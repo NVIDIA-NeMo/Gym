@@ -19,13 +19,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
-    AgentOutcomePolicyConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
-    _is_retryable_dependency_error,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+from nemo_gym.agent_outcome import AgentOutcomePolicyConfig
+from nemo_gym.base_environment_server import is_retryable_dependency_error
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
@@ -397,9 +397,101 @@ def test_dependency_failure_reasons_are_bounded() -> None:
 
 
 def test_retry_requires_a_transient_dependency_error() -> None:
-    assert _is_retryable_dependency_error(TimeoutError()) is True
-    assert _is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
-    assert _is_retryable_dependency_error(ValueError("invalid response")) is False
+    assert is_retryable_dependency_error(TimeoutError()) is True
+    assert is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
+    assert is_retryable_dependency_error(ValueError("invalid response")) is False
+
+
+@pytest.mark.parametrize(("status", "retryable"), [(422, False), (409, False), (429, True), (500, True)])
+def test_an_agent_seed_refusal_is_final_but_a_server_error_is_retried(status: int, retryable: bool) -> None:
+    # An agent refuses a seed it cannot serve with AgentSeedRejectedError, which answers 422.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://agent/v1/agent_sessions"), history=(), status=status
+    )
+
+    assert is_retryable_dependency_error(refusal) is retryable
+
+
+async def test_an_agent_seed_refusal_fails_the_episode_once_with_the_agents_reason() -> None:
+    environment, client = _environment_server()
+    # What raise_for_status raises for an agent's AgentSeedRejectedError.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://agent:8001/v1/agent_sessions"),
+        history=(),
+        status=422,
+        message="Unprocessable Content",
+    )
+    refusal.response_content = b'{"detail":"Simple Agent does not support required MCP tool access: resources"}'
+    responses = client.responses
+    client.responses = [responses[0], refusal, responses[3], responses[5]]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == "agent"
+    assert result.failure.terminal is True
+    assert "Simple Agent does not support required MCP tool access: resources" in result.failure.failure_reason
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+
+
+async def test_a_resources_seed_refusal_fails_the_episode_once_with_the_servers_reason() -> None:
+    environment, client = _environment_server()
+    # What raise_for_status raises for a resources server's ResourcesSessionConflictError.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://resources:8000/seed_session"),
+        history=(),
+        status=409,
+        message="Conflict",
+    )
+    refusal.response_content = b'{"detail":"resources_session_id is already bound to another episode or task"}'
+    responses = client.responses
+    client.responses = [refusal, responses[5]]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == "seed"
+    assert result.failure.terminal is True
+    assert "already bound to another episode or task" in result.failure.failure_reason
+    # The close registered before the seed still runs, so a seed whose reply was a refusal leaks nothing.
+    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
+
+
+@pytest.mark.parametrize(
+    ("stage", "path", "status", "detail"),
+    [
+        ("agent", "/ng-rollout/rollout-a2/v1/responses", 422, "Agent turn refused: unsupported tool_choice"),
+        ("cleanup", "/v1/agent_sessions/close", 409, "Agent close receipt has expired"),
+        ("verification", "/verify", 422, "verify refused: task_data is missing expected_answer"),
+    ],
+)
+async def test_every_dependency_refusal_carries_the_servers_reason(
+    stage: str, path: str, status: int, detail: str
+) -> None:
+    environment, client = _environment_server()
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url=f"http://dependency:8000{path}"), history=(), status=status
+    )
+    refusal.response_content = orjson.dumps({"detail": detail})
+    responses = client.responses
+    client.responses = {
+        "agent": [responses[0], responses[1], refusal, responses[3], responses[5]],
+        # The final unwind retries the refused agent close once before closing resources.
+        "cleanup": [responses[0], responses[1], responses[2], refusal, responses[3], responses[5]],
+        "verification": [responses[0], responses[1], responses[2], responses[3], refusal, responses[5]],
+    }[stage]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == stage
+    assert result.failure.terminal is True
+    assert detail in result.failure.failure_reason
 
 
 async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
@@ -673,16 +765,6 @@ async def test_interrupted_activation_closes_agent_before_resources(
     assert not client.responses
 
 
-def test_checkpointing_refuses_more_than_one_worker() -> None:
-    environment_server, client = _environment_server()
-    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
-    config = environment_server.config.model_copy(update={"num_workers": 2})
-    server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
-
-    with pytest.raises(ValueError, match="num_workers=1"):
-        server.setup_webserver()
-
-
 @pytest.mark.parametrize("reported, expected", [({"x-ng-checkpoint-verify": "replay"}, "replay"), ({}, "wait")])
 async def test_verify_step_mode_comes_from_the_resources_seed_reply(reported: dict, expected: str) -> None:
     environment_server, client = _environment_server()
@@ -744,7 +826,7 @@ async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_an
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server()
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     client.slow_path = environment_server._agent_responses_path(_request())
@@ -779,7 +861,7 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
     from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _environment_server()
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     request = _request()
     handles = {"resources_session_id": "resources-session", "agent_session_id": "agent-session"}
@@ -826,7 +908,7 @@ async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_
     from nemo_gym._checkpoint.store import write_participant_state
 
     environment_server, client = _environment_server(client_type=_HoldingClient)
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     request = _request()
@@ -917,7 +999,7 @@ async def test_an_agent_failure_during_a_checkpoint_closes_the_agent_only_after_
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server(client_type=_AgentGateClient)
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     observations = {
@@ -1069,7 +1151,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
     client.agent = restored_http
     # Only the verification and the resources close are scripted; the agent answers the rest.
     del client.responses[:4]
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment._checkpoint = participant
     participant.restore_records(
         [
@@ -1099,7 +1181,7 @@ async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attem
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
-    environment_server._checkpoint = EnvironmentParticipant()
+    environment_server._checkpoint = EnvironmentParticipant(mode="exported")
     await environment_server.run_request(_request())
 
     [tool_access] = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).tool_accesses

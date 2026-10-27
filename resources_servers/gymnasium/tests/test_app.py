@@ -335,7 +335,7 @@ class TestCheckpointing:
         async with client:
             refused = await client.post("/reset", json=RESET)
 
-        assert refused.status_code == 400 and refused.json()["error"]["code"] == "rollout_id_required"
+        assert refused.status_code == 400 and refused.json()["error"]["code"] == "checkpoint_rollout_id_required"
         assert env.session_state == {}
 
     @pytest.mark.asyncio
@@ -396,7 +396,7 @@ class TestCheckpointing:
             stale = await client.post("/ng-rollout/r-a1/step", json=_step_body())
         # The retire stopped and freed the episode;
         # a late step is refused until the controller forgets the rollout, and does not recreate it.
-        assert stale.status_code == 409 and stale.json()["error"]["code"] == "stale_attempt"
+        assert stale.status_code == 409 and stale.json()["error"]["code"] == "checkpoint_stale_attempt"
         assert env.session_state == {}
 
     @pytest.mark.asyncio
@@ -428,5 +428,5 @@ class TestCheckpointing:
             late = await client.post("/ng-rollout/r/step", json=_step_body("<action>stand</action>"))
 
         assert held and retired.status_code == 200
-        assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+        assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
         assert env.session_state == {} and getattr(env, "session_turns", {}) == {}

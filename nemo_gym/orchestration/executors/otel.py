@@ -34,6 +34,7 @@ from pathlib import Path
 import yaml
 
 from nemo_gym.orchestration.api import BaseModelServiceConfig, SubmitConfig
+from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 
 
 logger = logging.getLogger(__name__)
@@ -217,6 +218,30 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         ]
     }
 
+    # vLLM records Gym's `X-Request-Id: <rollout id>-<8 hex>` as `gen_ai.request.id` (prefixed `chatcmpl-`), the
+    # only place the engine span names its rollout. Aggregators group on whole attributes, so copy it into the
+    # key every other Gym span uses. Request ids that are not Gym's (a plain uuid) do not match.
+    gym_engine_request_id = "^(?:chatcmpl-)?(.+)-[0-9a-f]{8}$$"
+    engine_rollout_id = {
+        "trace_statements": [
+            {
+                "context": "span",
+                "statements": [
+                    # Derive in the span-local cache, write only while absent: the pinned collector has no converter
+                    # form of `replace_pattern`, and an id the span already carries must stay as it is.
+                    'set(cache["engine_rollout_id"], attributes["gen_ai.request.id"]) '
+                    f'where name == "llm_request" and attributes["{ROLLOUT_ID_ATTRIBUTE}"] == nil '
+                    'and attributes["gen_ai.request.id"] != nil '
+                    f'and IsMatch(attributes["gen_ai.request.id"], "{gym_engine_request_id}")',
+                    f'replace_pattern(cache["engine_rollout_id"], "{gym_engine_request_id}", "$${{1}}") '
+                    'where cache["engine_rollout_id"] != nil',
+                    f'set(attributes["{ROLLOUT_ID_ATTRIBUTE}"], cache["engine_rollout_id"]) '
+                    f'where attributes["{ROLLOUT_ID_ATTRIBUTE}"] == nil and cache["engine_rollout_id"] != nil',
+                ],
+            }
+        ]
+    }
+
     attributes = [
         *([("service.name", obs.service_name, "upsert")] if obs.service_name is not None else []),
         ("user", getpass.getuser(), "upsert"),
@@ -245,6 +270,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     }
 
     metric_receivers = (["prometheus"] if scrape_configs else []) + ["otlp", "span_metrics"]
+    trace_transforms = ["transform/identity"] + (["transform/engine_rollout_id"] if obs.vllm_traces else [])
     doc = {
         "extensions": {"health_check": {"endpoint": f"0.0.0.0:{COLLECTOR_HEALTH_PORT}"}},
         "connectors": {"span_metrics": span_metrics},
@@ -263,6 +289,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
             "resource/local": {"attributes": resource_actions},
             "transform/identity": identity,
             "transform/metric_names": rename_colon_metrics,
+            **({"transform/engine_rollout_id": engine_rollout_id} if obs.vllm_traces else {}),
         },
         "exporters": {
             "otlp_http/managed": {"endpoint": obs.endpoint, "headers": {"Authorization": f"Bearer {token}"}},
@@ -287,12 +314,12 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
                 },
                 "traces": {
                     "receivers": ["otlp"],
-                    "processors": ["transform/identity", "resource/managed", "batch"],
+                    "processors": [*trace_transforms, "resource/managed", "batch"],
                     "exporters": ["otlp_http/managed"],
                 },
                 "traces/local": {
                     "receivers": ["otlp"],
-                    "processors": ["transform/identity", "resource/local", "batch"],
+                    "processors": [*trace_transforms, "resource/local", "batch"],
                     "exporters": ["file/traces", "span_metrics"],
                 },
                 "logs": {

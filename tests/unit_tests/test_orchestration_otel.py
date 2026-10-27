@@ -532,7 +532,7 @@ def test_script_switches_on_gym_lens_telemetry_toward_the_collector():
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=default,verify" in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
     assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
-    assert 'uv pip install -e ".[telemetry]"' in script
+    assert 'uv pip install -e ".[telemetry,ray]"' in script
 
 
 def test_script_installs_the_sdk_of_a_configured_exporter():
@@ -542,13 +542,13 @@ def test_script_installs_the_sdk_of_a_configured_exporter():
         "mlflow_run_name": "run",
     }
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": run}}}
-    assert 'uv pip install -e ".[telemetry,mlflow]"' in _script(_config(driver=driver))
+    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
 
 
 def test_script_skips_the_sdk_of_a_partly_configured_exporter():
     # A tracking URI alone (a registry lookup) opens no exporter, so needs no SDK.
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": {"mlflow_tracking_uri": "https://x"}}}}
-    assert 'uv pip install -e ".[telemetry]"' in _script(_config(driver=driver))
+    assert 'uv pip install -e ".[telemetry,ray]"' in _script(_config(driver=driver))
 
 
 @pytest.mark.parametrize("section", ["prepare", "run"])
@@ -556,7 +556,7 @@ def test_script_installs_mlflow_for_gitlab_dataset_storage(section):
     # A tracking URI and token without an experiment open no exporter, but a GitLab download needs mlflow.
     creds = {"mlflow_tracking_uri": "https://gitlab.example", "mlflow_tracking_token": "token"}
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {section: creds}}}
-    assert 'uv pip install -e ".[telemetry,mlflow]"' in _script(_config(driver=driver))
+    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
 
 
 def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
@@ -567,7 +567,7 @@ def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
         "mlflow_run_name": "run",
     }
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"prepare": run, "run": run}}}
-    assert 'uv pip install -e ".[telemetry,mlflow]"' in _script(_config(driver=driver))
+    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
 
 
 def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
@@ -667,8 +667,7 @@ def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
 def test_script_leaves_the_driver_alone_when_disabled():
     script = _script(_config(otel={"enabled": False}, driver=_DRIVER_WITH_INSTALL))
     assert "NEMO_GYM_OTEL" not in script
-    assert "uv pip install -e ." in script
-    assert "[telemetry]" not in script
+    assert 'uv pip install -e ".[ray]"' in script
 
 
 def test_script_has_no_collector_when_disabled():
@@ -728,7 +727,7 @@ def test_gym_telemetry_off_keeps_the_collector_and_skips_lens():
     script = _script(_config(otel={"gym_telemetry": False}, driver=_DRIVER_WITH_INSTALL))
     assert "--output=logs/otel_collector-$SLURM_JOB_ID.log" in script
     assert "NEMO_GYM_OTEL_ENABLED" not in script
-    assert "[telemetry]" not in script
+    assert 'uv pip install -e ".[ray]"' in script
 
 
 def test_submit_without_a_token_stages_and_persists_local_only_collection(tmp_path, monkeypatch, caplog):
@@ -821,3 +820,43 @@ def test_submit_without_otel_neither_stages_nor_exports(tmp_path, monkeypatch):
 
     assert not (Path(record.run_dir) / "scicode" / "otel").exists()
     assert not conn.commands[0][0].startswith("export ")
+
+
+def _engine_rollout_id_statements(doc):
+    copy, trim, write = doc["processors"]["transform/engine_rollout_id"]["trace_statements"][0]["statements"]
+    pattern = re.search(r'replace_pattern\(cache\["engine_rollout_id"\], "([^"]+)", "([^"]+)"\)', trim)
+    # The collector expands `${...}` itself, so OTTL regex syntax is written with `$$`; Go's `${1}` is
+    # Python's `\g<1>`.
+    regex = pattern.group(1).replace("$$", "$")
+    replacement = pattern.group(2).replace("$$", "$").replace("${1}", "\\g<1>")
+    return copy, trim, write, regex, replacement
+
+
+def test_collector_copies_the_rollout_id_out_of_the_engine_request_id_when_vllm_traces_are_on():
+    doc = _rendered(_config(otel={"vllm_traces": True}))
+    copy, trim, write, regex, replacement = _engine_rollout_id_statements(doc)
+    # Derived in the span-local cache; the attribute is written only while absent, so an id the span
+    # already carries is never touched, whatever its value (see the collector round trip in the PR).
+    assert copy.startswith('set(cache["engine_rollout_id"], attributes["gen_ai.request.id"])')
+    assert 'where name == "llm_request"' in copy and 'attributes["nemo.gym.rollout.id"] == nil' in copy
+    assert "IsMatch(" in copy, "only Gym's own request ids are derived"
+    assert trim.endswith('where cache["engine_rollout_id"] != nil')
+    assert write.startswith('set(attributes["nemo.gym.rollout.id"], cache["engine_rollout_id"])')
+    assert 'attributes["nemo.gym.rollout.id"] == nil' in write
+    assert "attributes[" not in trim, "the trim edits the cache, never an attribute"
+    for pipeline in ("traces", "traces/local"):
+        processors = doc["service"]["pipelines"][pipeline]["processors"]
+        assert processors.index("transform/engine_rollout_id") < processors.index(processors[-2]), pipeline
+    # Same semantics in Python's engine as in Go's for these inputs.
+    assert re.sub(regex, replacement, "chatcmpl-0-0-5bf494fb") == "0-0"
+    assert re.sub(regex, replacement, "chatcmpl-3-0-a2-deadbeef") == "3-0-a2"
+    assert re.sub(regex, replacement, "custom.id_7-00c0ffee") == "custom.id_7"
+    plain_uuid = "chatcmpl-0123456789abcdef0123456789abcdef"
+    assert re.search(regex, plain_uuid) is None, "a request id that is not Gym's is not derived"
+
+
+def test_collector_leaves_engine_spans_alone_when_vllm_traces_are_off():
+    doc = _rendered()
+    assert "transform/engine_rollout_id" not in doc["processors"]
+    for pipeline in ("traces", "traces/local"):
+        assert "transform/engine_rollout_id" not in doc["service"]["pipelines"][pipeline]["processors"]

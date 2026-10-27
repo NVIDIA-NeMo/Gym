@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - environment_servers/swe_together/configs/swe_together.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml
+  - ${oc.env:SWE_TOGETHER_MODELS_CONFIG,benchmarks/swe_together/models.yaml}
+
+swe_together_work_dir: ${oc.env:SWE_TOGETHER_WORK_DIR,outputs/swe_together}
+swe_together_asset_root: ${oc.env:SWE_TOGETHER_SOURCE,${swe_together_work_dir}/source}/tasks
+swe_together_artifact_root: ${swe_together_work_dir}/artifacts
+swe_together_runtime_manifest: ${swe_together_work_dir}/runtime/manifest.json
+policy_model_name: ${oc.env:POLICY_MODEL}
+
+environment_routing_mode: taskset
+environment_server_routes:
+  swe_together:full109: swe_together
+
+swe_together:
+  environment_servers:
+    swe_together:
+      agent_server:
+        type: responses_api_agents
+        name: swe_together_candidate
+      judge_agent:
+        type: responses_api_agents
+        name: swe_together_judge
+      num_workers: 1
+      setup_timeout_seconds: 1800
+      interaction_timeout_seconds: 4800
+      activation_timeout_seconds: 1800
+      grading_timeout_seconds: 1800
+      cleanup_timeout_seconds: 1200
+      default_episode_timeout_seconds: null
+      runtime_manifest_path: ${swe_together_runtime_manifest}
+      protocol_profile: reference
+      scoring_profile: reference
+      user_context_chars: 3000
+      max_resumes: 15
+      sandbox_config:
+        ttl_s: 10800
+        ready_timeout_s: 1200
+
+swe_together_candidate:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      concurrency: ${oc.env:CANDIDATE_CONCURRENCY,32}
+      num_workers: 1
+      resources_server: null
+      datasets:
+        - name: swe_together
+          type: benchmark
+          taskset: swe_together:full109
+          jsonl_fpath: benchmarks/swe_together/data/full109.jsonl
+          prepare_script: benchmarks/swe_together/prepare.py
+          num_repeats: 2
+          license: Apache-2.0
+      token_id_capture: false
+      model: ${policy_model_name}
+      opencode_version: 1.15.13
+      sandbox_model_id: ${policy_model_name}
+      sandbox_python_executable: /opt/gym-runtime/python/bin/python3
+      sandbox_path_prefix: [/opt/gym-runtime]
+      sandbox_executable_path: /opt/gym-runtime/opencode
+      sandbox_executable_sha256: 8e97f83175c84daeb51e96b34baf9ee9839ae54e5e848a3cce1e0e32dcf41a6c  # pragma: allowlist secret (public runtime digest)
+      context_window: 262144
+      max_output_tokens: 32000
+      timeout: 1800
+      session_close_timeout_seconds: 300
+      opencode_config:
+        tools:
+          webfetch: false
+          websearch: false
+        permission:
+          bash: allow
+          external_directory:
+            /workspace/**: allow
+            /tmp/**: allow
+            /var/tmp/**: allow
+            /opt/**: allow
+            /root/**: allow
+            /home/**: allow
+            /proc/**: allow
+            /usr/**: allow
+            /logs/**: allow
+
+swe_together_judge:
+  _inherit_from: claude_code_agent
+  responses_api_agents:
+    claude_code_agent:
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: swe_together_judge_model
+      model: claude-opus-4-6
+      claude_code_version: 2.1.108
+      max_turns: 50
+      timeout: 1200
+      sandbox_local_executable_path: ${swe_together_work_dir}/runtime/bin/claude
+      resources_server: null
+      anthropic_api_key: EMPTY
+      sandbox_executable_sha256: 1f641676eb086ceafd76a5f51ffb260b948fa1f6d77991d8cd6e480267dfff37  # pragma: allowlist secret (public runtime digest)
+
+observability_enabled: true
+model_call_capture_dir: ${swe_together_artifact_root}/model_calls

@@ -28,14 +28,14 @@ from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from time import time
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, ClassVar, Literal, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -69,6 +69,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
+from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     parse_codex_observations,
@@ -85,6 +86,10 @@ _SANDBOX_SESSION_KEY = "nemo_gym_codex_sandbox_session"
 _MODEL_CALL_JOIN_GAP = "model_call_join_key_unavailable"
 _PROVIDER_ERROR = "provider_error"
 _OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+# Characters of Codex stderr kept in the error of an activation that never started a turn.
+_STDERR_TAIL_CHARS = 2000
+# Codex 0.144.4 rejects MCP server names with other characters.
+_CODEX_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -160,6 +165,49 @@ fi
         bootstrap + f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
         f"{shlex.quote(directory)} {shlex.quote(runtime)} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
     )
+
+
+def _redact(text: str, values: list[str]) -> str:
+    """Replace each copy of each value in ``text``, as written or JSON-escaped, including cut copies.
+
+    Codex cuts long error bodies, which can end an echoed value early. A copy cut after its first 8 characters is
+    replaced through its last matching character and the rest of that word, so no part of a multiword value stays
+    visible. All copies are found in the original text and replaced once, so one value cannot hide another.
+    """
+    forms = {
+        form
+        for value in values
+        for form in (value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1])
+    }
+    spans: list[tuple[int, int]] = []
+    for form in forms:
+        if len(form) < 8:
+            spans += [match.span() for match in re.finditer(rf"(?<!\w){re.escape(form)}(?!\w)", text)]
+            continue
+        # Copies can overlap, so every start is checked.
+        for match in re.finditer(f"(?={re.escape(form[:8])})", text):
+            start = stop = match.start()
+            while stop - start < len(form) and text[stop : stop + 1] == form[stop - start]:
+                stop += 1
+            if stop - start < len(form):
+                stop = re.compile(r"[^\s'\"]*").match(text, stop).end()
+            spans.append((start, stop))
+    merged: list[list[int]] = []
+    for start, stop in sorted(spans):
+        if merged and start < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], stop)
+        else:
+            merged.append([start, stop])
+    parts, end = [], 0
+    for start, stop in merged:
+        parts += [text[end:start], "[redacted]"]
+        end = stop
+    return "".join(parts) + text[end:]
+
+
+def _codex_mcp_server_name(name: str) -> bool:
+    """Whether Codex accepts ``name`` as an MCP server name."""
+    return _CODEX_MCP_SERVER_NAME.fullmatch(name) is not None
 
 
 def _toml_key(key: str) -> str:
@@ -469,6 +517,8 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # Extra config.toml content deep-merged over the generated base config (mcp_servers, features,
     # tools, model_verbosity, ...). Per-rollout Gym MCP entries take precedence on name collisions.
     extra_config: dict[str, Any] = Field(default_factory=dict)
+    # Per-call timeout Codex applies to Gym MCP tools (`tool_timeout_sec`); None leaves the CLI default.
+    mcp_tool_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
@@ -483,6 +533,13 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
             and self.model_auto_compact_token_limit > self.model_context_window * 9 // 10
         ):
             raise ValueError("model_auto_compact_token_limit must not exceed 90% of model_context_window")
+        return self
+
+    @model_validator(mode="after")
+    def validate_mcp_tool_timeout(self) -> "CodexAgentConfig":
+        """A tool call cannot outlast the Codex run that makes it."""
+        if self.mcp_tool_timeout_seconds is not None and self.mcp_tool_timeout_seconds > self.timeout:
+            raise ValueError("mcp_tool_timeout_seconds must not exceed timeout, which bounds the whole Codex run")
         return self
 
 
@@ -577,9 +634,26 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "/tmp/nemo-gym-codex"
         ):
             raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
-        if any(access.required for access in self.effective_tool_accesses(body)):
+        tool_accesses = self.effective_tool_accesses(body)
+        unsupported = [
+            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
+        ]
+        if unsupported:
             raise HTTPException(
-                422, "Codex in the task sandbox supports its own sandbox tools, not required HTTP/MCP tools"
+                422,
+                "Codex in the task sandbox supports only MCP tool grants; required grants it cannot use: "
+                + ", ".join(sorted(unsupported)),
+            )
+        # Codex cannot start an MCP server whose name has other characters; _granted_mcp_servers skips optional ones.
+        invalid = [
+            access.name
+            for access in tool_accesses
+            if isinstance(access, MCPToolAccess) and access.required and not _codex_mcp_server_name(access.name)
+        ]
+        if invalid:
+            raise HTTPException(
+                422,
+                "Codex MCP server names may contain only letters, digits, '-' and '_': " + ", ".join(sorted(invalid)),
             )
         if self.config.model_server is None:
             raise HTTPException(422, "Codex in the task sandbox requires a sandbox-reachable Gym model_server")
@@ -655,8 +729,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"Codex installer exited {installed.return_code}, command={install_command}, "
                     f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                 )
-            for filename in ("sandbox_runner.py", "sandbox_transport.py"):
-                await sandbox.upload(Path(__file__).with_name(filename), f"{directory}/{filename}")
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            # The runner loads the transport from beside itself under this name.
+            await sandbox.upload(Path(__file__).with_name("sandbox_transport.py"), f"{directory}/sandbox_transport.py")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -759,9 +834,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         prompt: str,
         system: str,
     ) -> NeMoGymResponse:
+        mcp_servers, skipped_grants = self._granted_mcp_servers(state.request)
         invocation_id = state.request.episode_id.capture_key
         base_url = self._resolve_call_base_url(invocation_id)
-        config = self._build_config(base_url, developer_instructions=system)
+        config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -903,6 +979,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ObservationGap(code="compaction_observations_unavailable"),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
+            *(
+                ObservationGap(
+                    code="mcp_server_skipped", detail=f"{name}: its name is not letters, digits, '-' and '_'"
+                )
+                for name in skipped_grants
+            ),
         ]
         for count, code in (
             (
@@ -973,8 +1055,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         ToolCallObservation(
                             invocation_id=state.request.episode_id.capture_key,
                             tool_call_id=item_id,
-                            tool_name={"command_execution": "exec_command", "file_change": "apply_patch"}.get(
-                                item["type"], item["type"]
+                            tool_name=(
+                                item.get("tool")
+                                if item["type"] == "mcp_tool_call"
+                                else {"command_execution": "exec_command", "file_change": "apply_patch"}.get(
+                                    item["type"], item["type"]
+                                )
                             ),
                             started_at=start,
                             completed_at=observed_at,
@@ -1007,6 +1093,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 ],
                 gaps=gaps,
             )
+        if error and not started and failure is None:
+            # Startup failures, such as a required MCP server that did not connect, are reported only on stderr.
+            # The bundle is set first, so a close during this read still finds it.
+            stderr = await self._startup_stderr_tail(state)
+            if stderr:
+                error = f"{error}; stderr: {stderr}"
+                # Environment Servers keep the observations, not the 502 body, in their failure records.
+                state.observations.gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
         if failure is not None:
             raise failure
         if error and not reported_model_error:
@@ -1043,6 +1137,30 @@ class CodexAgent(SimpleResponsesAPIAgent):
         )
 
         return self.report_outcome(response, terminal)
+
+    async def _startup_stderr_tail(self, state: CodexSandboxSession) -> str:
+        """The end of Codex's stderr, with the session's MCP grant headers redacted; empty if unreadable.
+
+        Codex can copy an MCP server's error body to stderr, and such a body may echo the request headers.
+        """
+        try:
+            stderr = await asyncio.wait_for(
+                state.read_text("stderr.log"), timeout=self.config.session_close_timeout_seconds
+            )
+        except Exception as exc:
+            LOG.warning("Codex stderr unavailable for the startup failure: %s", type(exc).__name__)
+            return ""
+        values = [
+            str(value)
+            for access in self.effective_tool_accesses(state.request)
+            if isinstance(access, MCPToolAccess)
+            for value in access.connection.headers.values()
+            if value
+        ]
+        stderr = _redact(stderr, values)
+        # Codex can repeat an error body of several kilobytes on one line; keep the start, which names the server.
+        lines = [line if len(line) <= 500 else f"{line[:400]} ... {line[-100:]}" for line in stderr.splitlines()]
+        return "\n".join(lines).strip()[-_STDERR_TAIL_CHARS:]
 
     def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
         """Provider base_url for the CLI's model calls (Codex appends ``/responses`` to it).
@@ -1278,19 +1396,51 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         server_name = str(metadata.get("server_name") or self.config.resources_server.name)
         url_path = str(metadata.get("url_path") or "/mcp")
-        entry: dict[str, Any] = {
-            "url": f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}",
-        }
         headers = metadata.get("headers")
-        if isinstance(headers, dict) and headers:
-            entry["http_headers"] = {str(key): str(value) for key, value in headers.items()}
-        else:
+        if not (isinstance(headers, dict) and headers):
+            headers = None
             LOG.warning(
                 "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
                 "session token and will reject the calls.",
                 server_name,
             )
-        return {server_name: entry}
+        url = f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}"
+        return {server_name: self._mcp_server_entry(url, headers)}
+
+    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], list[str]]:
+        """``mcp_servers`` config.toml entries for a session's MCP tool grants, and the optional grants left out.
+
+        Codex connects when the activation starts. A required server that does not connect fails the
+        activation before the first model call; an optional one is left out of the tool list.
+        Codex runs no other tool while an MCP call is in flight, and a call that times out keeps running on the
+        server, so ``mcp_tool_timeout_seconds`` should exceed the slowest call the server can make.
+        """
+        servers = {}
+        skipped = []
+        for access in self.effective_tool_accesses(request):
+            if not isinstance(access, MCPToolAccess):
+                continue
+            if not _codex_mcp_server_name(access.name):
+                # Seeding rejects such a name when the grant is required.
+                skipped.append(access.name)
+                continue
+            servers[access.name] = self._mcp_server_entry(
+                str(access.connection.url), access.connection.headers, required=access.required
+            )
+        return servers, skipped
+
+    def _mcp_server_entry(
+        self, url: str, headers: Optional[Mapping[str, Any]], *, required: bool = False
+    ) -> dict[str, Any]:
+        """One streamable HTTP ``mcp_servers`` entry; the session token rides on ``http_headers``."""
+        entry: dict[str, Any] = {"url": url}
+        if headers:
+            entry["http_headers"] = {str(key): str(value) for key, value in headers.items()}
+        if required:
+            entry["required"] = True
+        if self.config.mcp_tool_timeout_seconds is not None:
+            entry["tool_timeout_sec"] = float(self.config.mcp_tool_timeout_seconds)
+        return entry
 
     async def _create_response(
         self,
