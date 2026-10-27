@@ -303,6 +303,18 @@ async def run_verification(
             test_output=output,
             error=f"repo directory {repo_directory(inputs.repo)} not present in the image",
         )
+    # 124/137 can also be the test's own exit code; treat them as a kill only when output is cut off.
+    cut_off = TEST_OUTPUT_END not in output
+    timed_out = getattr(result, "error_type", None) == "timeout" or (result.return_code == 124 and cut_off)
+    if timed_out or (result.return_code == 137 and cut_off):
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=True,
+            test_results=None,
+            test_output=output,
+            error=("evaluation timed out" if timed_out else "evaluation was killed (exit 137, likely OOM)"),
+        )
 
     try:
         # Also off the loop. The parsers are regex passes over the whole test log, so they are
