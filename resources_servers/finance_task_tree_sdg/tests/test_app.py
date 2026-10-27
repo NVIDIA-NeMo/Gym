@@ -19,6 +19,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from big_finance_harness.tools import ToolError
 from fastapi.testclient import TestClient
@@ -39,6 +41,7 @@ from resources_servers.finance_task_tree_sdg.app import (
     validate_revised_question,
     validate_verdict,
 )
+from resources_servers.finance_task_tree_sdg.local_sec import LocalSecCorpus
 from resources_servers.finance_task_tree_sdg.sec_tools import (
     AsOfEdgarSearchTool,
     AsOfFetchUrlTool,
@@ -223,6 +226,139 @@ async def test_fetch_url_refuses_archive_documents_filed_after_as_of() -> None:
     await fetch.check_as_of("https://www.sec.gov/Archives/edgar/data/320193/000099999923000001/x.htm", as_of)
     await fetch.check_as_of(later, None)
     await fetch.check_as_of("https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json", as_of)
+
+
+_ARCHIVE = "https://www.sec.gov/Archives/edgar/data/320193"
+
+
+def _corpus(tmp_path: Path) -> LocalSecCorpus:
+    download = tmp_path / "step-0-download"
+    container = "/workspace/outputs/step-0-download"
+    files = {
+        "10-K/aapl.html": "<html><body><p>Net sales were 383,285.</p></body></html>",
+        "10-K/exhibits/EX-99.1.html": "<html><body><p>Press release.</p></body></html>",
+        "10-K/exhibits/EX-10.1.html": "<html><body><p>Whichever exhibit was written last.</p></body></html>",
+        "10-Q/q1.html": "<html><body><p>Quarter.</p></body></html>",
+        "4/form4.html": "<html><body><p>Rendered Form 4.</p></body></html>",
+    }
+    for name, text in files.items():
+        (download / "data" / name).parent.mkdir(parents=True, exist_ok=True)
+        (download / "data" / name).write_text(text, encoding="utf-8")
+
+    def row(accession: str, form: str, filed: str, url: str, kind: str, name: str) -> dict:
+        return {
+            "accession_number": accession,
+            "form_type": form,
+            "report_date": "2023-09-30",
+            "filing_date": date.fromisoformat(filed),
+            "url": url,
+            "file_type": kind,
+            "file_location": f"{container}/data/{name}",
+            "ticker": "AAPL",
+        }
+
+    k, q, f4 = "0000320193-23-000106", "0000320193-24-000006", "0000320193-23-000090"
+    rows = [
+        row(
+            k,
+            "10-K",
+            "2023-11-03",
+            f"{_ARCHIVE}/000032019323000106/aapl-20230930.htm",
+            "primary_document",
+            "10-K/aapl.html",
+        ),
+        row(
+            k,
+            "10-K",
+            "2023-11-03",
+            f"{_ARCHIVE}/000032019323000106/ex991.htm",
+            "exhibit",
+            "10-K/exhibits/EX-99.1.html",
+        ),
+        row(
+            k,
+            "10-K",
+            "2023-11-03",
+            f"{_ARCHIVE}/000032019323000106/ex101a.htm",
+            "exhibit",
+            "10-K/exhibits/EX-10.1.html",
+        ),
+        row(
+            k,
+            "10-K",
+            "2023-11-03",
+            f"{_ARCHIVE}/000032019323000106/ex101b.htm",
+            "exhibit",
+            "10-K/exhibits/EX-10.1.html",
+        ),
+        row(q, "10-Q", "2024-02-02", f"{_ARCHIVE}/000032019324000006/q1.htm", "primary_document", "10-Q/q1.html"),
+        row(
+            f4,
+            "4",
+            "2023-10-02",
+            f"{_ARCHIVE}/000032019323000090/xslF345X05/form4.xml",
+            "primary_document",
+            "4/form4.html",
+        ),
+    ]
+    pq.write_table(pa.Table.from_pylist(rows), download / "sec_metadata.parquet")
+    return LocalSecCorpus(metadata_path=download / "sec_metadata.parquet")
+
+
+def _offline_tools(tmp_path: Path) -> tuple[AsOfEdgarSearchTool, AsOfFetchUrlTool]:
+    corpus = _corpus(tmp_path)
+    cache = SecHttpCache(cache_dir=None, use_cache=False)
+    edgar = AsOfEdgarSearchTool(cache=cache, user_agent="Test test@example.com", corpus=corpus)
+    edgar._get = AsyncMock(side_effect=AssertionError("offline edgar_search requested SEC"))
+    fetch = AsOfFetchUrlTool(cache=cache, history=edgar.history, sec_user_agent="Test t@e.com", corpus=corpus)
+    return edgar, fetch
+
+
+async def test_offline_edgar_search_lists_only_readable_filings(tmp_path: Path) -> None:
+    edgar, _ = _offline_tools(tmp_path)
+    result = json.loads(await edgar.run({"ticker": "aapl"}, as_of=date(2023, 11, 3)))
+    assert [row["accession"] for row in result["filings"]] == ["0000320193-23-000106"]
+    assert result["filings"][0]["primary_document_url"] == f"{_ARCHIVE}/000032019323000106/aapl-20230930.htm"
+    unclamped = json.loads(await edgar.run({"ticker": "AAPL"}))
+    assert [row["form"] for row in unclamped["filings"]] == ["10-Q", "10-K"]
+    with pytest.raises(ToolError, match="unknown ticker"):
+        await edgar.run({"ticker": "NOPE"})
+
+
+async def test_offline_fetch_url_serves_the_corpus_and_refuses_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("big_finance_harness.tools.fetch_url._check_url_safe", lambda url: None)
+    _, fetch = _offline_tools(tmp_path)
+    as_of = date(2023, 11, 3)
+    folder = f"{_ARCHIVE}/000032019323000106"
+
+    bare_host = "http://sec.gov/Archives/edgar/data/320193/000032019323000106/aapl-20230930.htm#part-ii"
+    assert "Net sales were 383,285." in await fetch.run({"url": bare_host}, as_of)
+    assert "Press release." in await fetch.run({"url": f"{folder}/ex991.htm"}, as_of)
+    for page in (f"{folder}/0000320193-23-000106-index.htm", f"{folder}/", folder):
+        index = await fetch.run({"url": page}, as_of)
+        assert f"{folder}/aapl-20230930.htm" in index and f"{folder}/ex991.htm" in index and "EX-99.1" in index
+        assert "ex101a" not in index
+    for url in (
+        f"{folder}/ex101a.htm",
+        f"{_ARCHIVE}/000032019323000090/xslF345X05/form4.xml",
+        f"{folder}/R4.htm",
+        "https://efts.sec.gov/LATEST/search-index?q=revenue",
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=320193",
+    ):
+        with pytest.raises(ToolError, match="not in the offline SEC corpus"):
+            await fetch.run({"url": url}, as_of)
+    with pytest.raises(ToolError, match="filed on 2024-02-02"):
+        await fetch.run({"url": f"{_ARCHIVE}/000032019324000006/q1.htm"}, as_of)
+
+
+def test_server_wires_the_corpus_into_both_sec_tools(tmp_path: Path) -> None:
+    _corpus(tmp_path)
+    server = _server(
+        "question_gen", sec_corpus_metadata_path=str(tmp_path / "step-0-download" / "sec_metadata.parquet")
+    )
+    assert server._edgar._corpus is server._fetch._corpus is not None
 
 
 def test_leak_proposal_validation() -> None:

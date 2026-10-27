@@ -12,6 +12,8 @@ tt_sdg_answer_gen_resources_server:
       sec_edgar_user_agent: ${oc.select:sec_edgar_user_agent,${oc.env:SEC_EDGAR_USER_AGENT,null}}
       use_cache: ${oc.select:tt_sdg_use_cache,false}
       cache_dir: ${oc.select:tt_sdg_cache_dir,null}
+      # Set: SEC tools read this downloaded corpus and never call SEC.
+      sec_corpus_metadata_path: ${oc.select:tt_sdg_sec_corpus_metadata_path,null}
 
 tt_sdg_answer_gen_agent:
   responses_api_agents:

@@ -39,6 +39,16 @@ Verify returns the row plus `reward` and `sdg_result`. `sdg_result.status` is on
 EDGAR submission history. `fetch_url` refuses EDGAR archive documents filed after it. Other URLs,
 including the XBRL API, are not blocked.
 
+## Offline SEC corpus
+
+With `sec_corpus_metadata_path` set to an NVFlow `download-sec` `sec_metadata.parquet`, the SEC
+tools send no request to SEC. `edgar_search` lists, and resolves tickers from, only the filings
+whose primary document is in the corpus. `fetch_url` serves those documents, their exhibits,
+and a generated filing index page for each filing; every other SEC URL (full-text search, browse
+pages, XBRL viewer pages, documents not downloaded) is refused with a tool error. Non-HTML files
+and exhibits whose saved file is shared by several URLs are not served. Non-SEC URLs are fetched
+as before.
+
 ## Judge isolation
 
 The judge returns `{"verdict", "failed_criteria", "reason"}`; verify passes on only the verdict.
@@ -51,6 +61,7 @@ the verify response, so no judge text reaches a later stage's model. The judge d
 
 - `sec_edgar_user_agent` (falls back to `SEC_EDGAR_USER_AGENT`)
 - `tt_sdg_use_cache`, `tt_sdg_cache_dir`: SEC response cache
+- `tt_sdg_sec_corpus_metadata_path`: offline SEC corpus (see above)
 - `tt_sdg_audit_dir`: judge audit directory
 
 ## Tests

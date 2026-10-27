@@ -67,6 +67,7 @@ from resources_servers.big_finance.app import (
     format_trace,
 )
 from resources_servers.big_finance.sec_cache import SecHttpCache
+from resources_servers.finance_task_tree_sdg.local_sec import LocalSecCorpus
 from resources_servers.finance_task_tree_sdg.sec_tools import AsOfEdgarSearchTool, AsOfFetchUrlTool, parse_as_of
 
 
@@ -120,6 +121,9 @@ class FinanceTaskTreeSdgConfig(BaseResourcesServerConfig):
     sec_edgar_user_agent: Optional[str] = None
     use_cache: bool = False
     cache_dir: Optional[str] = None
+    # A download-sec sec_metadata.parquet: edgar_search and SEC fetch_url URLs are then served
+    # from that corpus with no SEC request.
+    sec_corpus_metadata_path: Optional[str] = None
     edgar_timeout_s: float = 20.0
     fetch_timeout_s: float = 30.0
     python_exec_timeout_s: float = 5.0
@@ -332,17 +336,24 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
         self._sessions: dict[str, _Session] = {}
         self._edgar: Optional[AsOfEdgarSearchTool] = None
         self._fetch: Optional[AsOfFetchUrlTool] = None
+        corpus = (
+            LocalSecCorpus(metadata_path=self.config.sec_corpus_metadata_path)
+            if self.config.sec_corpus_metadata_path
+            else None
+        )
         if self.config.sec_edgar_user_agent:
             self._edgar = AsOfEdgarSearchTool(
                 cache=cache,
                 user_agent=self.config.sec_edgar_user_agent,
                 timeout_s=self.config.edgar_timeout_s,
+                corpus=corpus,
             )
             self._fetch = AsOfFetchUrlTool(
                 cache=cache,
                 history=self._edgar.history,
                 timeout_s=self.config.fetch_timeout_s,
                 sec_user_agent=self.config.sec_edgar_user_agent,
+                corpus=corpus,
             )
         self._python = PythonExecTool(timeout_s=self.config.python_exec_timeout_s)
         self._judge_system = ""

@@ -18,33 +18,30 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from datetime import date
 from typing import Any, Optional
 
 import httpx
 from big_finance_harness.tools import ToolError
 
-from resources_servers.big_finance.sec_cache import CachedEdgarSearchTool, CachedFetchUrlTool, SecHttpCache
+from resources_servers.big_finance.sec_cache import (
+    CachedEdgarSearchTool,
+    CachedFetchUrlTool,
+    SecHttpCache,
+    _is_sec_url,
+)
+from resources_servers.finance_task_tree_sdg.local_sec import (
+    FilingRecord,
+    LocalFilingHistory,
+    LocalSecCorpus,
+    archive_accession,
+)
 
 
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:0>10}.json"
 SUBMISSIONS_PAGE_URL = "https://data.sec.gov/submissions/{name}"
 DEFAULT_LIMIT = 20
-
-_ARCHIVE_FOLDER_RE = re.compile(r"/Archives/edgar/data/(\d+)/(\d{18})(?=[/.]|$)", re.IGNORECASE)
-_ARCHIVE_DASHED_RE = re.compile(r"/Archives/edgar/data/(\d+)/(\d{10}-\d{2}-\d{6})(?=[/.]|$)", re.IGNORECASE)
-
-
-@dataclass(frozen=True, slots=True)
-class FilingRecord:
-    form: str
-    filing_date: str
-    accession: str
-    primary_document: str
-    report_date: str
 
 
 def _page_records(page: dict[str, Any]) -> list[FilingRecord]:
@@ -65,16 +62,6 @@ def parse_as_of(value: Any) -> Optional[date]:
         return date.fromisoformat(str(value)[:10])
     except ValueError as exc:
         raise ValueError(f"as_of_date must be an ISO date, got {value!r}") from exc
-
-
-def archive_accession(url: str) -> Optional[tuple[str, str]]:
-    """Return ``(cik, dashed accession)`` for an EDGAR archive URL."""
-    if match := _ARCHIVE_DASHED_RE.search(url):
-        return match.group(1), match.group(2)
-    if match := _ARCHIVE_FOLDER_RE.search(url):
-        digits = match.group(2)
-        return match.group(1), f"{digits[:10]}-{digits[10:12]}-{digits[12:]}"
-    return None
 
 
 class SecFilingHistory:
@@ -147,9 +134,24 @@ class AsOfEdgarSearchTool(CachedEdgarSearchTool):
         "are listed; older filings are included. Use `fetch_url` to read a filing's contents."
     )
 
-    def __init__(self, *, cache: SecHttpCache, user_agent: str, timeout_s: float = 20.0) -> None:
+    def __init__(
+        self,
+        *,
+        cache: SecHttpCache,
+        user_agent: str,
+        timeout_s: float = 20.0,
+        corpus: LocalSecCorpus | None = None,
+    ) -> None:
         super().__init__(cache=cache, user_agent=user_agent, timeout_s=timeout_s)
-        self.history = SecFilingHistory(self)
+        self._corpus = corpus
+        self.history: SecFilingHistory | LocalFilingHistory = (
+            LocalFilingHistory(corpus) if corpus is not None else SecFilingHistory(self)
+        )
+
+    async def _ticker_to_cik(self, ticker: str) -> str:
+        if self._corpus is None:
+            return await super()._ticker_to_cik(ticker)
+        return self._corpus.ticker_to_cik(ticker)
 
     async def run(self, args: dict[str, Any], as_of: Optional[date] = None) -> str:
         ticker = str(args.get("ticker") or "").strip()
@@ -190,18 +192,28 @@ class AsOfEdgarSearchTool(CachedEdgarSearchTool):
 
 
 class AsOfFetchUrlTool(CachedFetchUrlTool):
-    """Refuse EDGAR archive documents filed after the task's as-of date."""
+    """Refuse EDGAR archive documents filed after the task's as-of date.
+
+    With a corpus, SEC URLs are served from it and never requested from SEC.
+    """
 
     def __init__(
         self,
         *,
         cache: SecHttpCache,
-        history: SecFilingHistory,
+        history: SecFilingHistory | LocalFilingHistory,
         timeout_s: float = 30.0,
         sec_user_agent: str | None = None,
+        corpus: LocalSecCorpus | None = None,
     ) -> None:
         super().__init__(cache=cache, timeout_s=timeout_s, sec_user_agent=sec_user_agent)
         self._history = history
+        self._corpus = corpus
+
+    async def _fetch(self, url: str) -> httpx.Response:
+        if self._corpus is None or not _is_sec_url(url):
+            return await super()._fetch(url)
+        return await asyncio.to_thread(self._corpus.response, url)
 
     async def check_as_of(self, url: str, as_of: Optional[date]) -> None:
         if as_of is None or (parsed := archive_accession(url)) is None:
