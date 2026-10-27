@@ -38,6 +38,8 @@ class _Server(uvicorn.Server):
 
 def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     """Record session runtime pins or require a preinstalled legacy runtime."""
+    if harness == "simple":
+        return {"installation": "builtin"}
     if use_agent_sessions and harness != "hermes":
         return {"installation": "agent_session"}
     if harness == "hermes":
@@ -88,9 +90,11 @@ def _config(
         f"{harness}_agent"
     ]
     agent.update({key: value for key, value in defaults.items() if key.endswith("_version")})
-    if use_agent_sessions:
+    if use_agent_sessions and harness != "simple":
         # The verifier only reads retained output, so the agent can own this local sandbox.
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
+    if harness == "simple":
+        agent["max_steps"] = 6
     if harness in ("opencode", "pi"):
         agent["timeout"] = timeout
         if not use_agent_sessions:
@@ -128,7 +132,7 @@ def _config(
     if use_agent_sessions:
         environment.update(
             resources_server={"type": "resources_servers", "name": "probe_resources"},
-            resources_tool_transports=[],
+            resources_tool_transports=["direct_http"] if harness == "simple" else [],
             default_episode_timeout_seconds=timeout,
             cleanup_timeout_seconds=10,
         )
@@ -141,7 +145,7 @@ def _config(
         "probe_agent": {"responses_api_agents": {f"{harness}_agent": agent}},
         "probe_environment": {"environment_servers": {environment_type: environment}},
     }
-    if use_agent_sessions:
+    if use_agent_sessions and harness != "simple":
         config["probe_sandbox"] = {"local": {"concurrency": 1}}
     return config
 
@@ -152,7 +156,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     agent_cls = getattr(module, HARNESSES[harness])
     config_cls = getattr(module, HARNESSES[harness] + "Config")
     use_agent_sessions = _supports_agent_sessions(agent_cls)
-    if use_agent_sessions and sys.platform != "linux":
+    if use_agent_sessions and harness != "simple" and sys.platform != "linux":
         raise RuntimeError(
             "Conformance probes using agent sessions require Linux; run the probes on a Linux host or in a container"
         )
@@ -247,7 +251,23 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                             raise RuntimeError("probe server exited during startup")
                     await asyncio.sleep(0.01)
             inputs = directory / "requests.jsonl"
-            inputs.write_text(json.dumps(scenario.task()) + "\n")
+            task = scenario.task()
+            if harness == "simple":
+                task["responses_create_params"]["model"] = "conformance-model"
+                task["responses_create_params"]["tools"] = [
+                    {
+                        "type": "function",
+                        "name": "bash",
+                        "strict": False,
+                        "description": "Run a shell command.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"command": {"type": "string"}},
+                            "required": ["command"],
+                        },
+                    }
+                ]
+            inputs.write_text(json.dumps(task) + "\n")
             async with asyncio.timeout(timeout + 10):
                 await RolloutCollectionHelper().run_from_config(
                     RolloutCollectionConfig(
