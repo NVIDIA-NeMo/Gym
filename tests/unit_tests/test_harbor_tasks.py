@@ -486,6 +486,49 @@ class TestDigest:
             with_pyc.update(f"{relative}\0{file_hash}\n".encode())
         assert archive_hash(task) == with_pyc.hexdigest()
 
+    @pytest.mark.parametrize("linked_path", ["tests/data", "tests", "tests/__pycache__/data"])
+    @pytest.mark.parametrize("external", [False, True])
+    def test_directory_symlinks_are_refused(self, tmp_path, linked_path, external):
+        task = write_task(tmp_path / "t")
+        target = (tmp_path if external else task) / "payload"
+        link = task / linked_path
+        if link.exists():
+            link.rename(target)
+        else:
+            target.mkdir()
+            link.parent.mkdir(parents=True, exist_ok=True)
+        (target / "data.txt").write_text("test input")
+        link.symlink_to(target, target_is_directory=True)
+
+        message = "escapes the task folder" if external else "directory symlinks are not supported"
+        with pytest.raises(HarborTaskError, match=message):
+            load_task(task)
+
+    def test_retargeted_directory_link_cannot_reuse_materialized_digest(self, tmp_path):
+        task = write_task(tmp_path / "t")
+        for name in ("one", "two"):
+            (task / "tests" / name).mkdir()
+            (task / "tests" / name / "data.txt").write_text(name)
+        link = task / "tests" / "data"
+        for name in ("one", "two"):
+            link.symlink_to(name, target_is_directory=True)
+            # Neither target may produce a valid row with an untracked directory link.
+            with pytest.raises(HarborTaskError, match="directory symlinks are not supported"):
+                load_task(task)
+            link.unlink()
+
+    def test_internal_file_symlink_keeps_the_file_content_digest(self, tmp_path):
+        task = write_task(tmp_path / "t")
+        source = task / "tests" / "test.sh"
+        link = task / "tests" / "linked-test.sh"
+        link.write_bytes(source.read_bytes())
+        expected = content_hash(task)
+        link.unlink()
+        link.symlink_to("test.sh")
+        assert load_task(task).digest == expected
+        source.write_text("changed test input")
+        assert load_task(task).digest != expected
+
 
 class TestLoadTask:
     def test_hello_world_shape(self, tmp_path):
@@ -2007,7 +2050,7 @@ class TestCli:
         assert any(path.endswith("harbor.yaml") for path in paths[:-1])
 
 
-@pytest.mark.parametrize("failure", ["encoding", "escape", "io"])
+@pytest.mark.parametrize("failure", ["encoding", "escape", "directory_link", "dangling_link", "io"])
 def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch, failure):
     write_task(tmp_path / "ds" / "good")
     bad = write_task(tmp_path / "ds" / "bad")
@@ -2017,6 +2060,10 @@ def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch,
         marker = tmp_path / "marker"
         marker.write_text("private marker")
         (bad / "tests" / "leak").symlink_to(marker)
+    elif failure == "directory_link":
+        (bad / "tests" / "data").symlink_to("../solution", target_is_directory=True)
+    elif failure == "dangling_link":
+        (bad / "tests" / "data").symlink_to("missing", target_is_directory=True)
     else:
         original = Path.open
 
@@ -2037,8 +2084,50 @@ def test_discovery_keeps_file_errors_inside_task_boundary(tmp_path, monkeypatch,
     "policy", ['network_mode = "no-network"', 'network_mode = "allowlist"', 'allowed_hosts = ["example.org"]']
 )
 def test_loader_rejects_unenforced_network_policies(tmp_path, section, policy):
-    with pytest.raises(HarborTaskError, match="network.*not supported"):
+    # A shared-mode task: every phase's restriction is refused, the verifier's for a reason that names the fix.
+    with pytest.raises(HarborTaskError, match="network.*not supported") as excinfo:
         load_task(write_task(tmp_path / "t", toml=f"[{section}]\n{policy}\n"))
+    if section == "verifier":
+        assert "shared verifier mode" in str(excinfo.value) and 'environment_mode = "separate"' in str(excinfo.value)
+
+
+SEPARATE_VERIFIER_TOML = HELLO_TOML.replace(
+    "[verifier]\ntimeout_sec = 120.0", '[verifier]\ntimeout_sec = 120.0\nenvironment_mode = "separate"'
+).replace("[environment]\n", '[environment]\ndocker_image = "ubuntu:24.04"\n')
+
+
+@pytest.mark.parametrize(
+    ("policy", "mode", "hosts"),
+    [
+        ('network_mode = "no-network"', "no-network", None),
+        ('network_mode = "allowlist"', "allowlist", None),
+        (
+            'network_mode = "allowlist"\nallowed_hosts = ["pypi.org", "*.nvidia.com"]',
+            "allowlist",
+            ["pypi.org", "*.nvidia.com"],
+        ),
+    ],
+)
+def test_loader_admits_a_verifier_phase_policy_for_separate_verification(tmp_path, policy, mode, hosts):
+    """The restricted policy can be applied to the separate verifier's own sandbox, so the loader admits it there."""
+    toml = SEPARATE_VERIFIER_TOML.replace('environment_mode = "separate"', f'environment_mode = "separate"\n{policy}')
+    task = load_task(write_task(tmp_path / "t", toml=toml))
+    assert not task.config.is_shared_verifier
+    assert (task.config.verifier.network_mode, task.config.verifier.allowed_hosts) == (mode, hosts)
+    # The agent's own sandbox stays public: the other phases are still refused on the same task.
+    for section in ("environment", "agent"):
+        restricted = toml.replace(f"[{section}]\n", f'[{section}]\nnetwork_mode = "no-network"\n')
+        with pytest.raises(HarborTaskError, match=f"{section} network restrictions are not supported yet"):
+            load_task(write_task(tmp_path / section, toml=restricted))
+
+
+@pytest.mark.parametrize("policy", ['network_mode = "no-network"', 'network_mode = "public"', ""])
+def test_loader_refuses_verifier_allowed_hosts_without_an_allowlist(tmp_path, policy):
+    toml = SEPARATE_VERIFIER_TOML.replace(
+        'environment_mode = "separate"', f'environment_mode = "separate"\n{policy}\nallowed_hosts = ["pypi.org"]'
+    )
+    with pytest.raises(HarborTaskError, match="allowed_hosts is only valid when network_mode='allowlist'"):
+        load_task(write_task(tmp_path / "t", toml=toml))
 
 
 @pytest.mark.parametrize(

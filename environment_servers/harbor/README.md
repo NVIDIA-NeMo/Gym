@@ -500,7 +500,7 @@ it is, the other providers cannot run commands as it.
 | Users | The image's default user and `verifier.user` are supported. Explicit `agent.user` and Dockerfile `USER` overrides are rejected at seed because sandbox access cannot yet carry the agent user. This layer has no oracle-specific exemption. |
 | Environment variables | Whole-value `${VAR}` and `${VAR:-default}` templates in environment and verifier variables resolve from the server's host environment at use time. Missing required values fail the episode before provisioning. Resolved values are not added to dataset rows, task snapshots, or the episode result. A task can still print its own environment into verifier logs. |
 | Prebuilt-image input files | `environment/` contents are uploaded to the workdir when the task has a prebuilt image and no `Dockerfile` or Compose definition. File modes are preserved. |
-| Network restrictions | Public networking only. Restricted network modes, host allowlists and deny rules are rejected by the loader rather than silently ignored. |
+| Network restrictions | `[verifier].network_mode` is enforced for separate-mode tasks on OpenSandbox: `no-network`, or `allowlist` with `allowed_hosts` of host names, `*.domain` wildcards and bare IP literals, spelled as Harbor's `normalize_allowed_hosts` admits them (no brackets or zone ids on an IPv6 literal, no wildcard over an IP literal). The separate verifier's sandbox is created under that egress policy (deny by default, the allowed hosts as allow rules in order), which replaces the deployment's `sandbox_provider_options.network_policy` for that sandbox as Harbor's explicit phase policy replaces the environment baseline, except that it may not widen it: under a deny-by-default deployment policy (`defaultAction: deny`, or none named, which OpenSandbox reads as deny), an `allowlist` task is refused at seed naming its hosts, whatever the deployment's own rules allow (there is no host matching; such a task needs an allow-by-default deployment), and `no-network` passes; the result's `verifier_network` reports the mode. The window is wider than Harbor's: Harbor applies the `[verifier]` policy around `verifier.verify()` only and starts the separate verifier environment under its baseline, whereas here the verifier sandbox lives its whole life under the policy, so the verifier image's `ENTRYPOINT` and `HEALTHCHECK` (see the Image ENTRYPOINT row) and the artifact staging run restricted too; a verifier image that needs the network when it starts passes under Harbor's `no-network` but masks as `harbor:entrypoint_failed` here, so such a task must name those hosts in `allowed_hosts`. OpenSandbox cannot switch a running sandbox from public to restricted (its egress API changes rules, never the default action; see the OpenSandbox provider page), so Harbor's `_phase_network_policy` switch has no equivalent in shared mode: the loader refuses a `[verifier]` restriction on a shared-mode task, naming the fix, and `[environment]`, `[agent]`, `[verifier.environment]` and step restrictions stay refused rather than silently ignored. A provider other than OpenSandbox, or an `allowed_hosts` entry the policy cannot express or Harbor would refuse (a CIDR range, a bracketed or zoned IPv6 literal, a `*.` wildcard over an IP literal), is refused at seed, before the rollout. |
 | Artifacts and hooks | Verifier logs are downloaded. `[[verifier.collect]]` hooks run in both modes, each in the service it names (a non-zero exit or a hook that runs past its `timeout_sec` warns, a hook the sandbox cannot run masks). In separate mode `/logs/artifacts` and the `artifacts` entries are copied into the verifier, each under its own staging root, with their `exclude` rules applied as Harbor passes them to `tar --exclude` (unanchored: `node_modules` at any depth), replacing what the verifier image ships at those paths. The verifier receives each artifact as the archive the agent's sandbox packed, so read-only, world-writable and set-id modes arrive as the agent left them; the host copy under the staging root is unpacked through a filter (widened owner modes, links kept, nothing that escapes and no device nodes) and is the gate the archive must pass plus a diagnostic, and the archive is removed once restored. A probe the sandbox cannot answer masks rather than counting as an absent artifact. |
 | Image ENTRYPOINT | Runs for a plain (non-Compose) task whose image configuration is recorded: a built image, or a pull or overlay Dockerfile whose base image is recorded, unless the Dockerfile says `ENTRYPOINT []`. The sandbox starts with the provider's keepalive; the seed then starts `ENTRYPOINT + sh -c "sleep infinity"` beside it (what Harbor's Compose `command` leaves it with) as the image's `User` in its `WorkingDir` (created for a resolved Dockerfile when the task's workdir is another), after the working directory and `/logs` exist. It then waits as `up --wait` and Harbor's `run_healthcheck()` do: the image `HEALTHCHECK` first, then `[environment.healthcheck]`, both as the image's user (the image check in its `WorkingDir`, the task check in the task workdir; a `CMD-SHELL` check runs through the image's recorded `Shell`, `/bin/sh -c` when it sets none, as the daemon runs it, so `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` fails `false | true` here too), probing the entrypoint's exit status before every attempt and once more before the hand-over. Exit non-zero before the hand-over fails the seed as a task error (terminal, with the output tail), as does a launcher whose own shell fails for the image's user or directory; a provider that cannot run the launcher is retried. Exit zero logs a warning once and the episode continues on the keepalive. At verification the status is read again: in the separate verifier's fresh sandbox a non-zero exit masks the sample as `harbor:entrypoint_failed` (under Harbor the container would have died and the trial errored); in the agent's sandbox it masks only when the exec holding the entrypoint returned on its own with that status, because the runtime folder is world-writable and the agent had the sandbox; otherwise it is recorded as `entrypoint-exit.txt` with an error in the log and the sample is scored. The holding exec lives as long as the provider allows (docker caps it at `exec.default_timeout_s`, OpenSandbox without `operations.background_exec` at `connection.request_timeout_s`); past that the entrypoint is untracked, logged once, and OpenSandbox deployments need `background_exec` for long-lived launchers. An entrypoint that is one `sleep` or `tail` command is not started. A separate verifier that runs in the task image gets that image's entrypoint and `HEALTHCHECK` because Harbor's effective verifier environment is then a copy of `[environment]` (its prebuilt verifier), never the task's healthcheck. A declared `[verifier.environment].docker_image` starts the same way when `compose-images.json` records it, which it does when that image is the base of a task's Dockerfile (this task's own, in pull or overlay mode, or another task's): its own `ENTRYPOINT` as its own `User` in its own `WorkingDir`, its own `HEALTHCHECK`, none of the Dockerfile's `RUN` lines, `USER` or `WORKDIR`, as Harbor's `up --wait` of the declared image leaves it. The separate verifier's sandbox is a plain one whatever the agent's environment: under a Compose task too, the verifier image's entrypoint runs there and its `HEALTHCHECK` gates `test.sh`, as Harbor's `up --wait` of the verifier image does. The output is kept as `entrypoint-stdout.txt` (and `verifier-entrypoint-stdout.txt`) next to the verifier logs. A prebuilt `docker_image` has no recorded configuration yet, so its entrypoint still does not run. |
 | Other features | Windows and TPU environments are unsupported. Multi-step tasks run as turns (see above). |
@@ -608,6 +608,46 @@ access for shared results. Local log-directory creation or containment failures 
 with `failure_kind: persistence_failed` and identify the affected path.
 Measured outcomes include an absolute `verifier_logs_dir` naming the collection location; that directory
 can be empty if optional log collection fails.
+
+Every run through this server (`gym dataset validate` and `gym eval run <task target>`) also leaves one
+per-run summary beside its rollouts, `<rollouts stem>_run_summary.json` (`rollouts_run_summary.json` by
+default; `nemo_gym.tasks.harbor.run_summary`), so a results folder explains itself: the command, target,
+taskset and agent; the dataset's folder, source and digests; the `task_source` the run config declares for the
+taskset (`harbor_<taskset>_agent`, known before dispatch) and, as a cross-check, the one the result rows carry
+(`rows_task_source`, `null` without rows or when they disagree); the files of the run under `files` (rollouts,
+failures, materialized inputs, aggregate metrics, the health check's `quality_summary.json` and
+`rollout_verdicts.jsonl`; the rows with the data processor's `_prepare.jsonl` and `_metrics.json` beside them;
+the collator's `<rollouts stem>/preprocessed_datasets/` folder with the `<split>.jsonl` the collector
+dispatched and its `_metrics.json`; run config, `skipped.json`, `images.json`, the verifier root), each `null`
+when the run did not write it (the aggregate metrics and the two health reports follow a completed collection,
+so they are listed only when at least as new as the rollouts file: a run that stops early leaves an earlier
+run's, and the health reports keep one name per folder whatever the `--output` stem; a fresh start, the
+default `resume_from_cache=false`, clears the rollouts, failures and materialized inputs only once its servers
+are up, so a file under those names that is unchanged since before dispatch, as after servers that failed to
+start, is an earlier run's too, its rows are not this run's and its tasks are `missing`); the files found under
+the run's names that are not its own are listed under `stale_files`, so a `null` beside a file by that name is
+explained; and, per selected task
+and repeat, its status
+(`result`, `failed` or `missing`), reward, mask and `failure_kind`, the verifier's mode, wall time, network
+and return code, the paths of its verifier log folder, `test-stdout.txt`, `trajectory.json`,
+`entrypoint-stdout.txt` and collected `artifacts/` (per turn for a multi-step task), and the input the row
+carried: its task and dataset digests and the `responses_create_params` metadata (`agent_timeout_sec`,
+`harbor_step`). Every path is relative to the summary's own folder, so a results folder moved as a whole
+still resolves (`--output` outside it gives `../` paths); a folder a row names that is not on disk is listed
+under that task's `missing_paths`, never dropped. The summary is written whatever the run did: after
+collection, and also when `gym dataset validate` dispatches nothing because no selected task has a
+`solution/` (then with no run config and no tasks, beside the `--output` the command asked for). A summary
+that cannot be written is logged without
+touching the run's outcome; a fresh `gym eval run` reads its selected rows for the summary only after the
+collector has run, inside that same guard. No judge runs on this path outside the task's own `test.sh`: a
+task that calls one inside the sandbox leaves whatever the judge wrote under `/logs/verifier`, which is the
+verifier log folder the summary names.
+
+`gym -v` / `--verbose` (the `verbose` config key, forwarded to every spun-up server) raises the log level to
+DEBUG in the CLI, this server and the oracle agent alike. At that level the server traces each episode
+(seeded, `test.sh` exit code, wall time, rewards and log folder, final score) and the oracle its `solve.sh`
+run (budget, the task user or `the sandbox default user` when the task names none, exit code); without it
+both stay quiet below WARNING.
 
 The task's `[agent].timeout_sec` reaches the harness twice: in the agent-session seed as
 `agent_timeout_sec`, next to `sandbox_access` (which also names the task's `[agent].user` as `user`, and
@@ -791,14 +831,21 @@ task's `_ng_digest`: a table that declares only them leaves every task at its ba
 table does; only `[gym.defaults]` scaling and `[gym.tasks]` overrides fold a slice in. A `domain` outside Gym's
 values is refused with the values named, like a `license` outside Gym's, so the dataset does not load until it
 is fixed (the generated entry carries the same enum). A benchmark entry names no `prepare_script`; the rows are
-written by the run that generates the entry. Gym's data preparation records the entry in a metrics sidecar
-beside the rows (`results/harbor/<taskset>/tasks_<agent>_metrics.json`, under `results/harbor/validation/` for
-`gym dataset validate`) and refuses a later run whose entry differs from it. `domain`, `verified` and
-`allowed_agents` are catalog declarations, not properties of the rows, so the sidecar leaves them out: flipping
-`verified = true` after baselining, widening `allowed_agents` or changing `domain` between two runs of one taskset
-and harness does not conflict. `type` and `license` are recorded, as for every Gym dataset; editing either between
-two runs of the same taskset and harness fails data preparation with "Found conflicting aggregate metrics", and
-the message names the sidecar to delete before running again.
+written by the run that generates the entry. Gym's data preparation records the entry, with the rows' metrics,
+in a sidecar beside the rows (`results/harbor/<taskset>/tasks_<agent>_metrics.json`, under
+`results/harbor/validation/` for `gym dataset validate`) and in the collated split's
+(`<rollouts stem>/preprocessed_datasets/<split>_metrics.json`). For a committed source dataset such a sidecar is a
+source of truth, and a later preparation that computes something else fails with "Found conflicting aggregate
+metrics". On this path it is not: the rows are regenerated from the task folder on every command and the output
+folder is reused per taskset, so each run removes the previous selection's sidecars before data preparation
+(prepare the one beside the rows as it rewrites them, a fresh start the collated one right before it dispatches)
+and the processor writes them anew. Growing the dataset, narrowing it with `--only-tasks`/`--exclude-tasks` or
+editing `type` or `license` between two runs of one taskset and harness therefore never fails, and
+`overwrite_metrics_conflicts` is never needed. A resumed run (`--resume`) keeps the collated sidecar, as its rows
+must be unchanged to resume at all; so does a run with `reuse_existing_data_preparation=true` and the collated
+input present, which skips data preparation (that run has no rows sidecar of its own: prepare removed the earlier
+one and no processor rewrote it). `domain`, `verified` and `allowed_agents` are catalog declarations,
+not properties of the rows, and the sidecar leaves them out.
 
 `allowed_agents` lists the harnesses the dataset admits, by implementation name (`responses_api_agents/<name>`,
 what `--agent` resolves to); unset admits any. `gym eval run` with another harness fails as soon as

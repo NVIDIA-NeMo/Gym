@@ -153,6 +153,53 @@ async def test_each_step_is_a_turn_in_a_fresh_session_on_one_sandbox(tmp_path, m
     ]
 
 
+async def test_a_multi_step_episode_traces_its_final_score_at_debug_level_only(tmp_path, monkeypatch, caplog):
+    """Review (round 38, non-blocking): the multi-step branch returned from `_run_turns` before the single-turn
+    path's final-score DEBUG trace, so a `--verbose` run traced every single-turn episode's score but no multi-step
+    episode's. Both paths now end with the same message; without `verbose` neither logs anything."""
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        THREE_STEPS,
+        {"plan": "P", "build": "B", "check": "C"},
+        head='multi_step_reward_strategy = "mean"\n',
+    )
+    rewards_per_turn(server, sandbox, ["1", "0", "1"])
+    with caplog.at_level(logging.DEBUG, logger="environment_servers.harbor"):
+        response = await server.run_request(request_for(task))
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 0.0, 1.0]
+    records = [record for record in caplog.records if record.name == "environment_servers.harbor.app"]
+    scored = [record for record in records if " scored " in record.getMessage()]
+    assert [record.getMessage() for record in scored] == [
+        f"hello: episode {response.episode_id.capture_key} scored {response.result.reward}"
+    ]
+    assert response.result.reward == pytest.approx(2 / 3) and {record.levelno for record in scored} == {logging.DEBUG}
+
+    # An episode a turn without a reward file ended early is traced with the measured score the roll-up gave it.
+    caplog.clear()
+    server.server_client.turn_hooks.clear()
+    sandbox.verifier_files = {}
+    with caplog.at_level(logging.DEBUG, logger="environment_servers.harbor"):
+        measured = await server.run_request(request_for(task, rollout="r2"))
+    assert measured.failure is None, measured.failure
+    assert (measured.result.reward, measured.result.mask_sample, measured.result.stopped_after_turn) == (
+        0.0,
+        False,
+        "plan",
+    )
+    assert [record.getMessage() for record in caplog.records if " scored " in record.getMessage()] == [
+        "hello: episode r2 scored 0.0"
+    ]
+
+    # Without `verbose` the trace stays off.
+    caplog.clear()
+    rewards_per_turn(server, sandbox, ["1", "1", "1"])
+    with caplog.at_level(logging.INFO, logger="environment_servers.harbor"):
+        await server.run_request(request_for(task, rollout="r3"))
+    assert not [record for record in caplog.records if record.name == "environment_servers.harbor.app"]
+
+
 async def test_a_task_with_step_level_tests_alone_grades_each_turn_with_its_step(tmp_path, monkeypatch):
     """Harbor reads a multi-step task's tests from its steps: the top-level tests/ is optional, and each turn then
     uploads its own step's tests/ alone and is graded by that script's reward."""
