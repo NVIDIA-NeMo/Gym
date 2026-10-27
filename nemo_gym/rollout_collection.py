@@ -3589,14 +3589,19 @@ class RolloutCollectionHelper(BaseModel):
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
-        token_capture_rows = [
-            row
-            for row in input_rows
-            if token_id_capture_enabled_for_agent(
-                global_config,
-                self._agent_name_for_row(row, global_config),
-            )
-        ]
+        # Participation depends only on the agent name and the static global config.
+        # Decide it once per agent, so the per-row and per-rollout checks below do not revalidate the global config.
+        token_capture_enabled_by_agent: dict[str | None, bool] = {}
+
+        def token_capture_enabled_for_row(row: dict[str, Any]) -> bool:
+            agent_name = self._agent_name_for_row(row, global_config)
+            if agent_name not in token_capture_enabled_by_agent:
+                token_capture_enabled_by_agent[agent_name] = token_id_capture_enabled_for_agent(
+                    global_config, agent_name, config=token_capture_config
+                )
+            return token_capture_enabled_by_agent[agent_name]
+
+        token_capture_rows = [row for row in input_rows if token_capture_enabled_for_row(row)]
         if (
             token_capture_config.token_id_capture.rebuild_response
             and token_capture_rows
@@ -3815,10 +3820,7 @@ class RolloutCollectionHelper(BaseModel):
                 # It leaves harness output and reward unchanged.
                 # Direct callers of run_examples finalize each record themselves.
                 token_capture_build = None
-                if not no_result and token_id_capture_enabled_for_agent(
-                    global_config,
-                    self._agent_name_for_row(row, global_config),
-                ):
+                if not no_result and token_capture_enabled_for_row(row):
                     token_capture_build = await finalize_rollout_token_capture(
                         result, token_source, mask_incomplete_when_attributed=mask_incomplete_when_attributed
                     )
