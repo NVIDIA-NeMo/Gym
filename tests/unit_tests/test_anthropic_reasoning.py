@@ -19,10 +19,10 @@ import json
 import pytest
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse
 
 
-PREFIX = "litellm_encrypted_reasoning:"
+PREFIX = "nemo_gym_responses_reasoning:"
 CIPHERTEXT = '[{"type":"thinking","thinking":"Synthetic reasoning","signature":"synthetic-signature"}]'
 
 
@@ -51,7 +51,7 @@ def response(encrypted, summaries):
 
 
 @pytest.mark.parametrize(
-    "encrypted", [CIPHERTEXT, "arbitrary-opaque-content", PREFIX + "nested", "[not-json", "", "opaque-λ\nbytes"]
+    "encrypted", [CIPHERTEXT, "arbitrary-opaque-content", PREFIX + "nested", "[not-json", "opaque-λ\nbytes"]
 )
 @pytest.mark.parametrize(
     "summaries",
@@ -66,71 +66,91 @@ def test_opaque_carrier_round_trips_without_duplication_or_reordering(encrypted,
     message = converter.responses_to_anthropic_response(response(encrypted, summaries), model="synthetic")
     blocks = message["content"][:-1]
     assert message["content"][-1]["type"] == "tool_use"
+    joined_summary = "\n\n".join(item["text"] for item in summaries)
     if summaries:
-        assert [block["thinking"] for block in blocks] == [item["text"] for item in summaries]
-        assert blocks[0]["signature"] == PREFIX + encrypted
-        assert all(block["signature"] == "" for block in blocks[1:])
+        assert blocks == [{"type": "thinking", "thinking": joined_summary, "signature": PREFIX + encrypted}]
     else:
         assert blocks == [{"type": "redacted_thinking", "data": PREFIX + encrypted}]
     replay = converter.anthropic_request_to_responses(
         {"max_tokens": 10, "messages": [{"role": "assistant", "content": message["content"]}]}
     )
-    assert all(item.type == "reasoning" for item in replay.input[:-1])
-    assert all(
-        item["type"] == "reasoning" for item in replay.model_dump(mode="json", exclude_unset=True)["input"][:-1]
-    )
-    assert replay.input[0].encrypted_content == encrypted
-    assert all(item.encrypted_content in (None, "") for item in replay.input[1:-1])
-    assert replay.input[-1].call_id == "call_synthetic"
-    assert [summary.text for item in replay.input[:-1] for summary in item.summary] == [
-        item["text"] for item in summaries
-    ]
+    forwarded = replay.model_dump(mode="json", exclude_unset=True)["input"]
+    assert [item["type"] for item in forwarded] == ["reasoning", "function_call"]
+    assert forwarded[0]["summary"] == ([{"type": "summary_text", "text": joined_summary}] if summaries else [])
+    assert forwarded[0]["encrypted_content"] == encrypted
+    assert forwarded[1]["call_id"] == "call_synthetic"
     events = [json.loads(event.split("data: ", 1)[1]) for event in converter.anthropic_response_to_sse(message)]
-    for index, block in enumerate(blocks):
-        deltas = [
-            event["delta"] for event in events if event["type"] == "content_block_delta" and event["index"] == index
+    deltas = [event["delta"] for event in events if event["type"] == "content_block_delta" and event["index"] == 0]
+    if summaries:
+        assert deltas == [
+            {"type": "thinking_delta", "thinking": joined_summary},
+            {"type": "signature_delta", "signature": PREFIX + encrypted},
         ]
-        if block["type"] == "thinking":
-            assert deltas == [
-                {"type": "thinking_delta", "thinking": block["thinking"]},
-                {"type": "signature_delta", "signature": block["signature"]},
-            ]
-        else:
-            starts = [event["content_block"] for event in events if event["type"] == "content_block_start"]
-            assert starts[index] == block
-            assert deltas == []
+    else:
+        assert events[1]["content_block"] == blocks[0]
+        assert deltas == []
 
 
-def test_native_provider_keeps_unmarked_signature():
+@pytest.mark.parametrize("encrypted", [None, ""])
+@pytest.mark.parametrize("summaries", [[], [{"type": "summary_text", "text": "Readable."}]])
+def test_absent_ciphertext_emits_no_carrier(encrypted, summaries):
     converter = AnthropicConverter()
-    request = converter.anthropic_request_to_responses(
+    message = converter.responses_to_anthropic_response(response(encrypted, summaries), model="synthetic")
+    expected = [{"type": "thinking", "thinking": "Readable.", "signature": ""}] if summaries else []
+    assert message["content"][:-1] == expected
+    replay = converter.anthropic_request_to_responses(
+        {"max_tokens": 10, "messages": [{"role": "assistant", "content": message["content"]}]}
+    )
+    forwarded = replay.model_dump(mode="json", exclude_unset=True)["input"]
+    assert len(forwarded) == (2 if summaries else 1)
+    for item in forwarded[:-1]:
+        assert item["summary"] == summaries
+        assert item["encrypted_content"] is None
+
+
+@pytest.mark.parametrize(
+    "signature", [None, "", "native-signature", "litellm_encrypted_reasoning:opaque", PREFIX, 123]
+)
+def test_only_marked_nonempty_signatures_become_ciphertext(signature):
+    request = AnthropicConverter().anthropic_request_to_responses(
         {
             "max_tokens": 10,
             "messages": [
                 {
                     "role": "assistant",
-                    "content": [
-                        {"type": "thinking", "thinking": "Synthetic reasoning", "signature": "native-signature"}
-                    ],
+                    "content": [{"type": "thinking", "thinking": "Readable.", "signature": signature}],
                 }
             ],
         }
     )
-    assert request.input[0].encrypted_content == "native-signature"
-    provider = converter.responses_to_anthropic(
-        request, model="synthetic", max_tokens=10, thinking=None, thinking_budget_tokens=None, extra_body={}
+    item = request.model_dump(mode="json", exclude_unset=True)["input"][0]
+    assert item["summary"] == [{"type": "summary_text", "text": "Readable."}]
+    assert item["encrypted_content"] is None
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "redacted_thinking"},
+        *({"type": "redacted_thinking", "data": value} for value in [None, "", "native-data", PREFIX, 123]),
+    ],
+)
+def test_unsupported_redacted_history_is_dropped(block):
+    request = AnthropicConverter().anthropic_request_to_responses(
+        {
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Before"}, block, {"type": "text", "text": "After"}],
+                }
+            ],
+        }
     )
-    assert provider["messages"][0]["content"] == [
-        {"type": "thinking", "thinking": "Synthetic reasoning", "signature": "native-signature"}
+    assert request.model_dump(mode="json", exclude_unset=True)["input"] == [
+        {
+            "role": "assistant",
+            "type": "message",
+            "content": [{"type": "input_text", "text": "Before"}, {"type": "input_text", "text": "After"}],
+        }
     ]
-
-
-def test_native_provider_rejects_encrypted_only_without_payload():
-    converter = AnthropicConverter()
-    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(
-        {"input": [{"type": "reasoning", "id": "rs_synthetic", "encrypted_content": "opaque-secret"}]}
-    )
-    with pytest.raises(ValueError, match="^Encrypted-only reasoning cannot be sent to a native Anthropic provider$"):
-        converter.responses_to_anthropic(
-            request, model="synthetic", max_tokens=10, thinking=None, thinking_budget_tokens=None, extra_body={}
-        )

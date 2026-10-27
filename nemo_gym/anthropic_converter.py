@@ -14,12 +14,11 @@
 # limitations under the License.
 """Bidirectional converter between NeMo Gym Responses API objects and Anthropic Messages.
 
-This module is the single source of truth for the Anthropic <-> Responses mapping. It is
-shared by two opposite-direction consumers:
+This module is the single source of truth for the Anthropic <-> Responses mapping. It
+provides two opposite-direction mappings:
 
-* **Egress** (`responses_api_models/anthropic_model`): NeMo Gym is the client and Anthropic is
-  the backend. Uses ``responses_to_anthropic`` (request) and ``anthropic_to_responses``
-  (response).
+* **Egress**: NeMo Gym is the client and Anthropic is the backend. Uses
+  ``responses_to_anthropic`` (request) and ``anthropic_to_responses`` (response).
 * **Ingress** (an Anthropic-Messages proxy, e.g. for the Claude Code CLI): an Anthropic client
   talks to NeMo Gym, which forwards to a downstream Gym model server. Uses
   ``anthropic_request_to_responses`` (request), ``responses_to_anthropic_response`` (response),
@@ -72,7 +71,8 @@ from nemo_gym.openai_utils import (
 SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 
-_ENCRYPTED_REASONING_PREFIX = "litellm_encrypted_reasoning:"
+# Like LiteLLM, tunnel opaque Responses reasoning through Anthropic clients, but use a Gym-owned marker.
+_RESPONSES_REASONING_CARRIER_PREFIX = "nemo_gym_responses_reasoning:"
 
 
 class AnthropicConverter:
@@ -395,23 +395,20 @@ class AnthropicConverter:
                     NeMoGymResponseReasoningItem(
                         id=f"rs_{uuid4().hex}",
                         summary=[NeMoGymSummary(text=block.get("thinking", ""), type="summary_text")],
-                        encrypted_content=(
-                            block["signature"][len(_ENCRYPTED_REASONING_PREFIX) :]
-                            if (block.get("signature") or "").startswith(_ENCRYPTED_REASONING_PREFIX)
-                            else block.get("signature")
-                        ),
+                        encrypted_content=self._encrypted_content_from_carrier(block.get("signature")),
                         type="reasoning",
                     )
                 )
             elif block_type == "redacted_thinking":
-                data = block["data"]
-                if not data.startswith(_ENCRYPTED_REASONING_PREFIX):
-                    raise ValueError("Unsupported unmarked redacted reasoning for Responses")
+                encrypted_content = self._encrypted_content_from_carrier(block.get("data"))
+                if encrypted_content is None:
+                    continue
                 flush_message()
                 items.append(
                     NeMoGymResponseReasoningItem(
                         id=f"rs_{uuid4().hex}",
-                        encrypted_content=data[len(_ENCRYPTED_REASONING_PREFIX) :],
+                        summary=[],
+                        encrypted_content=encrypted_content,
                         type="reasoning",
                     )
                 )
@@ -509,7 +506,7 @@ class AnthropicConverter:
             if item_type == "message":
                 content.extend(self._output_message_to_anthropic_blocks(item))
             elif item_type == "reasoning":
-                content.extend(self._reasoning_item_to_anthropic_blocks(item, opaque_carrier=True))
+                content.extend(self._reasoning_item_to_anthropic_response_blocks(item))
             elif item_type == "function_call":
                 content.append(self._function_call_to_tool_use(item))
                 has_tool_use = True
@@ -747,26 +744,33 @@ class AnthropicConverter:
     def _system_parts_to_anthropic_blocks(self, system_parts: List[str]) -> List[Dict[str, str]]:
         return [{"type": "text", "text": text} for text in system_parts if text]
 
-    def _reasoning_item_to_anthropic_blocks(
-        self, item: Dict[str, Any], *, opaque_carrier: bool = False
-    ) -> List[Dict[str, Any]]:
+    def _encrypted_content_from_carrier(self, value: Any) -> Optional[str]:
+        if isinstance(value, str) and value.startswith(_RESPONSES_REASONING_CARRIER_PREFIX):
+            return value[len(_RESPONSES_REASONING_CARRIER_PREFIX) :] or None
+        return None
+
+    def _reasoning_item_to_anthropic_response_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
         encrypted = item.get("encrypted_content")
+        carrier = _RESPONSES_REASONING_CARRIER_PREFIX + encrypted if encrypted else ""
         summaries = item.get("summary", [])
-        if opaque_carrier and encrypted is not None:
-            # LiteLLM's carrier keeps Responses ciphertext opaque through an Anthropic client.
-            # Native provider requests must retain their actual signatures instead.
-            carrier = _ENCRYPTED_REASONING_PREFIX + encrypted
-            if not summaries:
-                return [{"type": "redacted_thinking", "data": carrier}]
-            return [
-                {"type": "thinking", "thinking": summary["text"], "signature": carrier if index == 0 else ""}
-                for index, summary in enumerate(summaries)
-            ]
-        if encrypted is not None and not summaries:
-            raise ValueError("Encrypted-only reasoning cannot be sent to a native Anthropic provider")
-        return [
-            {"type": "thinking", "thinking": summary["text"], "signature": encrypted or ""} for summary in summaries
-        ]
+        if summaries:
+            return [{"type": "thinking", "thinking": "\n\n".join(s["text"] for s in summaries), "signature": carrier}]
+        if carrier:
+            return [{"type": "redacted_thinking", "data": carrier}]
+        return []
+
+    def _reasoning_item_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        blocks = []
+        for summary in item.get("summary", []):
+            # Anthropic's ThinkingBlock requires a signature; open-model backends don't
+            # produce one, so default to "" (the synthesized SSE never emits it anyway).
+            block = {
+                "type": "thinking",
+                "thinking": summary["text"],
+                "signature": item.get("encrypted_content") or "",
+            }
+            blocks.append(block)
+        return blocks
 
     def _function_call_to_tool_use(self, item: Dict[str, Any]) -> Dict[str, Any]:
         return {
