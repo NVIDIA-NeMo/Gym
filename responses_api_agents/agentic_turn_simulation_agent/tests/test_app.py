@@ -453,7 +453,8 @@ class TestTruncation:
         assert script.budgets == [1_000, 2_000, 4_000]
         assert response.metadata["steps"] == "1" and _types(response.output) == ["message"]
         assert response.output[0].content[0].text == "ok"  # discarded attempts leave nothing behind
-        assert response.usage.output_tokens == 30  # but their tokens were spent
+        assert response.usage.output_tokens == 10  # their tokens are listed in model_calls, not counted in the usage
+        assert [c["kept"] for c in _model_calls(response)] == [False, False, True]
 
     async def test_doubling_stops_at_the_cap(self) -> None:
         replies = [_model(_reasoning(), incomplete=True) for _ in range(3)]
@@ -566,18 +567,33 @@ class TestModelCallUsage:
         response, *_ = await _episode(agent, _body(max_output_tokens=1_000))
         assert script.budgets == [1_000, 2_000]
         assert _model_calls(response) == [_record(1_000, cut_off=True, kept=False), _record(1_500)]
-        assert response.usage.output_tokens == 2_500
+        assert response.usage.output_tokens == 1_500
+
+    async def test_the_usage_counts_only_the_kept_replies(self) -> None:
+        # The trajectory references only the kept reply, and Gym's rollout_token_count_mismatch check compares
+        # response.usage with the calls it references: the discarded reply's tokens stay in model_calls alone.
+        discarded = _model(_msg("Writing it."), _write_file("c1"), tokens=1_000, rid="discarded")
+        kept = _model(_msg("Done."), tokens=1_500, rid="kept")
+        agent, _ = _agent(discarded, kept, max_output_tokens_cap=4_000)
+        response, trajectory, *_ = await _episode(agent, _body(max_output_tokens=1_000), collect_trajectory=True)
+        assert _model_calls(response) == [_record(1_000, cut_off=True, kept=False), _record(1_500)]
+        assert [ref.response_id for ref in trajectory.invocations[0].model_calls] == ["kept"]
+        usage = response.usage
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (100, 1_500, 1_600)
+        assert (usage.input_tokens_details.cached_tokens, usage.output_tokens_details.reasoning_tokens) == (0, 0)
 
     async def test_a_cut_off_reply_kept_at_the_cap_is_marked_cut_off(self) -> None:
         agent, _ = _agent(_model(_msg("partial answer"), incomplete=True), max_output_tokens_cap=1_000)
         response, *_ = await _episode(agent, _body(max_output_tokens=1_000))
         assert _model_calls(response) == [_record(cut_off=True, kept=True)]
+        assert response.usage.output_tokens == 10  # kept: its tokens count
 
     async def test_a_cut_off_reply_that_ends_the_turn_is_not_kept(self) -> None:
         agent, _ = _agent(_model(_reasoning(), incomplete=True))
         response, *_ = await _episode(agent)
         assert response.metadata["stop_reason"] == "max_output_tokens"
         assert _model_calls(response) == [_record(cut_off=True, kept=False)]
+        assert response.usage is None  # no reply was kept
 
     async def test_a_model_server_error_is_not_a_reply(self) -> None:
         agent, _ = _agent(_http(status=400, body=_overflow(10_000, 5_000)), _model(_msg("ok")))

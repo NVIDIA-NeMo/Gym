@@ -42,9 +42,11 @@ episode loop.
 
 ## Token usage
 
-`response.usage` sums the usage of every model reply of the turn, discarded ones included: their tokens were spent.
-`response.metadata.model_calls` lists the replies one by one, in order, as a JSON string (Responses metadata values are
-strings):
+`response.usage` sums the usage of the turn's kept replies (its steps), `null` when no reply was kept. These are the
+model calls the rollout's trajectory references, so the usage matches Gym's captured calls (the
+`rollout_token_count_mismatch` health check compares the two). Discarded replies spent tokens too:
+`response.metadata.model_calls` lists every reply, discarded ones included, one by one, in order, as a JSON string
+(Responses metadata values are strings):
 
 ```json
 [{"input_tokens": 9120, "output_tokens": 4096, "cut_off": true, "kept": false},

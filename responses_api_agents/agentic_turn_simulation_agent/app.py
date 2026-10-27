@@ -16,8 +16,8 @@ these strings; README "What ends the turn" describes each): ``final_message`` (a
 other calls run first), ``max_steps``, ``time_cap`` (``max_time_seconds``), ``context_overflow``,
 ``max_output_tokens`` (cut off once the budget cannot grow, with a tool call or nothing visible; a cut-off reply
 that shows only text is kept) or, for Cline rows, ``mistake_limit`` (too many replies in a row without a tool call).
-``response.usage`` sums every model reply's tokens; ``response.metadata.model_calls`` lists them per reply (README
-"Token usage").
+``response.usage`` sums the kept replies' tokens (the ones the trajectory references);
+``response.metadata.model_calls`` lists every reply, discarded ones too (README "Token usage").
 """
 
 import json
@@ -269,7 +269,8 @@ class _Episode:
     outputs: list[Any] = field(default_factory=list)
     # The latest model response, a discarded one's too: the episode's response is built on it.
     response: NeMoGymResponse | None = None
-    # Summed over every model response, discarded ones too: their tokens were spent.
+    # Summed over the kept model responses only: the trajectory references just those, and Gym's
+    # rollout_token_count_mismatch check compares this usage with them. `model_calls` lists the discarded ones' tokens.
     usage: NeMoGymResponseUsage | None = None
     # Every model response, in order (discarded ones too).
     model_calls: list[ModelCallRecord] = field(default_factory=list)
@@ -447,7 +448,6 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         except ValidationError as e:
             raise RuntimeError(f"Received an invalid response from model server: {json.dumps(payload)}") from e
         ep.response = reply
-        ep.usage = accumulate_response_usage(ep.usage, reply.usage)
         usage, reply.usage = reply.usage, None
         # vLLM reports a reply cut off inside a tool call as finished ("tool_calls", not "length"): its parser drops
         # the unfinished argument and keeps the call. Only the token count shows that cut. A reply that ended on
@@ -458,12 +458,15 @@ class AgenticTurnSimulationAgent(SimpleAgent):
             budget is not None and usage is not None and usage.output_tokens >= budget
         )
         outcome = reply if not cut_off else self._cut_off_outcome(ep, reply)
+        kept = outcome is reply
+        if kept:
+            ep.usage = accumulate_response_usage(ep.usage, usage)
         ep.model_calls.append(
             ModelCallRecord(
                 input_tokens=usage.input_tokens if usage is not None else None,
                 output_tokens=usage.output_tokens if usage is not None else None,
                 cut_off=cut_off,
-                kept=outcome is reply,
+                kept=kept,
             )
         )
         return outcome
