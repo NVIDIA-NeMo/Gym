@@ -57,8 +57,9 @@ tool calls, tool results, and simulation outcome.
 The User Agent uses `user_model`, the Assistant Agent uses `policy_model`, and
 Judge, Summary, tool simulation, and verification use `support_model`. These
 are independently configured Model Servers, although their upstream endpoints
-may match when one provider satisfies multiple roles. `user_model_*` and
-`support_model_*` default to the `policy_*` values.
+may match when one provider satisfies multiple roles. `user_model_*` is
+required and has no default; `support_model_*` defaults to the `policy_*`
+values.
 
 `financial_services` retrieval also calls `/embeddings` directly on the
 endpoint configured by `embedding_model_base_url`, `embedding_model_api_key`,

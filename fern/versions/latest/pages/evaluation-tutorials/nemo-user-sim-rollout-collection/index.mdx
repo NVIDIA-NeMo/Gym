@@ -104,8 +104,9 @@ support_model_api_key: ${oc.env:SUPPORT_MODEL_API_KEY}
 support_model_name: your-structured-output-model
 ```
 
-`user_model_*` and `support_model_*` default to the `policy_*` values; set them only when those roles use a
-different endpoint.
+The `user_model_*` keys are required: the simulated User runs on its own model, separate from the Assistant you are
+evaluating, and Gym stops with an error that names any unset key. `support_model_*` defaults to the `policy_*`
+values; set it only when the support role uses a different endpoint.
 
 All three URLs must expose an OpenAI-compatible Chat Completions API. The support endpoint must also accept
 `json_schema` response formats. If it rejects the probe-scorer schema, verification is masked as `verifier_error`.

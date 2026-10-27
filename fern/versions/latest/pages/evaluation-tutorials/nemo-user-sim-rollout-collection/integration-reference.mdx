@@ -75,8 +75,9 @@ Sim handles and returns appear under `usersim_result.simulation_outcome`.
 ## Model requirements and routing
 
 `user_model`, `policy_model`, and `support_model` are separate Gym Model Server configurations. Their upstream
-URLs can be shared, but every URL must implement an OpenAI-compatible Chat Completions API. `user_model_*` and
-`support_model_*` default to the `policy_*` values.
+URLs can be shared, but every URL must implement an OpenAI-compatible Chat Completions API. `user_model_*` has no
+default, so the simulated User never silently runs on the evaluated policy; `support_model_*` defaults to the
+`policy_*` values.
 
 The support endpoint must accept JSON Schema response formats because evaluator and scorer requests require
 structured output. If it rejects the probe-scorer schema, verification is masked as `verifier_error`. If it
