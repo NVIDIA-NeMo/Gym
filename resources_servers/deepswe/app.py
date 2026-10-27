@@ -26,10 +26,14 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
+    PROVIDER_OOM_KILLED,
     SESSION_LOST,
     VERIFIER_ERROR,
     FailureBoundary,
+    FailureReport,
     NgFailureEvent,
+    RequestFailureLog,
+    SandboxFailureDetails,
     current_verifier_invocation_id,
     observe_failure,
 )
@@ -50,6 +54,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,
@@ -87,6 +92,7 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
+    score_agent_sandbox_oom_as_zero: bool = False
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -117,10 +123,13 @@ class DeepSWESeedSessionResponse(BaseSeedSessionResponse):
 
 class DeepSWEVerifyRequest(DeepSWEInstanceRequest, BaseVerifyRequest):
     sandbox_handle: str | None = None
+    failure_report: FailureReport | None = None
 
 
 class DeepSWEVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+    failure_report: FailureReport | None = Field(default=None, exclude_if=lambda value: value is None)
 
     task_id: str
     evaluation_completed: bool
@@ -280,12 +289,17 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             # identity unknown". v1.1 grading collects only committed work,
             # so seed an explicit identity instead of relying on the sandbox
             # provider's hostname format.
-            await started.exec(
+            setup_result = await started.exec(
                 'git config --global user.email "agent@nemo-gym.local"'
                 ' && git config --global user.name "NeMo Gym Agent"'
-                " && git config --global --add safe.directory /app || true",
+                " && git config --global --add safe.directory /app",
                 timeout_s=60,
             )
+            if setup_result.return_code != 0 or setup_result.error_type is not None:
+                raise RuntimeError(
+                    f"DeepSWE agent git setup failed with code {setup_result.return_code}, "
+                    f"error_type={setup_result.error_type!r}: {setup_result.stderr or ''}"
+                )
 
         await sandbox.start_with_setup(spec, _run_setup)
         return sandbox
@@ -299,9 +313,12 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
     async def _collect_model_patch(self, sandbox: AsyncSandbox, task: Task) -> bytes:
         collect = task_collect_hook(task)
         result = await sandbox.exec(collect.command, timeout_s=collect.timeout_sec)
-        if result.return_code != 0:
+        if result.return_code != 0 or result.error_type is not None:
             details = ((result.stderr or "") + (result.stdout or "")).strip()
-            raise RuntimeError(f"DeepSWE collect hook exited with code {result.return_code}: {details[-4000:]}")
+            status = f"exited with code {result.return_code}"
+            if result.error_type is not None:
+                status = f"failed with code {result.return_code}, error_type={result.error_type!r}"
+            raise RuntimeError(f"DeepSWE collect hook {status}: {details[-4000:]}")
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-deepswe-collect-") as temporary_dir:
             local_patch_path = Path(temporary_dir) / "model.patch"
@@ -313,7 +330,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             "mkdir -p /tests /logs/artifacts /logs/verifier",
             timeout_s=60,
         )
-        if mkdir_result.return_code != 0:
+        if mkdir_result.return_code != 0 or mkdir_result.error_type is not None:
             raise RuntimeError(f"Failed to create DeepSWE verifier directories: {mkdir_result.stderr or ''}")
 
         uploads = [
@@ -327,12 +344,17 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             await asyncio.gather(*uploads)
 
         chmod_result = await sandbox.exec("chmod 0755 /tests/test.sh /tests/grader.py", timeout_s=60)
-        if chmod_result.return_code != 0:
+        if chmod_result.return_code != 0 or chmod_result.error_type is not None:
             raise RuntimeError(f"Failed to make DeepSWE verifier executable: {chmod_result.stderr or ''}")
 
     async def _download_if_present(self, sandbox: AsyncSandbox, remote_path: str, local_path: Path) -> bool:
         exists = await sandbox.exec(f"test -f {remote_path}", timeout_s=30)
-        if exists.return_code != 0:
+        if exists.error_type is not None or exists.return_code not in (0, 1):
+            raise RuntimeError(
+                f"Could not check DeepSWE verifier artifact {remote_path}: "
+                f"code={exists.return_code}, error_type={exists.error_type!r}"
+            )
+        if exists.return_code == 1:
             return False
         await sandbox.download(remote_path, local_path)
         return True
@@ -349,18 +371,11 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         log_dir: Path,
     ) -> VerifierResult:
         await self._stage_verifier(sandbox, task, model_patch)
-        try:
-            command_result = await sandbox.exec(
-                "bash /tests/test.sh",
-                cwd=self._verifier_workdir(task),
-                timeout_s=task.config.verifier.timeout_sec,
-            )
-        except TimeoutError:
-            return VerifierResult(
-                evaluation_completed=False,
-                reward=0.0,
-                verifier_error=f"Verifier timed out after {task.config.verifier.timeout_sec:g} seconds",
-            )
+        command_result = await sandbox.exec(
+            "bash /tests/test.sh",
+            cwd=self._verifier_workdir(task),
+            timeout_s=task.config.verifier.timeout_sec,
+        )
 
         log_dir.mkdir(parents=True, exist_ok=True)
         combined_output = (command_result.stdout or "") + (command_result.stderr or "")
@@ -374,6 +389,17 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             name: await self._download_if_present(sandbox, f"/logs/verifier/{name}", path)
             for name, path in artifact_paths.items()
         }
+        if command_result.return_code != 0 or command_result.error_type is not None:
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error=(
+                    f"Verifier command failed with code {command_result.return_code}, "
+                    f"error_type={command_result.error_type!r}"
+                ),
+                test_output=combined_output,
+            )
         if not present["reward.json"]:
             return VerifierResult(
                 evaluation_completed=False,
@@ -419,6 +445,24 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
                 verifier_error="Verifier did not produce /logs/verifier/ctrf.json",
+                test_output=combined_output,
+            )
+        try:
+            ctrf_data = json.loads(artifact_paths["ctrf.json"].read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error=f"Invalid verifier ctrf.json: {error}",
+                test_output=combined_output,
+            )
+        if not isinstance(ctrf_data, dict):
+            return VerifierResult(
+                evaluation_completed=False,
+                reward=0.0,
+                verifier_exit_code=command_result.return_code,
+                verifier_error="Invalid verifier ctrf.json: expected a JSON object",
                 test_output=combined_output,
             )
 
@@ -487,6 +531,46 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         patch_error: str | None = None
         failure_kind = VERIFIER_ERROR
         failure_cause: Exception | None = None
+        failure_log = RequestFailureLog.current()
+        if body.failure_report is not None and failure_log is not None:
+            failure_log.add(body.failure_report)
+        raw_agent_observation = (body.response.metadata or {}).get(NG_AGENT_SANDBOX_OBSERVATION_KEY)
+        agent_oom_observation = None
+        agent_oom_event = None
+        if raw_agent_observation is not None:
+            agent_oom_observation = SandboxObservation.model_validate_json(raw_agent_observation)
+            if (
+                agent_oom_observation.role != "agent"
+                or agent_oom_observation.outcome != "oom"
+                or agent_oom_observation.phase != "agent_execution"
+            ):
+                raise ValueError("Invalid agent sandbox OOM observation for DeepSWE scoring")
+            if not self.config.score_agent_sandbox_oom_as_zero:
+                raise ValueError("DeepSWE agent sandbox OOM zero scoring is disabled")
+            report = body.failure_report
+            if report is None or report.omitted or report.failure_id is not None:
+                raise ValueError("DeepSWE agent sandbox OOM requires a complete diagnostic failure report")
+            agent_oom_event = report.events.get(agent_oom_observation.failure_id)
+            if (
+                agent_oom_event is None
+                or agent_oom_event.boundary != FailureBoundary.SANDBOX
+                or agent_oom_event.failure_kind != PROVIDER_OOM_KILLED
+                or not isinstance(agent_oom_event.details, SandboxFailureDetails)
+                or not agent_oom_event.details.provider
+                or not agent_oom_event.details.sandbox_id
+            ):
+                raise ValueError("DeepSWE agent sandbox OOM requires its canonical sandbox failure event")
+            details = agent_oom_event.details
+            provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+            if details.provider not in provider_config:
+                raise ValueError("Agent sandbox OOM provider does not match the configured DeepSWE provider")
+            if (agent_oom_observation.provider is not None and agent_oom_observation.provider != details.provider) or (
+                agent_oom_observation.sandbox_id is not None and agent_oom_observation.sandbox_id != details.sandbox_id
+            ):
+                raise ValueError("Agent sandbox OOM observation conflicts with its canonical failure details")
+
+        if agent_oom_observation is not None and (self.config.is_verifying_golden_patch or body.response.output):
+            raise ValueError("An agent sandbox OOM zero requires a non-golden run with an empty agent response")
 
         if self.config.is_verifying_golden_patch:
             model_patch = task_solution_patch_path(task).read_bytes()
@@ -494,6 +578,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             model_patch = b""
             agent_session = self._agent_sessions.pop(session_id, None)
             if agent_session is None:
+                if agent_oom_observation is not None:
+                    raise RuntimeError("Cannot score an agent sandbox OOM without its seeded DeepSWE session")
                 patch_error = f"No DeepSWE agent sandbox exists for session {session_id!r}"
                 failure_kind = SESSION_LOST
             else:
@@ -510,8 +596,18 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                             f"DeepSWE session image {agent_session.image!r} does not match verify image "
                             f"{current_task_image!r}"
                         )
-                    model_patch = await self._collect_model_patch(agent_session.sandbox, task)
+                    if agent_oom_observation is not None:
+                        if agent_oom_event.details.sandbox_id != agent_session.sandbox_handle:
+                            raise ValueError("Agent sandbox OOM observation does not match the seeded DeepSWE sandbox")
+                        patch_error = (
+                            "Agent sandbox was OOM-killed during agent execution; no patch could be collected. "
+                            f"{agent_oom_event.failure_reason}"
+                        )
+                    else:
+                        model_patch = await self._collect_model_patch(agent_session.sandbox, task)
                 except Exception as error:
+                    if agent_oom_observation is not None:
+                        raise
                     print(
                         f"Failed to collect DeepSWE model patch for {current_task_id}: {format_exc()}",
                         file=sys.stderr,
@@ -555,7 +651,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             rmtree(str(log_dir), ignore_errors=True)
             log_dir = ""
 
-        if not result.evaluation_completed:
+        if not result.evaluation_completed and agent_oom_observation is None:
             # A lost session or failed patch collection happens before verification. Keep that
             # boundary and its cause distinct from an inconclusive verifier result.
             failure = NgFailureEvent(
@@ -587,8 +683,10 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "patch_collection_time_s": patch_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
-                "mask_sample": not result.evaluation_completed,
-                "failure_kind": None if result.evaluation_completed else failure_kind,
+                "mask_sample": not result.evaluation_completed and agent_oom_observation is None,
+                "failure_kind": PROVIDER_OOM_KILLED
+                if agent_oom_observation is not None
+                else (None if result.evaluation_completed else failure_kind),
                 "failure_reason": None if result.evaluation_completed else result.verifier_error,
             }
             | (lost_session_verification(patch_error) if failure_kind == SESSION_LOST else {})

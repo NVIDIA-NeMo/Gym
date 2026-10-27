@@ -78,8 +78,10 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId
-from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED, PROVIDER_OOM_KILLED
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, _is_judge_failure
 from nemo_gym.metrics.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.models.token_capture.config import TokenCaptureConfig
@@ -152,6 +154,7 @@ from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, Aggr
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.trajectory.trajectory_record import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
 # Not from a telemetry test module: its module-level importorskip would skip this whole module without the OTel SDK.
@@ -2625,6 +2628,91 @@ class TestRolloutCollection:
         assert "Rollouts missing from the score: 1 of 2 materialized" in printed
         assert "Metrics cover: 1 of 2 rollouts" in printed
         assert str(_failures_path_for(output_jsonl_fpath)) in printed
+
+    async def test_scored_agent_sandbox_oom_is_in_main_rollouts_and_completion_gate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        aggregated: dict[str, list[dict]] = {}
+        failure = NgFailureEvent(
+            boundary=FailureBoundary.SANDBOX,
+            failure_kind=PROVIDER_OOM_KILLED,
+            failure_reason="OpenSandbox terminal lifecycle OOMKilled",
+            operation="pty",
+            details=SandboxFailureDetails(provider="opensandbox", sandbox_id="agent-sandbox"),
+        )
+        report = failure_report_for(failure).model_dump(mode="json")
+        report["failure_id"] = None
+        observation = SandboxObservation(
+            role="agent",
+            phase="agent_execution",
+            outcome="oom",
+            failure_id=failure.event_id,
+        )
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                if json["x"] == 0:
+                    return FakeResponse(
+                        200,
+                        {
+                            "reward": 0.0,
+                            "mask_sample": False,
+                            "failure_report": report,
+                            "failure_kind": PROVIDER_OOM_KILLED,
+                            "failure_reason": "OpenSandbox confirmed OOMKilled after agent dispatch",
+                            "response": {
+                                "output": [],
+                                "metadata": {NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
+                            },
+                            "ng_agent_observations": {
+                                "source": "opencode",
+                                "records": [observation.model_dump(mode="json")],
+                            },
+                        },
+                    )
+                return FakeResponse(200, {"reward": 1.0, "response": {"output": []}})
+            assert url_path == "/aggregate_metrics"
+            aggregated["verify_responses"] = [dict(row) for row in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
+            disable_health_check=True,
+            require_complete=True,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert len(persisted) == 2
+        assert sorted(row["reward"] for row in persisted) == [0.0, 1.0]
+        oom_row = next(row for row in persisted if row["reward"] == 0.0)
+        assert oom_row["failure_kind"] == PROVIDER_OOM_KILLED
+        assert oom_row["mask_sample"] is False
+        assert (
+            SandboxObservation.model_validate_json(oom_row["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+            == observation
+        )
+        assert oom_row["ng_agent_observations"]["records"][0]["failure_id"] == failure.event_id
+        assert oom_row["failure_report"] == report
+        assert oom_row["failure_report"]["failure_id"] is None
+        assert _failures_path_for(output_jsonl_fpath).read_bytes() == b""
+        assert len(aggregated["verify_responses"]) == 2
+        metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
+            ".json"
+        )
+        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == 0.5
 
     async def test_run_from_config_resume_retries_an_agent_failure_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
