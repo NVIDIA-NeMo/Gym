@@ -18,10 +18,21 @@ The flow for one failure:
 3. The server middleware sends the report in the `X-NG-Failure-Report` reply header,
    on success and failure replies, with the failures observed while serving the
    request (for example a model attempt that a retry recovered).
-4. The caller's `raise_for_status` rebuilds the remote failure as the explicit cause
-   of its HTTP error, with the same event IDs.
+4. The caller's `raise_boundary_failure` raises the reconstructed remote failure,
+   preserving event IDs and explicit causes. Its `http_error` keeps this hop's status
+   and body separately. `raise_for_status` remains the HTTP exception compatibility
+   path for callers whose retry or routing logic depends on `ClientResponseError`.
 5. Collection saves the report beside the existing result or failure record
    (`_ng_failure_events`, `_ng_failure_id`).
+
+An environment raises `HandledEpisodeError` from its cause, passing a `FailureEvent`,
+its local `terminal` decision and separate partial evidence. The response adapter
+constructs the protocol's `EpisodeFailure` after cleanup, including late observations
+and trajectory evidence. Attaching diagnostics never borrows a cause's kind.
+
+Pickle and cloudpickle retain the explicit cause graph and captured event IDs.
+Foreign causes are reconstructed from their diagnostic event data; SDK request
+objects do not cross that interface.
 
 An exception that is not a `BoundaryFailure` is recorded by type and HTTP status only;
 its text is never serialized. It gets one event ID the first time a request captures

@@ -121,7 +121,7 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
-from nemo_gym.typed_exceptions import AgentRouteFailure, rebuild_failure
+from nemo_gym.typed_exceptions import AgentRouteFailure, BoundaryFailure, rebuild_failure
 
 
 try:
@@ -731,6 +731,8 @@ def format_exception_with_response_body(error: BaseException) -> str:
     such as an agent's ``AgentSeedRejectedError`` detail, is in the body that ``raise_for_status`` keeps on
     ``response_content``.
     """
+    if isinstance(error, BoundaryFailure) and error.http_error is not None:
+        error = error.http_error
     content = getattr(error, "response_content", None) if isinstance(error, ClientResponseError) else None
     if not content:
         return str(error)
@@ -891,6 +893,24 @@ Response content: {content}""")
             if remote is not None:
                 raise e from remote
             raise e
+
+
+async def raise_boundary_failure(response: ClientResponse, content: bytes | None = None) -> None:
+    """Raise a valid remote ``BoundaryFailure`` with its original IDs and explicit causes.
+
+    ``error.http_error`` retains this hop's status, body and request information. Without a final remote
+    failure, raise the original ``ClientResponseError``. Call ``raise_for_status`` where callers require
+    that HTTP exception type even for typed replies, such as a model client's retry/routing logic.
+    """
+    try:
+        await raise_for_status(response, content)
+    except ClientResponseError as http_error:
+        remote = http_error.__cause__
+        if not isinstance(remote, BoundaryFailure):
+            raise
+        http_error.__cause__ = None
+        remote.http_error = http_error
+        raise remote
 
 
 async def get_response_json(response: ClientResponse) -> Any:
@@ -1847,6 +1867,8 @@ class SimpleServer(BaseServer):
 
     def _failure_reply(self, e: BaseException) -> JSONResponse:  # pragma: no cover
         """The reply for an exception the route did not handle."""
+        if isinstance(e, BoundaryFailure) and e.http_error is not None:
+            e = e.http_error
         if isinstance(e, ClientResponseError):
             assert hasattr(e, "response_content"), (
                 "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"

@@ -33,7 +33,7 @@ from nemo_gym.episode_types import (
     FailureEvent,
 )
 from nemo_gym.failure_kinds import FailureStage
-from nemo_gym.failure_transport import with_failure_report
+from nemo_gym.failure_transport import report_for_current_request, with_failure_report
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
 from nemo_gym.typed_exceptions import BoundaryFailure
@@ -45,7 +45,6 @@ _ENVIRONMENT_CHECKPOINT_MODES = ("restart_only", "exported")
 
 EpisodeRequestT = TypeVar("EpisodeRequestT", bound=BaseEpisodeRequest[Any])
 EpisodeResponseT = TypeVar("EpisodeResponseT", bound=BaseEpisodeResponse[Any])
-EpisodeFailureT = TypeVar("EpisodeFailureT", bound=EpisodeFailure)
 CleanupCallback = Callable[[], Awaitable[None]]
 
 
@@ -138,19 +137,24 @@ class CleanupContext:
 
 
 class HandledEpisodeError(BoundaryFailure):
-    """Carry a failure that belongs in the episode response; the environment boundary's own failure."""
+    """The environment's handled runtime failure, with local policy and partial evidence kept separately.
 
-    def __init__(self, failure: EpisodeFailure) -> None:
-        super().__init__(
-            FailureEvent(
-                boundary=FailureBoundary.ENVIRONMENT,
-                failure_kind=failure.failure_kind,
-                failure_reason=failure.failure_reason,
-                operation="episode",
-                stage=failure.stage,
-            )
-        )
-        self.failure = failure
+    Raise it directly from the cause. The response adapter constructs the protocol's ``EpisodeFailure``
+    after cleanup, so observations and trajectory evidence can finish without mutating a wire model.
+    """
+
+    def __init__(
+        self,
+        event: FailureEvent,
+        *,
+        terminal: bool,
+        evidence: dict[str, object] | None = None,
+    ) -> None:
+        if event.boundary is not FailureBoundary.ENVIRONMENT:
+            raise ValueError("HandledEpisodeError requires an environment failure event")
+        super().__init__(event)
+        self.terminal = terminal
+        self.evidence = evidence if evidence is not None else {}
 
 
 # Request Timeout, Too Early and Too Many Requests clear on a later attempt.
@@ -173,6 +177,8 @@ def is_retryable_dependency_error(error: BaseException) -> bool:
     connection and a timeout are transient. Any other error, such as a reply that fails validation, would fail the
     same way again.
     """
+    if isinstance(error, BoundaryFailure) and error.http_error is not None:
+        error = error.http_error
     if isinstance(error, ClientResponseError):
         return is_retryable_dependency_status(error.status)
     # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
@@ -182,7 +188,6 @@ def is_retryable_dependency_error(error: BaseException) -> bool:
 def dependency_failure(
     error: BaseException,
     *,
-    failure_model: type[EpisodeFailureT],
     stage: FailureStage,
     terminal: bool | None = None,
     name_error_type: bool = False,
@@ -194,18 +199,23 @@ def dependency_failure(
     (see ``format_exception_with_response_body``), prefixed with the error's class name when ``name_error_type`` is set,
     and bounded to the failure's 2000 characters. ``terminal`` defaults to
     ``not is_retryable_dependency_error(error)``; pass it only where the stage decides on its own.
-    ``fields`` fill the failure model's own fields, such as a partial response.
+    ``fields`` retain partial evidence for the response adapter, such as a partial response.
     """
-    failure_reason = format_exception_with_response_body(error)
+    description_error = (
+        error.http_error if isinstance(error, BoundaryFailure) and error.http_error is not None else error
+    )
+    failure_reason = format_exception_with_response_body(description_error)
     if name_error_type:
-        failure_reason = f"{type(error).__name__}: {failure_reason}"
+        failure_reason = f"{type(description_error).__name__}: {failure_reason}"
     handled = HandledEpisodeError(
-        failure_model(
+        FailureEvent(
+            boundary=FailureBoundary.ENVIRONMENT,
             stage=stage,
+            operation="episode",
             failure_reason=failure_reason[:2000],
-            terminal=not is_retryable_dependency_error(error) if terminal is None else terminal,
-            **fields,
-        )
+        ),
+        terminal=not is_retryable_dependency_error(error) if terminal is None else terminal,
+        evidence=fields,
     )
     # The dependency's error is this failure's explicit cause, whether or not the caller writes ``from``.
     handled.__cause__ = error
@@ -290,6 +300,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             cleanup_timeout_seconds=float(self.config.cleanup_timeout_seconds),
         )
         response: EpisodeResponseT
+        handled: HandledEpisodeError | None = None
         cancelled: asyncio.CancelledError | None = None
         # Set once this request owns its episode's checkpoint state.
         # A begin refused as a duplicate or a retired attempt owns nothing,
@@ -333,7 +344,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     # A checkpoint refused this episode before it started; the caller retries it later.
                     raise
                 except HandledEpisodeError as error:
-                    response = self.failure_response(request, with_failure_report(error.failure, error))
+                    handled = error
                 except asyncio.CancelledError as error:
                     cancelled = error
                 except Exception as error:
@@ -356,6 +367,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
         if cancelled is not None:
             raise cancelled
+        if handled is not None:
+            response = self.failure_response(request, handled)
         response = self.response_model.model_validate(response)
         self.validate_response_identity(request, response)
         return response
@@ -434,18 +447,34 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")
         failure_reason = f"Unhandled environment server error: {type(error).__name__}: {error}"
-        failure = EpisodeFailure(failure_reason=failure_reason[:2000], terminal=True)
-        reported = HandledEpisodeError(failure)
+        reported = HandledEpisodeError(
+            FailureEvent(
+                boundary=FailureBoundary.ENVIRONMENT, failure_reason=failure_reason[:2000], operation="episode"
+            ),
+            terminal=True,
+        )
         reported.__cause__ = error
-        return self.failure_response(request, with_failure_report(failure, reported))
+        return self.failure_response(request, reported)
 
-    def failure_response(self, request: EpisodeRequestT, failure: EpisodeFailure) -> EpisodeResponseT:
-        return self.response_model.model_validate(
-            {
-                "episode_id": request.episode_id,
-                "task_id": request.task.task_id,
-                "failure": failure.model_dump(mode="json"),
+    def failure_response(
+        self, request: EpisodeRequestT, failure: EpisodeFailure | HandledEpisodeError
+    ) -> EpisodeResponseT:
+        """Adapt runtime event, local policy and evidence to the protocol's wire failure model."""
+        if isinstance(failure, HandledEpisodeError):
+            report = report_for_current_request(failure)
+            fields = failure.evidence | {
+                "failure_reason": failure.event.failure_reason,
+                "failure_kind": failure.event.failure_kind,
+                "stage": failure.event.stage,
+                "terminal": failure.terminal,
+                "failure_id": report.failure_id,
+                "failure_events": report.events,
             }
+        else:
+            # A protocol may still return a wire failure directly instead of raising a runtime failure.
+            fields = failure.model_dump(mode="json")
+        return self.response_model.model_validate(
+            {"episode_id": request.episode_id, "task_id": request.task.task_id, "failure": fields}
         )
 
     @staticmethod

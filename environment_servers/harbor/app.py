@@ -97,7 +97,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
 )
 from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, FailureBoundary, TaskId
+from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, FailureBoundary, FailureEvent, TaskId
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
@@ -108,7 +108,7 @@ from nemo_gym.sandbox.providers.base import SandboxCredentialsRejected
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
+    raise_boundary_failure,
 )
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
@@ -731,7 +731,6 @@ class HarborEnvironmentServer(
             # seed failure, retried elsewhere; the cleanup stops what was claimed.
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="seed",
                 terminal=False,
                 name_error_type=True,
@@ -874,7 +873,7 @@ class HarborEnvironmentServer(
                 ).model_dump(mode="json"),
                 cookies=agent_cookies,
             )
-            await raise_for_status(close_http_response)
+            await raise_boundary_failure(close_http_response)
             agent_close_response = AgentCloseSessionResponse.model_validate(
                 await get_response_json(close_http_response)
             )
@@ -905,7 +904,7 @@ class HarborEnvironmentServer(
                     agent_timeout_sec=agent_timeout_sec,
                 ).model_dump(mode="json"),
             )
-            await raise_for_status(agent_create_http_response)
+            await raise_boundary_failure(agent_create_http_response)
             agent_session = AgentSeedSessionResponse.model_validate(
                 await get_response_json(agent_create_http_response)
             )
@@ -941,7 +940,6 @@ class HarborEnvironmentServer(
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="agent",
             ) from error
 
@@ -953,7 +951,7 @@ class HarborEnvironmentServer(
                 json=_harness_params(responses_create_params),
                 cookies=agent_cookies,
             )
-            await raise_for_status(agent_http_response)
+            await raise_boundary_failure(agent_http_response)
             response_cookies = _cookies(agent_http_response)
             if response_cookies:
                 agent_cookies = response_cookies
@@ -967,7 +965,6 @@ class HarborEnvironmentServer(
                 pass  # Final unwind retries the close and logs its failure.
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="agent",
                 agent_observations=agent_observations,
                 trajectory=agent_trajectory,
@@ -986,7 +983,6 @@ class HarborEnvironmentServer(
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="cleanup",
                 partial_response=agent_response,
             ) from error
@@ -1458,15 +1454,19 @@ class HarborEnvironmentServer(
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
         return HandledEpisodeError(
-            SingleAgentTurnFailure(
+            FailureEvent(
+                boundary=FailureBoundary.ENVIRONMENT,
                 stage=stage,
+                operation="episode",
                 failure_reason=failure_reason[:2000],
-                terminal=terminal,
                 failure_kind=failure_kind,
-                partial_response=partial_response,
-                agent_observations=agent_observations,
-                trajectory=trajectory,
-            )
+            ),
+            terminal=terminal,
+            evidence={
+                "partial_response": partial_response,
+                "agent_observations": agent_observations,
+                "trajectory": trajectory,
+            },
         )
 
 

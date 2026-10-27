@@ -37,6 +37,7 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
+from nemo_gym.episode_types import FailureBoundary, FailureEvent
 from nemo_gym.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
@@ -51,11 +52,10 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
+    raise_boundary_failure,
     rollout_path_prefix,
 )
 from nemo_gym.single_agent_turn_types import (
-    SingleAgentTurnFailure,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
@@ -111,7 +111,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             url_path="/aggregate_metrics",
             json=body,
         )
-        await raise_for_status(response)
+        await raise_boundary_failure(response)
         return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def run(
@@ -186,8 +186,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception:
                     pass  # Final unwind retries the close and logs its failure.
                 if closed_agent:
-                    failure.failure.agent_observations = closed_agent[-1].agent_observations
-                    failure.failure.trajectory = closed_agent[-1].trajectory
+                    failure.evidence["agent_observations"] = closed_agent[-1].agent_observations
+                    failure.evidence["trajectory"] = closed_agent[-1].trajectory
                 raise
             stage = "close_agent"
 
@@ -212,7 +212,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception as error:
                     raise dependency_failure(
                         error,
-                        failure_model=SingleAgentTurnFailure,
                         stage="cleanup",
                         partial_response=agent_response,
                     ) from error
@@ -289,7 +288,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     task_data=task_input.task_data,
                 ).model_dump(mode="json"),
             )
-            await raise_for_status(seed_http_response)
+            await raise_boundary_failure(seed_http_response)
             handles.resources_cookies = _cookies(seed_http_response)
             handles.resources_verify_step_type = seed_verify_step_type(seed_http_response.headers)
             if seed_restarts(seed_http_response.headers):
@@ -302,7 +301,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="seed",
             ) from error
         return seed
@@ -370,7 +368,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     sandbox_access=seed.sandbox_access,
                 ).model_dump(mode="json"),
             )
-            await raise_for_status(agent_create_http_response)
+            await raise_boundary_failure(agent_create_http_response)
             agent_session = AgentSeedSessionResponse.model_validate(
                 await get_response_json(agent_create_http_response)
             )
@@ -382,7 +380,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="agent",
             ) from error
 
@@ -397,7 +394,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # A restore before its reply invokes it again, and the agent gives the reply it already gave.
                 headers={AGENT_ACTIVATION_HEADER: "1"},
             )
-            await raise_for_status(agent_http_response)
+            await raise_boundary_failure(agent_http_response)
             response_cookies = _cookies(agent_http_response)
             if response_cookies:
                 handles.agent_cookies = response_cookies
@@ -405,7 +402,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="agent",
             ) from error
 
@@ -421,7 +417,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ).model_dump(mode="json"),
             cookies=handles.agent_cookies,
         )
-        await raise_for_status(close_http_response)
+        await raise_boundary_failure(close_http_response)
         close = AgentCloseSessionResponse.model_validate(await get_response_json(close_http_response))
         if close.agent_session_id != handles.agent_session_id:
             raise ValueError("Agent close returned a different agent_session_id")
@@ -442,7 +438,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ).model_dump(mode="json"),
             cookies=handles.resources_cookies,
         )
-        await raise_for_status(close_response)
+        await raise_boundary_failure(close_response)
 
     async def _verify(
         self,
@@ -470,12 +466,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
-            await raise_for_status(verify_http_response)
+            await raise_boundary_failure(verify_http_response)
             return SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="verification",
                 partial_response=agent_response,
                 agent_observations=observations,
@@ -507,14 +502,18 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
         return HandledEpisodeError(
-            SingleAgentTurnFailure(
+            FailureEvent(
+                boundary=FailureBoundary.ENVIRONMENT,
                 stage=stage,
+                operation="episode",
                 failure_reason=failure_reason[:2000],
-                terminal=terminal,
-                partial_response=partial_response,
-                agent_observations=agent_observations,
-                trajectory=trajectory,
-            )
+            ),
+            terminal=terminal,
+            evidence={
+                "partial_response": partial_response,
+                "agent_observations": agent_observations,
+                "trajectory": trajectory,
+            },
         )
 
 

@@ -29,7 +29,6 @@ from environment_servers.swe_together.repo_config import discover_repo_config_fi
 from environment_servers.swe_together.runtime import PYTHON, RuntimeProvisioner
 from environment_servers.swe_together.schemas import (
     CandidateTurn,
-    SWETFailure,
     SWETRequest,
     SWETResponse,
     SWETResult,
@@ -62,7 +61,7 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ModelServerRef,
 )
-from nemo_gym.episode_types import EpisodeFailure
+from nemo_gym.episode_types import FailureBoundary, FailureEvent
 from nemo_gym.failure_kinds import JUDGE_FAILED
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -188,7 +187,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         cookies = {}
         agent_id = "candidate-" + uuid4().hex
         agent_close = None
-        failure: SWETFailure | None = None
+        failure: HandledEpisodeError | None = None
         activations = []
         steps = []
         stage = "seed"
@@ -224,11 +223,14 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         async def persist_cleanup_evidence() -> None:
             (state.directory / "cleanup-receipts.json").write_text(json.dumps(state.cleanup_receipts, indent=2))
             if failure is not None:
-                failure.agent_close = agent_close
-                failure.agent_observations = agent_close.agent_observations if agent_close else None
-                failure.trajectory = request.trajectory_for_collection(agent_close.trajectory) if agent_close else None
-                failure.cleanup_receipts = state.cleanup_receipts
-                (state.directory / "failure.json").write_text(failure.model_dump_json(indent=2))
+                failure.evidence.update(
+                    agent_close=agent_close,
+                    agent_observations=agent_close.agent_observations if agent_close else None,
+                    trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    cleanup_receipts=state.cleanup_receipts,
+                )
+                wire_failure = self.failure_response(request, failure).failure
+                (state.directory / "failure.json").write_text(wire_failure.model_dump_json(indent=2))
 
         async def release_dependency_access() -> None:
             if state.dependency_access is not None:
@@ -372,28 +374,29 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 dependency["body"] = (
                     content.decode(errors="replace") if isinstance(content, bytes) else str(content)
                 )[:8000]
-            failure = SWETFailure(
-                stage=stage,
+            failure = HandledEpisodeError(
+                FailureEvent(
+                    boundary=FailureBoundary.ENVIRONMENT,
+                    stage=stage,
+                    operation="episode",
+                    failure_reason=(f"{type(error).__name__}: {error}")[:2000],
+                ),
                 terminal=activation_attempted or isinstance(error, (ValueError, FileNotFoundError)),
-                failure_reason=(f"{type(error).__name__}: {error}")[:2000],
-                partial_response=activations[-1].response if activations else None,
-                activations=activations,
-                agent_close=agent_close,
-                agent_observations=agent_close.agent_observations if agent_close else None,
-                trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
-                cleanup_receipts=state.cleanup_receipts,
-                artifact_directory=str(state.directory),
-                dependency_error=dependency,
+                evidence={
+                    "partial_response": activations[-1].response if activations else None,
+                    "activations": activations,
+                    "agent_close": agent_close,
+                    "agent_observations": agent_close.agent_observations if agent_close else None,
+                    "trajectory": request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    "cleanup_receipts": state.cleanup_receipts,
+                    "artifact_directory": str(state.directory),
+                    "dependency_error": dependency,
+                },
             )
-            (state.directory / "failure.json").write_text(failure.model_dump_json(indent=2))
-            failure.cleanup_receipts = state.cleanup_receipts
-            raise HandledEpisodeError(failure) from error
-
-    def failure_response(self, request: SWETRequest, failure: EpisodeFailure) -> SWETResponse:
-        if isinstance(failure, SWETFailure):
-            # Final cleanup updates this same object before the base class serializes it.
-            return SWETResponse(episode_id=request.episode_id, task_id=request.task.task_id, failure=failure)
-        return super().failure_response(request, failure)
+            failure.__cause__ = error
+            wire_failure = self.failure_response(request, failure).failure
+            (state.directory / "failure.json").write_text(wire_failure.model_dump_json(indent=2))
+            raise failure from error
 
     def _activation_path(self, request: SWETRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}

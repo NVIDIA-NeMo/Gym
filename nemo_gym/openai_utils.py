@@ -1849,7 +1849,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
             # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
             last_failure = None
-            if FailureHeader.decode(getattr(response, "headers", None)) is None:
+            forwarded = FailureHeader.decode(getattr(response, "headers", None))
+            if forwarded is None or forwarded.failure_id is None:
                 last_failure = _model_attempt_failure(
                     f"HTTP {response.status} from the model server",
                     operation_id=operation_id,

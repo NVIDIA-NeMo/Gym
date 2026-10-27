@@ -17,7 +17,6 @@ from fastapi import Body
 from pydantic import ConfigDict, Field
 
 from environment_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeFailure,
     UserSimEpisodeRequest,
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
@@ -614,7 +613,6 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
     ) -> HandledEpisodeError:
         return dependency_failure(
             error,
-            failure_model=UserSimEpisodeFailure,
             stage=stage,
             terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
             name_error_type=True,

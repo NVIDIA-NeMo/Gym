@@ -8,9 +8,16 @@ chain into a ``FailureReport`` (one ``FailureEvent`` per exception, linked by ``
 ``rebuild_failure`` and Collection saves it. Nothing here chooses retries, terminality or scores.
 """
 
+from __future__ import annotations
+
 import copyreg
 import uuid
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from aiohttp import ClientResponseError
 
 from nemo_gym.episode_types import FailureBoundary, FailureEvent, FailureReport, SdkErrorDetails
 from nemo_gym.exception_inspection import bounded_text, error_to_http_status, explicit_causes, qualified_type_name
@@ -29,6 +36,9 @@ class BoundaryFailure(Exception):
     as data (``exception_type``), and no type is imported from the wire.
     """
 
+    http_error: ClientResponseError | None = None
+    """The HTTP response that carried a remote failure, separate from its original causal chain."""
+
     def __init__(self, event: FailureEvent, *args: object) -> None:
         super().__init__(*(args or (event.failure_reason,)))
         if event.exception_type is None and type(self) is not BoundaryFailure:
@@ -38,7 +48,13 @@ class BoundaryFailure(Exception):
     def __reduce__(self) -> tuple:
         # Rebuild with Exception.__new__ and the saved state, so a subclass's own constructor signature
         # (``HarnessTerminationError(*, harness, receipt)``) is not called with ``args``.
-        return copyreg.__newobj__, (type(self), *self.args), self.__dict__
+        # Use the request's foreign IDs, just as HTTP reporting does. A projection also avoids pickling SDK
+        # request objects and preserves causes nested below foreign exceptions, whose pickle drops __cause__.
+        from nemo_gym.failure_transport import report_for_current_request
+
+        report = report_for_current_request(self)
+        cause = rebuild_failure(report.model_copy(update={"failure_id": report.events[self.event.event_id].cause_id}))
+        return copyreg.__newobj__, (type(self), *self.args), self.__dict__ | {"__cause__": cause}
 
 
 @dataclass
@@ -99,11 +115,11 @@ def find_boundary_failure(error: BaseException | None) -> BoundaryFailure | None
 def failure_report_for(error: BaseException | None, *, foreign_ids: ForeignCauseIds | None = None) -> FailureReport:
     """``error`` and its explicit causes as a ``FailureReport`` whose ``failure_id`` is ``error``'s event.
 
-    The report is empty when the chain holds no boundary failure. A ``BoundaryFailure`` contributes its own
+    The report is empty when the chain holds no captured failure. A ``BoundaryFailure`` contributes its own
     event. Any other exception contributes its type and HTTP status only (its text may hold request data),
     under the id ``foreign_ids`` gives it; pass the request's ids so the same exception keeps one id.
     """
-    if find_boundary_failure(error) is None:
+    if error is None or not any(isinstance(current, BoundaryFailure) for current in explicit_causes(error)):
         return FailureReport()
     foreign_ids = foreign_ids if foreign_ids is not None else ForeignCauseIds()
     events: dict[str, FailureEvent] = {}

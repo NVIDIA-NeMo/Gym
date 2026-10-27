@@ -9,8 +9,9 @@ Flow for one request a Gym server serves:
    attempt), and ``observe_reply`` adds the report each reply from another Gym server forwarded.
 3. When the request ends, the middleware merges the request's own failure (if it raised) with the log and
    sends the result in the ``FailureHeader``.
-4. The caller's ``raise_for_status`` rebuilds the remote failure as the explicit cause of its HTTP error.
-   Collection saves the report with ``FailureReportRow``.
+4. The caller's ``raise_boundary_failure`` raises the rebuilt failure with separate HTTP details;
+   ``raise_for_status`` keeps the HTTP exception compatibility path. Collection saves the report with
+   ``FailureReportRow``.
 """
 
 import json
