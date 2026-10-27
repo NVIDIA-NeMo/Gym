@@ -67,6 +67,7 @@ from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
+from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
@@ -674,7 +675,7 @@ class TestApp:
         )
         assert seed.status_code == 200
 
-        with pytest.raises(RuntimeError, match="no direct HTTP tool access"):
+        with raises_agent_failure(RuntimeError, match="no direct HTTP tool access"):
             client.post("/v1/responses", json={"input": [{"role": "user", "content": "weather?"}]})
         assert [call.kwargs["server_name"] for call in server_client.post.await_args_list] == ["model"]
         direct_request.assert_not_awaited()

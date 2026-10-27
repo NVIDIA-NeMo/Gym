@@ -142,7 +142,10 @@ async def test_judge_failsafe_output_is_unchanged_by_the_typed_error(status: int
     ]
     typed_events = typed_row.pop("_ng_failure_events")
     typed_row.pop("_ng_failure_id")
-    # The kind is what the client observed; the routing class, reward and mask are the plain row's.
+    plain_events = plain_row.pop("_ng_failure_events")
+    plain_id = plain_row.pop("_ng_failure_id")
+    assert plain_events[plain_id]["failure_kind"] == "judge_failed"
+    # Both judge-owned boundaries have the same kind, routing class, reward and mask.
     assert (
         typed_row.pop("failure_kind") == type(typed).failure_kind and plain_row.pop("failure_kind") == "judge_failed"
     )

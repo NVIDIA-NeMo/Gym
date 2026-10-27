@@ -12,6 +12,9 @@ Each failure gets one stable event ID. `failure_events` maps IDs to observations
 Foreign exception names and integer HTTP statuses are data, never dynamically
 imported classes. Implicit Python context does not become a causal relationship.
 Kinds belong to their boundary; a nested provider status does not reclassify a judge failure.
+Optional `foreign_error` fields retain selected SDK type, scalar message and HTTP status.
+SDK objects, request bodies and response payloads are not serialized. Selected diagnostics
+are bounded, with a visible marker when shortened.
 
 Shared HTTP helpers forward observations on error and successful responses, so
 an attempt recovered by an existing retry remains observable. The collector saves

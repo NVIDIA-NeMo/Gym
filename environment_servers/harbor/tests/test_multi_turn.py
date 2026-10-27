@@ -508,6 +508,7 @@ timeout_sec = 0.05
     failure = response.failure
     assert failure.stage == "agent" and failure.failure_kind == "harbor:task_deadline" and not failure.terminal
     assert "time budget of task 'hello'" in failure.failure_reason and "over 2 turn(s)" in failure.failure_reason
+    assert any(event.exception_type == "TimeoutError" for event in failure.failure_events.values())
     assert not any("test.sh" in call["command"] for call in sandbox.execs)
     # The final unwind still closed the agent session and stopped the sandbox.
     assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"

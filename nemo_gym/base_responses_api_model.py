@@ -549,7 +549,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
-            raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+            raise RequestValidationError(
+                [{**error, "loc": ("body", *error["loc"])} for error in exc.errors()]
+            ) from exc
 
         return await self._stream_responses(request, params, ns_map)
 
@@ -782,7 +784,7 @@ def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStre
     try:
         return NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
     except ValidationError as exc:
-        raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+        raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()]) from exc
 
 
 def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStreaming:
@@ -797,7 +799,7 @@ def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStr
     except ValidationError as exc:
         raise RequestValidationError(
             [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)]
-        )
+        ) from exc
 
 
 # --- Capture configuration + rollout-keyed storage ---

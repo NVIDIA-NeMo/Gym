@@ -150,3 +150,53 @@ class TestJudgeFailsafe:
         assert len(data["failure_reason"]) == 2000
         assert data["_ng_failure_judge_error"] == data["failure_reason"]
         assert request.model_dump() == original
+
+
+async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
+    from nemo_gym.typed_exceptions import ModelFailure, failure_events
+
+    original = ModelFailure(message="provider refused", operation="model.request", http_status=401)
+    original_events = failure_events(original)
+    original_id = next(iter(original_events))
+
+    async def rejected():
+        raise original
+
+    @judge_failsafe
+    async def verify(body):
+        await reraise_judge_errors(rejected())
+
+    result = await verify(_Req(response={"saved": "answer"}))
+    data = orjson.loads(result.body)
+    assert data["failure_kind"] == "judge_failed"
+    assert data["_ng_failure_class"] == "judge_failed"
+    assert data["mask_sample"] is True
+    assert data["response"] == {"saved": "answer"}
+    events = data["_ng_failure_events"]
+    boundary = events[data["_ng_failure_id"]]
+    assert boundary.get("failure_kind") == "judge_failed"
+    assert events[original_id]["http_status"] == 401
+    assert events[original_id] == original_events[original_id].model_dump(mode="json")
+
+
+async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary():
+    from nemo_gym.typed_exceptions import ResServerFailure, failure_events
+
+    class SpecificJudgeError(JudgeError, ResServerFailure):
+        failure_kind = "model_request_error"
+
+    original = SpecificJudgeError(message="provider refused", operation="provider.request")
+    before = failure_events(original)
+    original_id = next(iter(before))
+
+    @judge_failsafe
+    async def verify(body):
+        raise original
+
+    data = orjson.loads((await verify(_Req())).body)
+    assert data["failure_kind"] == "judge_failed"
+    events = data["_ng_failure_events"]
+    boundary = events[data["_ng_failure_id"]]
+    assert boundary["failure_kind"] == "judge_failed"
+    assert boundary["cause_id"] == original_id
+    assert events[original_id] == before[original_id].model_dump(mode="json")

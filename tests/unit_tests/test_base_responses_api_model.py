@@ -1666,3 +1666,16 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
         assert len(store.read("r-inflight")) == 1
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("surface", ["responses", "chat"])
+def test_model_request_validation_keeps_original_validation_cause(surface):
+    from fastapi.exceptions import RequestValidationError
+    from pydantic import ValidationError
+
+    from nemo_gym.base_responses_api_model import _validate_chat_params, _validate_responses_params
+
+    validate = _validate_responses_params if surface == "responses" else _validate_chat_params
+    with pytest.raises(RequestValidationError) as caught:
+        validate({"input": 123, "messages": 123})
+    assert isinstance(caught.value.__cause__, ValidationError)

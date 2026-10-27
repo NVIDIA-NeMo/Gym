@@ -403,6 +403,8 @@ class TestEpisode:
 
         class SandboxApiException(Exception):  # the provider SDK's error, with its integer status_code
             status_code = status
+            message = "Authentication credentials are invalid."
+            request_payload = {"secret": "must not be serialized"}
 
         async def refused(task, workdir, *, episode_key):
             raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
@@ -420,6 +422,10 @@ class TestEpisode:
             assert events[-2].failure_kind == "provider_credentials_rejected"
             assert hops[-2:] == ["SandboxCredentialsRejected", "SandboxApiException"]
             assert events[-2].operation == "sandbox.setup"
+            assert events[-2].foreign_error.exception_type.endswith("SandboxApiException")
+            assert events[-2].foreign_error.message == "Authentication credentials are invalid."
+            assert events[-2].foreign_error.http_status == status
+            assert "must not be serialized" not in failure.model_dump_json()
             assert events[-1].http_status == status
         else:
             assert failure.failure_kind is None and "SandboxCredentialsRejected" not in hops

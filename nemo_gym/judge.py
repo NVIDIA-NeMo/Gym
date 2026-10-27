@@ -49,7 +49,7 @@ from nemo_gym.failure_kinds import (
     JUDGE_FAILED,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
-from nemo_gym.typed_exceptions import NgFailureEvent, ResServerFailure, boundary_failure, row_fields
+from nemo_gym.typed_exceptions import ResServerFailure, boundary_failure, foreign_error_details, row_fields
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
@@ -68,9 +68,8 @@ class JudgeError(Exception):
     """A judge call failed; judge_failsafe routes the row to the failures sidecar."""
 
 
-# Typed judge failures. Each is also a JudgeError, so every ``except JudgeError`` (judge_failsafe
-# and the servers that catch it) runs as before; the text is the same JudgeError text. Each names
-# what the client observed as its failure_kind; any other JudgeError stays a ``judge_failed``.
+# Typed judge failures remain JudgeError-compatible. The judge boundary always uses judge_failed;
+# transport and provider details belong to the explicit cause.
 
 
 class _TypedJudgeError(JudgeError, ResServerFailure):
@@ -92,7 +91,12 @@ def _judge_error(error: Exception) -> JudgeError:
     """
     message = f"{type(error).__name__}: {error}"
     if isinstance(error, (ClientResponseError, ClientConnectorError, TimeoutError)):
-        return JudgeCallFailed(message=message, operation="judge.request", stage="verification")
+        return JudgeCallFailed(
+            message=message,
+            operation="judge.request",
+            stage="verification",
+            foreign_error=foreign_error_details(error),
+        )
     return JudgeError(message)
 
 
@@ -154,8 +158,8 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             data |= {
                 "reward": 0.0,
                 "mask_sample": True,
-                # What the client observed, where it could tell; the routing class below stays judge_failed.
-                "failure_kind": (e.failure_kind if isinstance(e, NgFailureEvent) and e.failure_kind else JUDGE_FAILED),
+                # The judge owns this boundary; more specific diagnostics stay on the explicit cause.
+                "failure_kind": JUDGE_FAILED,
                 "failure_reason": error,
                 # Keep older NeMo RL consumers working during top-level field migration.
                 "instance_config": {
@@ -165,8 +169,12 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
                 "_ng_failure_class": "judge_failed",
                 "_ng_failure_judge_error": error,
             }
-            # The failed call's event metadata.
-            data |= row_fields(boundary_failure(e, server="judge"))
+            # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
+            failure = e
+            if not isinstance(e, JudgeCallFailed):
+                failure = JudgeCallFailed(message=error, operation="judge.verify", stage="verification")
+                failure.__cause__ = e
+            data |= row_fields(boundary_failure(failure, server="judge"))
             return JSONResponse(content=jsonable_encoder(data))
 
     return wrapper

@@ -122,7 +122,7 @@ from nemo_gym.tasks.harbor.registry import ImageConfigError
 from nemo_gym.tasks.harbor.task import HarborTurn
 from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 from nemo_gym.tool_access import MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
-from nemo_gym.typed_exceptions import http_status
+from nemo_gym.typed_exceptions import foreign_error_details, http_status
 
 
 LOGGER = logging.getLogger(__name__)
@@ -736,7 +736,7 @@ class HarborEnvironmentServer(
                 stage="seed",
                 terminal=False,
                 name_error_type=True,
-            )
+            ) from error
 
         # The task's own time budget bounds the episode from here, the sandbox being ready: the seed (image
         # pulls, their retries, the overlay) has its own bounds and is not charged against it. It fires only
@@ -770,11 +770,11 @@ class HarborEnvironmentServer(
                         agent_observations=agent_observations,
                         trajectory=agent_trajectory,
                     ) from error
-        except TimeoutError:
+        except TimeoutError as error:
             if task_deadline is None or not task_deadline.expired():
                 raise
             # The final unwind closes the agent session and stops the sandbox.
-            raise self._deadline_failure(session.task, budget, progress)
+            raise self._deadline_failure(session.task, budget, progress) from error
 
         result = HarborEpisodeResult(
             responses_create_params=task_input.responses_create_params,
@@ -1468,7 +1468,10 @@ def _setup_cause(exc: Exception) -> BaseException:
         return exc
     try:
         raise SandboxCredentialsRejected(
-            message=f"{type(exc).__name__}: {exc}"[:2000], operation="sandbox.setup", stage="seed"
+            message=f"{type(exc).__name__}: {exc}"[:2000],
+            operation="sandbox.setup",
+            stage="seed",
+            foreign_error=foreign_error_details(exc),
         ) from exc
     except SandboxCredentialsRejected as rejected:
         return rejected

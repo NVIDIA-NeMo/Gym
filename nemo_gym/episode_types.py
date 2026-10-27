@@ -82,6 +82,16 @@ MAX_FAILURE_CAUSE_DEPTH = 8
 MAX_FAILURE_EVENTS = 64
 
 
+class ForeignErrorDetails(BaseModel):
+    # Explicitly selected diagnostics, never an SDK object or a request/response payload.
+    # Oversized values are rejected instead of silently losing part of the reported evidence.
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    exception_type: str = Field(min_length=1, max_length=256)
+    message: str = Field(max_length=2000)
+    http_status: int | None = Field(default=None, ge=100, le=599)
+
+
 class FailureEventRecord(BaseModel):
     """One failure observation, an entry of a ``failure_events`` map keyed by its ``event_id``.
 
@@ -106,6 +116,7 @@ class FailureEventRecord(BaseModel):
     attempt_id: str | None = Field(default=None, max_length=128)
     stage: FailureStage | None = None
     http_status: int | None = Field(default=None, ge=100, le=599)
+    foreign_error: ForeignErrorDetails | None = None
     cause_id: str | None = Field(default=None, max_length=128)
     cause_truncated: bool | None = None
 

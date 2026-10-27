@@ -16,7 +16,6 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from environment_servers.single_agent_turn.tests.test_app import _agent_response, _request
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSessionState,
@@ -24,10 +23,49 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 from nemo_gym.typed_exceptions import decode_events_header, observing_failures
 from tests.unit_tests.test_agent_environment_collection_failures import _serve
+
+
+def _agent_response() -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="response",
+        created_at=0,
+        model="model",
+        object="response",
+        output=[
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "message",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "Patch applied", "annotations": []}],
+                "prompt_token_ids": [1, 2],
+                "generation_token_ids": [3, 4],
+                "generation_log_probs": [-0.1, -0.2],
+            }
+        ],
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        tools=[],
+    )
+
+
+def _request() -> SingleAgentTurnRequest:
+    return SingleAgentTurnRequest(
+        episode_id=EpisodeId(rollout_id="rollout", attempt=2),
+        task=MaterializedTask(
+            task_id=TaskId(taskset="test:source", task_id="task"),
+            task_input=SingleAgentTurnTaskInput(
+                responses_create_params={"input": "task"},
+                task_data={"instance_id": "task"},
+            ),
+        ),
+    )
 
 
 class _SessionModelAgent(SimpleResponsesAPIAgent):

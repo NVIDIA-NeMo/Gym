@@ -16,6 +16,7 @@ from nemo_gym.episode_types import (
     MAX_FAILURE_EVENTS,
     EpisodeFailure,
     FailureEventRecord,
+    ForeignErrorDetails,
     validate_failure_event_map,
 )
 from nemo_gym.failure_kinds import FailureStage, is_namespaced, is_registered
@@ -72,6 +73,7 @@ class NgFailureEvent(Exception):
         operation_id: str | None = None,
         attempt_id: str | None = None,
         event_id: str | None = None,
+        foreign_error: ForeignErrorDetails | None = None,
     ) -> None:
         if message is not None and failure_reason is not None:
             raise ValueError("pass message or failure_reason, not both")
@@ -91,6 +93,7 @@ class NgFailureEvent(Exception):
         self.operation_id = operation_id
         self.attempt_id = attempt_id
         self.event_id = event_id or uuid.uuid4().hex
+        self.foreign_error = ForeignErrorDetails.model_validate(foreign_error) if foreign_error is not None else None
 
     @property
     def failure_reason(self) -> str:
@@ -220,6 +223,22 @@ def http_status(error: BaseException) -> int | None:
     return None
 
 
+def foreign_error_details(error: BaseException) -> ForeignErrorDetails:
+    """Snapshot an SDK's selected type, scalar ``message`` and status, without its body or request.
+
+    Only an explicit SDK ``message`` field is selected: arbitrary ``str(error)`` may contain request data.
+    Long selected diagnostics carry a visible truncation marker within the existing record bounds.
+    """
+    exception_type = qualified_type(error)
+    if len(exception_type) > 256:
+        exception_type = exception_type[: 256 - len(_TRUNCATED)] + _TRUNCATED
+    message = getattr(error, "message", "")
+    message = message if isinstance(message, str) else ""
+    if len(message) > 2000:
+        message = message[: 2000 - len(_TRUNCATED)] + _TRUNCATED
+    return ForeignErrorDetails(exception_type=exception_type, message=message, http_status=http_status(error))
+
+
 def _original(error: BaseException) -> BaseException:
     # Ray re-raises a task's exception as a derived class built without __init__ and keeps the
     # original, unpickled, on ``cause``; that original holds the fields.
@@ -343,6 +362,7 @@ def _event_data(error: BaseException, event_id: str) -> dict[str, Any]:
             "attempt_id": error.attempt_id,
             "stage": error.stage,
             "http_status": http_status(error),
+            "foreign_error": getattr(error, "foreign_error", None),
         }
     return {
         "event_id": event_id,
@@ -369,6 +389,7 @@ def reconstruct_failure(event_id: str, events: dict[str, FailureEventRecord]) ->
     failure.operation_id = record.operation_id
     failure.attempt_id = record.attempt_id
     failure.event_id = record.event_id
+    failure.foreign_error = record.foreign_error
     if record.failure_kind is not None:
         failure.failure_kind = record.failure_kind
     if cls is ModelFailure or record.http_status is not None:
