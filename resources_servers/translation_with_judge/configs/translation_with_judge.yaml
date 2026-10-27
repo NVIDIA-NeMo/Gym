@@ -54,3 +54,11 @@ translation_judge_model:
       openai_base_url: ${translation_judge_base_url}
       openai_api_key: ${translation_judge_api_key}
       openai_model: ${translation_judge_model_name}
+
+translation_with_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: translation_with_judge_simple_agent
