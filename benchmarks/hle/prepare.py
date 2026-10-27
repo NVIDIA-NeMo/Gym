@@ -96,6 +96,7 @@ def prepare(include_vision: bool = False) -> Path:
                 "has_image": bool(image),
                 "category": batch.column("category")[i].as_py() if "category" in batch.column_names else None,
                 "raw_subject": batch.column("raw_subject")[i].as_py() if "raw_subject" in batch.column_names else None,
+                "task_id": batch.column("id")[i].as_py(),
             }
             if include_vision:
                 # Materialize the prompt so the row is self-contained (no prompt_config needed).

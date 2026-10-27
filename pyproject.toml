@@ -133,9 +133,9 @@ dependencies = [
     "fastapi!=0.142.*",
 
     # MCP Python SDK: Used by Gym-owned Streamable HTTP MCP resources servers.
-    # Updated Tue Jul 29, 2026 with mcp>=1.28.1,<2
+    # Updated Tue Oct 13, 2026: MCP 1.30.0 and 2.3.0 compatibility validated.
     # License: MIT https://github.com/modelcontextprotocol/python-sdk/blob/main/LICENSE
-    "mcp>=1.28.1,<2",
+    "mcp>=1.28.1,<3",
 
     # anyio: transitive dependency of mcp/fastapi/starlette; pinned directly since
     # mcp's own floor (>=4.10.0) resolves to a version with a known CVE.
@@ -336,11 +336,11 @@ sandbox = [
 
     # E2B SDK: used by the E2B sandbox provider for create/exec/kill and file operations.
     # Also drives any e2b-compatible gateway via connection.api_url/sandbox_url.
-    # Lower bound 2.36.0: provider traffic attribution, current template APIs, and stream-open timeout semantics.
+    # Lower bound 2.46.0: gateway port routing requires ConnectionConfig.sandbox_headers.
     # Upper bound <3.0.0: the provider depends on the E2B 2.x SDK contract.
-    # Updated: Tue Aug 04, 2026 with e2b>=2.36.0,<3.0.0
-    # License: MIT https://github.com/e2b-dev/E2B/blob/e2b@2.36.0/packages/python-sdk/LICENSE
-    "e2b>=2.36.0,<3.0.0",
+    # Updated: Wed Sep 23, 2026 with e2b>=2.46.0,<3.0.0
+    # License: MIT https://github.com/e2b-dev/E2B/blob/e2b@2.46.0/packages/python-sdk/LICENSE
+    "e2b>=2.46.0,<3.0.0",
 
     # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
     # CodeBuild/S3/SSM/Secrets Manager calls.
@@ -508,10 +508,10 @@ exclude-dependencies = [
     # (missing #include <cstdint> in src/args.cc). Excluded as a transitive dep
     # of unbabel-comet; wmt_translation does not import fasttext at runtime.
     "fasttext-wheel",
+    # cryptography must remain available: MCP 2 imports it at startup via pyjwt[crypto].
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
@@ -687,6 +687,10 @@ exclude = [
     "responses_api_agents.swe_agents.swe_swebench_multilingual_setup.*",
     "responses_api_agents.swe_agents.swe_swebench_setup",
     "responses_api_agents.swe_agents.swe_swebench_setup.*",
+    # `gym dataset pull` lands Harbor datasets under environments/harbor/<entry>/ (gitignored); the pulled tasks
+    # ship Python (tests/*.py, task_data.py) that must never be discovered as packages of this distribution. The
+    # committed entry files (README, dataset.toml, YAML) still ship as environments.harbor's package data.
+    "environments.harbor.*",
 ]
 
 ################################################

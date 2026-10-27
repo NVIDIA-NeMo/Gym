@@ -157,8 +157,11 @@ async def test_a_failed_control_call_is_counted_and_a_refused_data_request_is_no
     outcomes = points(
         recorded, gym_metrics.CHECKPOINT_OPERATION_INSTRUMENT, "nemo.gym.checkpoint.operation", "outcome"
     )
-    assert refused.json()["error"]["code"] == "stale_attempt" and failed.json()["error"]["code"] == "invalid_phase"
-    assert codes == {("invalid_phase",): 1}
+    assert (
+        refused.json()["error"]["code"] == "checkpoint_stale_attempt"
+        and failed.json()["error"]["code"] == "checkpoint_invalid_phase"
+    )
+    assert codes == {("checkpoint_invalid_phase",): 1}
     assert ("restore", "error") in outcomes
 
 
@@ -184,9 +187,9 @@ async def test_coordination_spans_each_prepare_stage(monkeypatch, spans) -> None
         client=None,
         auth_token="t",
         members=(
-            coordination.Participant("env", "environment"),
-            coordination.Participant("policy", "model"),
-            coordination.Participant("agent", "agent"),
+            coordination.Participant("env", "environment", "exported"),
+            coordination.Participant("policy", "model", "exported"),
+            coordination.Participant("agent", "agent", "exported"),
         ),
     )
 
@@ -229,7 +232,10 @@ async def test_a_resume_that_fails_on_a_participant_records_an_error_and_ends_it
     participants = coordination.Participants(
         client=None,
         auth_token="t",
-        members=(coordination.Participant("env", "environment"), coordination.Participant("agent", "agent")),
+        members=(
+            coordination.Participant("env", "environment", "exported"),
+            coordination.Participant("agent", "agent", "exported"),
+        ),
     )
 
     with pytest.raises(coordination.CoordinationError):
@@ -440,7 +446,11 @@ async def test_each_failed_control_call_counts_its_error_code_once(tmp_path: Pat
     codes = points(metrics(), gym_metrics.CHECKPOINT_CONTROL_ERRORS_INSTRUMENT, "nemo.gym.checkpoint.error_code")
     assert [wrong_phase.status_code, unauthorized.status_code, late.status_code] == [409, 401, 409]
     assert succeeded.status_code == 200
-    assert codes == {("invalid_phase",): 1, ("unauthorized",): 1, ("deadline_exceeded",): 1}
+    assert codes == {
+        ("checkpoint_invalid_phase",): 1,
+        ("checkpoint_unauthorized",): 1,
+        ("checkpoint_deadline_exceeded",): 1,
+    }
 
 
 def test_building_an_error_reply_records_nothing(metrics) -> None:

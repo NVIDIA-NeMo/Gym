@@ -17,8 +17,14 @@ counted correct at `>= 7/10`.
 Uses the shared [`frontierscience_judge`](../../resources_servers/frontierscience_judge/)
 resource server in `judge_mode: research`. The judge receives the task, the
 model answer, and the per-task rubric from the dataset's `answer` field.
-It emits `Score: X/10` and `Judgement: YES/NO`; `YES` means the parsed score
-is at least 7 points.
+The judge uses the paper's Appendix B Research prompt and emits a numeric
+`VERDICT: <total_points>`. The verifier computes correctness from `score >= 7`;
+the judge is not asked for a separate YES/NO decision.
+
+The Research configuration requests high reasoning effort and no explicit output
+token limit. Provider context/output limits still apply. Incomplete responses
+and missing or out-of-range grades raise `JudgeError` and go to Gym's judge-failure
+sidecar for recovery; they are not valid incorrect answers.
 
 The default judge model config is inherited from `frontierscience_judge`:
 `openai/gpt-oss-20b` on the public NVIDIA inference API
@@ -34,8 +40,14 @@ judge.
   normalized rubric score as a percentage.
 - `chemistry/...`, `biology/...`, and `physics/...` report per-subject
   breakdowns.
+- `mean/rubric_score` reports the arithmetic mean of all graded attempts on
+  the original 0–10 scale, also broken down by subject.
 
-## Reproduction note
+The example below uses 16 generation repeats per problem. The paper uses
+30 trials and a GPT-5 high-effort judge; substituting a newer judge changes the
+evaluation protocol even when the prompt matches.
+
+## Historical reproduction note
 
 On 2026-06-09, the 60 public research tasks were reproduced with direct
 NVIDIA inference API calls and the research rubric judge. Both policy runs
@@ -66,5 +78,5 @@ gym eval run --no-serve \
     --input benchmarks/frontierscience_research/data/frontierscience_research_benchmark.jsonl \
     --prompt-config benchmarks/prompts/generic/default.yaml \
     --output results/frontierscience_research_rollouts.jsonl \
-    --num-repeats 1
+    --num-repeats 16
 ```

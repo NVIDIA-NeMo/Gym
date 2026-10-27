@@ -57,7 +57,7 @@ An adapter supplies the knowledge that is specific to the harness or framework:
 | Component | What it handles |
 | --- | --- |
 | Environment Server (`single_agent_turn`) | The episode order: Resources Server seed, agent session, activation, agent close, verification, and cleanup. |
-| `SimpleResponsesAPIAgent` | The HTTP endpoints, the [agent-session contract](#agent-server-and-environment-server), rollout URL helpers such as `base_url_for_run()`, `resolve_model_base_url()`, and `model_endpoint()`, and the partial-rollout checkpoint hooks. An adapter that does not set `checkpoint_sessions_supported` restarts unfinished rollouts from their input. |
+| `SimpleResponsesAPIAgent` | The HTTP endpoints, the [agent-session contract](#agent-server-and-environment-server), rollout URL helpers such as `base_url_for_run()`, `resolve_model_base_url()`, and `model_endpoint()`, and the partial-rollout checkpoint hooks. An adapter that does not declare `checkpoint_mode = "exported"` restarts unfinished rollouts from their input, and its checkpoint status reports `mode: restart_only` so a training framework can tell before any checkpoint. |
 | Model Server | Provider normalization, rollout-prefixed routing, [model-call capture](/main/model-server/model-call-capture), and [training-token capture](/main/tutorials/training-tutorials/external-agent-harnesses). |
 | `nemo_gym.sandbox` | Sandbox providers, `AsyncSandbox`, and text file transfer. |
 | `nemo_gym.agent_utils` | Supervised harness execution in a task sandbox: launch, termination, artifact capture, and release. See the `agent_utils` section below. |
@@ -258,7 +258,7 @@ The current adapters support the following tool sources:
 | --- | --- | --- | --- |
 | Hermes | Hermes toolsets, selected with `enabled_toolsets` and `disabled_toolsets`, for example `[terminal]`. | `mcp` only. Each granted MCP server becomes a Hermes toolset with the same name. Required `direct_http` grants are rejected. | Chat Completions |
 | Pi | Pi's built-in sandbox tools. `sandbox_bash_timeout_seconds` limits each bash call. | None in agent sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
-| Codex | Codex's shell and file tools. Agent sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | None in agent sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Responses (streaming) |
+| Codex | Codex's shell and file tools. Agent sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | `mcp` only. Each granted MCP server becomes a Codex `mcp_servers` entry with the same name. Required `direct_http` grants are rejected. | Responses (streaming) |
 | OpenCode | OpenCode's built-in tools. Session `opencode_config` permits only `permission` and `tools`. | None in agent sessions. Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
 | OpenClaw | `read`, `write`, `edit`, `exec`, and `process`. | None in agent sessions. Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
 
@@ -404,7 +404,7 @@ Keep harness-specific response parsing and model and tool behavior in the adapte
 
 **1. Define the session state.** Subclass `AgentSessionState` and compose a `SandboxSession`. Implement two hooks:
 
-- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=..., python=...)`. `python` is the sandbox interpreter that runs the supervisor. Install the runtime earlier, during seed.
+- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=..., python=...)`. `python` is the sandbox interpreter that runs the supervisor. Install the runtime earlier, during seed. Set `stdlib_runner=True` when the runner needs only the standard library and `argv` starts with `python`: the runner then runs as `bin/gym-runner`, like the supervisor, so a `pkill -f python3` in the task cannot stop it. Upload such a runner without a `.py` suffix, as Codex and Pi do.
 - `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness. Bound the size of what it downloads: trim large logs inside the sandbox first and keep the tail with a truncation marker. For example, the older `hermes_sandboxed_agent`, which calls the process supervisor directly, keeps the last 1 MiB of its runner log; apply the same bound in `collect`.
 
 ```python
@@ -463,7 +463,7 @@ async with self.sem:  # asyncio.Semaphore(self.config.concurrency)
     )
 ```
 
-`execute()` uploads `process_supervisor.py` into `session_dir` after `stage_activation` returns, so adapters do not upload it themselves. It then launches the harness under the supervisor, confirms harness termination, collects artifacts, and releases the provider exec. Captured artifacts remain in `session.artifacts` even when execution raises. If the supervisor writes a final negative receipt, `execute()` raises `HarnessTerminationError` and does not capture artifacts. A nonzero harness exit code does not raise by itself, because the output can still be useful. Convert artifacts into a response and observations in the adapter.
+`execute()` uploads `process_supervisor.py` into `session_dir`, as `process_supervisor`, after `stage_activation` returns, so adapters do not upload it themselves. It then launches the harness under the supervisor, confirms harness termination, collects artifacts, and releases the provider exec. Captured artifacts remain in `session.artifacts` even when execution raises. If the supervisor writes a final negative receipt, `execute()` raises `HarnessTerminationError` and does not capture artifacts. A nonzero harness exit code does not raise by itself, because the output can still be useful. Convert artifacts into a response and observations in the adapter.
 
 **4. Close the session.** In `_close_agent_session_state()`, call `session.close()` first, then cancel the activation task if it is still running. Close joins any finalization in progress, never captures artifacts twice, and is safe to retry while termination evidence is missing. After a final negative receipt, close skips capture, releases a borrowed connection, and leaves teardown to the Resources Server; an owned sandbox is stopped through the provider. Build observations from `session.artifacts` if activation was interrupted before parsing them.
 
@@ -496,7 +496,9 @@ All control files live under `session_dir`, and their names are defined in `supe
 
 | File | Writer and purpose |
 | --- | --- |
-| `process_supervisor.py` | `SandboxSession` uploads it after staging input and before launch. |
+| `process_supervisor` | `SandboxSession` uploads `process_supervisor.py` under this name after staging input and before launch. |
+| `bin/gym-supervisor` | The launch shell links it to the binary behind `SandboxCommand.python` and runs the supervisor through it, so the supervisor's process name doesn't mention python. If the link can't be made, the supervisor runs under `python`. |
+| `bin/gym-runner` | The same link for a runner that sets `stdlib_runner`. |
 | `launch.claim` | The launch or stop shell creates it atomically, either to claim execution or to fence a delayed launch. |
 | `supervisor.pid` | The launch shell records the PID that becomes the supervisor when the shell executes it. |
 | `stop.request` | The stop shell writes this cancellation marker before signaling the supervisor. |
@@ -612,7 +614,7 @@ partial work proceeds to verification without an automatic episode retry.
 
 The helper writes JSON to `response.metadata.ng_agent_outcome`; `status_code` is the
 upstream model request's status, not the agent endpoint's HTTP status. The
-`single_agent_turn` Environment Server applies this default policy to classified
+`single_agent_turn` and `harbor` Environment Servers apply this default policy to classified
 failed responses after closing the agent:
 
 | Reported cause | Verify | Eligible for episode retry |
@@ -633,7 +635,7 @@ errors, other unmatched failure kinds and malformed metadata now fail without
 verification or episode retry by default. Unclassified failures reported as `unknown`
 remain retryable.
 
-Configure `agent_outcome_policy` inside the `single_agent_turn` Environment Server's
+Configure `agent_outcome_policy` inside the `single_agent_turn` or `harbor` Environment Server's
 config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable) for classified
 failed responses. These overrides do not apply to completed or incomplete responses.
 HTTP status rules take precedence over failure-kind rules; unmatched failures use `default_action`
@@ -646,7 +648,7 @@ status rule matches; it does not override the default 400/408/413/422/425/429/5x
 Use `by_status_code: {503: fail}` to change 503 handling. Adding
 `by_status_code: {404: retry}` keeps the other default status rules, including 429 and 5xx.
 
-It applies to `single_agent_turn` and its legacy-response wrapper, not other
+It applies to `single_agent_turn`, its legacy-response wrapper and `harbor`, not other
 Environment Server implementations or agents' own legacy `/run` methods.
 
 ## Make retries and close safe
