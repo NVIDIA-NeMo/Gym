@@ -4,13 +4,13 @@
 """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
 The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-reads reward.json or reward.txt, applies Harbor's reward selection rule and turns the exit into
-a measured or masked sample. Module level are the in-sandbox paths the protocol uses, the
-failure kinds, the wrapper command, the reward and exit record parsers, the timeout rule, and
-the choice of image and user the verifier runs as in shared and separate mode. The mixin holds
-the shared and separate verification choreography unchanged, the reward and log collection,
-the collect hooks and artifact download, and the scoring methods. Creating the verifier
-sandbox stays with the other provisioning code in sandboxes.py.
+reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
+``reward_components``) and turns the exit into a measured or masked sample. Module level are the
+in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
+record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
+and separate mode. The mixin holds the shared and separate verification choreography unchanged,
+the reward and log collection, the collect hooks and artifact download, and the scoring methods.
+Creating the verifier sandbox stays with the other provisioning code in sandboxes.py.
 """
 
 import asyncio
@@ -22,7 +22,7 @@ import posixpath
 import shlex
 import tarfile
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 from uuid import uuid4
@@ -47,6 +47,7 @@ from environment_servers.harbor.session import (
 )
 from nemo_gym import __version__, failure_kinds
 from nemo_gym.atif_export import encode_atif_trajectory, transcript_to_atif
+from nemo_gym.episode_types import BaseEpisodeRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.sandbox.transfer import (
@@ -60,10 +61,10 @@ from nemo_gym.sandbox.transfer import (
     upload_dir,
     upload_path,
 )
-from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.digest import is_ignored
 from nemo_gym.tasks.harbor.models import HarborArtifact
+from nemo_gym.tasks.harbor.task import HarborTurn
 
 
 LOGGER = logging.getLogger(__name__)
@@ -172,11 +173,42 @@ def verifier_timed_out(result: SandboxExecResult, exit_record: tuple[int, int | 
 
 
 def select_reward(rewards: dict[str, float]) -> float | None:
-    """Harbor's rule: the ``reward`` key, else the only key. Several keys and none named ``reward`` is ambiguous."""
+    """The score a parsed reward file gives: the ``reward`` key when present, else the sum of every key.
+
+    Gym's reading of ``reward.json``: a ``reward`` key is the score and the other keys are metrics; without
+    one every key is a component of the reward (:func:`reward_components`), which is their sum. One key
+    without ``reward`` is Harbor's own rule too. ``None`` when the components do not sum to a finite number.
+    """
     if "reward" in rewards:
         return rewards["reward"]
-    if len(rewards) == 1:
-        return next(iter(rewards.values()))
+    try:
+        total = math.fsum(rewards.values())
+    except OverflowError:
+        return None
+    return total if math.isfinite(total) else None
+
+
+def reward_components(rewards: dict[str, float]) -> dict[str, float] | None:
+    """The keys that sum to the reward, or ``None`` when the file names the reward itself.
+
+    With a ``reward`` key the other keys are metrics, not parts of the score, so there are no components to
+    name; without one every key is a component and :func:`select_reward` is their sum.
+    """
+    if "reward" in rewards:
+        return None
+    return dict(rewards)
+
+
+def summing_components(reward: float, components: dict[str, float] | None) -> dict[str, float] | None:
+    """``components`` when their values sum to ``reward`` (within floating-point tolerance), else ``None``.
+
+    A results row may name ``reward_components`` only when they sum to its ``reward``, the contract a
+    trainer asserts; this is the check at the point a verifier result becomes a result.
+    """
+    if components is None:
+        return None
+    if math.isclose(math.fsum(components.values()), reward, rel_tol=1e-9, abs_tol=1e-9):
+        return components
     return None
 
 
@@ -326,17 +358,32 @@ def _restores_under(source: str, path: str) -> bool:
 COLLECT_HOOK_GRACE_S = 30
 
 
+@dataclass(frozen=True)
+class VerifierSettings:
+    """The verifier settings one ``test.sh`` run uses: the task's, or a step's over the task's.
+
+    ``collect`` is the task's ``[[verifier.collect]]`` hooks, which every turn's verifier runs as in Harbor.
+    """
+
+    timeout_sec: float
+    env: dict[str, str]
+    user: str | int | None
+    collect: list[Any] = field(default_factory=list)
+    # The task's `[verifier].network_mode` (a step's over it), reported as `verifier_network`.
+    network_mode: str | None = None
+
+
 class HarborVerificationMixin:
     """Grade an episode: the test.sh wrapper protocol, the reward files and the verifier sandbox.
 
     The verifier runs Harbor's tests/test.sh under a timeout wrapper that writes an exit record,
-    reads reward.json or reward.txt, applies Harbor's reward selection rule and turns the exit into
-    a measured or masked sample. Module level are the in-sandbox paths the protocol uses, the
-    failure kinds, the wrapper command, the reward and exit record parsers, the timeout rule, and
-    the choice of image and user the verifier runs as in shared and separate mode. The mixin holds
-    the shared and separate verification choreography unchanged, the reward and log collection,
-    the collect hooks and artifact download, and the scoring methods. Creating the verifier
-    sandbox stays with the other provisioning code in sandboxes.py.
+    reads reward.json or reward.txt, applies the reward rule (``reward`` key, else the keys summed as
+    ``reward_components``) and turns the exit into a measured or masked sample. Module level are the
+    in-sandbox paths the protocol uses, the failure kinds, the wrapper command, the reward and exit
+    record parsers, the timeout rule, and the choice of image and user the verifier runs as in shared
+    and separate mode. The mixin holds the shared and separate verification choreography unchanged,
+    the reward and log collection, the collect hooks and artifact download, and the scoring methods.
+    Creating the verifier sandbox stays with the other provisioning code in sandboxes.py.
 
     """
 
@@ -522,6 +569,13 @@ class HarborVerificationMixin:
             if _verifier_runs_task_image(task):
                 # Its default is that image's own USER, never [agent].user, resolved by name once it exists.
                 await self._set_default_user(verifier, task, names, role="verifier")
+            if overlaid and task.workdir is not None:
+                # The overlay made the Dockerfile's WORKDIR directories only. The task workdir ([environment].workdir
+                # when task.toml sets one, else the Dockerfile's final WORKDIR) is where test.sh is sent below, so it
+                # is made and handed to the task's user here as the seed's `_prepare_workdir` leaves it in the agent's
+                # sandbox, which is how the shared verifier finds it; a Docker exec into a missing directory fails
+                # before test.sh starts.
+                await self._own_workdir(verifier, task.workdir, task.user, create=True)
             # The verifier's /logs folders exist before its entrypoint starts, as in the seed and as Harbor's
             # /logs/verifier bind mount does; /tests and the artifacts follow, as Harbor uploads them after start.
             prepare = await exec_as_root(
@@ -572,9 +626,10 @@ class HarborVerificationMixin:
             await _make_test_script_executable(verifier)
             # An overlaid verifier sandbox was created without the task workdir, as the agent's is (see
             # `_create_verifier_sandbox`), so its default directory is the base image's own: test.sh is sent to the
-            # task's workdir, where the overlay's WORKDIR step made it, as the shared verifier's exec is and as
-            # Harbor's `compose exec` lands in the built image's WORKDIR. Every other verifier sandbox starts in
-            # the directory its spec named, or its image's own.
+            # task workdir made above, as the shared verifier's exec is sent to the session's. Harbor's exec passes
+            # `[environment].workdir` whenever task.toml sets one and lands in the built image's WORKDIR otherwise,
+            # which is what `task.workdir` resolves. Every other verifier sandbox starts in the directory its spec
+            # named, or its image's own.
             result = await verifier.exec(
                 verifier_command(budget),
                 cwd=task.workdir if overlaid else None,
@@ -623,6 +678,42 @@ class HarborVerificationMixin:
         return self._score(
             task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
         )
+
+    async def _reset_shared_verifier_dirs(self, sandbox: AsyncSandbox) -> None:
+        """Empty ``/tests`` and ``/logs/verifier`` and remove the server's ``/logs/agent/trajectory.json`` in the
+        agent's own sandbox, as root. Raises :class:`RuntimeError` when the sandbox could not.
+
+        The shared verifier does this before it uploads its tests, as Harbor 0.22.0's
+        ``_reset_shared_step_verifier_dirs`` does, and a multi-step episode again before every turn after the
+        first, as Harbor main's ``_prepare_step`` does (0.22.0 does not, so its next step's agent sees the previous
+        step's tests): the previous turn's verifier left its tests (hidden ones included), its reward and the
+        agent's transcript where the next turn's fresh agent would read them. Agent-planted directory links at the
+        roots go first:
+        find does not follow its starting symlink, while tar does. /logs is unlinked without touching its former
+        target. The reserved trajectory.json destination goes too (`rm -rf` removes a link itself, or a planted
+        directory), so the agent cannot plant an entry the upload would follow or fail on; the rest of
+        /logs/agent is the agent's and is kept.
+        """
+        roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
+        unlink_roots = [f"if test -L {shlex.quote(path)}; then rm -- {shlex.quote(path)}; fi" for path in roots]
+        result = await exec_as_root(
+            sandbox,
+            " && ".join(
+                unlink_roots
+                + [
+                    f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
+                    f"rm -rf -- {AGENT_LOGS_DIR}/{TRAJECTORY_FILE_NAME}",
+                    f"find {TESTS_DIR} {VERIFIER_LOGS_DIR} -mindepth 1 -delete",
+                    f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
+                ]
+            ),
+            timeout_s=60,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"Could not clear /tests, /logs/verifier and the transcript in the agent's sandbox: "
+                f"{result.stderr or result.stdout}"
+            )
 
     async def _run_collect_hooks(self, session: HarborSession, hooks: list[Any]) -> None:
         """Run ``[[verifier.collect]]`` hooks in their services, before anything is collected from them.
@@ -715,17 +806,40 @@ class HarborVerificationMixin:
                 restored.append((archive, kind, artifact.source))
         return restored
 
-    async def _run_shared_verifier(self, session: HarborSession, trajectory: bytes) -> dict[str, Any]:
-        """Run ``tests/test.sh`` in the agent's sandbox and read the reward it wrote.
+    async def _run_shared_verifier(
+        self,
+        session: HarborSession,
+        trajectory: bytes,
+        *,
+        settings: VerifierSettings | None = None,
+        test_dirs: tuple[Path, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Run ``test.sh`` in the agent's sandbox and read the reward it wrote.
 
         ``[[verifier.collect]]`` hooks run first, as in Harbor: what they produce under ``/logs/artifacts``
         is there for ``test.sh``, and for the run's logs. ``/logs/agent`` is left as the agent wrote it,
         except for ``trajectory.json``: whatever the agent left at that reserved path (a link, a directory)
         is removed and the server writes the transcript there, so verifiers that read it find it.
+
+        ``test_dirs`` are uploaded to ``/tests`` in order, each over the last (a step's ``tests/`` over the
+        task's); missing folders are skipped. By default the task's ``tests/`` and ``[verifier]`` apply.
         """
         task = session.task
         sandbox = session.sandbox
-        settings = task.config.verifier
+        if settings is None:
+            verifier = task.config.verifier
+            settings = VerifierSettings(
+                timeout_sec=verifier.timeout_sec,
+                env=verifier.env,
+                user=verifier.user,
+                collect=verifier.collect,
+                network_mode=verifier.network_mode,
+            )
+        # A step's tests/ (and a multi-step task's top-level tests/) may be absent; a single-turn task's tests/ is
+        # uploaded whatever the host says, so a snapshot removed under the episode fails the upload and masks.
+        optional_tests = test_dirs is not None
+        if test_dirs is None:
+            test_dirs = (task.path / "tests",)
         started = asyncio.get_running_loop().time()
         try:
             logs_dir = self._reserve_logs_dir()
@@ -742,29 +856,11 @@ class HarborVerificationMixin:
                     await self._collect_entrypoint_log(sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
                     return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
             await self._run_collect_hooks(session, settings.collect)
-            # Replace agent-planted directory links before cleanup: find does not follow its starting
-            # symlink, while tar does. Unlink /logs first without touching its former target. The reserved
-            # trajectory.json destination goes too (`rm -rf` removes a link itself, or a planted directory),
-            # so the agent cannot plant an entry the upload would follow or fail on; the rest of /logs/agent
-            # is kept.
-            roots = (str(Path(VERIFIER_LOGS_DIR).parent), TESTS_DIR, VERIFIER_LOGS_DIR, AGENT_LOGS_DIR)
-            unlink_roots = [f"if test -L {shlex.quote(path)}; then rm -- {shlex.quote(path)}; fi" for path in roots]
-            prepare = await exec_as_root(
-                sandbox,
-                " && ".join(
-                    unlink_roots
-                    + [
-                        f"mkdir -p {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
-                        f"rm -rf -- {AGENT_LOGS_DIR}/{TRAJECTORY_FILE_NAME}",
-                        f"find {TESTS_DIR} {VERIFIER_LOGS_DIR} -mindepth 1 -delete",
-                        f"chmod 777 {TESTS_DIR} {VERIFIER_LOGS_DIR} {AGENT_LOGS_DIR}",
-                    ]
-                ),
-                timeout_s=60,
-            )
-            if prepare.return_code != 0:
-                raise RuntimeError(f"Could not prepare verifier directories: {prepare.stderr or prepare.stdout}")
-            await upload_dir(sandbox, task.path / "tests", TESTS_DIR, ignore=is_ignored)
+            await self._reset_shared_verifier_dirs(sandbox)
+            for tests in test_dirs:
+                if optional_tests and not tests.is_dir():
+                    continue
+                await upload_dir(sandbox, tests, TESTS_DIR, ignore=is_ignored)
             await _make_test_script_executable(sandbox)
             await self._upload_trajectory(sandbox, trajectory, logs_dir)
             # One plain exec for the whole run. The provider keeps it alive for as long as
@@ -780,7 +876,7 @@ class HarborVerificationMixin:
                 cwd=session.workdir,
                 env=self._verifier_env(settings),
                 timeout_s=settings.timeout_sec + self.config.verifier_grace_s,
-                user=_verifier_user(task),
+                user=settings.user if settings.user is not None else _verifier_user(task),
             )
             if result.error_type not in (None, "timeout"):
                 return self._masked(failure_kinds.VERIFIER_ERROR, f"test.sh could not run: {result.error_type}")
@@ -843,11 +939,17 @@ class HarborVerificationMixin:
             return self._measured(0.0, kind, f"{problem}; tail: {_stdout_tail(logs_dir)}") | extras
         reward = select_reward(rewards)
         if reward is None:
-            raise HTTPException(
-                422,
-                f"reward.json for {task.task_id!r} has several keys and none named 'reward': {sorted(rewards)}",
+            # Finite components whose sum overflows: a reward file no trainer can use, measured like any other
+            # invalid reward file.
+            reason = (
+                f"reward.json keys {sorted(rewards)} do not sum to a finite reward; tail: {_stdout_tail(logs_dir)}"
             )
-        return {"reward": reward, "verifier_rewards": rewards} | extras
+            return self._measured(0.0, INVALID_REWARD_KIND, reason) | extras
+        outcome = {"reward": reward, "verifier_rewards": rewards}
+        components = summing_components(reward, reward_components(rewards))
+        if components is not None:
+            outcome["reward_components"] = components
+        return outcome | extras
 
     def _refuse_verifier_group(self, task: HarborTask) -> None:
         """Refuse at seed the ``name:group`` ``test.sh`` would run as, in either verifier mode.
@@ -858,11 +960,16 @@ class HarborVerificationMixin:
         installs as its default (:meth:`HarborUsersMixin._set_default_user` with ``role="verifier"``). Only
         Docker applies a group. Refused here, the episode fails as a seed failure instead of paying the whole
         rollout and failing at verification; a verifier in another image keeps that image's default untouched
-        and names no user.
+        and names no user. A multi-step task's turn grades as its step's own ``[steps.verifier].user`` when the
+        step sets one (:meth:`_turn_verifier_settings` dispatches the pair as written), which is as static as the
+        task's: every step's pair is refused here the same way, before the first turn runs, with the step named
+        (``<task_id> step 'build': user ...``), as the loader names the step in its own per-step refusals.
         """
         if _verifier_runs_task_image(task):
             self._refuse_unsupported_group(task, task.entrypoint_user)
         self._refuse_unsupported_group(task, _verifier_user(task))
+        for turn in task.turns:
+            self._refuse_unsupported_group(task, turn.config.verifier.user, where=f" step {turn.name!r}")
 
     @staticmethod
     def _measured(reward: float, kind: str, reason: str) -> dict[str, Any]:
@@ -918,13 +1025,19 @@ class HarborVerificationMixin:
         if readable.return_code != 0:
             raise RuntimeError(f"Could not make {target} readable: {readable.stderr or readable.stdout}")
 
-    def _export_trajectory(self, request: SingleAgentTurnRequest, agent_response: NeMoGymResponse) -> bytes:
+    def _export_trajectory(
+        self, request: BaseEpisodeRequest[Any], agent_response: NeMoGymResponse, responses_create_params: Any = None
+    ) -> bytes:
         """The agent's transcript as ATIF v1.7 JSON, for ``/logs/agent/trajectory.json``.
 
         Exported from the Gym transcript (the task's input and the harness's output); raises
         :class:`AtifExportError` for anything the converter cannot represent, which masks the turn.
+        ``responses_create_params`` is the request the turn was sent when it is not the row's own (a
+        multi-step task's turn); by default the row's ``responses_create_params`` is the input.
         """
         params: Any = request.task.task_input.responses_create_params
+        if responses_create_params is not None:
+            params = responses_create_params
         input_items = params.get("input") if isinstance(params, Mapping) else getattr(params, "input", None)
         usage = agent_response.usage.model_dump(mode="json") if agent_response.usage is not None else None
         trajectory = transcript_to_atif(
@@ -937,3 +1050,15 @@ class HarborVerificationMixin:
             usage=usage,
         )
         return encode_atif_trajectory(trajectory)
+
+    @staticmethod
+    def _turn_verifier_settings(task: HarborTask, turn: HarborTurn) -> VerifierSettings:
+        """A step's verifier settings over the task's, as Harbor resolves them."""
+        step = turn.config.verifier
+        return VerifierSettings(
+            timeout_sec=task.config.step_verifier_timeout_sec(turn.config),
+            env=task.config.verifier.env | step.env,
+            user=step.user if step.user is not None else task.config.verifier.user,
+            collect=task.config.verifier.collect,
+            network_mode=step.network_mode if step.network_mode is not None else task.config.verifier.network_mode,
+        )

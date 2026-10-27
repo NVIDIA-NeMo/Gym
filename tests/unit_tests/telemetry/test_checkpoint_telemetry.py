@@ -187,9 +187,9 @@ async def test_coordination_spans_each_prepare_stage(monkeypatch, spans) -> None
         client=None,
         auth_token="t",
         members=(
-            coordination.Participant("env", "environment"),
-            coordination.Participant("policy", "model"),
-            coordination.Participant("agent", "agent"),
+            coordination.Participant("env", "environment", "exported"),
+            coordination.Participant("policy", "model", "exported"),
+            coordination.Participant("agent", "agent", "exported"),
         ),
     )
 
@@ -232,7 +232,10 @@ async def test_a_resume_that_fails_on_a_participant_records_an_error_and_ends_it
     participants = coordination.Participants(
         client=None,
         auth_token="t",
-        members=(coordination.Participant("env", "environment"), coordination.Participant("agent", "agent")),
+        members=(
+            coordination.Participant("env", "environment", "exported"),
+            coordination.Participant("agent", "agent", "exported"),
+        ),
     )
 
     with pytest.raises(coordination.CoordinationError):
