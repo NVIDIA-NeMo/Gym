@@ -1,0 +1,19 @@
+config_paths:
+- benchmarks/skill_trigger/common.yaml
+skill_trigger_settings:
+  harness: hermes
+harbor_agent_general:
+  responses_api_agents:
+    harbor_agent_general:
+      datasets:
+      - name: skill_trigger
+        type: benchmark
+        jsonl_fpath: ${skill_trigger_settings.tasks}/gym.jsonl
+        prepare_script: benchmarks/skill_trigger/package.py
+        num_repeats: 1
+      job:
+        agents:
+        - name: hermes
+          model_name: ${policy_model_name}
+          kwargs:
+            version: 0.22.2
