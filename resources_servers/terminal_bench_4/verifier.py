@@ -123,31 +123,47 @@ async def restore(environment, artifacts_dir):
             await upload_file(environment.main, host, target)
 
 
-async def run_verifier(environment, directory, diagnostics):
+def _require_command_outcome(result, step):
+    """A sandbox that reports no command outcome (``error_type`` set) failed the verifier, so the reward files it
+    left say nothing about the task. Test doubles without ``error_type`` ran the command."""
+    error_type = getattr(result, "error_type", None)
+    if error_type:
+        raise RuntimeError(f"Verifier {step} failed in the sandbox: {error_type}: {result.stderr}")
+
+
+async def run_verifier(environment, directory, diagnostics, timeout_sec=None):
     settings = environment.task.config.verifier
+    timeout_sec = settings.timeout_sec if timeout_sec is None else timeout_sec
     logs = Path(directory) / "verifier"
     logs.mkdir(parents=True, exist_ok=True)
 
     async def execute():
-        await environment.exec("chmod +x /tests/test.sh", user="root")
+        _require_command_outcome(await environment.exec("chmod +x /tests/test.sh", user="root"), "preparation")
         result = await environment.exec(
             "/tests/test.sh > /logs/verifier/test-stdout.txt 2>&1",
             env=resolve_env(settings.env),
             user=settings.user,
         )
         diagnostics.append({"operation": "verifier_command", "return_code": result.return_code})
+        _require_command_outcome(result, "execution")
         await download_dir(environment.main, "/logs/verifier", logs)
         rewards = parse_reward(logs)
         counts = parse_test_counts(logs, diagnostics)
         return {"rewards": rewards, **counts.model_dump(exclude_none=True)}
 
+    # Only the verifier's own budget makes a VerifierTimeoutError. A provider call that times out within it is an
+    # infrastructure failure and propagates as raised.
+    deadline = asyncio.timeout(timeout_sec)
     try:
-        return await asyncio.wait_for(execute(), timeout=settings.timeout_sec)
+        async with deadline:
+            return await execute()
     except TimeoutError as exc:
+        if not deadline.expired():
+            raise
         # Preserve diagnostics on timeout without turning partial reward files
         # into a completed evaluation (the reference aborts this verifier).
         try:
             await download_dir(environment.main, "/logs/verifier", logs)
         except Exception as download_exc:
             diagnostics.append({"operation": "verifier_logs", "error": str(download_exc)})
-        raise VerifierTimeoutError(f"Verifier execution timed out after {settings.timeout_sec} seconds") from exc
+        raise VerifierTimeoutError(f"Verifier execution timed out after {timeout_sec} seconds") from exc

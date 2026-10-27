@@ -1,0 +1,20 @@
+# Modelled on alibaba-aaig/alibaba-ctf: every service restarts on its own and sits on a custom network.
+services:
+  main:
+    image: ${MAIN_IMAGE_NAME}
+    restart: always
+    networks:
+      - agent_network
+    depends_on:
+      - target
+  target:
+    image: org/ctf-target:1
+    restart: always
+    networks:
+      agent_network:
+        aliases:
+          - challenge
+
+networks:
+  agent_network:
+    driver: bridge
