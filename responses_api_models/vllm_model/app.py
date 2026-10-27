@@ -40,6 +40,7 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
     _request_messages,
+    _validate_responses_params,
     context_overflow_error_fields,
     is_propagated_refusal,
     start_model_execution,
@@ -86,7 +87,8 @@ LOG = logging.getLogger("nemo_gym.vllm_model")
 # Accepts exactly the reasoning efforts the pinned OpenAI SDK lists.
 _LISTED_REASONING_EFFORT = TypeAdapter(ReasoningEffort)
 # Where `forward_unvalidated_reasoning_effort` keeps an effort the SDK does not list, between the
-# dispatch that takes it out of the request and `responses()`, which puts it on the chat request.
+# route that takes it out of the request and `_responses_to_chat_request()`, which puts it on the chat
+# request for generation and for context measurement alike.
 _UNLISTED_REASONING_EFFORT_STATE = "nemo_gym_unlisted_reasoning_effort"
 
 
@@ -707,12 +709,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             app.post("/context/measure")(self.measure_context)
         return app
 
-    async def measure_context(
-        self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-    ) -> dict[str, int]:
+    async def measure_context(self, request: Request, body: dict = Body()) -> dict[str, int]:
         """Render through the generation admission path without writing capture state."""
+        # Validated as /v1/responses does, so an effort generation forwards is measured, not refused.
+        if self.config.forward_unvalidated_reasoning_effort:
+            body = _set_aside_unlisted_reasoning_effort(request, body)
+        body = _validate_responses_params(body)
         if self._external_capture_handler is None or self._capture_lineage is None:
             raise HTTPException(status_code=409, detail="measurement requires external capture")
         rollout_id = current_rollout_id()
@@ -739,7 +741,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             except CaptureInputError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
             try:
-                chat = self._responses_to_chat_request(body)
+                chat = self._responses_to_chat_request(body, request)
                 processed = await self._prepare_chat_request(request, chat)
             except (ValueError, NotImplementedError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
@@ -878,11 +880,17 @@ class VLLMModel(SimpleResponsesAPIModel):
         return tokenizer
 
     def _responses_to_chat_request(
-        self, body: NeMoGymResponseCreateParamsNonStreaming
+        self, body: NeMoGymResponseCreateParamsNonStreaming, request: Request | None = None
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
-        return self._converter.responses_to_chat_completion_create_params(
+        chat = self._converter.responses_to_chat_completion_create_params(
             body, drop_unrepresentable_request_fields=self.config.drop_unrepresentable_request_fields
         )
+        effort = getattr(request.state, _UNLISTED_REASONING_EFFORT_STATE, None) if request is not None else None
+        if self.config.forward_unvalidated_reasoning_effort and isinstance(effort, str):
+            # Assigned, not validated: the chat params type reasoning_effort with the SDK literal
+            # that does not list it. The engine validates the level instead.
+            chat.reasoning_effort = effort
+        return chat
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -891,13 +899,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             return await self._responses_native(request, body)
 
         # Response Create Params -> Chat Completion Create Params
-        chat_completion_create_params = self._responses_to_chat_request(body)
-        if self.config.forward_unvalidated_reasoning_effort:
-            effort = getattr(request.state, _UNLISTED_REASONING_EFFORT_STATE, None)
-            if isinstance(effort, str):
-                # Assigned, not validated: the chat params type reasoning_effort with the SDK literal
-                # that does not list it. The engine validates the level instead.
-                chat_completion_create_params.reasoning_effort = effort
+        chat_completion_create_params = self._responses_to_chat_request(body, request)
         body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
