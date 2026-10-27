@@ -221,6 +221,7 @@ async def test_a_restored_cohort_nothing_continues_from_is_dropped(config, how):
     else:
         await restored_participant.delete_restored(replacement)
     assert restored._verify_cohorts == {}
+    assert restored._terminal_cohorts == {} and restored._idle_groups == {}
     assert restored._latest_group_attempts == {}
     assert restored._session_members == {}
 
@@ -303,14 +304,52 @@ async def test_a_restore_refuses_digests_saved_under_another_scheme(config):
     records = await participant.export(None)
     assert records[0].state["response_digest_scheme"] == genrm.RESPONSE_DIGEST_SCHEME
     await server.aclose()
-    records[0] = records[0].model_copy(
-        update={"state": {**records[0].state, "response_digest_scheme": "orjson-sha256"}}
-    )
+    records[0] = records[0].model_copy(update={"state": {**records[0].state, "response_digest_scheme": "sha1-repr"}})
 
     restored, restored_participant = participant_server(config)
     with pytest.raises(ValueError, match="response_digest_scheme"):
         await restored_participant.install(records, [record.episode_id for record in records])
     assert restored._verify_cohorts == {}
+    await restored.aclose()
+
+
+@pytest.mark.parametrize("checkpoints", [1, 2])
+async def test_a_member_saved_under_the_previous_digest_scheme_is_compared_under_it(config, checkpoints):
+    """A checkpoint written before the current digest still restores. The member keeps its saved scheme through later
+    checkpoints, so its exact replay gets the saved reward and a changed answer is still refused."""
+    answers = [member(index, answer=f"réponse-{index}") for index in range(2)]
+    server, participant = seeded(config, judge=AsyncMock(side_effect=member_0_wins))
+    outcomes = await asyncio.gather(*(verify_as(server, SESSIONS[index], answers[index]) for index in range(2)))
+    participant.ended(SESSIONS[0])
+    [record] = await participant.export(None)
+    await server.aclose()
+    legacy_digest = genrm.GenRMCompareResourcesServer._response_digest(
+        answers[1].response, scheme=genrm.LEGACY_RESPONSE_DIGEST_SCHEME
+    )
+    # Non-ASCII text serializes differently under the two schemes, so a comparison under the wrong one refuses.
+    assert legacy_digest != record.state["response_digest"]
+    legacy_state = {
+        **record.state,
+        "response_digest": legacy_digest,
+        "response_digest_scheme": genrm.LEGACY_RESPONSE_DIGEST_SCHEME,
+    }
+    records = [record.model_copy(update={"state": legacy_state})]
+    for _ in range(checkpoints - 1):
+        restored, restored_participant = await restore(config, records)
+        # Another checkpoint lands before the member replays.
+        records = await restored_participant.export(None)
+        assert [saved.state for saved in records] == [legacy_state]
+        await restored.aclose()
+
+    restored, restored_participant = await restore(config, records)
+    with pytest.raises(genrm.HTTPException) as error:
+        await verify_as(restored, SESSIONS[1], member(1, answer="a different answer"))
+    assert error.value.status_code == 409
+    replayed = await asyncio.wait_for(verify_as(restored, SESSIONS[1], answers[1]), timeout=0.5)
+    assert replayed.reward == outcomes[1].reward
+    # The replayed member still exports its saved scheme until its caller closes the session.
+    assert [saved.state for saved in await restored_participant.export(None)] == [legacy_state]
+    restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 
 
@@ -366,6 +405,38 @@ async def test_member_records_end_with_their_pruned_cohort(config):
     await server.aclose()
 
 
+async def test_member_records_end_with_their_cohort_evicted_by_count(config):
+    config = config.model_copy(update={"max_terminal_cohorts": 1})
+    server, participant = participant_server(config)
+    for group in ("a", "b"):
+        sessions = [f"{group}{index}" for index in range(2)]
+        for index, session_id in enumerate(sessions):
+            participant.seeded(session_id, EpisodeId(rollout_id=f"{group}_g{index}"))
+        await asyncio.gather(*(verify_as(server, sessions[index], member(index, group=group)) for index in range(2)))
+        # Both members recorded their outcomes and closed their sessions, so nothing needs the cohort any more.
+        for session_id in sessions:
+            participant.ended(session_id)
+
+    server._prune_terminal_cohorts()
+    assert [cohort.group_id for cohort in server._verify_cohorts.values()] == ["b"]
+    assert set(server._session_members) == {"b0", "b1"}
+    await server.aclose()
+
+
+async def test_a_superseded_cohort_takes_its_member_records_with_it(config):
+    """A newer attempt replaces the whole group, so the older attempt's outcome is neither exported nor replayed."""
+    server, participant = seeded(config)
+    await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
+    replacement = asyncio.create_task(verify_as(server, "replacement", member(0, attempt=1, answer="new-0")))
+    await until(lambda: "replacement" in server._session_members)
+
+    assert set(server._session_members) == {"replacement"}
+    assert [record.state for record in await participant.export(None)] == [{}, {}]
+    replacement.cancel()
+    await asyncio.gather(replacement, return_exceptions=True)
+    await server.aclose()
+
+
 @pytest.mark.parametrize("judge_fails", [False, True], ids=["reward", "judge_failure"])
 @pytest.mark.parametrize("pruned_by", ["count", "age"])
 async def test_pruning_keeps_an_outcome_an_open_session_still_needs(config, pruned_by, judge_fails):
@@ -418,6 +489,8 @@ async def test_pruning_keeps_an_outcome_an_open_session_still_needs(config, prun
         await asyncio.sleep(0.02)
     restored._prune_terminal_cohorts()
     assert len(restored._verify_cohorts) == (1 if pruned_by == "count" else 0)
+    # Restored groups joined the attempt-record order too, so their watermarks are evicted the same way.
+    assert len(restored._latest_group_attempts) == (1 if pruned_by == "count" else 0)
     await restored.aclose()
 
 

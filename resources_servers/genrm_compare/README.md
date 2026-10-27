@@ -490,7 +490,9 @@ its member's outcome, the reward or the judge failure that callers record as a m
 reinstalls that finished group. The replay then gets the recorded outcome without another judge call. A
 group still collecting or evaluating exports nothing, and its members rebuild it by replaying, as before. Each saved
 response digest names how the response was serialized; a restore refuses digests saved under a scheme it
-does not know rather than refusing every replay.
+does not know rather than refusing every replay. New answers use `orjson-sorted-sha256`. Checkpoints that saved
+the previous `json-ascii-sha256` digests still restore: those members are compared under their saved scheme, so
+an exact replay gets its outcome and a changed answer is refused, and later checkpoints keep that scheme.
 
 While a checkpoint is open, a finished evaluation holds its rewards or judge failure until resume, so no
 member records an outcome after this server exported. If a restored member's session is retired before it
@@ -500,7 +502,10 @@ re-form the group under the same attempt.
 
 A finished group that a member with an open session may still need is kept past `cohort_result_ttl_s` and
 beyond `max_terminal_cohorts`, so pruning cannot evict an outcome a later checkpoint must export or
-a replay must return. It becomes an ordinary tombstone once those members close their sessions or are retired.
+a replay must return. Its attempt record is kept too, so the group still refuses older attempts. Each time
+pruning keeps either record, that record's retention restarts. It becomes an ordinary tombstone once those
+members close their sessions or are retired. A newer attempt of the group still removes it, because the
+caller has replaced the whole group. Restored groups join the same retention order as other finished groups.
 
 Only groups with an explicit `_ng_group_id` are exported. A member that is started over from its input while
 its restored group still holds continued members gets a conflicting response for its slot; the controller

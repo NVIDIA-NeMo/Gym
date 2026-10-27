@@ -377,6 +377,47 @@ async def test_new_attempt_retires_completed_record_and_owns_active_watermark(se
     assert_cohort_indices_match(server)
 
 
+@pytest.mark.parametrize("contract", ["fixed_baseline", "rubric_mean"])
+@pytest.mark.parametrize("old_phase", ["collecting", "completed"])
+async def test_new_attempt_supersedes_cohorts_whose_key_extends_the_group_key(server, contract, old_phase):
+    """Fixed-baseline and rubric cohorts add their contract to the group key; supersession must still find them."""
+    if contract == "fixed_baseline":
+        server.config.comparison_mode = "fixed_baseline"
+    else:
+        server.config.score_source = "rubric_mean"
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
+
+    def request(index, attempt):
+        body = member(index, attempt=attempt)
+        if contract == "fixed_baseline":
+            body.responses_create_params.metadata = {"baseline_response": "4"}
+        else:
+            body.expected_rubric_ids = (1, 2)
+        return body
+
+    old = asyncio.create_task(server.verify(request_with_session(), request(0, attempt=0)))
+    await asyncio.sleep(0)
+    [old_cohort] = server._verify_cohorts.values()
+    assert old_cohort.key != server._group_cohort_key("group", 0)
+    if old_phase == "completed":
+        await server.verify(request_with_session(), request(1, attempt=0))
+        await old
+    replacement = asyncio.create_task(server.verify(request_with_session(), request(0, attempt=1)))
+    if old_phase == "collecting":
+        # Well before the collection deadline, which a missed supersession would wait out.
+        with pytest.raises(HTTPException) as error:
+            await asyncio.wait_for(old, 0.5)
+        assert error.value.status_code == 503 and "superseded by attempt 1" in error.value.detail
+    else:
+        await asyncio.sleep(0)
+    assert old_cohort.key not in server._verify_cohorts
+    assert old_cohort.key not in server._terminal_cohorts
+    assert_cohort_indices_match(server)
+    await server.verify(request_with_session(), request(1, attempt=1))
+    await replacement
+    assert_cohort_indices_match(server)
+
+
 @pytest.mark.parametrize("conversion,existing_peer", [("response", False), ("history", False), ("response", True)])
 async def test_conversion_failure_fails_identified_group_and_releases_peers(
     server, monkeypatch, conversion, existing_peer
