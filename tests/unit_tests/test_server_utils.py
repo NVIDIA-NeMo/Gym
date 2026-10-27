@@ -15,15 +15,18 @@
 import asyncio
 import logging
 import multiprocessing
+import os
 import pickle
 import socket
 import sys
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
+from aiohttp import ClientOSError, ClientResponseError, RequestInfo, ServerDisconnectedError, TCPConnector
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -45,6 +48,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import (
+    IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME,
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
@@ -87,6 +91,71 @@ _TEST_ADDR_INFO = (
 
 def _return_exception_from_child_process(error: ClientResponseError) -> ClientResponseError:
     return error
+
+
+class TestRequestRetries:
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("traced", [False, True])
+    @mark.parametrize("metrics", [False, True])
+    @mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_single_attempt_preserves_failure_after_execution(
+        self, monkeypatch: MonkeyPatch, internal: bool, traced: bool, metrics: bool, failure_type: type[Exception]
+    ) -> None:
+        effects = []
+        failure = failure_type("response lost after execution")
+
+        async def execute_then_fail(**kwargs):
+            effects.append("applied")
+            raise failure
+
+        send = AsyncMock(side_effect=execute_then_fail)
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: traced)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_trace_exporter_active", lambda: traced)
+        counts = SimpleNamespace(outbound_in_flight=0)
+        monkeypatch.setattr(nemo_gym.server_utils, "request_counts", lambda: counts if metrics else None)
+        monkeypatch.setattr("nemo_gym.telemetry.spans.client_span", lambda _: nullcontext(None))
+        monkeypatch.setattr("nemo_gym.telemetry.contrib.inject_trace_context", lambda headers: None)
+
+        with raises(failure_type) as exc_info:
+            await nemo_gym.server_utils.request(
+                "POST",
+                "http://server.test/step",
+                _internal=internal,
+                _resend_after_disconnect=False,
+                json={"action": "move"},
+            )
+
+        assert exc_info.value is failure
+        assert effects == ["applied"]
+        send.assert_awaited_once_with(
+            method="POST",
+            url="http://server.test/step",
+            data=b'{"action":"move"}',
+            headers={"Content-Type": "application/json"},
+        )
+        sleep.assert_not_awaited()
+        assert counts.outbound_in_flight == 0
+
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_default_retries_recover(
+        self, monkeypatch: MonkeyPatch, internal: bool, failure_type: type[Exception]
+    ) -> None:
+        response = MagicMock()
+        send = AsyncMock(side_effect=[failure_type("transient failure"), response])
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
+
+        actual = await nemo_gym.server_utils.request("POST", "http://server.test/step", _internal=internal)
+
+        assert actual is response
+        assert send.await_count == 2
+        sleep.assert_awaited_once_with(0.5)
 
 
 class TestServerUtils:
@@ -1197,7 +1266,8 @@ class TestServerUtils:
 
         class TestSimpleServer(SimpleServer):
             def __init__(self, *args, **kwargs):
-                pass
+                # Only the config: the startup checks before the dry-run return read it.
+                object.__setattr__(self, "config", MagicMock(num_workers=None))
 
             def setup_webserver(self):
                 assert False
@@ -1207,6 +1277,29 @@ class TestServerUtils:
                 pass
 
         TestSimpleServer.run_webserver()
+
+    def test_dry_run_reports_unsupported_num_workers(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_ray_return_value(monkeypatch, True)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", MagicMock(spec=ServerClient))
+
+        class RefusingServer(SimpleServer):
+            def __init__(self, *args, **kwargs):
+                object.__setattr__(self, "config", MagicMock(num_workers=2))
+                self.config.name = "refusing_server"
+
+            def multiple_workers_unsupported_reason(self) -> str:
+                return "sessions live in this process"
+
+            def setup_webserver(self):
+                assert False
+
+            @classmethod
+            def load_config_from_global_config(cls) -> None:
+                pass
+
+        with raises(ValueError, match="^refusing_server needs num_workers=1: sessions live in this process$"):
+            RefusingServer.run_webserver()
 
     def test_setup_liveness_exposes_conventional_probe_surface(self) -> None:
         from fastapi import FastAPI
@@ -2237,6 +2330,7 @@ class TestRunWebserverProxyKwargs:
         ray_enabled: bool | None = None,
         is_worker: bool = False,
         routes_sessions: bool = False,
+        unsupported_reason: str | None = None,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -2278,6 +2372,9 @@ class TestRunWebserverProxyKwargs:
             def load_config_from_global_config(cls):
                 return server_config
 
+            def multiple_workers_unsupported_reason(self) -> str | None:
+                return unsupported_reason
+
             def setup_webserver(self) -> FastAPI:
                 return FastAPI()
 
@@ -2312,6 +2409,34 @@ class TestRunWebserverProxyKwargs:
         assert 4 == kwargs["workers"]
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_server_with_a_reason_refuses_several_workers_before_uvicorn_starts(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Recorded with monkeypatch, so the variable is restored even if a launch sets it.
+        monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "")
+        monkeypatch.delenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME)
+
+        with raises(ValueError, match="^my_server needs num_workers=1: sessions live in this process$"):
+            self._capture_uvicorn_kwargs(
+                monkeypatch, {}, num_workers=2, unsupported_reason="sessions live in this process"
+            )
+
+        assert self.uvicorn_kwargs == {}
+        # The refusal comes before the multi-worker launch sets up the workers' environment.
+        assert IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME not in os.environ
+
+    def test_server_with_a_reason_still_runs_one_worker(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch, {}, num_workers=1, unsupported_reason="sessions live in this process"
+        )
+
+        assert "workers" not in kwargs
+
+    def test_server_without_a_reason_runs_several_workers(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=2)
+
+        assert 2 == kwargs["workers"]
 
     def test_undeclared_server_does_not_join_a_configured_cluster(self, monkeypatch: MonkeyPatch) -> None:
         self._capture_uvicorn_kwargs(monkeypatch, {"ray_head_node_address": "10.0.0.1:6379"}, num_workers=1)

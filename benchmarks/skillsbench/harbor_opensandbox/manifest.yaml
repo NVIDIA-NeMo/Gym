@@ -1,0 +1,29 @@
+name: skillsbench/harbor_opensandbox
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: Official benchflow-ai/skillsbench tasks through Harbor and OpenSandbox.
+modality: text
+licensing: Apache-2.0
+authors:
+  - benchflow-ai
+  - NVIDIA NeMo Gym contributors
+reward:
+  range: [0.0, 1.0]
+  higher_is_better: true
+determinism: unknown
+config_path: ../harbor_opensandbox.yaml
+resources_server: null
+agent_server: harbor_agent_general
+datasets:
+  - name: skillsbench_official
+    type: benchmark
+    jsonl_fpath: benchmarks/skillsbench/data/skillsbench_official.jsonl
+    prepare_script: benchmarks/skillsbench/prepare.py
+    num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active

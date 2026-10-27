@@ -12,7 +12,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.agent_utils import uv_bootstrap
+from nemo_gym.agent_utils import sandbox_python
+from nemo_gym.agent_utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -72,6 +73,7 @@ def root(tmp_path, monkeypatch) -> Path:
         return box
 
     monkeypatch.setattr(AsyncSandbox, "connect", connect)
+    monkeypatch.setattr(SandboxPythonRuntime, "is_installed", AsyncMock(return_value=True))
     monkeypatch.setattr(sandbox, "SANDBOX_PYTHON", sys.executable)
     monkeypatch.setattr(sandbox, "_PACKAGE_DIR", str(tmp_path / "harness/responses_api_agents/stirrup_agent"))
     return root
@@ -351,37 +353,22 @@ def test_a_session_requiring_mcp_tools_is_rejected(client):
     assert "Stirrup does not support required MCP tool access: gdpval.mcp" in response.json()["detail"]
 
 
-async def test_the_runtime_installs_with_a_uv_built_for_the_sandbox_architecture(tmp_path, monkeypatch):
-    host_machine = uv_bootstrap.platform.machine().lower()
-    sandbox_machine = "x86_64" if host_machine in ("aarch64", "arm64") else "aarch64"
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: "/host/uv")
-    monkeypatch.setattr(uv_bootstrap, "_host_uv_version", lambda uv: "0.9.0")
-    downloads = []
+async def test_a_missing_runtime_is_installed_with_the_seed_timeout(monkeypatch):
+    install = AsyncMock()
+    monkeypatch.setattr(SandboxPythonRuntime, "is_installed", AsyncMock(return_value=False))
+    monkeypatch.setattr(SandboxPythonRuntime, "install", install)
+    fake_sandbox = MagicMock(exec=AsyncMock(return_value=_ok()), upload=AsyncMock())
+    state = SimpleNamespace(session=SimpleNamespace(sandbox=fake_sandbox, session_dir="/tmp/session"))
 
-    def download(version, target, path):
-        downloads.append(target)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("uv")
+    await sandbox.StirrupSessionState.install_runtime(state, timeout=60)
 
-    monkeypatch.setattr(uv_bootstrap, "_download_uv", download)
-    probe = SimpleNamespace(return_code=0, stdout=f"Linux\n{sandbox_machine}\ngnu\n", stderr="")
-    installed = SimpleNamespace(return_code=0, stdout="", stderr="")
-    fake_sandbox = MagicMock(exec=AsyncMock(side_effect=[probe, installed]), upload=AsyncMock())
-    state = SimpleNamespace(
-        session=SimpleNamespace(sandbox=fake_sandbox, workdir="/root"),
-        _runtime_installed=AsyncMock(return_value=True),
-    )
-
-    await sandbox.StirrupSessionState._install_runtime(state, timeout=60)
-
-    (uploaded, _), _ = fake_sandbox.upload.await_args
-    assert downloads and sandbox_machine in downloads[0]
-    assert uploaded != "/host/uv" and Path(uploaded).read_text() == "uv"
-    (install_command,), install_kwargs = fake_sandbox.exec.await_args
-    assert f"uv venv {sandbox.RUNTIME_DIR}/venv --python {sandbox.PYTHON_VERSION}" in install_command
-    assert f"uv pip install --python {sandbox.SANDBOX_PYTHON} {sandbox.STIRRUP_REQUIREMENT}" in install_command
-    assert install_kwargs["timeout_s"] == 60
+    install.assert_awaited_once_with(fake_sandbox, timeout_s=60)
+    assert sandbox.RUNTIME.requirements == (sandbox.STIRRUP_REQUIREMENT,)
+    # The runtime resolves with the overrides this server's own environment is installed with.
+    assert sandbox.RUNTIME.overrides == ("pillow==12.3.0",)
+    assert sandbox.SANDBOX_PYTHON == f"{sandbox.RUNTIME_DIR}/python/bin/python3"
+    # Seeding never runs in, or writes to, the task's working directory.
+    assert [call.kwargs["cwd"] for call in fake_sandbox.exec.await_args_list] == ["/"]
 
 
 def _respond(client: TestClient, body: dict | None = None, rollout: str = _EPISODE.capture_key):
@@ -550,24 +537,27 @@ def test_a_session_whose_sandbox_cannot_be_prepared_is_released_and_fails_the_se
     assert box.disconnected
 
 
-def test_a_failed_runtime_install_fails_the_seed_and_releases_the_sandbox(client, borrow, monkeypatch):
-    monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: "/host/uv")
+def test_a_failed_runtime_install_fails_the_seed_and_releases_the_sandbox(client, borrow, monkeypatch, tmp_path):
+    archive = tmp_path / "archive.tar.gz"
+    archive.write_bytes(b"")
+    monkeypatch.setattr(
+        sandbox_python, "probe_sandbox_platform", AsyncMock(return_value=SandboxPlatform("x86_64", "gnu"))
+    )
+    monkeypatch.setattr(sandbox_python, "_python_archive", AsyncMock(return_value=archive))
+    monkeypatch.setattr(SandboxPythonRuntime, "_site_packages_archive", AsyncMock(return_value=archive))
 
     def answer(command):
-        if "mkdir" in command:
-            return _ok()
+        if "install_python_runtime.sh" in command:
+            return _ok(stderr="ModuleNotFoundError: No module named 'moviepy'", return_code=1)
         if "import stirrup" in command:
             return _ok(return_code=1)
-        if "uv venv" in command:
-            return _ok(stderr="no network", return_code=2)
         return _ok()
 
     box, _ = borrow(answer)
 
-    with pytest.raises(RuntimeError, match="no network"):
+    with pytest.raises(RuntimeError, match="No module named 'moviepy'"):
         _seed(client, sandbox_access=_sandbox_access())
 
-    assert any("pip install" in command for command in box.commands)
     assert box.disconnected
 
 
