@@ -119,14 +119,10 @@ def trajectory_to_responses(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
 
         observation = step.get("observation", {})
         results = observation.get("results", [])
-        if len(tool_calls) > 1 and len(results) == 1:
-            tool_calls = [
-                {
-                    "tool_call_id": f"call_{agent_step_index}_batch",
-                    "function_name": "terminal_step",
-                    "arguments": {"tool_calls": tool_calls},
-                }
-            ]
+        # Terminus captures one terminal screen per step. Pair it with the first call and give the step's
+        # other calls an empty output, so every function_call has an output like the other harnesses.
+        if results and len(results) < len(tool_calls):
+            results = results + [{"content": ""}] * (len(tool_calls) - len(results))
 
         for tc in tool_calls:
             arguments = tc.get("arguments", {})

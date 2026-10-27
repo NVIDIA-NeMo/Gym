@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -131,7 +130,7 @@ class TestStandaloneTerminus2:
 
 
 class TestTrajectoryOutput:
-    def test_shared_terminal_observation_is_one_batch(self) -> None:
+    def test_shared_terminal_observation_pairs_every_call(self) -> None:
         calls = [
             {"tool_call_id": "a", "function_name": "bash_command", "arguments": {"keystrokes": "ls\n"}},
             {"tool_call_id": "b", "function_name": "mark_task_complete", "arguments": {}},
@@ -139,11 +138,10 @@ class TestTrajectoryOutput:
         output = trajectory_to_responses(
             {"steps": [{"source": "agent", "tool_calls": calls, "observation": {"results": [{"content": "files"}]}}]}
         )
-        assert [item["type"] for item in output] == ["message", "function_call", "function_call_output"]
-        assert output[1]["name"] == "terminal_step"
-        assert json.loads(output[1]["arguments"])["tool_calls"] == calls
-        assert output[1]["call_id"] == output[2]["call_id"]
-        assert output[2]["output"] == "files"
+        calls_out = [item for item in output if item["type"] == "function_call"]
+        outputs = [item for item in output if item["type"] == "function_call_output"]
+        assert [item["call_id"] for item in calls_out] == [item["call_id"] for item in outputs] == ["a", "b"]
+        assert [item["output"] for item in outputs] == ["files", ""]
 
     def test_raw_content_preserves_training_fields_and_commands(self) -> None:
         trajectory = {
