@@ -15,11 +15,11 @@ from aiohttp.test_utils import TestServer
 from fastapi.testclient import TestClient
 
 import nemo_gym.server_utils as server_utils
-from nemo_gym.base_environment_server import HandledEpisodeError, is_retryable_dependency_error
+from nemo_gym.base_environment_server import handled_episode_failure, is_retryable_dependency_error
 from nemo_gym.episode_types import BaseEpisodeResponse, EpisodeFailure, FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog, report_for_current_request
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.typed_exceptions import BoundaryFailure, failure_report_for
+from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
 
 
@@ -36,7 +36,9 @@ class _EvidenceResponse(BaseEpisodeResponse[str]):
 @pytest.mark.parametrize("terminal", [False, True])
 def test_an_environment_runtime_failure_is_handled_without_constructing_a_wire_model(terminal):
     provider = RuntimeError("provider disconnected")
-    model = BoundaryFailure(FailureEvent(boundary=FailureBoundary.MODEL, http_status=503))
+    model = NgFailureEvent(
+        failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="test failure", http_status=503
+    )
     model.__cause__ = provider
     event = FailureEvent(
         boundary=FailureBoundary.ENVIRONMENT,
@@ -44,8 +46,8 @@ def test_an_environment_runtime_failure_is_handled_without_constructing_a_wire_m
         stage="verification",
         failure_kind="judge_failed",
     )
-    error = HandledEpisodeError(
-        event,
+    error = handled_episode_failure(
+        **event.model_dump(exclude={"cause_id", "foreign_error", "http_status", "exception_type"}),
         terminal=terminal,
         evidence={"partial_response": "partial", "agent_observations": ["turn failed"], "trajectory": {"turn": "one"}},
     )
@@ -55,7 +57,7 @@ def test_an_environment_runtime_failure_is_handled_without_constructing_a_wire_m
 
         async def run(self, request, cleanup):
             async def finish_evidence():
-                error.evidence["agent_observations"].append("cleanup completed")
+                error.episode_evidence["agent_observations"].append("cleanup completed")
 
             cleanup.register_cleanup("finish evidence", finish_evidence)
             raise error from model
@@ -66,8 +68,6 @@ def test_an_environment_runtime_failure_is_handled_without_constructing_a_wire_m
         response = client.post("/run", json=_request().model_dump(mode="json"))
     assert response.status_code == 200
     failure = _EvidenceFailure.model_validate(response.json()["failure"])
-    report = FailureReport.model_validate(response.json()["failure_report"])
-    report = FailureReport.model_validate(response.json()["failure_report"])
     report = FailureReport.model_validate(response.json()["failure_report"])
     assert failure.terminal is terminal and failure.stage == "verification"
     assert failure.failure_kind == "judge_failed" and failure.failure_reason == event.failure_reason
@@ -85,8 +85,12 @@ def test_an_environment_runtime_failure_is_handled_without_constructing_a_wire_m
 async def test_the_typed_http_path_raises_the_remote_failure_and_keeps_http_details_separate(
     monkeypatch, header_kind, status
 ):
-    model = BoundaryFailure(FailureEvent(boundary=FailureBoundary.MODEL, http_status=429))
-    remote = BoundaryFailure(FailureEvent(boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed"))
+    model = NgFailureEvent(
+        failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="test failure", http_status=429
+    )
+    remote = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="judge call failed"
+    )
     remote.__cause__ = model
     model.__cause__ = ValueError("private provider request")
     report = failure_report_for(remote)
@@ -110,7 +114,7 @@ async def test_the_typed_http_path_raises_the_remote_failure_and_keeps_http_deta
             response = await server_utils.request("GET", str(server.make_url("/verify")), _max_num_tries=1)
             raises = server_utils.raise_boundary_failure if typed else server_utils.raise_for_status
             if typed and header_kind == "failure":
-                with pytest.raises(BoundaryFailure) as caught:
+                with pytest.raises(NgFailureEvent) as caught:
                     await raises(response)
                 error = caught.value
                 assert error.event.boundary is FailureBoundary.RESOURCES_SERVER
@@ -140,8 +144,15 @@ async def test_the_typed_http_path_raises_the_remote_failure_and_keeps_http_deta
 
 @pytest.mark.parametrize("header_kind", ["none", "reason", "malformed", "recovered", "failure"])
 async def test_only_a_valid_failed_reply_reference_can_replace_the_current_model_attempt(monkeypatch, header_kind):
-    old = FailureEvent(boundary=FailureBoundary.MODEL, http_status=429, failure_reason="earlier attempt")
-    final = FailureEvent(boundary=FailureBoundary.MODEL, http_status=503, failure_reason="remote final attempt")
+    old = FailureEvent(
+        failure_kind="test:failure", boundary=FailureBoundary.MODEL, http_status=429, failure_reason="earlier attempt"
+    )
+    final = FailureEvent(
+        failure_kind="test:failure",
+        boundary=FailureBoundary.MODEL,
+        http_status=503,
+        failure_reason="remote final attempt",
+    )
     headers = {}
     if header_kind == "reason":
         headers = {FailureHeader.NAME: json.dumps({"failure_reason": "try later", "terminal": False})}
@@ -194,19 +205,20 @@ class _SdkError(RuntimeError):
 
 @pytest.mark.parametrize("serializer", [pickle, cloudpickle], ids=["pickle", "cloudpickle"])
 def test_process_serialization_keeps_nested_typed_and_foreign_causes_with_their_captured_ids(serializer):
-    model = BoundaryFailure(FailureEvent(boundary=FailureBoundary.MODEL, http_status=429))
+    model = NgFailureEvent(
+        failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="test failure", http_status=429
+    )
     model.__cause__ = _SdkError()
-    agent = BoundaryFailure(FailureEvent(boundary=FailureBoundary.AGENT))
+    agent = NgFailureEvent(failure_kind="test:failure", boundary=FailureBoundary.AGENT, failure_reason="test failure")
     agent.__cause__ = model
     with RequestFailureLog.capture():
         before = report_for_current_request(agent)
         restored = serializer.loads(serializer.dumps(agent))
     after = failure_report_for(restored)
-    assert after == before and len(after.events) == 4
+    assert after == before and len(after.events) == 2
     assert restored.event.event_id == agent.event.event_id
     assert restored.__cause__.event.event_id == model.event.event_id
     assert restored.__cause__.event.http_status == 429
-    foreign = [event for event in after.events.values() if event.boundary is None]
-    assert {event.exception_type for event in foreign} == {f"{__name__}._SdkError", "ValueError"}
-    assert all(event.failure_reason == "" for event in foreign)
+    assert after.events[model.event_id].foreign_error.exception_type == f"{__name__}._SdkError"
+    assert after.events[model.event_id].cause_id is None
     assert "private" not in after.model_dump_json()

@@ -50,7 +50,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge, reraise_judge_errors
+from nemo_gym.judge import JUDGE_FAILURES, call_judge, is_judge_failure, reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -1523,7 +1523,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         for attempt in range(max_judge_retries):
             try:
                 judge_response = await self._call_judge(judge_params)
-            except JudgeError as judge_error:
+            except JUDGE_FAILURES as judge_error:
+                if not is_judge_failure(judge_error):
+                    raise
                 logger.warning("Judge call attempt %d/%d failed: %s", attempt + 1, max_judge_retries, judge_error)
                 if attempt < max_judge_retries - 1:
                     await asyncio.sleep(2**attempt)

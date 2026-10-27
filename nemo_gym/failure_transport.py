@@ -25,7 +25,7 @@ from typing import Any, ClassVar
 from pydantic import ValidationError
 
 from nemo_gym.episode_types import FailureReport
-from nemo_gym.typed_exceptions import ForeignCauseIds, failure_report_for
+from nemo_gym.typed_exceptions import failure_report_for
 
 
 LOGGER = logging.getLogger(__name__)
@@ -75,7 +75,6 @@ class RequestFailureLog:
     """
 
     report: FailureReport = field(default_factory=FailureReport)
-    foreign_ids: ForeignCauseIds = field(default_factory=ForeignCauseIds)
 
     _current: ClassVar[ContextVar["RequestFailureLog | None"]] = ContextVar("ng_request_failure_log", default=None)
 
@@ -101,20 +100,19 @@ class RequestFailureLog:
 
     def reply_report(self, error: BaseException | None) -> FailureReport:
         """The report for this request's reply: its own failure (``error``, ``None`` on success) and the log."""
-        return failure_report_for(error, foreign_ids=self.foreign_ids).merged(self.report)
+        return failure_report_for(error).merged(self.report)
 
 
 def report_for_current_request(error: BaseException | None) -> FailureReport:
-    """``failure_report_for(error)``, with the ids the request being served gave to non-boundary causes."""
-    log = RequestFailureLog.current()
-    return failure_report_for(error, foreign_ids=log.foreign_ids if log is not None else None)
+    """Project the explicit Gym cause chain, preserving its origin IDs."""
+    return failure_report_for(error)
 
 
 def observe_failure(error: BaseException) -> None:
     """Record ``error`` for the request being served, for example a model attempt a retry may replace."""
     log = RequestFailureLog.current()
     if log is not None:
-        log.add(failure_report_for(error, foreign_ids=log.foreign_ids))
+        log.add(failure_report_for(error))
 
 
 def observe_reply(headers: Mapping[str, str] | None) -> None:

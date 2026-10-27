@@ -16,8 +16,9 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    HandledEpisodeError,
     dependency_failure,
+    handled_episode_failure,
+    is_handled_episode_failure,
 )
 from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
@@ -38,7 +39,7 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
-from nemo_gym.episode_types import FailureBoundary, FailureEvent
+from nemo_gym.episode_types import FailureBoundary
 from nemo_gym.global_config import (
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -69,6 +70,7 @@ from nemo_gym.tool_access import (
     MCPToolAccess,
     ToolAccess,
 )
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 class SessionHandles(BaseModel):
@@ -196,7 +198,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             try:
                 async with self.checkpoint_step(request, "replay"):
                     agent_response = await self._invoke_agent(request, handles)
-            except HandledEpisodeError as failure:
+            except NgFailureEvent as failure:
+                if not is_handled_episode_failure(failure):
+                    raise
                 # The agent's evidence of the failed turn arrives with its session close.
                 # The close runs after the failed step, which parks until resume while a checkpoint is open.
                 try:
@@ -204,8 +208,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception:
                     pass  # Final unwind retries the close and logs its failure.
                 if closed_agent:
-                    failure.evidence["agent_observations"] = closed_agent[-1].agent_observations
-                    failure.evidence["trajectory"] = closed_agent[-1].trajectory
+                    failure.episode_evidence["agent_observations"] = closed_agent[-1].agent_observations
+                    failure.episode_evidence["trajectory"] = closed_agent[-1].trajectory
                 raise
             stage = "close_agent"
 
@@ -545,16 +549,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         partial_response: Any = None,
         agent_observations: Any = None,
         trajectory: Any = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
-        return HandledEpisodeError(
-            FailureEvent(
-                boundary=FailureBoundary.ENVIRONMENT,
-                stage=stage,
-                operation="episode",
-                failure_reason=failure_reason[:2000],
-            ),
+        return handled_episode_failure(
+            boundary=FailureBoundary.ENVIRONMENT,
+            stage=stage,
+            operation="episode",
+            failure_reason=failure_reason[:2000],
             terminal=terminal,
             evidence={
                 "partial_response": partial_response,

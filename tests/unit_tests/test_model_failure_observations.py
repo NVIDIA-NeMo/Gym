@@ -33,20 +33,20 @@ async def test_a_recovered_transport_attempt_is_observed_without_an_episode_fail
         report = log.reply_report(None)
 
     assert wire.request.await_count == 2 and report.failure_id is None
-    assert len(report.events) == 2
+    assert len(report.events) == 1
     event = next(event for event in report.events.values() if event.boundary is FailureBoundary.MODEL)
     assert event.failure_kind == MODEL_REQUEST_ERROR and event.http_status is None
-    cause = report.events[event.cause_id]
-    assert cause.exception_type == f"{error_type.__module__}.{error_type.__qualname__}"
-    assert cause.boundary is None and cause.failure_reason == ""
-    assert "sensitive" not in report.model_dump_json()
+    assert event.cause_id is None
+    assert event.foreign_error.exception_type == f"{error_type.__module__}.{error_type.__qualname__}"
+    assert event.foreign_error.http_status is None
     assert event.attempt_id.startswith(event.operation_id)
     assert FailureHeader.decode(FailureHeader.encode(report)) == report
 
 
 @pytest.mark.parametrize("error_type", [aiohttp.ServerDisconnectedError, aiohttp.ClientOSError, TimeoutError])
 async def test_a_terminal_transport_attempt_is_observed_without_an_extra_retry(monkeypatch, error_type):
-    error = error_type("private request")
+    error = error_type("selected transport message")
+    error.request_payload = "private request"
     wire = SimpleNamespace(request=AsyncMock(side_effect=error))
     monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
     monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
@@ -57,9 +57,10 @@ async def test_a_terminal_transport_attempt_is_observed_without_an_extra_retry(m
             await model._request(method="POST", url="http://model.test/responses")
 
     assert caught.value is error and wire.request.await_count == 1
-    assert len(log.report.events) == 2
+    assert len(log.report.events) == 1
     event = next(event for event in log.report.events.values() if event.boundary is FailureBoundary.MODEL)
-    assert log.report.events[event.cause_id].failure_reason == ""
+    assert event.cause_id is None
+    assert event.foreign_error.exception_type.endswith(error_type.__qualname__)
     assert "private" not in log.report.model_dump_json()
 
 
@@ -75,7 +76,7 @@ async def test_model_cancellation_is_neither_retried_nor_observed(monkeypatch):
 
 
 async def test_an_oversized_report_through_the_gym_http_client_keeps_body_status_and_one_call(monkeypatch):
-    event = FailureEvent(boundary=FailureBoundary.MODEL, failure_reason="界" * 2000)
+    event = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="界" * 2000)
     report = FailureReport(failure_id=event.event_id, events={event.event_id: event})
     hits = 0
 

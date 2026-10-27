@@ -193,7 +193,7 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
-from nemo_gym.episode_types import FailureBoundary, FailureEvent
+from nemo_gym.episode_types import FailureBoundary
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.failure_transport import FailureHeader, observe_failure
 from nemo_gym.rollout_correlation import current_rollout_id
@@ -206,7 +206,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     request,
 )
-from nemo_gym.typed_exceptions import BoundaryFailure
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 class ChatCompletionModeration(TypedDict, total=False):
@@ -1583,22 +1583,20 @@ def _retry_after_seconds(response: ClientResponse) -> Optional[float]:
 
 def _model_attempt_failure(
     reason: str, *, operation_id: str, attempt_id: str, http_status: Optional[int] = None
-) -> BoundaryFailure:
+) -> NgFailureEvent:
     """The model boundary's failure for one HTTP attempt of a model call (``operation_id``)."""
-    return BoundaryFailure(
-        FailureEvent(
-            boundary=FailureBoundary.MODEL,
-            failure_kind=MODEL_REQUEST_ERROR,
-            failure_reason=reason,
-            operation="model_request",
-            operation_id=operation_id,
-            attempt_id=attempt_id,
-            http_status=http_status,
-        )
+    return NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason=reason,
+        operation="model_request",
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+        http_status=http_status,
     )
 
 
-async def _raise_exhausted(response: ClientResponse, content: bytes, last_failure: Optional[BoundaryFailure]) -> None:
+async def _raise_exhausted(response: ClientResponse, content: bytes, last_failure: Optional[NgFailureEvent]) -> None:
     """``raise_for_status`` for the last attempt; its error's explicit cause is that attempt's observed failure.
 
     A cause ``raise_for_status`` set itself (a Gym server's rebuilt failure) is kept.

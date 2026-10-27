@@ -3,15 +3,15 @@ title: Failure observations
 description: Boundary failures, their explicit causes and the failure report, without changing outcome policy.
 ---
 
-Gym records an observed failure as a `BoundaryFailure` exception that owns one
-`FailureEvent`. The event names the boundary that observed it (`model`, `harness`,
+Gym records an observed failure as one `NgFailureEvent` exception. The same object
+is raised and serialized with `to_record()`; `from_record()` reconstructs it. It names the boundary that observed it (`model`, `harness`,
 `agent`, `resources_server`, `environment` or `collection`), its kind, stage, HTTP
 status and the event ID of its explicit cause. Existing handlers, outcome policy,
 retry budgets and scoring remain in control.
 
 The flow for one failure:
 
-1. A boundary raises `BoundaryFailure(...) from error`. The event ID is assigned here.
+1. A boundary raises `NgFailureEvent(...) from error`. The event ID is assigned here.
 2. `failure_report_for` turns the explicit cause chain (`raise ... from`) into a
    `FailureReport`: `failure_id` names the current failure, `cause_id` links causes.
    Implicit Python context is not a cause.
@@ -25,20 +25,24 @@ The flow for one failure:
 5. Collection saves the report beside the existing result or failure record
    (`_ng_failure_events`, `_ng_failure_id`).
 
-An environment raises `HandledEpisodeError` from its cause, passing a `FailureEvent`,
-its local `terminal` decision and separate partial evidence. The response adapter
-constructs the protocol's `EpisodeFailure` after cleanup, including late observations
-and trajectory evidence. Attaching diagnostics never borrows a cause's kind.
+An environment uses `handled_episode_failure(...)` with event fields, its local
+`terminal` decision and separate partial evidence. It returns an `NgFailureEvent`;
+the response adapter constructs `EpisodeFailure` after cleanup, including late
+observations and trajectory evidence. Diagnostics never borrow a cause's kind.
+The v1 `EpisodeFailure` keeps its existing four fields; `failure_report` travels
+beside it in the response.
 
-Pickle and cloudpickle retain the explicit cause graph and captured event IDs.
-Foreign causes are reconstructed from their diagnostic event data; SDK request
-objects do not cross that interface.
+Pickle and cloudpickle retain canonical Gym causes, captured IDs and selected SDK
+facts. Foreign exceptions do not become boundary-less events: their type, bounded
+selected message and status go in the nearest Gym event's `foreign_error`. Gym
+causes below a foreign intermediary remain linked. Exception type names stay data;
+decoding never imports them. Every event requires an explicit boundary and a
+registered or namespaced kind, including recovered reports.
 
-An exception that is not a `BoundaryFailure` is recorded by type and HTTP status only;
-its text is never serialized. It gets one event ID the first time a request captures
-it, so the same SDK error is one event wherever it appears. Exception type names are
-data and are never imported. Kinds belong to their boundary: a judge failure stays
-`judge_failed` above a provider's 401.
+There are no boundary-specific exception subclasses. Catch `NgFailureEvent` and
+select by `boundary`, `failure_kind` and, where needed, `operation`. A judge call
+records `judge_failed` above its provider cause; standalone parser `JudgeError`s
+remain supported by the judge failsafe.
 
 The optional `foreign_error` field holds diagnostics that an adapter selected from an
 SDK error: its type, a scalar message and its HTTP status. SDK objects, request bodies
@@ -49,4 +53,5 @@ aiohttp rejects a reply header line over 8190 bytes. A report over 4096 bytes is
 therefore not sent: the header carries `{"omitted": true}`, every hop above keeps the
 flag, and Collection saves `_ng_failure_events_omitted`. The real status and body
 still arrive. This diagnostic loss does not change the task outcome. Old records with
-no failure report keep their meaning; the saved-record version stays 1.
+no failure report keep their meaning. The final saved-record migration remains a
+separate change.

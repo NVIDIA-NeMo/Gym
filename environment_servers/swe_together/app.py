@@ -45,7 +45,7 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    HandledEpisodeError,
+    handled_episode_failure,
 )
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
@@ -61,7 +61,7 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ModelServerRef,
 )
-from nemo_gym.episode_types import FailureBoundary, FailureEvent
+from nemo_gym.episode_types import FailureBoundary
 from nemo_gym.failure_kinds import JUDGE_FAILED
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -70,6 +70,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 LOGGER = logging.getLogger(__name__)
@@ -187,7 +188,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         cookies = {}
         agent_id = "candidate-" + uuid4().hex
         agent_close = None
-        failure: HandledEpisodeError | None = None
+        failure: NgFailureEvent | None = None
         activations = []
         steps = []
         stage = "seed"
@@ -223,7 +224,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         async def persist_cleanup_evidence() -> None:
             (state.directory / "cleanup-receipts.json").write_text(json.dumps(state.cleanup_receipts, indent=2))
             if failure is not None:
-                failure.evidence.update(
+                failure.episode_evidence.update(
                     agent_close=agent_close,
                     agent_observations=agent_close.agent_observations if agent_close else None,
                     trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
@@ -377,13 +378,11 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 dependency["body"] = (
                     content.decode(errors="replace") if isinstance(content, bytes) else str(content)
                 )[:8000]
-            failure = HandledEpisodeError(
-                FailureEvent(
-                    boundary=FailureBoundary.ENVIRONMENT,
-                    stage=stage,
-                    operation="episode",
-                    failure_reason=(f"{type(error).__name__}: {error}")[:2000],
-                ),
+            failure = handled_episode_failure(
+                boundary=FailureBoundary.ENVIRONMENT,
+                stage=stage,
+                operation="episode",
+                failure_reason=(f"{type(error).__name__}: {error}")[:2000],
                 terminal=activation_attempted or isinstance(error, (ValueError, FileNotFoundError)),
                 evidence={
                     "partial_response": activations[-1].response if activations else None,

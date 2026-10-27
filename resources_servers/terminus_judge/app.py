@@ -32,7 +32,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.judge import JUDGE_FAILURES, call_judge, is_judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -489,8 +489,12 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 reward = 1.0
                 failure_reason = FailureCode.NONE
 
-        except JudgeError:
-            raise
+        except JUDGE_FAILURES as error:
+            if is_judge_failure(error):
+                raise
+            else:
+                failure_reason = FailureCode.UNKNOWN_ERROR
+                logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(error).__name__} {error}")
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(e).__name__} {e}")

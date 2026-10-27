@@ -11,7 +11,7 @@ import pytest
 from aiohttp import web
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
+from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
 from nemo_gym.episode_types import (
     BaseEpisodeResponse,
     EpisodeFailure,
@@ -29,20 +29,21 @@ from nemo_gym.failure_transport import (
     observe_reply,
     reply_failure_report,
 )
-from nemo_gym.judge import JudgeCallFailed, JudgeError
+from nemo_gym.judge import judge_call_failed
 from nemo_gym.rollout_collection import _episode_record
-from nemo_gym.sandbox.providers.base import SandboxCredentialsRejected
+from nemo_gym.sandbox.providers.base import sandbox_credentials_rejected
 from nemo_gym.typed_exceptions import (
-    BoundaryFailure,
-    ForeignCauseIds,
+    NgFailureEvent,
     failure_report_for,
     rebuild_failure,
     sdk_error_details,
 )
 
 
-def _model(reason: str = "HTTP 503 from the model server", **fields) -> BoundaryFailure:
-    return BoundaryFailure(FailureEvent(boundary=FailureBoundary.MODEL, failure_reason=reason, **fields))
+def _model(reason: str = "HTTP 503 from the model server", **fields) -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary=FailureBoundary.MODEL, failure_reason=reason, **({"failure_kind": "test:failure"} | fields)
+    )
 
 
 def _chained(outer: BaseException, cause: BaseException) -> BaseException:
@@ -67,24 +68,23 @@ class _SdkError(Exception):
 def test_a_chain_keeps_origin_ids_and_records_untyped_causes_by_type_only() -> None:
     sdk = _SdkError("refused", status_code=401)
     model = _chained(_model(), sdk)
-    agent = _chained(BoundaryFailure(FailureEvent(boundary=FailureBoundary.AGENT, failure_reason="run failed")), model)
+    agent = _chained(
+        NgFailureEvent(failure_kind="test:failure", boundary=FailureBoundary.AGENT, failure_reason="run failed"), model
+    )
 
-    ids = ForeignCauseIds()
-    report = failure_report_for(agent, foreign_ids=ids)
+    report = failure_report_for(agent)
 
     own = report.events[report.failure_id]
     assert own.event_id == agent.event.event_id and own.boundary == "agent"
     model_event = report.events[own.cause_id]
     assert model_event.event_id == model.event.event_id and model_event.boundary == "model"
-    untyped = report.events[model_event.cause_id]
-    assert (untyped.boundary, untyped.exception_type, untyped.http_status, untyped.failure_reason) == (
-        None,
-        f"{__name__}._SdkError",
-        401,
-        "",
-    )
+    assert model_event.cause_id is None
+    assert model_event.foreign_error.exception_type == f"{__name__}._SdkError"
+    assert model_event.foreign_error.http_status == 401
+    assert model_event.foreign_error.message == ""
+    assert len(report.events) == 2
     assert "secret" not in report.model_dump_json()
-    assert failure_report_for(agent, foreign_ids=ids) == report  # the same owner gives the same ids
+    assert failure_report_for(agent) == report  # origin Gym IDs stay stable
 
 
 def test_only_explicit_causes_are_linked_and_a_chain_without_a_boundary_reports_nothing() -> None:
@@ -93,7 +93,7 @@ def test_only_explicit_causes_are_linked_and_a_chain_without_a_boundary_reports_
             raise ValueError("handled first")
         except ValueError:
             raise _model()
-    except BoundaryFailure as raised:
+    except NgFailureEvent as raised:
         failure, report = raised, failure_report_for(raised)
     assert list(report.events) == [failure.event.event_id] and report.events[failure.event.event_id].cause_id is None
     assert failure_report_for(_chained(RuntimeError("x"), KeyError("y"))) == FailureReport()
@@ -105,7 +105,7 @@ def test_a_rebuilt_chain_reports_the_same_events() -> None:
 
     rebuilt = rebuild_failure(report)
 
-    assert isinstance(rebuilt, BoundaryFailure) and type(rebuilt.__cause__) is BoundaryFailure
+    assert isinstance(rebuilt, NgFailureEvent) and type(rebuilt.__cause__) is NgFailureEvent
     assert failure_report_for(rebuilt) == report
 
 
@@ -126,7 +126,7 @@ def test_the_header_codec_omits_an_oversized_report_and_keeps_the_flag_upward() 
 
     events: dict[str, FailureEvent] = {}
     for _ in range(4):
-        event = FailureEvent(boundary=FailureBoundary.MODEL, failure_reason="x" * 2000)
+        event = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="x" * 2000)
         events[event.event_id] = event
     oversized = FailureHeader.encode(FailureReport(events=events))
     assert FailureHeader.decode(oversized) == FailureReport(omitted=True)
@@ -165,7 +165,7 @@ async def _status_over_a_real_socket(headers: dict[str, str]) -> int | str:
 def test_aiohttp_rejects_a_large_header_and_the_encoded_report_keeps_the_real_status() -> None:
     events: dict[str, FailureEvent] = {}
     for _ in range(6):
-        event = FailureEvent(boundary=FailureBoundary.MODEL, failure_reason="x" * 2000)
+        event = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="x" * 2000)
         events[event.event_id] = event
     raw = FailureReport(events=events).model_dump_json()
 
@@ -192,20 +192,28 @@ def test_an_exhausted_request_links_its_last_observed_attempt() -> None:
         observe_failure(_model(operation_id="call", attempt_id="call-2", http_status=503))
         observe_failure(last)
         error = _chained(aiohttp.ClientResponseError(None, (), status=503), last)
-        failed = log.reply_report(_chained(BoundaryFailure(FailureEvent(boundary=FailureBoundary.AGENT)), error))
+        failed = log.reply_report(
+            _chained(
+                NgFailureEvent(
+                    failure_kind="test:failure", boundary=FailureBoundary.AGENT, failure_reason="test failure"
+                ),
+                error,
+            )
+        )
     own = failed.events[failed.failure_id]
     http = failed.events[own.cause_id]
-    assert http.http_status == 503 and http.cause_id == last.event.event_id
-    assert len(failed.events) == 4  # agent, HTTP error, last attempt and the earlier attempt as an observation
+    assert own.foreign_error.http_status == 503
+    assert http.event_id == last.event_id and http.cause_id is None
+    assert len(failed.events) == 3  # agent, HTTP error, last attempt and the earlier attempt as an observation
 
 
 def test_judge_failed_is_its_own_kind_above_the_typed_cause() -> None:
     cause = _model(failure_kind="model_request_error", http_status=401)
-    judge = _chained(JudgeCallFailed("judge call failed: unauthorized", operation="judge.request"), cause)
+    judge = _chained(judge_call_failed("judge call failed: unauthorized", operation="judge.request"), cause)
 
     report = failure_report_for(judge)
 
-    assert isinstance(judge, JudgeError)
+    assert type(judge) is NgFailureEvent
     own = report.events[report.failure_id]
     assert (own.boundary, own.failure_kind, own.stage) == ("resources_server", "judge_failed", "verification")
     assert report.events[own.cause_id].failure_kind == "model_request_error"
@@ -216,7 +224,7 @@ def test_judge_failed_is_its_own_kind_above_the_typed_cause() -> None:
 )
 def test_sandbox_credentials_are_rejected_only_by_status(status: int, kind: str) -> None:
     sdk = _SdkError("Authentication credentials are invalid.", status_code=status)
-    rejected = SandboxCredentialsRejected.from_provider_error(
+    rejected = sandbox_credentials_rejected(
         sdk, boundary=FailureBoundary.ENVIRONMENT, operation="sandbox.setup", sdk_message=sdk.args[0]
     )
     assert rejected.__cause__ is sdk and rejected.event.failure_kind == kind
@@ -227,10 +235,7 @@ def test_sandbox_credentials_are_rejected_only_by_status(status: int, kind: str)
 @pytest.mark.parametrize("status", [500, None])
 def test_auth_looking_text_without_a_401_or_403_is_not_a_credentials_failure(status: int | None) -> None:
     sdk = _SdkError("Authentication credentials are invalid.", status_code=status)
-    assert (
-        SandboxCredentialsRejected.from_provider_error(sdk, boundary=FailureBoundary.ENVIRONMENT, operation="x")
-        is None
-    )
+    assert sandbox_credentials_rejected(sdk, boundary=FailureBoundary.ENVIRONMENT, operation="x") is None
 
 
 def test_sdk_details_select_only_the_given_text_and_bound_it_visibly() -> None:
@@ -246,19 +251,24 @@ def test_outer_503_keeps_the_inner_sdk_401_below_the_credentials_failure() -> No
     from fastapi import HTTPException
 
     sdk = _SdkError("denied", status_code=401)
-    rejected = SandboxCredentialsRejected.from_provider_error(
+    rejected = sandbox_credentials_rejected(
         sdk, boundary=FailureBoundary.ENVIRONMENT, operation="sandbox.setup", stage="seed"
     )
     outer = _chained(HTTPException(503, "Could not set up sandbox"), rejected)
     episode = _chained(
-        BoundaryFailure(FailureEvent(boundary=FailureBoundary.ENVIRONMENT, failure_reason="seed failed")), outer
+        NgFailureEvent(
+            failure_kind="test:failure", boundary=FailureBoundary.ENVIRONMENT, failure_reason="seed failed"
+        ),
+        outer,
     )
 
     report = failure_report_for(episode)
 
     statuses = [event.http_status for event in report.events.values()]
-    assert statuses == [None, 503, 401, 401]
-    assert [event.boundary for event in report.events.values()] == ["environment", None, "environment", None]
+    assert statuses == [None, 401]
+    assert report.events[episode.event_id].foreign_error.http_status == 503
+    assert report.events[rejected.event_id].foreign_error.http_status == 401
+    assert [event.boundary for event in report.events.values()] == ["environment", "environment"]
 
 
 def test_an_episode_failure_keeps_its_own_classification_and_its_report_travels_beside_it() -> None:
@@ -267,7 +277,7 @@ def test_an_episode_failure_keeps_its_own_classification_and_its_report_travels_
     report = reply_failure_report(error)
     assert report is not None
     assert report.events[error.event.event_id].failure_kind == "model_request_error"
-    assert report.events[report.failure_id].cause_id is not None
+    assert report.events[report.failure_id].foreign_error.exception_type == "TimeoutError"
     reply = BaseEpisodeResponse[dict](
         episode_id=EpisodeId(rollout_id="r", attempt=0),
         task_id=TaskId(taskset="test:source", task_id="t"),
@@ -307,14 +317,14 @@ def test_collection_rows_save_and_merge_reports_without_replacing_the_outcome() 
     merged = FailureReportRow.merged_into(row, header, FailureReport(omitted=True))
 
     assert merged["reward"] == 1.0 and merged[FailureReportRow.FAILURE_ID] == body.failure_id
-    assert len(merged[FailureReportRow.EVENTS]) == 3 and merged[FailureReportRow.OMITTED] is True
+    assert len(merged[FailureReportRow.EVENTS]) == 2 and merged[FailureReportRow.OMITTED] is True
     broken = FailureReportRow.merged_into({FailureReportRow.EVENTS: {"a": {"event_id": "b"}}})
     assert broken == {FailureReportRow.OMITTED: True}
 
 
 def test_a_harness_termination_is_the_harness_boundary_and_keeps_its_runtime_error_text() -> None:
-    error = HarnessTerminationError(harness="codex", receipt={"cleanup_confirmed": False, "error": "pid 41"})
-    assert isinstance(error, RuntimeError) and str(error).endswith("pid 41")
+    error = harness_termination_failure(harness="codex", receipt={"cleanup_confirmed": False, "error": "pid 41"})
+    assert type(error) is NgFailureEvent and str(error).endswith("pid 41")
     assert error.event.boundary == "harness" and "pid 41" not in error.event.failure_reason
 
 
@@ -323,12 +333,16 @@ def test_one_foreign_exception_keeps_one_event_id_before_and_after_wrapping() ->
     foreign = _chained(RuntimeError("agent step failed"), model)
     with RequestFailureLog.capture() as log:
         observe_failure(foreign)
-        wrapped = _chained(BoundaryFailure(FailureEvent(boundary=FailureBoundary.AGENT)), foreign)
+        wrapped = _chained(
+            NgFailureEvent(failure_kind="test:failure", boundary=FailureBoundary.AGENT, failure_reason="test failure"),
+            foreign,
+        )
         reply = log.reply_report(wrapped)
-    foreign_ids = [event_id for event_id, event in reply.events.items() if event.exception_type == "RuntimeError"]
-    assert len(foreign_ids) == 1 and len(reply.events) == 3
-    assert reply.events[reply.failure_id].cause_id == foreign_ids[0]
-    assert reply.events[foreign_ids[0]].cause_id == model.event.event_id
+    assert len(reply.events) == 2
+    own = reply.events[wrapped.event_id]
+    assert own.cause_id == model.event_id
+    assert own.foreign_error.exception_type == "RuntimeError"
+    assert reply.events[model.event_id] == model.event
 
 
 def test_one_sdk_error_under_two_parents_is_one_event() -> None:
@@ -338,21 +352,23 @@ def test_one_sdk_error_under_two_parents_is_one_event() -> None:
     with RequestFailureLog.capture() as log:
         observe_failure(first)
         observe_failure(second)
-    sdk_events = [event for event in log.report.events.values() if event.boundary is None]
-    assert len(sdk_events) == 1 and len(log.report.events) == 3
-    assert {event.cause_id for event in log.report.events.values() if event.boundary} == {sdk_events[0].event_id}
+    assert len(log.report.events) == 2
+    for event in log.report.events.values():
+        assert event.cause_id is None
+        assert event.foreign_error.exception_type == f"{__name__}._SdkError"
+        assert event.foreign_error.http_status == 401
 
 
 def test_boundary_failures_pickle_with_their_event_args_and_existing_types() -> None:
     import pickle
 
-    harness = HarnessTerminationError(harness="codex", receipt={"cleanup_confirmed": False, "error": "pid 41"})
-    judge = JudgeCallFailed("judge call failed", operation="judge.request")
+    harness = harness_termination_failure(harness="codex", receipt={"cleanup_confirmed": False, "error": "pid 41"})
+    judge = judge_call_failed("judge call failed", operation="judge.request")
     for error in (harness, judge, _model(), rebuild_failure(failure_report_for(_model()))):
         restored = pickle.loads(pickle.dumps(error))
         assert type(restored) is type(error) and str(restored) == str(error) and restored.event == error.event
     assert pickle.loads(pickle.dumps(harness)).receipt == harness.receipt
-    assert isinstance(pickle.loads(pickle.dumps(judge)), JudgeError)
+    assert type(pickle.loads(pickle.dumps(judge))) is NgFailureEvent
 
 
 @pytest.mark.parametrize("status", [401, 500, None])
@@ -364,7 +380,7 @@ async def test_selected_judge_details_and_http_error_identity_survive_observatio
 
     from nemo_gym.judge import _judge_error
     from nemo_gym.server_utils import raise_for_status
-    from nemo_gym.typed_exceptions import AgentRouteFailure
+    from nemo_gym.typed_exceptions import agent_route_failure
 
     sdk = aiohttp.ClientResponseError(
         SimpleNamespace(real_url="http://provider.invalid/judge"), (), status=status, message="authentication failed"
@@ -395,14 +411,15 @@ async def test_selected_judge_details_and_http_error_identity_survive_observatio
             assert pickle.loads(pickle.dumps(rebuilt)).event.foreign_error == details
             observe_failure(error)
             observe_failure(error)
-            agent = AgentRouteFailure(error, operation="agent.run")
+            agent = agent_route_failure(error, operation="agent.run")
             agent.__cause__ = error
             forwarded = log.reply_report(agent)
 
-    http_events = [event for event in forwarded.events.values() if event.http_status == 503]
-    assert len(http_events) == 1
-    assert forwarded.events[agent.event.event_id].cause_id == http_events[0].event_id
-    assert http_events[0].cause_id == origin.event.event_id
+    assert len(forwarded.events) == 2
+    own = forwarded.events[agent.event_id]
+    assert own.foreign_error.http_status == 503
+    assert own.cause_id == origin.event_id
+    assert forwarded.events[origin.event_id].foreign_error == details
     assert FailureHeader.decode(FailureHeader.encode(forwarded)) == forwarded
 
 
@@ -428,23 +445,39 @@ def test_collection_saves_a_body_only_reply_report_on_failed_and_recovered_rows(
     assert FailureReportRow.report(row).events == recovered.events
 
 
-def test_collection_saves_a_body_only_reply_report_on_failed_and_recovered_rows() -> None:
-    """No header here: the report beside ``failure`` or ``result`` in the reply body alone reaches the row."""
-    failed = reply_failure_report(_chained(_model(failure_kind="model_request_error"), TimeoutError()))
-    task_id = {"taskset": "test:source", "task_id": "t"}
-    row = _episode_record(
-        {
-            "task_id": task_id,
-            "failure": {"failure_reason": "Episode timed out", "terminal": False},
-            "failure_report": failed.model_dump(mode="json"),
-        }
-    )
-    assert FailureReportRow.report(row) == failed
-    assert row["_ng_failure_message"] == "Episode timed out"
+@pytest.mark.parametrize("serializer_name", ["pickle", "cloudpickle"])
+def test_process_projection_preserves_generated_sdk_details(serializer_name):
+    import importlib
 
-    recovered = failed.model_copy(update={"failure_id": None})
-    row = _episode_record(
-        {"task_id": task_id, "result": {"reward": 1.0}, "failure_report": recovered.model_dump(mode="json")}
-    )
-    assert row["reward"] == 1.0 and FailureReportRow.FAILURE_ID not in row
-    assert FailureReportRow.report(row).events == recovered.events
+    serializer = importlib.import_module(serializer_name)
+    sdk = _SdkError("args contain request details", status_code=401)
+    sdk.message = "selected SDK message"
+    error = _model()
+    error.__cause__ = sdk
+    assert error.foreign_error is None
+    before = failure_report_for(error)
+    restored = serializer.loads(serializer.dumps(error))
+    assert failure_report_for(restored) == before
+    assert restored.foreign_error.message == "selected SDK message"
+    assert restored.foreign_error.http_status == 401
+    assert restored.__cause__ is None
+    assert "secret" not in failure_report_for(restored).model_dump_json()
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+@pytest.mark.parametrize("invalid", [{"boundary": None}, {"failure_kind": None}, {"failure_kind": "unknown_kind"}])
+def test_all_report_decode_paths_reject_invalid_canonical_fields(recovered, invalid):
+    failure = _model()
+    report = failure_report_for(failure).model_dump(mode="json")
+    if recovered:
+        report["failure_id"] = None
+    report["events"][failure.event_id].update(invalid)
+    with pytest.raises(ValidationError):
+        FailureReport.model_validate(report)
+    assert FailureHeader.decode({FailureHeader.NAME: json.dumps(report)}) == FailureReport(omitted=True)
+    row = {FailureReportRow.EVENTS: report["events"]}
+    if not recovered:
+        row[FailureReportRow.FAILURE_ID] = failure.event_id
+    assert FailureReportRow.report(row).omitted
+    with pytest.raises((ValidationError, ValueError)):
+        NgFailureEvent.from_record({"failure_id": failure.event_id, "failure_events": report["events"]})

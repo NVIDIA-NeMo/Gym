@@ -95,7 +95,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.judge import JUDGE_FAILURES, call_judge, is_judge_failure
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_subset_metrics
 from resources_servers.beam.prompts import (
@@ -249,7 +249,10 @@ async def _gather_or_cancel(coros: List[Awaitable[Any]]) -> List[Any]:
     try:
         async with asyncio.TaskGroup() as tg:
             tasks = [tg.create_task(c) for c in coros]
-    except* JudgeError as group:
+    except* JUDGE_FAILURES as group:
+        _, other = group.split(is_judge_failure)
+        if other is not None:
+            raise
         raise group.exceptions[0] from None
     return [t.result() for t in tasks]
 

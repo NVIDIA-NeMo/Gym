@@ -70,6 +70,14 @@ TRANSPORT_LOCAL_RESOURCE = "transport_local_resource"
 # Both are produced today by rollout collection: the agent answered and broke, versus
 # something in front of it answered and the rollout never ran.
 AGENT_RUN_ERROR = "agent_run_error"
+# An agent server route failed; its reply is its cause's reply.
+AGENT_ROUTE_FAILED = "agent_route_failed"
+# A harness supervisor reported that termination was not confirmed (a negative cleanup receipt).
+HARNESS_TERMINATION_UNCONFIRMED = "harness_termination_unconfirmed"
+# An environment server handled an episode failure that names no more specific kind.
+EPISODE_FAILED = "environment_episode_failed"
+# Collection could not dispatch an episode; routing metadata remains separate.
+COLLECTION_DISPATCH_FAILED = "collection_dispatch_failed"
 AGENT_REQUEST_FAILED = "agent_request_failed"
 AGENT_TIMEOUT = "agent_timeout"
 AGENT_COMMAND_NOT_ALLOWED = "agent_command_not_allowed"
@@ -143,6 +151,10 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         SHUTDOWN,
         PERSISTENCE_FAILED,
         COHORT_INCOMPLETE,
+        AGENT_ROUTE_FAILED,
+        HARNESS_TERMINATION_UNCONFIRMED,
+        EPISODE_FAILED,
+        COLLECTION_DISPATCH_FAILED,
     }
 )
 
@@ -179,4 +191,11 @@ def validate_failure_kind(name: str | None) -> str | None:
             "'<server>:<kind>'. Reported once per name.",
             name,
         )
+    return name
+
+
+def require_failure_kind(name: str | None) -> str:
+    """Validate a canonical event kind; legacy outcome envelopes keep their migration validator."""
+    if name is None or not (is_registered(name) or is_namespaced(name)):
+        raise ValueError(f"failure_kind {name!r} is not registered in nemo_gym/failure_kinds.py or namespaced")
     return name

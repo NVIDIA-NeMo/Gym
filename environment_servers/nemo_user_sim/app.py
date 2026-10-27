@@ -27,7 +27,6 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServerConfig,
     CleanupContext,
     CleanupHandle,
-    HandledEpisodeError,
     dependency_failure,
     is_retryable_dependency_error,
     is_retryable_dependency_status,
@@ -63,6 +62,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from nemo_gym.server_utils import format_exception_with_response_body, get_response_json, raise_for_status
 from nemo_gym.server_utils import request as http_request
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,
@@ -610,7 +610,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         error: Exception,
         *,
         terminal: bool | None = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         return dependency_failure(
             error,
             stage=stage,

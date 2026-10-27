@@ -90,7 +90,7 @@ from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
-from nemo_gym.typed_exceptions import AgentRouteFailure, find_boundary_failure
+from nemo_gym.typed_exceptions import agent_route_failure, find_boundary_failure
 
 
 LOG = logging.getLogger(__name__)
@@ -328,7 +328,7 @@ def _has_exception_handler(app: FastAPI, error: BaseException) -> bool:
 def _agent_boundary(
     endpoint: Callable[..., Awaitable[Any]], *, app: FastAPI, operation: str, stage: FailureStage | None = None
 ):
-    """``endpoint`` with its failures raised as one ``AgentRouteFailure`` caused by them.
+    """``endpoint`` with its failures raised as one agent route failure caused by them.
 
     The reply body and status stay those of the original error. ``HTTPException``, cancellation and any error
     ``app`` has a handler for (such as a checkpoint ``ControlError``, answered 409) pass through to that
@@ -344,11 +344,11 @@ def _agent_boundary(
             raise
         except Exception as error:
             reported = find_boundary_failure(error)
-            if (reported is not None and reported.event.boundary is FailureBoundary.AGENT) or _has_exception_handler(
+            if (reported is not None and reported.boundary is FailureBoundary.AGENT) or _has_exception_handler(
                 app, error
             ):
                 raise
-            raise AgentRouteFailure(error, operation=operation, stage=stage) from error
+            raise agent_route_failure(error, operation=operation, stage=stage) from error
 
     return bounded
 

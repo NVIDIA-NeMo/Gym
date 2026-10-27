@@ -415,21 +415,20 @@ class TestEpisode:
         assert "Could not set up sandbox for 'hello'" in failure.failure_reason
         assert response.failure_report is not None
         events = list(response.failure_report.events.values())
-        hops = [(event.exception_type or event.boundary).rsplit(".", 1)[-1] for event in events]
         outer = response.failure_report.events[response.failure_report.failure_id]
         assert outer.boundary == "environment"
-        assert outer.failure_kind is None and failure.failure_kind is None
-        if status in (401, 403):
-            assert events[-2].failure_kind == "provider_credentials_rejected"
-            assert hops[-2:] == ["SandboxCredentialsRejected", "SandboxApiException"]
-            assert events[-2].operation == "sandbox.setup"
-            assert events[-2].foreign_error.exception_type.endswith("SandboxApiException")
-            assert events[-2].foreign_error.message == "Create sandbox failed: Authentication credentials are invalid."
-            assert events[-2].foreign_error.http_status == status
-            assert "must not be serialized" not in failure.model_dump_json()
-            assert events[-1].http_status == status
-        else:
-            assert failure.failure_kind is None and "SandboxCredentialsRejected" not in hops
+        assert outer.failure_kind == "environment_episode_failed" and failure.failure_kind is None
+        assert outer.foreign_error.http_status == 503
+        setup = response.failure_report.events[outer.cause_id]
+        assert len(events) == 2 and setup.operation == "sandbox.setup"
+        assert setup.foreign_error.exception_type.endswith("SandboxApiException")
+        assert setup.foreign_error.message == "Create sandbox failed: Authentication credentials are invalid."
+        assert setup.foreign_error.http_status == status
+        assert "must not be serialized" not in response.failure_report.model_dump_json()
+        assert setup.cause_id is None
+        assert setup.failure_kind == (
+            "provider_credentials_rejected" if status in (401, 403) else "environment_episode_failed"
+        )
 
     async def test_shutdown_refuses_new_episodes(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)

@@ -44,7 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.judge import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from nemo_gym.openai_utils import (
     RATE_LIMIT_ERROR_CODES,
     RETRY_ERROR_CODES,
@@ -1585,7 +1585,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
             try:
                 judge_response, text = await self._call_judge(judge_create_params)
-            except JudgeError as e:
+            except JUDGE_FAILURES as e:
+                if not is_judge_failure(e):
+                    raise
                 last_error = str(e)
                 sleep_s = _judge_backoff_s(attempt)
                 print(

@@ -59,9 +59,9 @@ from nemo_gym.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureEvent, FailureReport, is_materialized_task_row
+from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureReport, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import CANCELLED, COLLECTION_DISPATCH_FAILED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -134,7 +134,7 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.typed_exceptions import BoundaryFailure, failure_report_for
+from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
 
 if TYPE_CHECKING:
@@ -618,14 +618,12 @@ class _CompletedRollout:
 
 def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
     """Collection's own failure for a failed `/run` dispatch, caused by the dispatch error, with the report the
-    reply forwarded. Its kind is the routing class; a remote failure the client rebuilt stays the cause."""
-    failure = BoundaryFailure(
-        FailureEvent(
-            boundary=FailureBoundary.COLLECTION,
-            failure_kind=failure_class,
-            failure_reason=f"Rollout dispatch failed: {type(exc).__name__}",
-            operation="collection.run",
-        )
+    reply forwarded. Routing classes remain outcome metadata; this diagnostic has a registered collection kind."""
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.COLLECTION,
+        failure_kind=COLLECTION_DISPATCH_FAILED,
+        failure_reason=f"Rollout dispatch failed: {type(exc).__name__}",
+        operation="collection.run",
     )
     failure.__cause__ = exc
     report = failure_report_for(failure)

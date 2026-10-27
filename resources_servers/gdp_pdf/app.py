@@ -66,7 +66,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.judge import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -324,9 +324,9 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                         json=params,
                         response_model=NeMoGymChatCompletion,
                     )
-                except JudgeError as e:
-                    # A transport/HTTP failure is not a parse failure -- don't
-                    # retry it here, let judge_failsafe route the row.
+                except JUDGE_FAILURES as e:
+                    if not is_judge_failure(e):
+                        raise
                     print(f"[gdp_pdf] judge HTTP error: {e}", flush=True)
                     raise
 

@@ -40,7 +40,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.judge import JUDGE_FAILURES, call_judge, is_judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -218,7 +218,9 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
                     json=params,
                     response_model=NeMoGymResponse,
                 )
-            except JudgeError as e:
+            except JUDGE_FAILURES as e:
+                if not is_judge_failure(e):
+                    raise
                 print(f"[labbench2_vlm] judge HTTP error: {e}", flush=True)
                 raise
 

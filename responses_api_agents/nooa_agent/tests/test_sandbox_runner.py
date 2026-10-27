@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
-from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import NOOARunFailure
 from responses_api_agents.nooa_agent.sandbox_entrypoint import (
@@ -340,7 +340,7 @@ async def test_definitive_negative_receipt_skips_capture_and_releases_for_resour
     )
     download = AsyncMock(wraps=s.download)
     s.download = download
-    with pytest.raises(HarnessTerminationError):
+    with pytest.raises(NgFailureEvent):
         await r.run(payload().request)
     await r.close()
     assert r.artifact is None

@@ -87,8 +87,8 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    HandledEpisodeError,
     dependency_failure,
+    handled_episode_failure,
 )
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
@@ -97,14 +97,15 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
 )
 from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, FailureBoundary, FailureEvent, TaskId
+from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, FailureBoundary, TaskId
+from nemo_gym.failure_kinds import EPISODE_FAILED
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.sandbox.providers.base import SandboxCredentialsRejected
+from nemo_gym.sandbox.providers.base import sandbox_credentials_rejected
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
@@ -122,6 +123,7 @@ from nemo_gym.tasks.harbor.registry import ImageConfigError
 from nemo_gym.tasks.harbor.task import HarborTurn
 from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 from nemo_gym.tool_access import MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
+from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
 
 
 LOGGER = logging.getLogger(__name__)
@@ -797,7 +799,7 @@ class HarborEnvironmentServer(
             f" (masked: {result.failure_kind})" if result.mask_sample else "",
         )
 
-    def _deadline_failure(self, task: HarborTask, budget: float, progress: "_TurnProgress") -> HandledEpisodeError:
+    def _deadline_failure(self, task: HarborTask, budget: float, progress: "_TurnProgress") -> NgFailureEvent:
         """The staged failure of an episode that ran past its task's time budget, with the turn's evidence so far."""
         if task.turns:
             budget_parts = (
@@ -1451,16 +1453,22 @@ class HarborEnvironmentServer(
             except Exception:
                 LOGGER.exception("Failed to stop Harbor sandbox after failed seed")
             LOGGER.exception("Sandbox setup failed for %s", task.task_id)
-            raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from (
-                SandboxCredentialsRejected.from_provider_error(
-                    exc,
-                    boundary=FailureBoundary.ENVIRONMENT,
-                    operation="sandbox.setup",
-                    stage="seed",
-                    sdk_message=_opensandbox_message(exc),
-                )
-                or exc
+            setup_failure = sandbox_credentials_rejected(
+                exc,
+                boundary=FailureBoundary.ENVIRONMENT,
+                operation="sandbox.setup",
+                stage="seed",
+                sdk_message=_opensandbox_message(exc),
+            ) or NgFailureEvent(
+                boundary=FailureBoundary.ENVIRONMENT,
+                failure_kind=EPISODE_FAILED,
+                failure_reason="Sandbox setup failed",
+                operation="sandbox.setup",
+                stage="seed",
+                foreign_error=sdk_error_details(exc, message=_opensandbox_message(exc)),
             )
+            setup_failure.__cause__ = exc
+            raise HTTPException(503, f"Could not set up sandbox for {task.task_id!r}: {exc}") from setup_failure
         self._sessions[episode_key] = session
         return session
 
@@ -1486,17 +1494,15 @@ class HarborEnvironmentServer(
         agent_observations: Any = None,
         trajectory: Any = None,
         failure_kind: str | None = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
-        return HandledEpisodeError(
-            FailureEvent(
-                boundary=FailureBoundary.ENVIRONMENT,
-                stage=stage,
-                operation="episode",
-                failure_reason=failure_reason[:2000],
-                failure_kind=failure_kind,
-            ),
+        return handled_episode_failure(
+            boundary=FailureBoundary.ENVIRONMENT,
+            stage=stage,
+            operation="episode",
+            failure_reason=failure_reason[:2000],
+            failure_kind=failure_kind,
             terminal=terminal,
             evidence={
                 "partial_response": partial_response,

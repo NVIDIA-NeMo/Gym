@@ -154,7 +154,11 @@ async def test_an_exhausted_model_call_reaches_the_row_through_agent_and_environ
     own = events[row["_ng_failure_id"]]
     assert own["boundary"] == "collection"
     agents = [e for e in events.values() if e.get("boundary") == "agent"]
-    assert len(agents) == 1 and agents[0]["operation"] == "agent.run" and agents[0].get("failure_kind") is None
+    assert (
+        len(agents) == 1
+        and agents[0]["operation"] == "agent.run"
+        and agents[0]["failure_kind"] == "agent_route_failed"
+    )
     for failure in observed:
         assert failure.event.event_id in events  # The recorded model attempts keep their ids across every hop.
     chain, current = [], row["_ng_failure_id"]

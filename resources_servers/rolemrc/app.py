@@ -70,7 +70,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.judge import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -836,7 +836,9 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
                     json=self._judge_payload(prompt),
                     response_model=response_model,
                 )
-        except JudgeError as exc:  # retry-by-aspect is intentional
+        except JUDGE_FAILURES as exc:  # retry-by-aspect is intentional
+            if not is_judge_failure(exc):
+                raise
             LOG.warning("RoleMRC judge[%s] call failed: %s", aspect_name, exc, exc_info=True)
             return None, str(exc)
         if isinstance(judge_response, NeMoGymChatCompletion):

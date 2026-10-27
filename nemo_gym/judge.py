@@ -40,19 +40,18 @@ import functools
 import re
 from typing import Any, Awaitable, Callable, Type, TypeVar
 
-from aiohttp import ClientConnectorError, ClientResponseError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from nemo_gym.episode_types import FailureBoundary, FailureEvent, SdkErrorDetails
+from nemo_gym.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.exception_inspection import bounded_text
 from nemo_gym.failure_kinds import (
     JUDGE_FAILED,
 )
 from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
-from nemo_gym.typed_exceptions import BoundaryFailure, sdk_error_details
+from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
@@ -71,47 +70,53 @@ class JudgeError(Exception):
     """A judge call failed; judge_failsafe routes the row to the failures sidecar."""
 
 
-class JudgeCallFailed(JudgeError, BoundaryFailure):
-    """A judge call failed: the resources server boundary's ``judge_failed``.
-
-    It stays a ``JudgeError`` for existing handlers. What was observed (an HTTP 429 or 401, a refused
-    connection, a timeout) stays on the explicit cause, with its own type and status.
-    """
-
-    def __init__(self, message: str, *, operation: str, sdk_error: SdkErrorDetails | None = None) -> None:
-        BoundaryFailure.__init__(
-            self,
-            FailureEvent(
-                boundary=FailureBoundary.RESOURCES_SERVER,
-                failure_kind=JUDGE_FAILED,
-                failure_reason=bounded_text(message, 2000),
-                operation=operation,
-                stage="verification",
-                foreign_error=sdk_error,
-            ),
-            message,
-        )
+def judge_call_failed(message: str, *, operation: str, sdk_error: SdkErrorDetails | None = None) -> NgFailureEvent:
+    """The resources server boundary's ``judge_failed``; what was observed stays on the explicit cause."""
+    return NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind=JUDGE_FAILED,
+        failure_reason=bounded_text(message, 2000),
+        operation=operation,
+        stage="verification",
+        foreign_error=sdk_error,
+        message_args=(message,),
+    )
 
 
-def _judge_error(error: Exception) -> JudgeError:
-    """The JudgeError for a failed judge call; the caller raises it ``from error``.
+def is_judge_failure(error: BaseException) -> bool:
+    """Whether ``error`` is a judge failure: the ``JudgeError`` a parser raises, or a ``judge_failed`` event."""
+    return isinstance(error, JudgeError) or (
+        isinstance(error, NgFailureEvent)
+        and error.boundary == FailureBoundary.RESOURCES_SERVER
+        and error.failure_kind == JUDGE_FAILED
+    )
+
+
+JUDGE_FAILURES = (JudgeError, NgFailureEvent)
+"""Types to catch around a judge call; narrow with ``is_judge_failure`` where other Gym failures can occur."""
+
+
+def _judge_error(error: Exception) -> JudgeError | NgFailureEvent:
+    """The judge failure for a failed judge call; the caller raises it ``from error``.
 
     A call that failed over HTTP, could not connect or timed out is a typed ``judge_failed``. The kind is not
     derived from the error's status: a policy that needs the status reads it on the cause.
     """
     message = f"{type(error).__name__}: {error}"
-    if isinstance(error, (ClientResponseError, ClientConnectorError, TimeoutError)):
-        return JudgeCallFailed(message, operation="judge.request", sdk_error=sdk_error_details(error))
-    return JudgeError(message)
+    return judge_call_failed(
+        message,
+        operation="judge.request",
+        sdk_error=None if isinstance(error, NgFailureEvent) else sdk_error_details(error),
+    )
 
 
 async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
     """Await a judge call; re-raise any exception as JudgeError (recorded verbatim)."""
     try:
         return await coro
-    except JudgeError:
-        raise
     except Exception as e:
+        if is_judge_failure(e):
+            raise
         raise _judge_error(e) from e
 
 
@@ -150,7 +155,9 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
     async def wrapper(*args, **kwargs):
         try:
             return await verify_fn(*args, **kwargs)
-        except JudgeError as e:
+        except JUDGE_FAILURES as e:
+            if not is_judge_failure(e):
+                raise
             body = kwargs.get("body") or next(
                 (a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")),
                 None,
@@ -176,8 +183,8 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             }
             # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
             failure = e
-            if not isinstance(e, JudgeCallFailed):
-                failure = JudgeCallFailed(error, operation="judge.verify")
+            if not (isinstance(e, NgFailureEvent) and e.failure_kind == JUDGE_FAILED):
+                failure = judge_call_failed(error, operation="judge.verify")
                 failure.__cause__ = e
             data |= FailureReportRow.fields(report_for_current_request(failure))
             return JSONResponse(content=jsonable_encoder(data))

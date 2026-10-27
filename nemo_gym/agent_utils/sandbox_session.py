@@ -16,8 +16,8 @@ from nemo_gym.agent_utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
-    HarnessTerminationError,
     check_stdlib_runner,
+    is_harness_termination_failure,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
@@ -26,6 +26,7 @@ from nemo_gym.agent_utils.supervisor_client import (
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 LOG = logging.getLogger(__name__)
@@ -100,7 +101,7 @@ class SandboxSession[Artifacts]:
     cleanup: CleanupReceipt | None = field(default=None, init=False)
     artifacts: Artifacts | None = field(default=None, init=False)
     capture_error: Exception | None = field(default=None, init=False)
-    termination_error: HarnessTerminationError | None = field(default=None, init=False)
+    termination_error: NgFailureEvent | None = field(default=None, init=False)
     sandbox_stopped: bool = field(default=False, init=False)
     _session_root: str | None = field(default=None, init=False)
     _stage_task: asyncio.Future[SandboxCommand] | None = field(default=None, init=False)
@@ -263,11 +264,12 @@ class SandboxSession[Artifacts]:
                     timeout=timeout,
                     harness=self.harness,
                 )
-        except HarnessTerminationError as error:
-            self.termination_error = error
-            raise
         except TimeoutError as error:
             raise RuntimeError(f"{self.harness} launch outcome is unknown; termination deadline exceeded") from error
+        except NgFailureEvent as error:
+            if is_harness_termination_failure(error):
+                self.termination_error = error
+            raise
 
     async def _finish(self, *, timeout: float) -> None:
         """Join process finalization without releasing the sandbox connection."""
@@ -320,7 +322,7 @@ class SandboxSession[Artifacts]:
         try:
             await self._finish(timeout=timeout)
         except Exception as error:
-            if not self.owns_sandbox and not isinstance(error, HarnessTerminationError):
+            if not self.owns_sandbox and not is_harness_termination_failure(error):
                 raise
             if self.owns_sandbox:
                 LOG.exception("%s session finalization failed; stopping owned sandbox", self.harness)

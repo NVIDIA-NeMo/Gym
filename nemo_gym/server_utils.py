@@ -121,7 +121,7 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
-from nemo_gym.typed_exceptions import AgentRouteFailure, BoundaryFailure, rebuild_failure
+from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure, route_reply_error
 
 
 try:
@@ -731,7 +731,7 @@ def format_exception_with_response_body(error: BaseException) -> str:
     such as an agent's ``AgentSeedRejectedError`` detail, is in the body that ``raise_for_status`` keeps on
     ``response_content``.
     """
-    if isinstance(error, BoundaryFailure) and error.http_error is not None:
+    if isinstance(error, NgFailureEvent) and error.http_error is not None:
         error = error.http_error
     content = getattr(error, "response_content", None) if isinstance(error, ClientResponseError) else None
     if not content:
@@ -896,7 +896,7 @@ Response content: {content}""")
 
 
 async def raise_boundary_failure(response: ClientResponse, content: bytes | None = None) -> None:
-    """Raise a valid remote ``BoundaryFailure`` with its original IDs and explicit causes.
+    """Raise a valid remote ``NgFailureEvent`` with its original IDs and explicit causes.
 
     ``error.http_error`` retains this hop's status, body and request information. Without a final remote
     failure, raise the original ``ClientResponseError``. Call ``raise_for_status`` where callers require
@@ -906,7 +906,7 @@ async def raise_boundary_failure(response: ClientResponse, content: bytes | None
         await raise_for_status(response, content)
     except ClientResponseError as http_error:
         remote = http_error.__cause__
-        if not isinstance(remote, BoundaryFailure):
+        if not isinstance(remote, NgFailureEvent):
             raise
         http_error.__cause__ = None
         remote.http_error = http_error
@@ -1874,7 +1874,7 @@ class SimpleServer(BaseServer):
                 except BaseException as raised:
                     error = raised
                     # An agent route failure answers with its cause's body and status.
-                    reply_error = raised.reply_error if isinstance(raised, AgentRouteFailure) else raised
+                    reply_error = route_reply_error(raised)
                     response = SimpleServer._failure_reply(self, reply_error)
                 # Success or failure, the reply forwards its own failure and those observed while serving it.
                 report = failure_log.reply_report(error)
@@ -1887,7 +1887,7 @@ class SimpleServer(BaseServer):
 
     def _failure_reply(self, e: BaseException) -> JSONResponse:  # pragma: no cover
         """The reply for an exception the route did not handle."""
-        if isinstance(e, BoundaryFailure) and e.http_error is not None:
+        if isinstance(e, NgFailureEvent) and e.http_error is not None:
             e = e.http_error
         if isinstance(e, ClientResponseError):
             assert hasattr(e, "response_content"), (

@@ -20,7 +20,7 @@ from pydantic import (
 )
 from typing_extensions import Self
 
-from nemo_gym.failure_kinds import FailureStage, validate_failure_kind
+from nemo_gym.failure_kinds import FailureStage, require_failure_kind, validate_failure_kind
 
 
 _CAPTURE_KEY_ATTEMPT = re.compile(r"-a([1-9][0-9]*)$")
@@ -115,10 +115,10 @@ class SdkErrorDetails(BaseModel):
 class FailureEvent(BaseModel):
     """One observed failure: who observed it, what failed, and which failure caused it.
 
-    A ``BoundaryFailure`` exception owns one of these from the moment it is created, so ``event_id`` is fixed
-    at the origin and stays the same through every reply that forwards it. ``cause_id`` names the explicit
-    cause (``raise ... from``) in the same map; it is set when a chain is serialized. An explicit cause that is
-    not a ``BoundaryFailure`` is recorded with no ``boundary`` and only its type and status, never its text.
+    This is the validated wire projection of a ``NgFailureEvent``, whose fields and origin identity live on
+    the exception itself. ``cause_id`` names another Gym failure in the same map. Foreign SDK facts live in
+    ``foreign_error``; they are not boundary-less Gym events. Canonical projections validate kind and boundary
+    on both failed and recovered reports, independently of the legacy outcome envelope.
 
     Readers count each failure once by ``event_id``. Outcome policy stays with ``EpisodeFailure.terminal`` and
     the collector's existing rules.
@@ -127,10 +127,10 @@ class FailureEvent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     event_id: str = Field(default_factory=lambda: uuid.uuid4().hex, min_length=1, max_length=128)
-    boundary: FailureBoundary | None = None
+    boundary: FailureBoundary
     exception_type: str | None = Field(default=None, max_length=256)
     failure_reason: str = Field(default="", max_length=2000)
-    failure_kind: str | None = None
+    failure_kind: str
     operation: str | None = Field(default=None, max_length=256)
     operation_id: str | None = Field(default=None, max_length=128)
     attempt_id: str | None = Field(default=None, max_length=128)
@@ -141,8 +141,8 @@ class FailureEvent(BaseModel):
 
     @field_validator("failure_kind")
     @classmethod
-    def _validate_failure_kind(cls, value: str | None) -> str | None:
-        return validate_failure_kind(value)
+    def _validate_failure_kind(cls, value: str) -> str:
+        return require_failure_kind(value)
 
     @model_serializer(mode="wrap")
     def _serialize_event(self, handler: SerializerFunctionWrapHandler):
@@ -179,6 +179,17 @@ class FailureReport(BaseModel):
     failure_id: str | None = Field(default=None, max_length=128)
     events: dict[str, FailureEvent] = Field(default_factory=dict)
     omitted: bool = False
+
+    @field_validator("events", mode="before")
+    @classmethod
+    def _restore_event_ids(cls, value):
+        # Map keys are the origin identities; decoding must never mint replacement ids.
+        if isinstance(value, Mapping):
+            return {
+                key: ({"event_id": key, **event} if isinstance(event, Mapping) else event)
+                for key, event in value.items()
+            }
+        return value
 
     @field_validator("events")
     @classmethod

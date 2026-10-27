@@ -5,10 +5,10 @@ from unittest.mock import MagicMock
 
 from aiohttp import ClientResponseError
 
-from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
-from nemo_gym.episode_types import FailureBoundary, FailureEvent
+from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
+from nemo_gym.episode_types import FailureBoundary
 from nemo_gym.failure_transport import FailureHeader
-from nemo_gym.typed_exceptions import AgentRouteFailure, BoundaryFailure, failure_report_for, rebuild_failure
+from nemo_gym.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for, rebuild_failure
 from tests.unit_tests import test_session_routing
 from tests.unit_tests.test_agent_seed_failure_boundary import _served
 
@@ -38,13 +38,12 @@ def _agent_events(reply):
 
 
 def test_exhausted_model_calls_keep_the_inner_reply_body_and_add_one_agent_failure(monkeypatch) -> None:
-    model = BoundaryFailure(
-        FailureEvent(
-            boundary=FailureBoundary.MODEL,
-            failure_reason="model unavailable",
-            operation="model.responses",
-            http_status=503,
-        )
+    model = NgFailureEvent(
+        failure_kind="test:failure",
+        boundary=FailureBoundary.MODEL,
+        failure_reason="model unavailable",
+        operation="model.responses",
+        http_status=503,
     )
     worker, reply = _post_responses(monkeypatch, _inner_reply_error(model))
 
@@ -53,13 +52,13 @@ def test_exhausted_model_calls_keep_the_inner_reply_body_and_add_one_agent_failu
     assert reply.json() == f"Hit an exception in {key} calling an inner server: " + 'b\'{"detail":"inner failed"}\''
     report, agents = _agent_events(reply)
     assert len(agents) == 1 and agents[0].event_id == report.failure_id
-    assert (agents[0].operation, agents[0].failure_kind) == ("agent.responses", None)
+    assert (agents[0].operation, agents[0].failure_kind) == ("agent.responses", "agent_route_failed")
     assert model.event.event_id in report.events
 
 
 def test_a_run_that_called_this_agents_responses_is_not_wrapped_twice(monkeypatch) -> None:
     cause = RuntimeError("x")
-    inner_agent = AgentRouteFailure(cause, operation="agent.responses")
+    inner_agent = agent_route_failure(cause, operation="agent.responses")
     inner_agent.__cause__ = cause
     _, reply = _post_responses(monkeypatch, _inner_reply_error(inner_agent))
 
@@ -68,7 +67,7 @@ def test_a_run_that_called_this_agents_responses_is_not_wrapped_twice(monkeypatc
 
 
 def test_a_generic_error_keeps_its_repr_body_and_a_harness_cause(monkeypatch) -> None:
-    termination = HarnessTerminationError(harness="codex", receipt={"cleanup_confirmed": False, "error": "stuck"})
+    termination = harness_termination_failure(harness="codex", receipt={"cleanup_confirmed": False, "error": "stuck"})
     _, reply = _post_responses(monkeypatch, termination)
 
     assert reply.status_code == 500 and reply.json() == repr(termination)

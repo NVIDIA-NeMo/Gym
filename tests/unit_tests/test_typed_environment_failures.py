@@ -260,19 +260,17 @@ async def test_an_exhausted_model_call_is_the_environments_own_agent_stage_failu
 def test_an_unhandled_environment_error_owns_its_report_without_borrowing_the_causes_kind(typed_cause: bool) -> None:
     from fastapi.testclient import TestClient
 
-    from nemo_gym.episode_types import EpisodeFailure, FailureBoundary, FailureEvent
+    from nemo_gym.episode_types import EpisodeFailure, FailureBoundary
     from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
-    from nemo_gym.typed_exceptions import BoundaryFailure
+    from nemo_gym.typed_exceptions import NgFailureEvent
     from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
 
     provider = RuntimeError("unexpected dependency failure")
-    model = BoundaryFailure(
-        FailureEvent(
-            boundary=FailureBoundary.MODEL,
-            failure_kind=MODEL_REQUEST_ERROR,
-            failure_reason="model request failed",
-            http_status=503,
-        )
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason="model request failed",
+        http_status=503,
     )
 
     class FailedEnvironment(_EnvironmentServer):
@@ -292,9 +290,9 @@ def test_an_unhandled_environment_error_owns_its_report_without_borrowing_the_ca
     report = FailureReport.model_validate(reply.json()["failure_report"])
     assert failure.terminal is True and failure.failure_kind is None
     own = report.events[report.failure_id]
-    assert own.boundary is FailureBoundary.ENVIRONMENT and own.failure_kind is None
+    assert own.boundary is FailureBoundary.ENVIRONMENT and own.failure_kind == "environment_episode_failed"
     assert own.failure_reason == failure.failure_reason
-    cause = report.events[own.cause_id]
+    cause = report.events[own.cause_id] if typed_cause else own
     if typed_cause:
         assert (cause.event_id, cause.boundary, cause.failure_kind, cause.http_status) == (
             model.event.event_id,
@@ -302,5 +300,5 @@ def test_an_unhandled_environment_error_owns_its_report_without_borrowing_the_ca
             MODEL_REQUEST_ERROR,
             503,
         )
-        cause = report.events[cause.cause_id]
-    assert cause.exception_type == "RuntimeError" and cause.boundary is None and cause.failure_reason == ""
+    assert cause.cause_id is None
+    assert cause.foreign_error.exception_type == "RuntimeError" and cause.foreign_error.message == ""

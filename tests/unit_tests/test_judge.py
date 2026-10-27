@@ -19,6 +19,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, normalize_math_judge_verdict, reraise_judge_errors
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 @pytest.mark.parametrize(
@@ -71,12 +72,12 @@ class TestCallJudge:
     async def test_http_error_reported_as_http_not_validation_error(self) -> None:
         # A 401 body is not a valid _Verdict. Without the status check the failure
         # would surface as an opaque pydantic ValidationError on the error payload.
-        with pytest.raises(JudgeError, match="HTTP 401"):
+        with pytest.raises(NgFailureEvent, match="HTTP 401"):
             await _call(_client(status=401, body=b'{"error": {"code": "401"}}'))
 
     @pytest.mark.asyncio
     async def test_transport_error_becomes_judge_error(self) -> None:
-        with pytest.raises(JudgeError, match="judge unreachable"):
+        with pytest.raises(NgFailureEvent, match="judge unreachable"):
             await _call(MagicMock(post=AsyncMock(side_effect=ConnectionError("judge unreachable"))))
 
 
@@ -93,7 +94,7 @@ class TestRunJudge:
         async def boom():
             raise RuntimeError("judge timeout")
 
-        with pytest.raises(JudgeError, match="RuntimeError: judge timeout"):
+        with pytest.raises(NgFailureEvent, match="RuntimeError: judge timeout"):
             await reraise_judge_errors(boom())
 
 
@@ -153,17 +154,15 @@ class TestJudgeFailsafe:
 
 
 async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
-    from nemo_gym.episode_types import FailureBoundary, FailureEvent
-    from nemo_gym.typed_exceptions import BoundaryFailure, failure_report_for
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
-    original = BoundaryFailure(
-        FailureEvent(
-            boundary=FailureBoundary.MODEL,
-            failure_kind="model_request_error",
-            failure_reason="provider refused",
-            operation="model.request",
-            http_status=401,
-        )
+    original = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="provider refused",
+        operation="model.request",
+        http_status=401,
     )
     original_events = failure_report_for(original).events
     original_id = next(iter(original_events))
@@ -190,26 +189,24 @@ async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
 
 
 async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary():
-    from nemo_gym.episode_types import FailureBoundary, FailureEvent
-    from nemo_gym.typed_exceptions import BoundaryFailure, failure_report_for
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
-    class SpecificJudgeError(JudgeError, BoundaryFailure):
-        pass
-
-    original = SpecificJudgeError(
-        FailureEvent(
-            boundary=FailureBoundary.RESOURCES_SERVER,
-            failure_kind="model_request_error",
-            failure_reason="provider refused",
-            operation="provider.request",
-        )
+    original = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="model_request_error",
+        failure_reason="provider refused",
+        operation="provider.request",
     )
     before = failure_report_for(original).events
     original_id = next(iter(before))
 
     @judge_failsafe
     async def verify(body):
-        raise original
+        async def failed_call():
+            raise original
+
+        return await reraise_judge_errors(failed_call())
 
     data = orjson.loads((await verify(_Req())).body)
     assert data["failure_kind"] == "judge_failed"
@@ -218,3 +215,50 @@ async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary(
     assert boundary["failure_kind"] == "judge_failed"
     assert boundary["cause_id"] == original_id
     assert events[original_id] == before[original_id].model_dump(mode="json")
+
+
+def test_judge_selector_does_not_swallow_other_canonical_failures():
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.judge import is_judge_failure
+
+    for boundary, kind in [
+        (FailureBoundary.MODEL, "judge_failed"),
+        (FailureBoundary.RESOURCES_SERVER, "model_request_error"),
+    ]:
+        event = NgFailureEvent(boundary=boundary, failure_kind=kind, failure_reason="not a judge call")
+        assert not is_judge_failure(event)
+
+
+async def test_beam_task_group_keeps_unrelated_canonical_failures():
+    import ast
+    import asyncio
+    from pathlib import Path
+    from typing import Any, Awaitable, List
+
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.judge import JUDGE_FAILURES, is_judge_failure
+
+    # Load the actual helper without importing BEAM's optional benchmark dependencies.
+    source = Path("resources_servers/beam/app.py").read_text()
+    node = next(
+        n for n in ast.parse(source).body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_gather_or_cancel"
+    )
+    namespace = dict(
+        asyncio=asyncio,
+        Any=Any,
+        Awaitable=Awaitable,
+        List=List,
+        JUDGE_FAILURES=JUDGE_FAILURES,
+        is_judge_failure=is_judge_failure,
+    )
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "resources_servers/beam/app.py", "exec"), namespace)
+    unrelated = NgFailureEvent(
+        boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model failed"
+    )
+
+    async def fail(error):
+        raise error
+
+    with pytest.raises(ExceptionGroup) as caught:
+        await namespace["_gather_or_cancel"]([fail(unrelated)])
+    assert caught.value.exceptions == (unrelated,)

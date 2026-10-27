@@ -6,23 +6,26 @@ from contextlib import contextmanager
 
 import pytest
 
-from nemo_gym.typed_exceptions import AgentRouteFailure
+from nemo_gym.failure_kinds import AGENT_ROUTE_FAILED
+from nemo_gym.typed_exceptions import NgFailureEvent, route_reply_error
 
 
 @contextmanager
 def raises_agent_failure(
     expected_exception: type[BaseException], *, match: str | None = None
 ) -> Iterator[pytest.ExceptionInfo]:
-    """Require an ``AgentRouteFailure`` from an agent route, then assert on its cause as ``pytest.raises`` does."""
+    """Require an ``agent route failure`` from an agent route, then assert on its cause as ``pytest.raises`` does."""
     with pytest.raises(expected_exception, match=match) as original:
         try:
             yield original
-        except AgentRouteFailure as failure:
+        except NgFailureEvent as failure:
+            if failure.failure_kind != AGENT_ROUTE_FAILED:
+                pytest.fail(f"Expected an agent route failure, got {failure.failure_kind}")
             cause = failure.__cause__
             assert cause is not None
-            assert failure.reply_error is cause
+            assert route_reply_error(failure) is cause
             raise cause
         except Exception as error:
-            pytest.fail(f"Expected AgentRouteFailure, got {type(error).__name__}")
+            pytest.fail(f"Expected agent route failure, got {type(error).__name__}")
         else:
-            pytest.fail("Agent HTTP boundary did not raise AgentRouteFailure")
+            pytest.fail("Agent HTTP boundary did not raise agent route failure")

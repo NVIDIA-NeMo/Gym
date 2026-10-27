@@ -17,7 +17,6 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
-    HandledEpisodeError,
     dependency_failure,
     is_retryable_dependency_error,
     is_retryable_dependency_status,
@@ -32,6 +31,7 @@ from nemo_gym.episode_types import (
     TaskId,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 class _TaskInput(BaseModel):
@@ -575,22 +575,22 @@ def test_dependency_failure_keeps_the_dependencys_reason_and_classifies_it() -> 
 
     failure = dependency_failure(refusal, stage="agent", partial_response="partial")
 
-    assert isinstance(failure, HandledEpisodeError)
+    assert isinstance(failure, NgFailureEvent)
     assert failure.event.stage == "agent"
-    assert failure.terminal is True
+    assert failure.episode_terminal is True
     assert failure.event.failure_reason.startswith("422, message='Unprocessable Content'")
     assert "agent does not support sandbox access" in failure.event.failure_reason
-    assert failure.evidence["partial_response"] == "partial"
+    assert failure.episode_evidence["partial_response"] == "partial"
 
 
 def test_dependency_failure_names_the_error_type_bounds_the_reason_and_honors_terminal() -> None:
     failure = dependency_failure(TimeoutError("x" * 3000), stage="cleanup", name_error_type=True)
-    assert failure.terminal is False
+    assert failure.episode_terminal is False
     assert failure.event.failure_reason.startswith("TimeoutError: xxx")
     assert len(failure.event.failure_reason) == 2000
 
     forced = dependency_failure(TimeoutError("timed out"), stage="cleanup", terminal=True)
-    assert forced.terminal is True
+    assert forced.episode_terminal is True
     assert forced.event.failure_reason == "timed out"
 
 
