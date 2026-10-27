@@ -100,6 +100,15 @@ async def seed_mcp_servers(
     return entries
 
 
+def verification_failure_fields() -> dict[str, Any]:
+    """Forward this request's bounded failure observations to the verifier, without selecting a failure."""
+    from nemo_gym.failure_transport import RequestFailureLog
+
+    log = RequestFailureLog.current()
+    report = log.report if log is not None else None
+    return {"failure_report": report.model_dump(mode="json")} if report is not None else {"failure_report": None}
+
+
 async def verify_agent_response(
     client: ServerClient,
     server: ResourcesServerRef,
@@ -115,7 +124,9 @@ async def verify_agent_response(
         server_name=server.name,
         url_path="/verify",
         cookies=cookies,
-        json=body.model_dump(mode="json") | {"response": grading_response.model_dump(mode="json")},
+        json=body.model_dump(mode="json")
+        | {"response": grading_response.model_dump(mode="json")}
+        | verification_failure_fields(),
     )
     await raise_for_status(verified)
     result = await get_response_json(verified)
