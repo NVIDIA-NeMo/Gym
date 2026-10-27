@@ -1309,6 +1309,80 @@ class TestDiscriminatedResponseItems:
 
 
 class TestNeMoGymChatCompletionSchemas:
+    def test_copilot_replays_chat_response_with_null_annotations(self) -> None:
+        message = openai_utils_module.NeMoGymChatCompletionMessage(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"pwd"}'}}
+            ],
+        ).model_dump(mode="json")
+        assert message["annotations"] is None
+        original = deepcopy(message)
+        params = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[message, {"role": "tool", "tool_call_id": "call_1", "content": "/app"}]
+        )
+        replayed = params.model_dump(exclude_unset=True)["messages"]
+        assert replayed[0] == {key: value for key, value in original.items() if key != "annotations"}
+        assert replayed[1] == {"role": "tool", "tool_call_id": "call_1", "content": "/app"}
+        assert message == original
+
+    def test_copilot_replays_chat_response_with_empty_annotations(self) -> None:
+        # A provider may return "annotations": []; the Model Server passes the message through unchanged.
+        message = openai_utils_module.NeMoGymChatCompletionMessage(
+            role="assistant", content="done", annotations=[]
+        ).model_dump(mode="json")
+        assert message["annotations"] == []
+        params = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[{"role": "user", "content": "x"}, message])
+        assert "annotations" not in params.model_dump(exclude_unset=True)["messages"][1]
+
+    @pytest.mark.parametrize(
+        "content",
+        ["Build finished\n<shellId: 30 completed with exit code 0>", [{"type": "text", "text": "Build finished"}]],
+    )
+    def test_copilot_background_tool_message_source_is_not_forwarded(self, content: object) -> None:
+        tool_result = {
+            "role": "tool",
+            "tool_call_id": "background-call",
+            "content": content,
+            "__copilotMessageSource": {"kind": "tool", "name": "read_bash", "summary": "Reading command output"},
+        }
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "background-call",
+                            "type": "function",
+                            "function": {"name": "read_bash", "arguments": '{"shellId":"30","delay":0}'},
+                        }
+                    ],
+                },
+                tool_result,
+            ]
+        }
+        original = deepcopy(payload)
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        expected = deepcopy(original)
+        del expected["messages"][1]["__copilotMessageSource"]
+        assert params.model_dump(exclude_unset=True) == expected
+        assert payload == original
+
+    @pytest.mark.parametrize("extra", ["__copilotMessageSourceUnknown", "other_client_metadata"])
+    def test_copilot_background_tool_other_metadata_remains_strict(self, extra: str) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {"messages": [{"role": "tool", "tool_call_id": "call", "content": "result", extra: {"kind": "tool"}}]}
+            )
+
+    def test_nonempty_response_annotations_are_not_silently_discarded(self) -> None:
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "assistant", "content": "answer", "annotations": [{"type": "url_citation"}]}]
+            )
+
     def test_assistant_reasoning_content_round_trips_between_tool_calls(self) -> None:
         payload = {
             "messages": [
