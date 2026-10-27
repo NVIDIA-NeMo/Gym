@@ -107,6 +107,21 @@ rows and scenarios as columns. Process return codes and timeouts stay in
 sidecar without a normal rollout fails applicable artifact checks. Missing check
 results also display ✗; execution details retain any runner/checker error.
 
+## Run the controlled P0 suite
+
+OpenClaw is included in the default harness selection. To run only OpenClaw,
+install Gym and the adapter's Python requirements on Linux, then run:
+
+```bash
+python scripts/run_harness_conformance.py --harness openclaw --output results/openclaw-conformance
+```
+
+Session setup installs pinned OpenClaw 2026.6.11 and Node 22.19.0 inside the local
+sandbox. The seven scenarios cover successful and failed tools, omitted usage,
+429/500 retries, a terminal model error, and verifier failure. They use controlled
+local model endpoints and require no model credentials. This exercises the sandbox
+session path; it does not qualify legacy local execution or newer OpenClaw versions.
+
 ## Compare harnesses
 
 Use the same task and capture settings when comparing harnesses:

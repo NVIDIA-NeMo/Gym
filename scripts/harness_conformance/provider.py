@@ -25,7 +25,7 @@ from nemo_gym.responses_streaming import (
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec")
+SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "exec")
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
@@ -84,7 +84,7 @@ class Probe:
                     args["description"] = "Run conformance shell check"
                 self.tool_calls.append(
                     {
-                        "id": f"call_{uuid4().hex}",
+                        "id": f"call{uuid4().hex}",
                         "name": name,
                         "arguments": args,
                         "token": token,
@@ -184,7 +184,7 @@ class Probe:
                     ]
                 elif (finish := self._finish(body)) is not None:
                     name, arguments, namespaces = finish
-                    self.finish_call = {"id": f"call_{uuid4().hex}", "name": name, "arguments": arguments}
+                    self.finish_call = {"id": f"call{uuid4().hex}", "name": name, "arguments": arguments}
                     output = [
                         {
                             "type": "function_call",

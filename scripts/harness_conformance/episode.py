@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import math
 import os
 import shutil
 import socket
@@ -93,6 +94,10 @@ def _config(
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
     if harness in ("opencode", "pi"):
         agent["timeout"] = timeout
+        if not use_agent_sessions:
+            agent["workspace_root"] = str(directory / "workspace")
+    if harness == "openclaw":
+        agent["timeout"] = math.ceil(timeout)
         if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
     if harness == "opencode":
