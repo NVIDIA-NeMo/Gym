@@ -5,8 +5,14 @@ position: 5
 ---
 
 Model-call capture records requests, responses, token usage, tool calls, reasoning, latency, and
-errors at a Gym model server. Capture does not modify model responses, agent responses,
-or rollout rewards.
+errors at a Gym model server. Capture does not modify model responses or rollout rewards.
+
+The one exception is token usage in agent responses. When capture is enabled, the Environment Server
+(session-based pairings) or the Hermes agent (legacy `/run`) replaces the agent's `usage` with the sum of
+the captured model calls, and reports `null` when that capture is missing or incomplete. Both must share
+the Model Server's absolute `model_call_capture_dir`. See the
+[single-agent-turn Environment Server](https://github.com/NVIDIA-NeMo/Gym/blob/main/environment_servers/single_agent_turn/README.md)
+for the accounting rules.
 
 `gym eval submit` enables capture by default under each benchmark's job directory at `model-calls/`.
 Set `driver.benchmarks.<name>.run.observability_enabled: false` to opt out, or set

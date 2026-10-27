@@ -258,6 +258,156 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert resources_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)
 
 
+@pytest.mark.parametrize("missing_usage", [False, True])
+async def test_shared_model_usage_covers_agent_lifecycle_but_excludes_resources_and_judge(
+    tmp_path, monkeypatch, missing_usage
+) -> None:
+    from nemo_gym.base_responses_api_model import CaptureStore
+
+    server, client = _environment_server()
+    client.global_config_dict.observability_enabled = True
+    client.global_config_dict.model_call_capture_dir = str(tmp_path)
+    for index in (2, 4):
+        payload = orjson.loads(client.responses[index].body)
+        response_payload = payload if index == 2 else payload["response"]
+        response_payload["usage"] = {
+            "input_tokens": 999,
+            "output_tokens": 1,
+            "total_tokens": 1000,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0},
+        }
+        client.responses[index] = _Response(payload)
+    store = CaptureStore(tmp_path)
+    original_post = _Client.post
+
+    async def post(self, server_name, url_path, **kwargs):
+        response = await original_post(self, server_name, url_path, **kwargs)
+        # Capture from setup, root, delegate/compaction and close, regardless of
+        # harness transcript format or whether it retained a model response ID.
+        prompt = {
+            "/seed_session": 1000,
+            "/v1/agent_sessions": 10,
+            "/ng-rollout/rollout-a2/v1/responses": 20,
+            "/v1/agent_sessions/close": 30,
+            "/verify": 2000,
+        }.get(url_path)
+        if prompt is not None:
+            usage = {"prompt_tokens": prompt, "completion_tokens": 5}
+            if missing_usage and url_path == "/v1/agent_sessions/close":
+                usage = None
+            store.record("rollout-a2", {"response": {"usage": usage}})
+        return response
+
+    monkeypatch.setattr(_Client, "post", post)
+    result = await server.run_request(_request())
+    assert result.result.reward == 1.0
+    usage = result.result.response.usage
+    sent_usage = next(kwargs["json"]["response"]["usage"] for _, path, kwargs in client.calls if path == "/verify")
+    if missing_usage:
+        assert usage is None
+        assert sent_usage is None
+    else:
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (60, 15, 75)
+        assert usage.input_tokens_details.cached_tokens is None
+        assert usage.output_tokens_details.reasoning_tokens is None
+        assert sent_usage == usage.model_dump()
+
+
+def _native_usage(total: int = 7) -> dict:
+    return {
+        "input_tokens": total - 2,
+        "output_tokens": 2,
+        "total_tokens": total,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": 0},
+    }
+
+
+@pytest.mark.parametrize("capture", [False, True])
+async def test_agent_close_failure_invalidates_captured_usage_but_keeps_native_usage(tmp_path, capture: bool) -> None:
+    server, client = _environment_server()
+    if capture:
+        client.global_config_dict.observability_enabled = True
+        client.global_config_dict.model_call_capture_dir = str(tmp_path)
+    payload = orjson.loads(client.responses[2].body)
+    payload["usage"] = _native_usage()
+    client.responses[2] = _Response(payload)
+    client.fail_path = "/v1/agent_sessions/close"
+
+    result = await server.run_request(_request())
+
+    assert result.failure is not None
+    assert result.failure.stage == "cleanup"
+    assert result.failure.terminal is False
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    usage = result.failure.partial_response.usage
+    if capture:
+        assert usage is None
+    else:
+        assert usage is not None and usage.total_tokens == 7
+
+
+@pytest.mark.parametrize("verification_fails", [False, True])
+async def test_close_trajectory_and_captured_usage_reach_verification_together(
+    tmp_path, monkeypatch, verification_fails: bool
+) -> None:
+    from nemo_gym.base_responses_api_model import CaptureStore
+
+    server, client = _environment_server()
+    client.global_config_dict.observability_enabled = True
+    client.global_config_dict.model_call_capture_dir = str(tmp_path)
+    trajectory = {
+        "task_id": "task",
+        "rollout_id": "rollout",
+        "turns": [
+            {
+                "invocation_id": "root",
+                "task_id": "task",
+                "rollout_id": "rollout",
+                "turn_no": 1,
+                "timestamp": 1.0,
+                "step_count": 2,
+                "model_calls": [{"model_call_id": "model-call-1"}],
+            }
+        ],
+    }
+    payload = orjson.loads(client.responses[2].body)
+    payload["usage"] = _native_usage(999)
+    client.responses[2] = _Response(payload)
+    close_body = orjson.loads(client.responses[3].body)
+    close_body["trajectory"] = trajectory
+    client.responses[3] = _Response(close_body)
+    # The verifier rewrites the response and its usage; the agent's accounted usage must stay.
+    verify_body = orjson.loads(client.responses[4].body)
+    verify_body["response"]["usage"] = _native_usage(5000)
+    client.responses[4] = _Response(verify_body)
+    if verification_fails:
+        client.responses[4] = ValueError("invalid verifier payload")
+    store = CaptureStore(tmp_path)
+    original_post = _Client.post
+
+    async def post(self, server_name, url_path, **kwargs):
+        response = await original_post(self, server_name, url_path, **kwargs)
+        if url_path == "/ng-rollout/rollout-a2/v1/responses":
+            store.record("rollout-a2", {"response": {"usage": {"prompt_tokens": 20, "completion_tokens": 5}}})
+        return response
+
+    monkeypatch.setattr(_Client, "post", post)
+    result = await server.run_request(_request())
+
+    expected = TrajectoryRecord.model_validate(trajectory)
+    verify_call = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
+    # Captured usage replaces, never sums with, the agent's native 999-token total.
+    assert verify_call["json"]["response"]["usage"]["total_tokens"] == 25
+    if verification_fails:
+        assert result.failure is not None
+        assert result.failure.stage == "verification"
+        return
+    assert result.result.response.usage.total_tokens == 25
+    assert result.result.ng_trajectory == expected
+
+
 async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
     environment_server, client = _environment_server(resources_tool_transports=["direct_http", "mcp"])
     client.responses[0] = _Response(
