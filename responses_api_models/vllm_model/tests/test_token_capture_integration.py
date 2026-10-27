@@ -83,7 +83,7 @@ def test_external_staging_resolves_served_reasoning_history(
     class Sink:
         def stage(self, record, *, attachments=None):
             assert attachments is None
-            key = f"{record.rollout_id}/{record.model_call_id}"
+            key = f"{record.capture_key}/{record.model_call_id}"
             records[key] = record
             return StageResult(ok=True, staging_key=key)
 
@@ -251,7 +251,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         def stage(self, record, *, attachments=None):
             assert attachments is None
             staged.append(record)
-            return StageResult(ok=True, staging_key=f"{record.rollout_id}/{record.model_call_id}")
+            return StageResult(ok=True, staging_key=f"{record.capture_key}/{record.model_call_id}")
 
     capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
 

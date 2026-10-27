@@ -537,3 +537,41 @@ async def test_separate_verifier_chmods_test_sh_as_root_then_runs_it_as_the_veri
     assert all(i < chmod for i in uploads) and chmod < run
     assert verifier.execs[chmod]["user"] == "root" and verifier.execs[run]["user"] == "tester"
     assert commands[run] == verifier_command(300)
+
+
+@pytest.mark.parametrize("linked", ["none", "tests", "verifier"])
+async def test_after_a_turns_verification_the_next_agent_reads_none_of_its_grading_files(
+    tmp_path, monkeypatch, verifier_tree, linked
+):
+    # The sandbox as a verified turn leaves it: the uploaded tests (the hidden ones included), the reward, the
+    # server's transcript, and what the agent wrote under /logs/agent itself. An agent may also have replaced a
+    # grading root with a link to a folder of its own before the verification.
+    root, logs, tests = verifier_tree
+    planted = root / "planted"
+    planted.mkdir()
+    (planted / "keep.txt").write_text("the agent's own")
+    if linked == "tests":
+        tests.symlink_to(planted, target_is_directory=True)
+    else:
+        tests.mkdir()
+        (tests / "test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
+        (tests / "test.patch").write_text("hidden tests\n")
+    (logs / "agent").mkdir(parents=True)
+    (logs / "agent" / "trajectory.json").write_bytes(TRAJECTORY)
+    (logs / "agent" / "commits.txt").write_text("written by the agent in its turn\n")
+    if linked == "verifier":
+        (logs / "verifier").symlink_to(planted, target_is_directory=True)
+    else:
+        (logs / "verifier").mkdir()
+        (logs / "verifier" / "reward.txt").write_text("1\n")
+    server, _, _, _ = make_server(tmp_path, monkeypatch)
+
+    await server._reset_shared_verifier_dirs(LocalSandbox())
+
+    assert sorted(path.name for path in tests.iterdir()) == []
+    assert sorted(path.name for path in (logs / "verifier").iterdir()) == []
+    assert sorted(path.name for path in (logs / "agent").iterdir()) == ["commits.txt"]
+    assert not tests.is_symlink() and not (logs / "verifier").is_symlink()
+    # A linked root is replaced, never followed: the folder it pointed at keeps its contents.
+    assert (planted / "keep.txt").read_text() == "the agent's own"
+    await server.shutdown()

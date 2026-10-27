@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
-from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
 from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
 
 
@@ -427,19 +426,6 @@ def _asset_config_path(flag: str, value: str) -> str:
     if matches:
         return str(matches[0])
 
-    if flag == "environment" and value in LEGACY_ENVIRONMENT_ALIASES:
-        canonical = LEGACY_ENVIRONMENT_ALIASES[value]
-        resolved = _asset_config_path(flag, canonical)
-        logger.warning(f"`--environment {value}` is deprecated; use `--environment {canonical}`.")
-        return resolved
-
-    if canonical_path := legacy_config_path_alias(path):
-        for root in roots:
-            candidate = root / canonical_path
-            if candidate.exists():
-                logger.warning(f"Config path `{path}` is deprecated; use `{canonical_path}`.")
-                return str(candidate.resolve())
-
     # No match: build a "did you mean?" hint and the roots searched
     if flag == "benchmark":
         # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
@@ -804,6 +790,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
             ignored_checks=args.ignore_checks or (),
             limits=RunHealthLimits(**given_limits),
             json_output=args.json,
+            model_call_capture_dir=args.model_call_capture_dir,
         )
     except (FileNotFoundError, ValueError) as exc:
         args._parser.error(str(exc))
@@ -1372,6 +1359,17 @@ COMMANDS = {
                 )
             ),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--model-call-capture-dir",
+                    type=Path,
+                    metavar="DIR",
+                    help=(
+                        "The run's model_call_capture_dir. With it, the captured calls of rollouts that failed "
+                        "without a row (an episode deadline, say) count in run.stats.timeouts' time split."
+                    ),
+                )
+            ),
             Flag(
                 register=lambda p: p.add_argument(
                     "--ignore-checks",

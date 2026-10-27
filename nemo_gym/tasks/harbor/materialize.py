@@ -1,20 +1,91 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Turn loaded tasks into single-agent-turn rows and the run config that serves them."""
+"""Turn loaded tasks into episode rows and the run config that serves them."""
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from typing_extensions import Self
+
 from nemo_gym.episode_types import MaterializedTask, TaskId
-from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
 from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.task import HarborTask, is_task_folder
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
+# The Harbor step a turn's request belongs to, in its `responses_create_params.metadata`.
+STEP_METADATA_KEY = "harbor_step"
+# The dataset a row came from, on every row: the dataset folder's name (the taskset, unless the target is a single
+# task folder, whose dataset is its parent). The same string as `nemo_gym.global_config.TASK_SOURCE_KEY_NAME`,
+# which this module does not import; rollout collection copies the key from a row onto the record it writes, so
+# every results row names its dataset.
+TASK_SOURCE_KEY = "task_source"
+
+
+class HarborTurnInput(BaseModel):
+    """One turn of a multi-step task: the Harbor step's name and the request the agent receives."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+
+
+class HarborTaskInput(BaseModel):
+    """A Harbor row's input: one ``responses_create_params`` for a single-turn task, or one per turn.
+
+    ``task_data`` carries the folder digest; the server reads everything else from the pinned folder.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None
+    task_data: dict[str, JsonValue]
+    turns: list[HarborTurnInput] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_flat_task_input(cls, value: object) -> object:
+        """Fold flat task fields into ``task_data``, keeping both request-envelope fields where they are.
+
+        The flat single-turn input (the task fields beside ``responses_create_params``, as
+        ``SingleAgentTurnTaskInput`` accepts them) is the canonical row once validated, so a client that sends
+        ``{"responses_create_params": ..., "_ng_digest": ...}`` runs as the row does. Only the keys the input set
+        are passed on, so a row that names no ``responses_create_params`` (a multi-step row) keeps the field unset
+        and its serialized form (``exclude_unset``) carries no ``null``.
+        """
+        if not isinstance(value, Mapping):
+            return value
+        fields = dict(value)
+        envelope = {key: fields.pop(key) for key in ("responses_create_params", "turns") if key in fields}
+        task_data = fields.pop("task_data", {})
+        if not isinstance(task_data, Mapping):
+            return value  # Let the field validator report the malformed canonical container.
+        for key in fields.keys() & task_data.keys():
+            if fields[key] != task_data[key]:
+                raise ValueError(f"Conflicting task field {key!r} inside and outside task_data")
+        return {**envelope, "task_data": dict(task_data) | fields}
+
+    @model_validator(mode="after")
+    def one_shape(self) -> Self:
+        if (self.responses_create_params is None) == (not self.turns):
+            raise ValueError("A Harbor row has either responses_create_params or turns, not both")
+        return self
+
+
+def _turn_params(instruction: str, timeout_sec: float, step: str | None = None) -> dict[str, Any]:
+    metadata = {AGENT_TIMEOUT_METADATA_KEY: str(timeout_sec)}
+    if step is not None:
+        metadata[STEP_METADATA_KEY] = step
+    return {"input": [{"role": "user", "content": instruction}], "metadata": metadata}
+
 
 # Instance names in the generated run config, per taskset.
 ENVIRONMENT_SERVER_IMPL = "harbor"
@@ -40,26 +111,38 @@ def environment_server_instance(taskset: str) -> str:
 
 def materialize_task(
     task: HarborTask, taskset: str, *, dataset_digest: str | None = None
-) -> MaterializedTask[SingleAgentTurnTaskInput]:
+) -> MaterializedTask[HarborTaskInput]:
     """One row: the instruction as a user message, the folder digest in ``task_data``.
+
+    A multi-step task gets one turn per step, each with that step's instruction and agent budget. The
+    top-level ``instruction.md`` is never sent for such a task.
 
     With ``dataset_digest``, the row also carries the dataset's digest (``manifest.toml``'s
     ``[dataset].digest``). Rollout collection copies the ``_ng_*`` keys of ``task_data`` onto every
     results row it writes, so each row then says which task folder and which dataset it ran.
     """
-    task_data = {DIGEST_KEY: task.digest}
+    task_data: dict[str, JsonValue] = {DIGEST_KEY: task.digest}
     if dataset_digest is not None:
         task_data[DATASET_DIGEST_KEY] = dataset_digest
-    return MaterializedTask(
-        task_id=TaskId(taskset=taskset, task_id=task.task_id),
-        task_input=SingleAgentTurnTaskInput(
-            responses_create_params={
-                "input": [{"role": "user", "content": task.instruction}],
-                "metadata": {AGENT_TIMEOUT_METADATA_KEY: str(task.config.agent.timeout_sec)},
-            },
+    if task.turns:
+        task_input = HarborTaskInput(
             task_data=task_data,
-        ),
-    )
+            turns=[
+                HarborTurnInput(
+                    name=turn.name,
+                    responses_create_params=_turn_params(
+                        turn.instruction, task.config.step_agent_timeout_sec(turn.config), step=turn.name
+                    ),
+                )
+                for turn in task.turns
+            ],
+        )
+    else:
+        task_input = HarborTaskInput(
+            responses_create_params=_turn_params(task.instruction, task.config.agent.timeout_sec),
+            task_data=task_data,
+        )
+    return MaterializedTask(task_id=TaskId(taskset=taskset, task_id=task.task_id), task_input=task_input)
 
 
 def _validate_task_ids(tasks: list[HarborTask]) -> None:
@@ -71,12 +154,28 @@ def _validate_task_ids(tasks: list[HarborTask]) -> None:
 
 
 def write_rows(
-    tasks: list[HarborTask], taskset: str, path: Path, *, dataset_digest: str | None = None
+    tasks: list[HarborTask],
+    taskset: str,
+    path: Path,
+    *,
+    dataset_digest: str | None = None,
+    task_source: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Write one materialized row per task as JSONL and return the rows."""
+    """Write one materialized row per task as JSONL and return the rows.
+
+    Beside the task's identity and input, every row carries ``task_source``: the dataset folder's name,
+    ``task_source`` when given (a single task folder target inside a dataset passes its parent's name; a
+    standalone task folder, whose parent holds no ``dataset.toml`` or ``manifest.toml``, passes its own) and
+    the taskset otherwise (a dataset folder target's taskset is that name). It is the dataset label a results row and
+    a trainer read, and nothing the collector routes by: a materialized row reaches its environment server
+    by its taskset, ``agent_map`` and ``fan_out`` do not apply to it, and a per-dataset ``num_repeats`` dict
+    keys on the taskset.
+    """
     _validate_task_ids(tasks)
+    label = task_source or taskset
     rows = [
         materialize_task(task, taskset, dataset_digest=dataset_digest).model_dump(mode="json", exclude_unset=True)
+        | {TASK_SOURCE_KEY: label}
         for task in tasks
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +211,34 @@ def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
     return mapping
 
 
+def dataset_entry(taskset: str, rows_path: Path, dataset: GymDatasetConfig | None = None) -> dict[str, Any]:
+    """The ``datasets:`` entry that declares a taskset's rows, from the dataset's ``[gym]`` table.
+
+    ``type`` is the split the rows enter (``GymDatasetConfig.effective_type``: the declared one, else
+    ``validation`` with a license, else ``benchmark``) and ``license`` the declared one, so a hub dataset
+    without a license is a benchmark that evaluates and never trains, and a ``train`` or ``validation``
+    dataset carries the license Gym requires of one. ``verified`` is the dataset's declaration (``false``
+    unless it says otherwise, as the pre-commit hook starts a new resources server), and ``domain`` and
+    ``allowed_agents`` are carried when declared. The entry sets no ``num_repeats``: collate would duplicate
+    the rows by it and the collector's run-level count would multiply on top, and the metrics sidecar beside
+    the rows records the entry, so a count that moved with the command line would conflict run to run.
+    ``[gym.defaults].num_repeats`` is the run config's top-level ``num_repeats`` instead (see
+    ``nemo_gym.tasks.harbor.cli.build_run``). A benchmark entry names no ``prepare_script``: the rows are
+    written by the preparation that generates this entry.
+    """
+    dataset = dataset or GymDatasetConfig()
+    entry: dict[str, Any] = {"name": taskset, "type": dataset.effective_type}
+    if dataset.license is not None:
+        entry["license"] = dataset.license
+    if dataset.domain is not None:
+        entry["domain"] = dataset.domain.value
+    entry["verified"] = dataset.verified
+    if dataset.allowed_agents is not None:
+        entry["allowed_agents"] = list(dataset.allowed_agents)
+    entry["jsonl_fpath"] = str(Path(rows_path).resolve())
+    return entry
+
+
 def run_config(
     *,
     taskset: str,
@@ -124,13 +251,15 @@ def run_config(
     sandbox_provider: str = "sandbox",
     dataset_digest: str | None = None,
     dataset_toml_digest: str | None = None,
+    dataset: GymDatasetConfig | None = None,
 ) -> dict[str, Any]:
     """The run-config blocks that bind one taskset to the ``harbor`` environment server.
 
     The environment server block inherits the shipped ``harbor_environment_server`` config and
     names the taskset's agent. The agent block inherits the selected harness config and declares
-    the taskset's rows as its validation dataset, which is where rollout collection looks for
-    datasets. Rows route to the environment server by taskset. The taskset mapping records the
+    the taskset's rows as its dataset (:func:`dataset_entry`, from the ``[gym]`` table of
+    ``dataset.toml``: split, license, repeats and catalog metadata), which is where rollout collection
+    looks for datasets. Rows route to the environment server by taskset. The taskset mapping records the
     dataset digest and the ``dataset.toml`` digest, so the run config says which dataset ran and
     whether the Gym layer or upstream moved between two runs.
     """
@@ -148,16 +277,7 @@ def run_config(
             "_inherit_from": agent_instance_name,
             "responses_api_agents": {
                 agent_impl: {
-                    "datasets": [
-                        {
-                            "name": taskset,
-                            "type": "validation",
-                            # Harbor task folders carry no dataset-level license; the run config
-                            # needs one for a validation split, so it is left to be determined.
-                            "license": "TBD",
-                            "jsonl_fpath": str(Path(rows_path).resolve()),
-                        }
-                    ],
+                    "datasets": [dataset_entry(taskset, rows_path, dataset)],
                     **(agent_overrides or {}),
                 }
             },
