@@ -12,19 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""SPEED-Bench data preparation for Gym (qualitative config).
+"""Unified SPEED-Bench preparation entrypoint for all six public configurations."""
 
-Each `type: benchmark` agent in `config.yaml` calls a separate prepare
-module via its `prepare_script` field; this one prepares the qualitative
-config. See `prepare_throughput_2k.py` for the throughput_2k variant. Both
-share helpers in `_prepare_common.py`.
-
-The Skills `_resolve_external_data` function is loaded by file path from
-the mounted Skills checkout (`/nemo_run/code/nemo_skills/dataset/speed-bench/prepare.py`)
-so we don't have to re-port the 14-source interpolation logic.
-"""
-
-import argparse
 import sys
 from pathlib import Path
 
@@ -35,15 +24,18 @@ from pathlib import Path
 # `_prepare_common` module is importable.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _prepare_common import prepare_one_config  # noqa: E402
+from _prepare_common import DEFAULT_DATASET_REPO, prepare_cli, prepare_one_config  # noqa: E402
 
 
-def prepare() -> Path:
-    """Prepare the qualitative split. Returns the output JSONL path."""
-    return prepare_one_config("qualitative")
+def prepare(
+    speed_config: str = "qualitative",
+    *,
+    dataset_repo: str = DEFAULT_DATASET_REPO,
+    dataset_revision: str | None = None,
+) -> Path:
+    """Prepare a split from the selected HF repository and return its Gym JSONL path."""
+    return prepare_one_config(speed_config, dataset_repo=dataset_repo, dataset_revision=dataset_revision)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prepare SPEED-Bench qualitative data for Gym.")
-    parser.parse_args()
-    prepare()
+    prepare_cli()

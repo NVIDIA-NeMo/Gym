@@ -18,12 +18,14 @@ import sys
 import textwrap
 from argparse import ArgumentParser
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
+from ipaddress import ip_address
 from os import environ, getenv
 from pathlib import Path
 from platform import python_version
@@ -40,7 +42,6 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym._checkpoint.settings import CHECKPOINT_BLOCK
-from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
 from nemo_gym.config_types import (
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
@@ -104,6 +105,9 @@ HEAD_SERVER_CONSTRAINTS_KEY_NAME = "head_server_constraints"
 PYTHON_VERSION_KEY_NAME = "python_version"
 PIP_INSTALL_VERBOSE_KEY_NAME = "pip_install_verbose"
 USE_ABSOLUTE_IP = "use_absolute_ip"
+# With `use_absolute_ip`, the server types (`responses_api_models`, ...) that get the resolved address; every other
+# server and the head server stay on loopback. Unset or null: every server, the head included.
+ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
 HF_TOKEN_KEY_NAME = "hf_token"
@@ -159,6 +163,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     PYTHON_VERSION_KEY_NAME,
     PIP_INSTALL_VERBOSE_KEY_NAME,
     USE_ABSOLUTE_IP,
+    ABSOLUTE_IP_SERVER_TYPES_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     HF_TOKEN_KEY_NAME,
@@ -486,8 +491,6 @@ class GlobalConfigDictParser(BaseModel):
 
             return parser
 
-        hydra_main_module.get_args_parser = new_get_args_parser
-
         # This function is just to get the config object out of the hydra main call.
         # Need a closure. We simply use an outer ref of a list
         config_list = []
@@ -496,7 +499,14 @@ class GlobalConfigDictParser(BaseModel):
         def inner_hydra_wrapper(cfg: DictConfig) -> DictConfig:
             config_list.append(cfg)
 
-        inner_hydra_wrapper()
+        # Patched for this call only and restored after it: hydra reads the parser at call time, and a patch left
+        # behind would wrap the previous call's wrapper, one level per `gym` command parsed in a process, until a
+        # long test session (hundreds of `main()` calls) hits the recursion limit inside the nested wrappers.
+        hydra_main_module.get_args_parser = new_get_args_parser
+        try:
+            inner_hydra_wrapper()
+        finally:
+            hydra_main_module.get_args_parser = original_get_args_parser
 
         # Hydra installs a console log handler on stdout; move it to stderr so command stdout stays machine-readable
         # (e.g. `gym ... --json`). Diagnostics belong on stderr; only the requested data goes to stdout.
@@ -542,12 +552,6 @@ class GlobalConfigDictParser(BaseModel):
             else:
                 searched_locations = [root / config_path for root in component_search_roots()]
             config_path = _resolve_under_cwd_or_install(original_entry)
-            if not config_path.exists() and (canonical_entry := legacy_config_path_alias(original_entry)):
-                canonical_path = _resolve_under_cwd_or_install(canonical_entry)
-                if canonical_path.exists():
-                    logger.warning(f"Config path `{original_entry}` is deprecated; use `{canonical_entry}`.")
-                    config_paths[index] = canonical_entry
-                    config_path = canonical_path
 
             try:
                 extra_config = _load_config_yaml(config_path)
@@ -638,8 +642,12 @@ Duplicate config paths:
         skip_verification: Optional[bool] = None,
         skip_verification_reward: Optional[float] = None,
         probe_ports: bool = True,
+        host_by_server_type: Optional[Mapping[str, str]] = None,
     ) -> List[int]:
+        """``host_by_server_type`` overrides ``default_host`` for the server types it names (a server with its own
+        ``host`` keeps it either way): the scoped form of ``use_absolute_ip``."""
         server_refs = [c.get_server_ref() for c in server_instance_configs]
+        host_by_server_type = host_by_server_type or {}
 
         disallowed_ports = initial_disallowed_ports.copy() if initial_disallowed_ports is not None else []
 
@@ -678,7 +686,9 @@ Duplicate config paths:
             # Populate the host and port values if they are not present in the config.
             with open_dict(run_server_config_dict):
                 if not run_server_config_dict.get("host"):
-                    run_server_config_dict["host"] = default_host
+                    run_server_config_dict["host"] = host_by_server_type.get(
+                        server_instance_config.SERVER_TYPE, default_host
+                    )
                 if not run_server_config_dict.get("port"):
                     if probe_ports:
                         port = _find_open_port_using_range(
@@ -1000,46 +1010,6 @@ Use the name the composed config reports."""
         if isinstance(declared, DictConfig):
             routes.update({str(key): value for key, value in declared.items()})
         global_config_dict["agent_map"] = routes
-
-    @staticmethod
-    def apply_legacy_agent_aliases(global_config_dict: DictConfig) -> None:
-        """Route legacy reasoning-gym agent names to their canonical instances."""
-        declared = global_config_dict.get("agent_map")
-        routes = dict(declared) if isinstance(declared, DictConfig) else {}
-        active_aliases = {}
-        for legacy, canonical in LEGACY_AGENT_ALIASES.items():
-            destination = routes.get(canonical, canonical)
-            if legacy not in global_config_dict and destination in global_config_dict:
-                active_aliases[legacy] = destination
-        if not active_aliases:
-            return
-
-        deprecated_uses = set()
-        selected = global_config_dict.get("agent_name")
-        if selected in active_aliases:
-            deprecated_uses.add(str(selected))
-            global_config_dict["agent_name"] = active_aliases[selected]
-
-        for key, destination in list(routes.items()):
-            if destination in active_aliases:
-                deprecated_uses.add(str(destination))
-                routes[key] = active_aliases[destination]
-        for legacy, destination in active_aliases.items():
-            routes.setdefault(legacy, destination)
-        global_config_dict["agent_map"] = routes
-
-        fan_out = global_config_dict.get("fan_out")
-        if isinstance(fan_out, DictConfig):
-            for key, destinations in fan_out.items():
-                if not isinstance(destinations, (list, ListConfig)):
-                    continue
-                replacements = [active_aliases.get(destination, destination) for destination in destinations]
-                deprecated_uses.update(destination for destination in destinations if destination in active_aliases)
-                fan_out[key] = replacements
-
-        if deprecated_uses:
-            replacements = ", ".join(f"`{legacy}` -> `{active_aliases[legacy]}`" for legacy in sorted(deprecated_uses))
-            logger.warning(f"Legacy agent names are deprecated; use {replacements}.")
 
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
@@ -1486,7 +1456,6 @@ Pass each config with --config (it builds the list for you), e.g.:
         # to environment servers, this should be updated.
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
         global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
-        self.apply_legacy_agent_aliases(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —
@@ -1545,11 +1514,48 @@ Found global config dict yaml:
 
         with open_dict(global_config_dict):
             use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
-        if use_absolute_ip and not parse_config.offline:
-            default_host = gethostbyname(gethostname())
-        else:
-            # Do one pass through all the configs validate and populate various configs for our servers.
-            default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME) or "127.0.0.1"
+        # An explicit address wins, including on machines whose short hostname has no DNS entry.
+        default_host = global_config_dict.get(DEFAULT_HOST_KEY_NAME)
+        if not default_host and use_absolute_ip and not parse_config.offline:
+            hostname = gethostname()
+            address_hint = (
+                "Set +default_host=<host address reachable from the sandbox>, or set +use_absolute_ip=false "
+                "only when the caller shares the servers' network namespace."
+            )
+            try:
+                default_host = gethostbyname(hostname)
+            except OSError as exc:
+                raise ConfigError(
+                    f"Cannot resolve host {hostname!r} for use_absolute_ip=true. {address_hint}"
+                ) from exc
+            address = ip_address(default_host)
+            if address.is_loopback or address.is_unspecified:
+                raise ConfigError(
+                    f"Host {hostname!r} resolves to {default_host}, which cannot advertise this host to a sandbox. "
+                    f"{address_hint}"
+                )
+        # `absolute_ip_server_types` scopes the resolved address to the servers a sandbox must reach (a Harbor run
+        # names the model server): the head server, whose unauthenticated config endpoint returns the merged
+        # config, and every other server stay on loopback as without `use_absolute_ip`. An explicit
+        # `default_host` is the broader opt-in and applies to every server, as does an unset list.
+        host_by_server_type: dict[str, str] = {}
+        server_types = global_config_dict.get(ABSOLUTE_IP_SERVER_TYPES_KEY_NAME)
+        if server_types is not None:
+            if isinstance(server_types, str) or not isinstance(server_types, Sequence):
+                raise ConfigError(
+                    f"`{ABSOLUTE_IP_SERVER_TYPES_KEY_NAME}` must be a list of server types "
+                    f"({', '.join(SERVER_TYPE_KEYS)}) or null; got {server_types!r}"
+                )
+            unknown = [t for t in server_types if t not in SERVER_TYPE_KEYS]
+            if unknown:
+                raise ConfigError(
+                    f"`{ABSOLUTE_IP_SERVER_TYPES_KEY_NAME}` names unknown server types {unknown!r}; expected "
+                    f"a subset of {', '.join(SERVER_TYPE_KEYS)}"
+                )
+            if default_host and not global_config_dict.get(DEFAULT_HOST_KEY_NAME):
+                host_by_server_type = {str(t): default_host for t in server_types}
+                default_host = None
+        default_host = default_host or "127.0.0.1"
 
         # Only an absent or null block means "all defaults"; any other non-mapping (incl. false, 0, "" and []) is
         # malformed. `host` is not read here: it may reference a server host that validate_and_populate_defaults
@@ -1586,6 +1592,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             skip_verification=global_config_dict.get(SKIP_VERIFICATION_KEY_NAME),
             skip_verification_reward=global_config_dict.get(SKIP_VERIFICATION_REWARD_KEY_NAME),
             probe_ports=not parse_config.offline,
+            host_by_server_type=host_by_server_type,
         )
 
         with open_dict(global_config_dict):
@@ -1796,6 +1803,16 @@ def maybe_get_global_config_dict() -> Optional[DictConfig]:
         return global_config_dict
 
     return None
+
+
+def reset_global_config_dict() -> None:
+    """Forget the cached global config dict, so the next `get_global_config_dict` resolves the command line again.
+
+    For a command that builds the configuration it dispatches (a run config written on the way), whatever this
+    process resolved before, for other tokens, must not stand in for it.
+    """
+    global _GLOBAL_CONFIG_DICT
+    _GLOBAL_CONFIG_DICT = None
 
 
 def get_global_config_dict(

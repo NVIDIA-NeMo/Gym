@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym.config_types import (
+    EnvironmentServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
 )
@@ -196,6 +197,11 @@ class TestTaskDataValidator:
             1, {"task_id": task, "task_input": {"responses_create_params": {}, "task_data": {"question": 1}}}
         )
         assert v.report.error_rows == 1
+        # A multi-turn row carries its requests as `turns` beside task_data: framework-owned, not an unknown field.
+        turns = [{"name": "plan", "responses_create_params": {}}]
+        fields = {"question": "q", "expected_answer": "a"}
+        v.validate_row(2, {"task_id": task, "task_input": {"turns": turns, "task_data": fields}})
+        assert v.report.unknown_keys == {} and v.report.error_rows == 1
 
     def test_generic_materialized_task_validates_flat_fields(self):
         v = self._validator()
@@ -283,6 +289,33 @@ class TestOwningResourcesServerImpl:
     def test_dangling_rs_reference_is_skipped(self):
         agent = self._agent("a", {"type": "resources_servers", "name": "missing"})
         assert TrainDataProcessor._owning_resources_server_impl(agent, [agent]) is None
+
+    def _env(self, name, impl, agent_name):
+        return EnvironmentServerInstanceConfig(
+            name=name,
+            server_type_config_dict=OmegaConf.create({}),
+            environment_servers={
+                impl: {"entrypoint": "app.py", "agent_server": {"type": "responses_api_agents", "name": agent_name}}
+            },
+        )
+
+    def test_environment_server_that_names_the_agent_owns_its_data(self):
+        # The Harbor layout: datasets on the agent block, episodes driven by the environment server.
+        agent = self._agent("harbor_oracle", None)
+        env = self._env("harbor_env", "harbor", "harbor_oracle")
+        other = self._env("other_env", "other", "someone_else")
+        assert TrainDataProcessor._owning_environment_server_impl(agent, [other, agent, env]) == "harbor"
+        assert TrainDataProcessor._schema_home_for(agent, [other, agent, env]) == ("harbor", "environment_servers")
+        # Nothing names the agent: it falls back to its own folder.
+        assert TrainDataProcessor._schema_home_for(agent, [other, agent]) == ("simple_agent", "responses_api_agents")
+
+    def test_resources_server_reference_wins_over_an_environment_server(self):
+        rs = self._rs("bench_rs", "mcqa")
+        agent = self._agent("bench_agent", {"type": "resources_servers", "name": "bench_rs"})
+        env = self._env("env", "harbor", "bench_agent")
+        assert TrainDataProcessor._schema_home_for(agent, [agent, rs, env]) == ("mcqa", "resources_servers")
+        dangling = self._agent("dangling", {"type": "resources_servers", "name": "missing"})
+        assert TrainDataProcessor._schema_home_for(dangling, [dangling, env]) is None
 
 
 class TestShippedSchemas:
@@ -638,3 +671,174 @@ class TestRepoDataMatchesSchemas:
                     failures.append(report.summary())
         assert rows_checked > 500, "sweep looks broken: too few rows checked"
         assert not failures, "\n".join(failures)
+
+
+class TestHarborLayoutThroughTheProcessor:
+    """The lookup must work on the processor's real path, where the in-scope list has no environment server."""
+
+    def _processor_and_configs(self, tmp_path, monkeypatch, rows):
+        from omegaconf import DictConfig
+
+        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.train_data_utils import TrainDataProcessorConfig
+
+        env_dir = tmp_path / "environment_servers" / "harbor"
+        env_dir.mkdir(parents=True)
+        (env_dir / "task_data.py").write_text((REPO_ROOT / "environment_servers/harbor/task_data.py").read_text())
+        # The agent folder exists but ships no schema: the pre-fix fallback found nothing and validated nothing.
+        (tmp_path / "responses_api_agents" / "harbor_oracle_agent").mkdir(parents=True)
+        rows_path = tmp_path / "rows.jsonl"
+        rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        monkeypatch.chdir(tmp_path)
+        global_config_dict = GlobalConfigDictParser().parse_no_environment(
+            DictConfig(
+                {
+                    "harbor_ds_agent": {
+                        "responses_api_agents": {
+                            "harbor_oracle_agent": {
+                                "entrypoint": "app.py",
+                                "datasets": [
+                                    {
+                                        "name": "ds",
+                                        "type": "validation",
+                                        "license": "TBD",
+                                        "jsonl_fpath": str(rows_path),
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                    "harbor_ds_environment": {
+                        "environment_servers": {
+                            "harbor": {
+                                "entrypoint": "app.py",
+                                "agent_server": {"type": "responses_api_agents", "name": "harbor_ds_agent"},
+                            }
+                        }
+                    },
+                }
+            )
+        )
+        processor = TrainDataProcessor()
+        config = TrainDataProcessorConfig(
+            output_dirpath=str(tmp_path / "out"), mode="train_preparation", task_data_validation="error"
+        )
+        in_scope = processor.load_and_validate_server_instance_configs(config, global_config_dict)
+        # Only the dataset-bearing agent is in scope; the environment server that owns the schema is not.
+        assert [c.name for c in in_scope] == ["harbor_ds_agent"]
+        return processor, config, in_scope
+
+    @staticmethod
+    def _row(task_data):
+        return {
+            "task_id": {"taskset": "ds", "task_id": "a"},
+            "task_input": {
+                "responses_create_params": {"input": [{"role": "user", "content": "do it"}]},
+                "task_data": task_data,
+            },
+        }
+
+    def test_row_without_the_digest_is_rejected(self, tmp_path, monkeypatch):
+        processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [self._row({})])
+        with pytest.raises(ValueError, match=r"(?s)against the `harbor` schema.*_ng_digest"):
+            processor._collate_samples_single_type(
+                "validation", in_scope, task_data_validation=config.effective_task_data_validation
+            )
+
+    def test_materialized_row_passes(self, tmp_path, monkeypatch):
+        processor, config, in_scope = self._processor_and_configs(
+            tmp_path, monkeypatch, [self._row({"_ng_digest": "a" * 64})]
+        )
+        paths = processor._collate_samples_single_type(
+            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+        )
+        assert len(paths) == 1 and json.loads(paths[0].read_text())["task_input"]["task_data"] == {
+            "_ng_digest": "a" * 64
+        }
+
+
+class TestLegacyWrapperLayoutThroughTheProcessor:
+    """A self-contained agent wrapped by a schema-less environment server validates against its own schema.
+
+    The shipped tau2 layout: ``responses_api_agents/tau2`` ships ``task_data.py`` and an
+    ``environment_servers/legacy_agent`` block names it as ``agent_server`` but has no schema. The
+    lookup must not stop at the schema-less wrapper (which silently disabled validation).
+    """
+
+    def _processor_and_configs(self, tmp_path, monkeypatch, rows):
+        from omegaconf import DictConfig
+
+        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.train_data_utils import TrainDataProcessorConfig
+
+        agent_dir = tmp_path / "responses_api_agents" / "tau2"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "task_data.py").write_text((REPO_ROOT / "responses_api_agents/tau2/task_data.py").read_text())
+        # The wrapper exists but ships no schema.
+        (tmp_path / "environment_servers" / "legacy_agent").mkdir(parents=True)
+        rows_path = tmp_path / "rows.jsonl"
+        rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        monkeypatch.chdir(tmp_path)
+        global_config_dict = GlobalConfigDictParser().parse_no_environment(
+            DictConfig(
+                {
+                    "tau2_agent": {
+                        "responses_api_agents": {
+                            "tau2": {
+                                "entrypoint": "app.py",
+                                "datasets": [
+                                    {
+                                        "name": "ds",
+                                        "type": "validation",
+                                        "license": "TBD",
+                                        "jsonl_fpath": str(rows_path),
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                    "tau2_environment_server": {
+                        "environment_servers": {
+                            "legacy_agent": {
+                                "entrypoint": "app.py",
+                                "agent_server": {"type": "responses_api_agents", "name": "tau2_agent"},
+                            }
+                        }
+                    },
+                }
+            )
+        )
+        processor = TrainDataProcessor()
+        config = TrainDataProcessorConfig(
+            output_dirpath=str(tmp_path / "out"), mode="train_preparation", task_data_validation="error"
+        )
+        in_scope = processor.load_and_validate_server_instance_configs(config, global_config_dict)
+        assert [c.name for c in in_scope] == ["tau2_agent"]
+        # The wrapper names the agent, but without a schema the agent's own folder is the schema home.
+        lookup = processor._schema_lookup_configs(in_scope)
+        assert TrainDataProcessor._owning_environment_server_impl(in_scope[0], lookup) == "legacy_agent"
+        assert TrainDataProcessor._schema_home_for(in_scope[0], lookup) == ("tau2", "responses_api_agents")
+        return processor, config, in_scope
+
+    @staticmethod
+    def _row():
+        # The committed tau2 example row, flat legacy format: the agent's schema requires ``seed``.
+        row = json.loads((REPO_ROOT / "responses_api_agents/tau2/data/example.jsonl").read_text().splitlines()[0])
+        assert "seed" in row
+        return row
+
+    def test_row_missing_a_required_agent_field_is_rejected(self, tmp_path, monkeypatch):
+        row = self._row()
+        del row["seed"]
+        processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [row])
+        with pytest.raises(ValueError, match=r"(?s)against the `tau2` schema.*seed"):
+            processor._collate_samples_single_type(
+                "validation", in_scope, task_data_validation=config.effective_task_data_validation
+            )
+
+    def test_valid_row_passes(self, tmp_path, monkeypatch):
+        processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [self._row()])
+        paths = processor._collate_samples_single_type(
+            "validation", in_scope, task_data_validation=config.effective_task_data_validation
+        )
+        assert len(paths) == 1 and len(paths[0].read_text().splitlines()) == 1

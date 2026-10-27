@@ -5,11 +5,12 @@
 import asyncio
 import json
 import logging
+import shlex
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -46,6 +47,8 @@ class CodexSandboxSession(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
+    native_transcript: str | None = None
+    model_attempts: list[dict[str, JsonValue]] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
@@ -93,9 +96,10 @@ class CodexSandboxSession(AgentSessionState):
             argv=[
                 "python3",
                 "-I",
-                f"{self.session.session_dir}/sandbox_runner.py",
+                f"{self.session.session_dir}/{RUNNER_FILE}",
                 f"{self.session.session_dir}/input.json",
             ],
+            stdlib_runner=True,
         )
 
     async def collect_artifacts(self) -> str:
@@ -114,4 +118,20 @@ class CodexSandboxSession(AgentSessionState):
         except ValueError:
             runtime_payload = None
         self.runtime_info = parse_runtime_info(runtime_payload)
+        try:
+            snapshot = await self.session.sandbox.exec(
+                f"python3 -I {shlex.quote(f'{self.session.session_dir}/{RUNNER_FILE}')} "
+                f"--snapshot {shlex.quote(self.session.session_dir)}",
+                timeout_s=10,
+            )
+            if snapshot.return_code != 0 or snapshot.error_type:
+                raise RuntimeError("Codex native session snapshot failed")
+            self.native_transcript = await self.read_text("native_session.jsonl")
+        except Exception:
+            LOG.warning("Codex native session transcript unavailable", exc_info=True)
+        try:
+            attempts = await self.read_text("model_attempts.jsonl")
+            self.model_attempts = [json.loads(line) for line in attempts.splitlines()]
+        except Exception:
+            LOG.warning("Codex model attempt statuses unavailable", exc_info=True)
         return events

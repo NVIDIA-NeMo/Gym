@@ -23,6 +23,8 @@ The default `instruction_backend: english` preserves the original evaluator.
 
 The dataset can be found at https://huggingface.co/datasets/nvidia/Nemotron-RL-instruction_following 
 
+The instruction checkers come from [verifiable-instructions](https://github.com/abukharin-nv/verifiable-instructions), except `count:counting_composition`, which is scored by the local checker in `counting_composition.py`. The upstream checker splits paragraphs on `***` although the instruction asks for `* * *`, and counts the period that ends each sentence as a word, so it rejected every response that followed the instruction.
+
 ### Example dataset row (dataset format)
 ```json
 {

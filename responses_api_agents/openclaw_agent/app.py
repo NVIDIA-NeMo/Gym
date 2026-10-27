@@ -35,7 +35,7 @@ import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -466,6 +466,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
     config: OpenClawAgentConfig
+    # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     sigterm_events: set = Field(default_factory=set)
     sigterm_handler_installed: bool = False
@@ -576,7 +578,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
                     f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
                 )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -1208,7 +1210,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 if observation_collector is not None:
                     try:
                         session_events = parse_openclaw_session_events(session_text)
-                        native_session_id = next(
+                        openclaw_session_id = next(
                             (
                                 event.get("id")
                                 for event in session_events
@@ -1218,9 +1220,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         )
                         session_tree, tree_gaps = discover_openclaw_session_tree(
                             home / ".openclaw" / "agents",
-                            native_session_id,
+                            openclaw_session_id,
                         )
-                        observation_collector(native_session_id, session_events, session_tree, tree_gaps)
+                        observation_collector(openclaw_session_id, session_events, session_tree, tree_gaps)
                     except Exception:
                         LOG.exception("failed to record OpenClaw session artifact")
             if not output_items:

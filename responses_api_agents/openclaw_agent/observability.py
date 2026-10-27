@@ -184,7 +184,7 @@ def build_openclaw_observation_tree(
             conversation,
             events,
             transcript_available=any(event.get("type") == "message" for event in events),
-            prefer_native_session_id=False,
+            prefer_openclaw_session_id=False,
             model_ref=model_ref,
         )
         combined.gaps.extend(gap for gap in bundle.gaps if gap.code != "subagent_hierarchy_unavailable")
@@ -254,11 +254,11 @@ def build_openclaw_observations(
     events: Iterable[dict[str, Any]],
     *,
     transcript_available: bool,
-    prefer_native_session_id: bool = True,
+    prefer_openclaw_session_id: bool = True,
     model_ref: ModelServerRef | None = None,
 ) -> AgentObservationBundle:
     events = list(events)
-    native_session_id = next(
+    openclaw_session_id = next(
         (
             event.get("id")
             for event in events
@@ -269,8 +269,8 @@ def build_openclaw_observations(
         ),
         None,
     )
-    if prefer_native_session_id:
-        invocation_id = native_session_id or invocation_id
+    if prefer_openclaw_session_id:
+        invocation_id = openclaw_session_id or invocation_id
     conversation = list(conversation)
     invocation = AgentInvocation(invocation_id=invocation_id, conversation=conversation)
     bundle = AgentObservationBundle(

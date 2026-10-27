@@ -10,6 +10,27 @@ code_gen:
       num_processes: 8
       unit_test_timeout_secs: 10
       debug: false
+      # Set to `sandbox` (with a provider config such as
+      # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml) to run unit tests in a fresh
+      # sandbox per verification instead of on a Ray worker. num_processes then caps concurrent sandboxes.
+      # See the README ("Running unit tests in a sandbox") for a complete example config.
+      sandbox_provider: null
+      sandbox_config:
+        image: ${oc.env:CODE_GEN_SANDBOX_IMAGE,null}
+        # One test runs at a time, as on a Ray worker. Memory stays above the harness's 4 GiB
+        # RLIMIT_DATA so a memory-hungry candidate fails its test instead of killing the sandbox.
+        resources:
+          cpu: 1
+          memory_mib: 6144
+        metadata:
+          benchmark: code-gen
+        provider_options:
+          # Candidate code needs no network, and must not fetch answers. OpenSandbox enforces this;
+          # Docker ignores it (set its `network: none` instead), and Daytona, E2B and OpenShell reject
+          # the key, so remove it for them.
+          network_policy:
+            defaultAction: deny
+            egress: []
 code_gen_simple_agent:
   responses_api_agents:
     simple_agent:

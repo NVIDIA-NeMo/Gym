@@ -168,6 +168,21 @@ class TestOpenAIUtils:
         logged = "Request kwargs:" in capsys.readouterr().out
         assert logged is debug_enabled
 
+    async def test_create_embeddings_posts_to_embeddings_url(self, monkeypatch) -> None:
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        response = SimpleNamespace(ok=True)
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr(client, "_request", request)
+        monkeypatch.setattr(client, "_raise_for_status", AsyncMock())
+        monkeypatch.setattr(openai_utils_module, "get_response_json", AsyncMock(return_value={"data": []}))
+
+        result = await client.create_embeddings(model="m", input="hi")
+
+        assert result == {"data": []}
+        request.assert_awaited_once_with(
+            method="POST", url="https://example.com/v1/embeddings", json={"model": "m", "input": "hi"}
+        )
+
     async def test_explicit_attempt_cap_reaches_low_level_transport(
         self,
         monkeypatch,
@@ -195,6 +210,26 @@ class TestOpenAIUtils:
         assert isinstance(captured["timeout"], ClientTimeout)
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
+
+    async def test_no_resend_retry_cap_and_time_budget_both_reach_transport(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://api.openai.com/v1",
+            connection_retry_timeout_s=30.0,
+        )
+
+        await client._request(method="POST", url="https://example.test", _resend_after_disconnect=False)
+
+        assert captured["_resend_after_disconnect"] is False
+        assert captured["_max_connection_retries"] == openai_utils_module.MAX_NUM_TRIES
+        assert captured["_connection_retry_timeout_s"] == 30.0
 
     async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
         captured = {}
@@ -230,12 +265,14 @@ class TestOpenAIUtils:
         assert "X-Request-Id" not in captured["headers"]
 
     @pytest.mark.parametrize("internal", [False, True])
-    @pytest.mark.parametrize("status", [429, 500, 504])
+    @pytest.mark.parametrize("status", [429, 500, 503, 504])
+    @pytest.mark.parametrize("captured", [False, True])
     async def test_explicit_attempt_cap_has_no_exhausted_status_sleep(
         self,
         monkeypatch,
         internal,
         status,
+        captured,
     ) -> None:
         sleeps = []
         calls = 0
@@ -269,12 +306,12 @@ class TestOpenAIUtils:
         client = NeMoGymAsyncOpenAI(
             api_key="abc",
             base_url="https://api.openai.com/v1",
-            max_num_tries=1,
+            max_num_tries=None if captured else 1,
             internal=internal,
         )
 
         with pytest.raises(RuntimeError, match="rate limited"):
-            await client._request(method="POST", url="https://example.test")
+            await client._request(method="POST", url="https://example.test", _resend_after_disconnect=not captured)
 
         assert calls == 1
         assert sleeps == []
@@ -2581,7 +2618,7 @@ def test_duplicate_type_tags_are_documented() -> None:
     They also make an unrecognized item report errors from every union member.
     """
     duplicates = {tag for tag, owners in GYM_INPUT_TAG_OWNERS.items() if len(owners) > 1}
-    assert duplicates == {"message", "function_call", "reasoning"}, (
+    assert duplicates == {"message", "function_call", "custom_tool_call", "reasoning"}, (
         f"duplicate type tags changed: {sorted(duplicates)}. Each duplicate widens the error "
         f"report for an unrecognised item; update this test if the change is intended."
     )
@@ -2643,6 +2680,7 @@ def test_response_field_set_is_pinned() -> None:
         "max_output_tokens",
         "max_tool_calls",
         "metadata",
+        "metrics",  # Gym extension: provider metrics preserved by the converter.
         "model",
         "moderation",
         "object",
