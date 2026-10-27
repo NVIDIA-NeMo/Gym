@@ -278,12 +278,14 @@ def failing_row(task_index: int = 7) -> dict:
 
 
 _JUDGE_429_ERROR = "ClientResponseError: 429, message='Too Many Requests', url='http://judge/v1/responses'"
+_JUDGE_EVENT_ID = "8e1e8ee1162d4c0e8da0375ac330609d"  # pragma: allowlist secret
+_JUDGE_429_EVENT_ID = "6d9285465af04e71acdd4dc75811275c"  # pragma: allowlist secret
 # The failure report #5072's judge_failsafe attaches for a judge HTTP 429, as its code at 5d964f492 produces it:
 # the judge-owned failure, and the 429 it was caused by.
 _JUDGE_429_REPORT = {
     "_ng_failure_events": {
-        "8e1e8ee1162d4c0e8da0375ac330609d": {
-            "event_id": "8e1e8ee1162d4c0e8da0375ac330609d",
+        _JUDGE_EVENT_ID: {
+            "event_id": _JUDGE_EVENT_ID,
             "boundary": "resources_server",
             "exception_type": "nemo_gym.judge.JudgeCallFailed",
             "failure_reason": _JUDGE_429_ERROR,
@@ -295,16 +297,16 @@ _JUDGE_429_REPORT = {
                 "message": "Too Many Requests",
                 "http_status": 429,
             },
-            "cause_id": "6d9285465af04e71acdd4dc75811275c",
+            "cause_id": _JUDGE_429_EVENT_ID,
         },
-        "6d9285465af04e71acdd4dc75811275c": {
-            "event_id": "6d9285465af04e71acdd4dc75811275c",
+        _JUDGE_429_EVENT_ID: {
+            "event_id": _JUDGE_429_EVENT_ID,
             "exception_type": "aiohttp.client_exceptions.ClientResponseError",
             "failure_reason": "",
             "http_status": 429,
         },
     },
-    "_ng_failure_id": "8e1e8ee1162d4c0e8da0375ac330609d",
+    "_ng_failure_id": _JUDGE_EVENT_ID,
 }
 
 
