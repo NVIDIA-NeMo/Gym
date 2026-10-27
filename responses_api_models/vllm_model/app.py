@@ -104,12 +104,13 @@ def _log_unhandled_engine_error(request: Request, status: int, body: str, route:
 # "This model's maximum context length is ..." and "Input length (N) exceeds model's maximum
 # context length (M)." (both contain "context length"), and the engine's "decoder prompt ... is
 # longer than the maximum model length". llama.cpp: two phrases a proxy may forward without the
-# error type.
+# error type. LiteLLM's router rejects oversized requests before selecting a deployment.
 _CONTEXT_WINDOW_MARKERS = (
     "context length",
     "maximum model length",
     "exceeds the available context size",
     "is larger than the max context size",
+    "Context Window exceeded",
 )
 # Phrases vLLM uses when the request's own output-token parameter is invalid ("max_tokens must be
 # at least 1", "max_completion_tokens=N cannot be greater than max_model_len"). Lowering the

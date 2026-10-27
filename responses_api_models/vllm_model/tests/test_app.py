@@ -936,8 +936,23 @@ class TestApp:
                 None,
                 None,
             ),
+            (
+                b'{"error":{"message":"litellm._pre_call_checks: Context Window exceeded for given call. '
+                b"No models have context window large enough for this call. "
+                b'Model=example-model, Max Input Tokens=100, Got=120","type":null,"param":null,"code":"400"}}',
+                "context_length_exceeded",
+                None,
+            ),
         ],
-        ids=["prompt-plus-output", "prompt-only", "decoder-prompt", "llamacpp", "max-tokens", "max-completion-tokens"],
+        ids=[
+            "prompt-plus-output",
+            "prompt-only",
+            "decoder-prompt",
+            "llamacpp",
+            "max-tokens",
+            "max-completion-tokens",
+            "litellm",
+        ],
     )
     def test_context_overflow_propagation_flag(
         self,
@@ -5324,6 +5339,8 @@ async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
         (400, '{"error": {"message": "Unknown model"}}', False),
         (400, "Invalid context size configuration", False),
         (400, "unified KV cache is full: context size exceeded", False),
+        (400, "litellm._pre_call_checks: Context Window exceeded for given call.", True),
+        (500, "litellm._pre_call_checks: Context Window exceeded for given call.", False),
     ],
     ids=[
         "vllm-context-length",
@@ -5339,6 +5356,8 @@ async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
         "http400-unrelated",
         "http400-context-config",
         "http400-unified-kv",
+        "http400-litellm",
+        "http500-litellm",
     ],
 )
 async def test_backend_context_overflow_handling(
