@@ -19,21 +19,22 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
-    AgentOutcomePolicyConfig,
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
-    _is_retryable_dependency_error,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
+from nemo_gym.base_environment_server import is_retryable_dependency_error
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
+from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.failure_kinds import MODEL_TRANSPORT_ERROR
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
@@ -397,9 +398,9 @@ def test_dependency_failure_reasons_are_bounded() -> None:
 
 
 def test_retry_requires_a_transient_dependency_error() -> None:
-    assert _is_retryable_dependency_error(TimeoutError()) is True
-    assert _is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
-    assert _is_retryable_dependency_error(ValueError("invalid response")) is False
+    assert is_retryable_dependency_error(TimeoutError()) is True
+    assert is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
+    assert is_retryable_dependency_error(ValueError("invalid response")) is False
 
 
 @pytest.mark.parametrize(("status", "retryable"), [(422, False), (409, False), (429, True), (500, True)])
@@ -409,7 +410,7 @@ def test_an_agent_seed_refusal_is_final_but_a_server_error_is_retried(status: in
         request_info=SimpleNamespace(real_url="http://agent/v1/agent_sessions"), history=(), status=status
     )
 
-    assert _is_retryable_dependency_error(refusal) is retryable
+    assert is_retryable_dependency_error(refusal) is retryable
 
 
 async def test_an_agent_seed_refusal_fails_the_episode_once_with_the_agents_reason() -> None:
@@ -507,6 +508,118 @@ async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     assert result.result.reward == 1.0
     assert client.calls[1][2]["json"]["tool_accesses"] == []
     assert client.calls[1][2]["json"]["sandbox_access"] is not None
+
+
+def _skipping_environment_server(
+    *, environment: dict[str, Any], agent: dict[str, Any]
+) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(agent)
+    environment_server.config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**environment_server.config.model_dump(), **environment}
+    )
+    # No /verify reply is consumed.
+    del client.responses[4]
+    return environment_server, client
+
+
+@pytest.mark.parametrize(
+    ("environment", "agent", "reward"),
+    [
+        ({"skip_verification": True, "skip_verification_reward": 0.5}, {}, 0.5),
+        ({"skip_verification": True}, {}, 0.0),
+        # Unset here, the bound agent's setting applies; Gym copies the global flag into it.
+        ({}, {"skip_verification": True, "skip_verification_reward": -1.5}, -1.5),
+        ({"skip_verification": True}, {"skip_verification_reward": 2.0}, 2.0),
+        ({"skip_verification_reward": 3.0}, {"skip_verification": True, "skip_verification_reward": 0.25}, 3.0),
+        # Strings, as a quoted override or an ${oc.env:...} interpolation leaves them, parse as the agent parses them.
+        ({}, {"skip_verification": "true", "skip_verification_reward": "0.5"}, 0.5),
+    ],
+)
+async def test_skip_verification_returns_the_fixed_reward_and_still_closes_both_sessions(
+    environment: dict[str, Any], agent: dict[str, Any], reward: float
+) -> None:
+    environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is None
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+    dumped = result.result.model_dump()
+    assert dumped["reward"] == reward
+    assert dumped["verification_skipped"] is True
+    # The same flat shape a verified result has: the verify body plus the reward.
+    assert dumped["instance_id"] == "task"
+    assert dumped["response"]["id"] == "response"
+    assert dumped["responses_create_params"]["input"] == "task"
+
+
+async def test_the_environment_servers_own_setting_overrides_the_agents() -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update({"skip_verification": True})
+    environment_server.config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**environment_server.config.model_dump(), "skip_verification": False}
+    )
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert "verification_skipped" not in result.result.model_dump()
+    assert "/verify" in [path for _, path, _ in client.calls]
+
+
+@pytest.mark.parametrize("agent_skip", [False, "false"])
+async def test_an_agent_that_does_not_skip_keeps_verifying(agent_skip: bool | str) -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"skip_verification": agent_skip, "skip_verification_reward": 0.5}
+    )
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert "verification_skipped" not in result.result.model_dump()
+    assert "/verify" in [path for _, path, _ in client.calls]
+
+
+async def test_skip_verification_still_applies_the_agent_outcome_policy() -> None:
+    environment_server, client = _skipping_environment_server(environment={"skip_verification": True}, agent={})
+    failed = _agent_response().model_dump(mode="json")
+    failed.update(
+        status="failed",
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR).model_dump_json()},
+    )
+    client.responses[2] = _Response(failed)
+
+    result = await environment_server.run_request(_request())
+
+    # A retryable agent failure stays a retryable failure, not a fixed reward.
+    assert result.result is None
+    assert result.failure.stage == "agent"
+    assert result.failure.terminal is False
+    assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
+@pytest.mark.parametrize(
+    ("environment", "agent"),
+    [({"skip_verification": True}, {}), ({}, {"skip_verification": True})],
+)
+async def test_skip_verification_returns_empty_aggregate_metrics_without_calling_resources(
+    environment: dict[str, Any], agent: dict[str, Any]
+) -> None:
+    environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
+
+    with pytest.warns(RuntimeWarning, match="skip_verification=True"):
+        metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+
+    assert metrics == AggregateMetrics()
+    assert client.calls == []
 
 
 @pytest.mark.parametrize("close_cookies", [{}, None])
@@ -765,16 +878,6 @@ async def test_interrupted_activation_closes_agent_before_resources(
     assert not client.responses
 
 
-def test_checkpointing_refuses_more_than_one_worker() -> None:
-    environment_server, client = _environment_server()
-    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
-    config = environment_server.config.model_copy(update={"num_workers": 2})
-    server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
-
-    with pytest.raises(ValueError, match="num_workers=1"):
-        server.setup_webserver()
-
-
 @pytest.mark.parametrize("reported, expected", [({"x-ng-checkpoint-verify": "replay"}, "replay"), ({}, "wait")])
 async def test_verify_step_mode_comes_from_the_resources_seed_reply(reported: dict, expected: str) -> None:
     environment_server, client = _environment_server()
@@ -836,7 +939,7 @@ async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_an
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server()
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     client.slow_path = environment_server._agent_responses_path(_request())
@@ -871,7 +974,7 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
     from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _environment_server()
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     request = _request()
     handles = {"resources_session_id": "resources-session", "agent_session_id": "agent-session"}
@@ -896,6 +999,37 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
     assert response.result.reward == 1.0
 
 
+async def test_an_episode_restored_at_verify_with_skip_on_closes_without_verifying() -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+
+    environment_server, client = _skipping_environment_server(
+        environment={"skip_verification": True, "skip_verification_reward": 0.5}, agent={}
+    )
+    participant = EnvironmentParticipant(mode="exported")
+    environment_server._checkpoint = participant
+    request = _request()
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1}),
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary={
+                    "next": "verify",
+                    "handles": {"resources_session_id": "resources-session", "agent_session_id": "agent-session"},
+                    "response": _agent_response().model_dump(mode="json"),
+                },
+            )
+        ]
+    )
+    # Only the final resources close remains.
+    del client.responses[:4]
+    response = await environment_server.run_request(request)
+
+    assert [path for _, path, _ in client.calls] == ["/close_session"]
+    assert response.result.reward == 0.5
+    assert response.result.model_dump()["verification_skipped"] is True
+
+
 class _HoldingClient(_Client):
     """Holds every call until ``released`` is set, and records which calls started before then."""
 
@@ -918,7 +1052,7 @@ async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_
     from nemo_gym._checkpoint.store import write_participant_state
 
     environment_server, client = _environment_server(client_type=_HoldingClient)
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     request = _request()
@@ -1009,7 +1143,7 @@ async def test_an_agent_failure_during_a_checkpoint_closes_the_agent_only_after_
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server(client_type=_AgentGateClient)
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     observations = {
@@ -1161,7 +1295,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
     client.agent = restored_http
     # Only the verification and the resources close are scripted; the agent answers the rest.
     del client.responses[:4]
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment._checkpoint = participant
     participant.restore_records(
         [
@@ -1191,7 +1325,7 @@ async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attem
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
-    environment_server._checkpoint = EnvironmentParticipant()
+    environment_server._checkpoint = EnvironmentParticipant(mode="exported")
     await environment_server.run_request(_request())
 
     [tool_access] = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).tool_accesses
