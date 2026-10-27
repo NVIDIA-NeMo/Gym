@@ -126,9 +126,6 @@ def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
             "terminal",
             "failure_kind",
             "stage",
-            "failure_id",
-            "failure_events",
-            "failure_events_omitted",
         },
         "EpisodeId": {"rollout_id", "attempt"},
     }, "Changing version-1 saved fields requires reviewing the RolloutFailure schema_version bump policy"

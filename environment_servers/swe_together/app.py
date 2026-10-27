@@ -229,8 +229,11 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
                     cleanup_receipts=state.cleanup_receipts,
                 )
-                wire_failure = self.failure_response(request, failure).failure
-                (state.directory / "failure.json").write_text(wire_failure.model_dump_json(indent=2))
+                wire_reply = self.failure_response(request, failure)
+                (state.directory / "failure.json").write_text(wire_reply.failure.model_dump_json(indent=2))
+                if wire_reply.failure_report is not None:
+                    report_json = wire_reply.failure_report.model_dump_json(indent=2)
+                    (state.directory / "failure_report.json").write_text(report_json)
 
         async def release_dependency_access() -> None:
             if state.dependency_access is not None:
@@ -394,8 +397,11 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 },
             )
             failure.__cause__ = error
-            wire_failure = self.failure_response(request, failure).failure
-            (state.directory / "failure.json").write_text(wire_failure.model_dump_json(indent=2))
+            wire_reply = self.failure_response(request, failure)
+            (state.directory / "failure.json").write_text(wire_reply.failure.model_dump_json(indent=2))
+            if wire_reply.failure_report is not None:
+                report_json = wire_reply.failure_report.model_dump_json(indent=2)
+                (state.directory / "failure_report.json").write_text(report_json)
             raise failure from error
 
     def _activation_path(self, request: SWETRequest) -> str:

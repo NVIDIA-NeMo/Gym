@@ -43,7 +43,7 @@ import aiohttp
 import orjson
 from aiohttp import ClientError
 from omegaconf import DictConfig, ListConfig, OmegaConf
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -513,6 +513,18 @@ def _task_data_provenance(row: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: task_data[key] for key in PROVENANCE_KEYS if key in task_data}
 
 
+def _reply_failure_report(response: Mapping[str, Any]) -> tuple[FailureReport, ...]:
+    """The ``FailureReport`` an environment reply carries beside its outcome; an invalid one is omitted."""
+    report = response.get("failure_report")
+    if report is None:
+        return ()
+    try:
+        return (FailureReport.model_validate(report),)
+    except ValidationError:
+        logger.warning("Invalid failure report in an environment reply; its failure events are omitted")
+        return (FailureReport(omitted=True),)
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
@@ -547,12 +559,7 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         if failure.get("failure_kind") is not None:
             record["failure_kind"] = failure["failure_kind"]
             record["_ng_failure_kind"] = failure["failure_kind"]
-        if failure.get("failure_events") is not None:
-            record[FailureReportRow.EVENTS] = failure["failure_events"]
-        if failure.get("failure_id") is not None:
-            record[FailureReportRow.FAILURE_ID] = failure["failure_id"]
-        if failure.get("failure_events_omitted"):
-            record[FailureReportRow.OMITTED] = True
+        record = FailureReportRow.merged_into(record, *_reply_failure_report(response))
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
@@ -586,6 +593,9 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     # add judge failure info to the record
     record = dict(result) | judge_failure
     record[NG_TASK_ID_KEY] = task_id
+    reply_report = _reply_failure_report(response)
+    if reply_report:
+        record = FailureReportRow.merged_into(record, *reply_report)
     return record
 
 

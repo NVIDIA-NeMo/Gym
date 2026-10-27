@@ -3,23 +3,34 @@
 """Failure reports: explicit cause chain -> FailureEvent data -> one HTTP header -> rebuilt chain."""
 
 import asyncio
+import json
 import socket
 
 import aiohttp
 import pytest
 from aiohttp import web
+from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
-from nemo_gym.episode_types import EpisodeFailure, FailureBoundary, FailureEvent, FailureReport
+from nemo_gym.episode_types import (
+    BaseEpisodeResponse,
+    EpisodeFailure,
+    EpisodeId,
+    FailureBoundary,
+    FailureEvent,
+    FailureReport,
+    TaskId,
+)
 from nemo_gym.failure_transport import (
     FailureHeader,
     FailureReportRow,
     RequestFailureLog,
     observe_failure,
     observe_reply,
-    with_failure_report,
+    reply_failure_report,
 )
 from nemo_gym.judge import JudgeCallFailed, JudgeError
+from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.sandbox.providers.base import SandboxCredentialsRejected
 from nemo_gym.typed_exceptions import (
     BoundaryFailure,
@@ -250,18 +261,42 @@ def test_outer_503_keeps_the_inner_sdk_401_below_the_credentials_failure() -> No
     assert [event.boundary for event in report.events.values()] == ["environment", None, "environment", None]
 
 
-def test_an_episode_failure_keeps_its_own_classification_when_attaching_a_report() -> None:
+def test_an_episode_failure_keeps_its_own_classification_and_its_report_travels_beside_it() -> None:
     error = _chained(_model(failure_kind="model_request_error"), TimeoutError())
-    failure = with_failure_report(EpisodeFailure(failure_reason="Episode timed out", terminal=False), error)
-    assert (failure.failure_reason, failure.terminal, failure.failure_kind) == (
-        "Episode timed out",
-        False,
-        None,
+    failure = EpisodeFailure(failure_reason="Episode timed out", terminal=False)
+    report = reply_failure_report(error)
+    assert report is not None
+    assert report.events[error.event.event_id].failure_kind == "model_request_error"
+    assert report.events[report.failure_id].cause_id is not None
+    reply = BaseEpisodeResponse[dict](
+        episode_id=EpisodeId(rollout_id="r", attempt=0),
+        task_id=TaskId(taskset="test:source", task_id="t"),
+        failure=failure,
+        failure_report=report,
     )
-    assert failure.failure_events[error.event.event_id].failure_kind == "model_request_error"
-    assert EpisodeFailure.model_validate_json(failure.model_dump_json()) == failure
-    plain = EpisodeFailure(failure_reason="x", terminal=True)
-    assert with_failure_report(plain, KeyError("no boundary")) is plain
+    wire = json.loads(reply.model_dump_json())
+    # The failure envelope keeps main's saved shape; events stay in the report beside it.
+    assert set(wire["failure"]) == {"failure_reason", "terminal"}
+    assert FailureReport.model_validate(wire["failure_report"]) == report
+    assert reply_failure_report(KeyError("no boundary")) is None
+
+
+def test_a_version_one_reader_of_episode_failure_refuses_event_maps() -> None:
+    """A saved record that nests ``EpisodeFailure`` (#3302 ``RolloutFailureRecord`` v1) keeps that shape."""
+    report = reply_failure_report(_chained(_model(failure_kind="model_request_error"), TimeoutError()))
+    for extra in (
+        {"failure_id": report.failure_id},
+        {"failure_events": report.model_dump(mode="json")["events"]},
+        {"failure_events_omitted": True},
+    ):
+        with pytest.raises(ValidationError):
+            EpisodeFailure.model_validate({"failure_reason": "x", "terminal": False} | extra)
+    assert set(EpisodeFailure.model_json_schema()["properties"]) == {
+        "failure_reason",
+        "terminal",
+        "failure_kind",
+        "stage",
+    }
 
 
 def test_collection_rows_save_and_merge_reports_without_replacing_the_outcome() -> None:
@@ -369,3 +404,47 @@ async def test_selected_judge_details_and_http_error_identity_survive_observatio
     assert forwarded.events[agent.event.event_id].cause_id == http_events[0].event_id
     assert http_events[0].cause_id == origin.event.event_id
     assert FailureHeader.decode(FailureHeader.encode(forwarded)) == forwarded
+
+
+def test_collection_saves_a_body_only_reply_report_on_failed_and_recovered_rows() -> None:
+    """No header here: the report beside ``failure`` or ``result`` in the reply body alone reaches the row."""
+    failed = reply_failure_report(_chained(_model(failure_kind="model_request_error"), TimeoutError()))
+    task_id = {"taskset": "test:source", "task_id": "t"}
+    row = _episode_record(
+        {
+            "task_id": task_id,
+            "failure": {"failure_reason": "Episode timed out", "terminal": False},
+            "failure_report": failed.model_dump(mode="json"),
+        }
+    )
+    assert FailureReportRow.report(row) == failed
+    assert row["_ng_failure_message"] == "Episode timed out"
+
+    recovered = failed.model_copy(update={"failure_id": None})
+    row = _episode_record(
+        {"task_id": task_id, "result": {"reward": 1.0}, "failure_report": recovered.model_dump(mode="json")}
+    )
+    assert row["reward"] == 1.0 and FailureReportRow.FAILURE_ID not in row
+    assert FailureReportRow.report(row).events == recovered.events
+
+
+def test_collection_saves_a_body_only_reply_report_on_failed_and_recovered_rows() -> None:
+    """No header here: the report beside ``failure`` or ``result`` in the reply body alone reaches the row."""
+    failed = reply_failure_report(_chained(_model(failure_kind="model_request_error"), TimeoutError()))
+    task_id = {"taskset": "test:source", "task_id": "t"}
+    row = _episode_record(
+        {
+            "task_id": task_id,
+            "failure": {"failure_reason": "Episode timed out", "terminal": False},
+            "failure_report": failed.model_dump(mode="json"),
+        }
+    )
+    assert FailureReportRow.report(row) == failed
+    assert row["_ng_failure_message"] == "Episode timed out"
+
+    recovered = failed.model_copy(update={"failure_id": None})
+    row = _episode_record(
+        {"task_id": task_id, "result": {"reward": 1.0}, "failure_report": recovered.model_dump(mode="json")}
+    )
+    assert row["reward"] == 1.0 and FailureReportRow.FAILURE_ID not in row
+    assert FailureReportRow.report(row).events == recovered.events

@@ -24,7 +24,7 @@ from typing import Any, ClassVar
 
 from pydantic import ValidationError
 
-from nemo_gym.episode_types import EpisodeFailure, FailureReport
+from nemo_gym.episode_types import FailureReport
 from nemo_gym.typed_exceptions import ForeignCauseIds, failure_report_for
 
 
@@ -125,15 +125,13 @@ def observe_reply(headers: Mapping[str, str] | None) -> None:
         log.add(report)
 
 
-def with_failure_report(failure: EpisodeFailure, error: BaseException) -> EpisodeFailure:
-    """Attach ``error``'s explicit cause chain without changing the producer's outcome fields.
+def reply_failure_report(error: BaseException) -> FailureReport | None:
+    """``error``'s explicit cause chain for the reply beside its ``EpisodeFailure``; ``None`` without events.
 
-    The caller owns its kind, reason, terminality and stage; a cause's kind remains on its own event.
+    The producer keeps its kind, reason, terminality and stage on the failure; a cause's kind stays on its event.
     """
     report = report_for_current_request(error)
-    if not report.events:
-        return failure
-    return failure.model_copy(update={"failure_id": report.failure_id, "failure_events": report.events})
+    return report if report.events or report.omitted else None
 
 
 class FailureReportRow:

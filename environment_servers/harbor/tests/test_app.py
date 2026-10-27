@@ -409,12 +409,14 @@ class TestEpisode:
             raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
 
         monkeypatch.setattr(server, "_create_sandbox", refused)
-        failure = (await run_episode(server, task)).failure
+        response = await run_episode(server, task)
+        failure = response.failure
         assert failure.stage == "seed" and not failure.terminal
         assert "Could not set up sandbox for 'hello'" in failure.failure_reason
-        events = list((failure.failure_events or {}).values())
+        assert response.failure_report is not None
+        events = list(response.failure_report.events.values())
         hops = [(event.exception_type or event.boundary).rsplit(".", 1)[-1] for event in events]
-        outer = failure.failure_events[failure.failure_id]
+        outer = response.failure_report.events[response.failure_report.failure_id]
         assert outer.boundary == "environment"
         assert outer.failure_kind is None and failure.failure_kind is None
         if status in (401, 403):

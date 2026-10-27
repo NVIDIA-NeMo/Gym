@@ -66,11 +66,14 @@ def test_an_environment_runtime_failure_is_handled_without_constructing_a_wire_m
         response = client.post("/run", json=_request().model_dump(mode="json"))
     assert response.status_code == 200
     failure = _EvidenceFailure.model_validate(response.json()["failure"])
+    report = FailureReport.model_validate(response.json()["failure_report"])
+    report = FailureReport.model_validate(response.json()["failure_report"])
+    report = FailureReport.model_validate(response.json()["failure_report"])
     assert failure.terminal is terminal and failure.stage == "verification"
     assert failure.failure_kind == "judge_failed" and failure.failure_reason == event.failure_reason
-    assert failure.failure_id == event.event_id
-    assert failure.failure_events[event.event_id].cause_id == model.event.event_id
-    assert failure.failure_events[model.event.event_id].http_status == 503
+    assert report.failure_id == event.event_id
+    assert report.events[event.event_id].cause_id == model.event.event_id
+    assert report.events[model.event.event_id].http_status == 503
     assert failure.partial_response == "partial"
     assert failure.agent_observations == ["turn failed", "cleanup completed"]
     assert failure.trajectory == {"turn": "one"}

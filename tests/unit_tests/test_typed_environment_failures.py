@@ -23,7 +23,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.episode_types import EpisodeId, FailureReport, MaterializedTask, TaskId
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
@@ -208,10 +208,12 @@ async def test_over_http_an_exhausted_model_call_is_the_environments_agent_stage
     result, model_hits, observed, verified, relayed = await _episode(monkeypatch, [502], via_http=True)
 
     failure = result.failure
+    report = result.failure_report
+    report = result.failure_report
     assert failure is not None and failure.stage == "agent" and len(model_hits) == 2
-    events = failure.failure_events
-    assert events[failure.failure_id].boundary == "environment"
-    chain, current = [], failure.failure_id
+    events = report.events
+    assert events[report.failure_id].boundary == "environment"
+    chain, current = [], report.failure_id
     while current is not None:
         chain.append(current)
         current = events[current].cause_id
@@ -236,12 +238,14 @@ async def test_an_exhausted_model_call_is_the_environments_own_agent_stage_failu
     result, model_hits, observed, verified, relayed = await _episode(monkeypatch, [502])
 
     failure = result.failure
+    report = result.failure_report
+    report = result.failure_report
     assert failure is not None and failure.stage == "agent" and not verified
     assert len(model_hits) == 2
-    events = failure.failure_events
-    own = events[failure.failure_id]
+    events = report.events
+    own = events[report.failure_id]
     assert own.boundary == "environment"
-    chain, current = [], failure.failure_id
+    chain, current = [], report.failure_id
     while current is not None:
         chain.append(current)
         current = events[current].cause_id
@@ -284,11 +288,13 @@ def test_an_unhandled_environment_error_owns_its_report_without_borrowing_the_ca
 
     assert reply.status_code == 200 and reply.json()["result"] is None
     failure = EpisodeFailure.model_validate(reply.json()["failure"])
+    report = FailureReport.model_validate(reply.json()["failure_report"])
+    report = FailureReport.model_validate(reply.json()["failure_report"])
     assert failure.terminal is True and failure.failure_kind is None
-    own = failure.failure_events[failure.failure_id]
+    own = report.events[report.failure_id]
     assert own.boundary is FailureBoundary.ENVIRONMENT and own.failure_kind is None
     assert own.failure_reason == failure.failure_reason
-    cause = failure.failure_events[own.cause_id]
+    cause = report.events[own.cause_id]
     if typed_cause:
         assert (cause.event_id, cause.boundary, cause.failure_kind, cause.http_status) == (
             model.event.event_id,
@@ -296,5 +302,5 @@ def test_an_unhandled_environment_error_owns_its_report_without_borrowing_the_ca
             MODEL_REQUEST_ERROR,
             503,
         )
-        cause = failure.failure_events[cause.cause_id]
+        cause = report.events[cause.cause_id]
     assert cause.exception_type == "RuntimeError" and cause.boundary is None and cause.failure_reason == ""

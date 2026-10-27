@@ -31,9 +31,10 @@ from nemo_gym.episode_types import (
     EpisodeId,
     FailureBoundary,
     FailureEvent,
+    FailureReport,
 )
 from nemo_gym.failure_kinds import FailureStage
-from nemo_gym.failure_transport import report_for_current_request, with_failure_report
+from nemo_gym.failure_transport import reply_failure_report, report_for_current_request
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
 from nemo_gym.typed_exceptions import BoundaryFailure
@@ -284,14 +285,12 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             except TimeoutError as error:
                 return self.failure_response(
                     request,
-                    with_failure_report(
-                        EpisodeFailure(
-                            failure_reason="Episode admission timed out",
-                            terminal=False,
-                            stage="admission",
-                        ),
-                        error,
+                    EpisodeFailure(
+                        failure_reason="Episode admission timed out",
+                        terminal=False,
+                        stage="admission",
                     ),
+                    report=reply_failure_report(error),
                 )
             acquired = True
 
@@ -330,13 +329,11 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     if deadline is not None and deadline.expired():
                         response = self.failure_response(
                             request,
-                            with_failure_report(
-                                EpisodeFailure(
-                                    failure_reason="Episode timed out",
-                                    terminal=False,
-                                ),
-                                error,
+                            EpisodeFailure(
+                                failure_reason="Episode timed out",
+                                terminal=False,
                             ),
+                            report=reply_failure_report(error),
                         )
                     else:
                         response = self._unhandled_failure_response(request, error)
@@ -457,9 +454,16 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         return self.failure_response(request, reported)
 
     def failure_response(
-        self, request: EpisodeRequestT, failure: EpisodeFailure | HandledEpisodeError
+        self,
+        request: EpisodeRequestT,
+        failure: EpisodeFailure | HandledEpisodeError,
+        *,
+        report: FailureReport | None = None,
     ) -> EpisodeResponseT:
-        """Adapt runtime event, local policy and evidence to the protocol's wire failure model."""
+        """Adapt runtime event, local policy and evidence to the protocol's wire failure model.
+
+        The failure's ``FailureReport`` goes in the reply's ``failure_report``, beside the failure.
+        """
         if isinstance(failure, HandledEpisodeError):
             report = report_for_current_request(failure)
             fields = failure.evidence | {
@@ -467,15 +471,14 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                 "failure_kind": failure.event.failure_kind,
                 "stage": failure.event.stage,
                 "terminal": failure.terminal,
-                "failure_id": report.failure_id,
-                "failure_events": report.events,
             }
         else:
             # A protocol may still return a wire failure directly instead of raising a runtime failure.
             fields = failure.model_dump(mode="json")
-        return self.response_model.model_validate(
-            {"episode_id": request.episode_id, "task_id": request.task.task_id, "failure": fields}
-        )
+        reply = {"episode_id": request.episode_id, "task_id": request.task.task_id, "failure": fields}
+        if report is not None and (report.events or report.omitted):
+            reply["failure_report"] = report.model_dump(mode="json")
+        return self.response_model.model_validate(reply)
 
     @staticmethod
     def validate_response_identity(request: EpisodeRequestT, response: EpisodeResponseT) -> None:

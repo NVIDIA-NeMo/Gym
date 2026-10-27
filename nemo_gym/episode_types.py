@@ -210,8 +210,8 @@ class EpisodeFailure(BaseModel):
     existing ``terminal`` flag and retry budget; ``failure_kind`` describes the failure without deciding
     terminality. Kind and stage are optional because a collector observing a lost reply may not know them.
 
-    ``failure_id``, ``failure_events`` and ``failure_events_omitted`` hold this attempt's ``FailureReport``:
-    its own failure, earlier recovered failures and their explicit causes. They are diagnostic only.
+    The attempt's ``FailureReport`` travels beside this envelope (``BaseEpisodeResponse.failure_report``), so
+    records that nest ``EpisodeFailure`` keep their saved format.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -220,25 +220,11 @@ class EpisodeFailure(BaseModel):
     terminal: bool = Field(description="Whether rollout collection must not attempt this episode again.")
     failure_kind: str | None = None
     stage: FailureStage | None = None
-    failure_id: str | None = Field(default=None, max_length=128)
-    failure_events: dict[str, FailureEvent] | None = None
-    failure_events_omitted: bool | None = None
 
     @field_validator("failure_kind")
     @classmethod
     def _validate_failure_kind(cls, value: str | None) -> str | None:
         return validate_failure_kind(value)
-
-    @field_validator("failure_events")
-    @classmethod
-    def _validate_failure_events(cls, value: dict[str, FailureEvent] | None):
-        return None if value is None else validate_failure_event_map(value)
-
-    @model_validator(mode="after")
-    def _failure_id_is_an_event(self) -> Self:
-        if self.failure_id is not None and self.failure_id not in (self.failure_events or {}):
-            raise ValueError(f"failure_id {self.failure_id!r} is not in failure_events")
-        return self
 
     # A return annotation would replace the public JSON Schema with that type.
     @model_serializer(mode="wrap")
@@ -246,7 +232,7 @@ class EpisodeFailure(BaseModel):
         # Omit metadata when the producer cannot classify the failure.
         # Protocol subclasses still serialize their own diagnostic fields.
         result = handler(self)
-        for key in ("failure_kind", "stage", "failure_id", "failure_events", "failure_events_omitted"):
+        for key in ("failure_kind", "stage"):
             if result.get(key) is None:
                 result.pop(key, None)
         return result
@@ -283,9 +269,20 @@ class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):
     task_id: TaskId
     result: EpisodeResultT | None = None
     failure: EpisodeFailure | None = None
+    failure_report: FailureReport | None = Field(
+        default=None, description="Diagnostic failures of this attempt, beside ``failure`` or a recovered result."
+    )
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
         if (self.result is None) == (self.failure is None):
             raise ValueError("exactly one of result or failure is required")
         return self
+
+    # A return annotation would replace the public JSON Schema with that type.
+    @model_serializer(mode="wrap")
+    def _serialize_response(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if result.get("failure_report") is None:
+            result.pop("failure_report", None)
+        return result
