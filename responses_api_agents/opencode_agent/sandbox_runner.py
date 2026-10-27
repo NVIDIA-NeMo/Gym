@@ -23,12 +23,19 @@ class RunnerInput(TypedDict):
     command: list[str]
     cwd: str
     env: dict[str, str]
+    path_prefix: list[str]
+    harness_session_id: str | None
+    previous_message_ids: list[str]
 
 
 def run(params: RunnerInput) -> int:
     """Run the CLI with isolated files and wait for it before returning captured output."""
     directory = Path(params["directory"])
-    (directory / "runtime.json").write_text(json.dumps({"hostname": os.uname().nodename, "pid": os.getpid()}))
+    (directory / "runtime.json").write_text(
+        json.dumps({"hostname": os.uname().nodename, "pid": os.getpid(), "python": sys.executable})
+    )
+    if params.get("path_prefix"):
+        params["env"]["PATH"] = os.pathsep.join([*params["path_prefix"], os.environ.get("PATH", "")])
     # Never accept an initialization receipt left by an earlier invocation.
     (directory / "task-environment.ready").unlink(missing_ok=True)
     # Save only task-directory variables for the shell.env hook, before CLI overrides.
@@ -83,9 +90,13 @@ def run(params: RunnerInput) -> int:
             process.wait()
 
 
-def snapshot(directory: Path) -> None:
+def snapshot(directory: Path, *, session_directory: Path | None = None) -> None:
     """Export root messages and retain the full session tree for observations."""
-    database = directory / "data/opencode/opencode.db"
+    session_directory = session_directory or directory
+    database = session_directory / "data/opencode/opencode.db"
+    input_path = directory / "input.json"
+    params = json.loads(input_path.read_text()) if input_path.exists() else {}
+    previous_ids = set(params.get("previous_message_ids", []))
     with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as source:
         with sqlite3.connect(directory / "observations.db") as destination:
             source.backup(destination)
@@ -98,8 +109,14 @@ def snapshot(directory: Path) -> None:
         rows = source.execute(
             "select id, data from message where session_id=? order by time_created, id", (sessions[0]["id"],)
         ).fetchall()
+        session_id = sessions[0]["id"]
+        expected_id = params.get("harness_session_id")
+        if expected_id is not None and expected_id != session_id:
+            raise RuntimeError(f"OpenCode resumed unexpected session {session_id!r}")
         messages = []
         for row in rows:
+            if row["id"] in previous_ids:
+                continue
             info = json.loads(row["data"])
             parts = [
                 json.loads(part[0])
@@ -107,14 +124,25 @@ def snapshot(directory: Path) -> None:
                     "select data from part where message_id=? order by time_created, id", (row["id"],)
                 )
             ]
-            messages.append({"info": info, "parts": parts})
-        usage_messages = [json.loads(row[0]) for row in source.execute("select data from message")]
-        (directory / "export.json").write_text(json.dumps({"messages": messages, "usage_messages": usage_messages}))
+            messages.append({"id": row["id"], "info": info, "parts": parts})
+        all_messages = source.execute("select id, data from message order by time_created, id").fetchall()
+        usage_messages = [json.loads(row["data"]) for row in all_messages if row["id"] not in previous_ids]
+        (directory / "export.json").write_text(
+            json.dumps(
+                {
+                    "session_id": session_id,
+                    "message_ids": [row["id"] for row in all_messages],
+                    "activation_message_ids": [row["id"] for row in all_messages if row["id"] not in previous_ids],
+                    "messages": messages,
+                    "usage_messages": usage_messages,
+                }
+            )
+        )
 
 
 def main() -> None:
     if sys.argv[1] == "--snapshot":
-        snapshot(Path(sys.argv[2]))
+        snapshot(Path(sys.argv[2]), session_directory=Path(sys.argv[3]) if len(sys.argv) > 3 else None)
         return
     params = json.loads(Path(sys.argv[1]).read_text())
     raise SystemExit(run(params))

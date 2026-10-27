@@ -16,7 +16,11 @@
 
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 from nemo_gym.sandbox.api import AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.config import (
+    resolve_provider_config,
+    resolve_provider_metadata,
+    resolve_provider_volume_sources,
+)
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
     ExecResult,
@@ -42,6 +46,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxRuntimeRequirements,
     SupportsSandboxSharedStorage,
     SupportsSandboxSidecars,
+    clamp_resource_requests,
     create_provider,
     get_provider_class,
     list_providers,
@@ -86,5 +91,7 @@ __all__ = [
     "register_provider",
     "resolve_provider_config",
     "resolve_provider_metadata",
+    "resolve_provider_volume_sources",
     "rewrite_image",
+    "clamp_resource_requests",
 ]

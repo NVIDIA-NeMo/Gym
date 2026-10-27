@@ -45,6 +45,7 @@ from nemo_gym.token_id_capture.protocols import (
     TokenSink,
 )
 from nemo_gym.token_id_capture.records import (
+    ENGINE_REFUSED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
     TokenEntry,
@@ -129,6 +130,11 @@ class CaptureContext:
     publish_on_delivery: bool = False
     # The ledger row that finalization left for the gate to publish; kept after publication.
     deferred_commit: CaptureLedgerCommit | None = None
+    # ``register_call_intent`` wrote a durable pre-dispatch intent to the sink.
+    intent_registered: bool = False
+    # ``capture_engine_refusal`` recorded that the engine refused this call. The call has no
+    # entry, and the worker-custody sweep must not record it a second time as uncommitted.
+    engine_refusal_recorded: bool = False
 
     @property
     def parent_call_id(self) -> str | None:
@@ -148,6 +154,7 @@ _STATS_LOCK = threading.Lock()
 _RESOLUTION_COUNTS = {"root": 0, "resolved": 0, "unresolved": 0}
 _CAPTURE_FAILURES = [0]
 _RESOLVER_UNAVAILABLE_NOTED = [False]
+_REFUSE_CALL_MISSING_NOTED = [False]
 
 
 def _count_resolution(status_value: str) -> None:
@@ -345,6 +352,104 @@ async def register_call_intent() -> None:
     if begin is None:
         return
     await begin(context.rollout_id, context.model_call_id)
+    context.intent_registered = True
+
+
+async def capture_engine_refusal(code: str | None) -> None:
+    """Record that the engine refused the in-flight call before it generated anything.
+
+    ``code`` is the error code the client received: ``context_length_exceeded`` for a prompt
+    that does not fit the context window, ``None`` when the envelope carried no code.
+
+    On the local capture path the sink's optional ``record_engine_refusal`` extension stores a
+    ``EngineRefusalRecord`` and resolves the intent ``register_call_intent`` wrote, so the rollout
+    freezes complete. The record carries the request-time lineage decision ``resolve_parent``
+    made before dispatch (the call the refused request continued), so the builder can tell a
+    refusal that followed the delivered chain from one on another branch. A sink without the
+    extension leaves the intent dangling, and the rollout is masked as a lost call would be;
+    that is logged once per worker.
+
+    Under worker custody the ledger gets a failure row with ``ENGINE_REFUSED_CALL_REASON``.
+    The call never reached the worker's staging, so the outcome is definite, unlike the
+    uncommitted-call row the custody sweep would otherwise write; the sweep skips a call
+    recorded here.
+
+    This never raises. On the local capture path a refusal that cannot be recorded leaves the
+    intent dangling, which masks the rollout; under worker custody the custody sweep writes the
+    uncommitted-call row for the call instead. Either way the failure lands on the safe side.
+    """
+    context = _CAPTURE_CONTEXT.get()
+    if context is None:
+        return
+    try:
+        if context.external_staging:
+            await _record_external_refusal(context)
+            return
+        if context.token_sink is None:
+            return
+        refuse = getattr(context.token_sink, "record_engine_refusal", None)
+        if refuse is None:
+            _note_missing_refuse_call(context)
+            return
+        resolution = context.parent_resolution
+        match = resolution.match if resolution is not None else None
+        await refuse(
+            context.rollout_id,
+            model_call_id=context.model_call_id,
+            code=code,
+            parent_call_id=match.model_call_id if match is not None else None,
+            parent_resolution=resolution.status if resolution is not None else None,
+        )
+        context.engine_refusal_recorded = True
+    except TokenCaptureFrozenError:
+        # The freeze sealed the verdict, as for a late ``put``; see ``commit_entry``.
+        logger.warning(
+            "The engine refusal of model call %s of rollout %s arrived after the capture was frozen; "
+            "the refusal is not recorded.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+    except Exception:
+        logger.warning(
+            "Could not record the engine refusal of model call %s of rollout %s.",
+            context.model_call_id,
+            context.rollout_id,
+            exc_info=True,
+        )
+
+
+async def _record_external_refusal(context: CaptureContext) -> None:
+    """Write the refusal as a definite ledger failure for an admitted worker-custody call.
+
+    The ledger failure row carries the call id and ``ENGINE_REFUSED_CALL_REASON`` only: the
+    staging wire models declare no column for the error code or for the request-time lineage, so
+    a rollout rebuilt from staged records cannot tell a context-window refusal from an
+    output-parameter one and reports no truncation verdict for it (NVIDIA-NeMo/Gym#4647 tracks
+    carrying both). The row still names the call as one that served no completion, which the
+    framework's receipt builder reads through ``UNSERVED_CALL_FAILURE_REASONS``.
+    """
+    ledger = context.lineage_store
+    if context.capture_admission is None or context.committed or not isinstance(ledger, CaptureLedger):
+        return
+    await ledger.record_failure(context.rollout_id, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
+    context.engine_refusal_recorded = True
+
+
+def _note_missing_refuse_call(context: CaptureContext) -> None:
+    """Warn once per worker that the sink cannot resolve a refused call's intent."""
+    if not context.intent_registered:
+        return
+    with _STATS_LOCK:
+        first = not _REFUSE_CALL_MISSING_NOTED[0]
+        _REFUSE_CALL_MISSING_NOTED[0] = True
+    if first:
+        logger.warning(
+            "Sink %s does not implement record_engine_refusal: a call the engine refuses leaves its intent "
+            "dangling, and the rollout is masked by default (first seen on model call %s of rollout %s).",
+            type(context.token_sink).__name__,
+            context.model_call_id,
+            context.rollout_id,
+        )
 
 
 async def capture_tokens(
