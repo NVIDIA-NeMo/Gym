@@ -30,6 +30,7 @@ from uuid import uuid4
 
 from anyio import CancelScope
 from fastapi import Request
+from openai.types.responses.response import IncompleteDetails
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -74,19 +75,17 @@ GOOSE_RELEASE_URL = f"https://github.com/aaif-goose/goose/releases/download/v{GO
 MAX_SYSTEM_PROMPT_BYTES = 128 * 1024
 # Goose's MAX_TURNS_MESSAGE, streamed when --max-turns is reached.
 GOOSE_MAX_TURNS_NOTICE = "I've reached the maximum number of actions I can do without user input"
-# Goose 1.54.0's notices for a model call that failed at the model server: unreachable, 5xx, rate limit, rejected credentials
-# or a missing model. The model server or the configuration failed, not the policy, so the request fails and is retried.
-GOOSE_MODEL_SERVER_NOTICES = (
-    "Network error:",
-    "Ran into this error: Server error",
-    "Ran into this error: Rate limit exceeded",
-    "Ran into this error: Authentication error",
-    "Ran into this error: Request failed: Resource not found",
+# Goose 1.54.0's provider errors for a model call that failed at the model server: unreachable, 5xx, rate limit, rejected
+# credentials or a missing model, during a turn or a compaction. The model server or the configuration failed, not the
+# policy, so the request fails and is retried.
+GOOSE_ERROR_NOTICES = ("Ran into this error: ", "Ran into this error trying to compact: ")
+GOOSE_MODEL_SERVER_ERRORS = (
+    "Network error",
+    "Server error",
+    "Rate limit exceeded",
+    "Authentication error",
+    "Request failed: Resource not found",
 )
-# Any other provider error Goose ends a run with (a failed compaction, for one) is the policy's failure.
-GOOSE_ERROR_NOTICE = "Ran into this error"
-# Exit statuses of `timeout`: 124 when the deadline ended Goose, 137 when it had to be killed.
-TIMEOUT_EXIT_CODES = (124, 137)
 
 
 def goose_archive_name(arch: str) -> str:
@@ -249,19 +248,24 @@ def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None
                 last = event["message"]
     if not last:
         return None
-    text = "".join(
-        block.get("text") or block.get("message") or ""
-        for block in last.get("content") or []
-        if block.get("type") in ("text", "error")
-    )
-    if text.startswith(GOOSE_MODEL_SERVER_NOTICES):
-        return "model_server"
-    if text.startswith(GOOSE_MAX_TURNS_NOTICE):
-        return "max_turns"
+    if (last.get("metadata") or {}).get("outputTokenLimitReached"):
+        # The output or context limit cut the last completion (the vLLM model server returns an empty one).
+        return "length"
+    blocks = [block for block in last.get("content") or [] if block.get("type") in ("text", "error")]
     persisted = {m["message_id"] for s in sessions for m in s["messages"]}
-    if text.startswith(GOOSE_ERROR_NOTICE) or (last.get("id") and last["id"] not in persisted):
-        return "model_error"
-    return None
+    # Goose's own notice is never persisted, or is persisted as an error block (rejected credentials). Persisted text is
+    # the policy's own answer, whatever its wording.
+    if not (last.get("id") and last["id"] not in persisted) and not any(b.get("type") == "error" for b in blocks):
+        return None
+    text = "".join(block.get("text") or block.get("message") or "" for block in blocks)
+    if text.startswith("Network error:") or _model_server_error(text):
+        return "model_server"
+    return "max_turns" if text.startswith(GOOSE_MAX_TURNS_NOTICE) else "model_error"
+
+
+def _model_server_error(text: str) -> bool:
+    head = next((h for h in GOOSE_ERROR_NOTICES if text.startswith(h)), None)
+    return head is not None and text[len(head) :].startswith(GOOSE_MODEL_SERVER_ERRORS)
 
 
 def max_concurrent(intervals: list[tuple[int, int]]) -> int:
@@ -413,14 +417,17 @@ class GooseAgent(SimpleResponsesAPIAgent):
         # `--system=` keeps a prompt that starts with "-" from being parsed as an option.
         system_arg = f'--system="$(cat {quote(remote)}/system.txt)"' if system else ""
         # Goose is stopped inside the sandbox before the provider deadline, because some providers only stop waiting at
-        # theirs (Goose keeps running) and some raise instead of returning a timeout. Sessions are archived even when
-        # Goose fails, so partial transcripts stay inspectable. The exit code file records that Goose finished, whatever
-        # the provider reports afterwards.
+        # theirs (Goose keeps running) and some raise instead of returning a timeout. A kill after the deadline (137) is
+        # recorded as the deadline's 124, so any other 137 is an out-of-memory or external kill. The task goes in on stdin:
+        # Goose drops --system for `-i <file>`. Sessions are archived even when Goose fails, so partial transcripts stay
+        # inspectable. The exit code file records that Goose finished, whatever the provider reports afterwards.
         deadline = int(self.config.timeout - min(120, self.config.timeout / 4))
         command = (
-            f"timeout --kill-after=10 {deadline} {quote(remote)}/goose run --name gym -i {quote(remote)}/prompt.txt --max-turns {self.config.max_turns} "
-            f"--output-format stream-json {system_arg} > {quote(remote)}/stdout.jsonl 2> {quote(remote)}/stderr.log; "
-            f"code=$?; tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions; "
+            f"start=$SECONDS; timeout --kill-after=10 {deadline} {quote(remote)}/goose run --name gym -i - "
+            f"--max-turns {self.config.max_turns} --output-format stream-json {system_arg} < {quote(remote)}/prompt.txt "
+            f"> {quote(remote)}/stdout.jsonl 2> {quote(remote)}/stderr.log; code=$?; "
+            f"[ $code -eq 137 ] && [ $((SECONDS - start)) -ge {deadline} ] && code=124; "
+            f"tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions; "
             f"echo $code > {quote(remote)}/exit_code; exit $code"
         )
         result, fault = None, None
@@ -446,8 +453,10 @@ class GooseAgent(SimpleResponsesAPIAgent):
             else:
                 # A sandbox or transport fault is not the policy's failure: retry the request instead of scoring it.
                 raise RuntimeError(f"Goose sandbox execution failed: {error_type or type(fault).__name__}") from fault
-        if return_code in TIMEOUT_EXIT_CODES and not error_type:
+        if return_code == 124 and not error_type:
             error_type = "timeout"
+        elif return_code == 137:
+            raise RuntimeError("Goose was killed before its deadline (exit 137: out of memory or an external kill)")
         # Export failures propagate, so retrying such a request cannot become a scored zero.
         for name in ("stdout.jsonl", "stderr.log", "sessions.tgz"):
             await sandbox.download(f"{remote}/{name}", root / name)
@@ -534,6 +543,9 @@ class GooseAgent(SimpleResponsesAPIAgent):
                 execution = await self._run_goose(sandbox, body, mcp, root)
                 sessions = execution.pop("sessions")
                 response = self._response(body, sessions)
+                if execution["goose_error_type"] == "length":
+                    response.status = "incomplete"
+                    response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
                 children = [s for s in sessions if s.get("parent_session_id")]
                 execution["goose_subagents"] = len(children)
                 execution["goose_max_concurrent_subagents"] = max_concurrent(

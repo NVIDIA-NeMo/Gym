@@ -494,11 +494,70 @@ async def test_rejected_credentials_fail_the_request(agent):
     assert not any(c.kwargs["url_path"] == "/verify" for c in server.server_client.post.await_args_list)
 
 
-@pytest.mark.parametrize("reason", ["model_error", "max_turns"])
-def test_persisted_goose_notices_are_still_early_stops(reason):
-    # The notice is classified by its wording even when Goose persisted it under the streamed id.
-    sessions = [{"messages": [{"message_id": "msg_notice"}]}]
-    assert goose_stop_reason(_stream("msg_notice", NOTICES[reason]), sessions) == reason
+def test_persisted_goose_notices_are_error_blocks():
+    # Goose persists a notice only as an error block (rejected credentials). Persisted text is the policy's answer.
+    sessions = [{"messages": [{"message_id": "m1"}]}]
+
+    def last(content):
+        return json.dumps({"type": "message", "message": {"id": "m1", "role": "assistant", "content": content}})
+
+    compaction = {"type": "error", "message": NOTICES["model_error"]}
+    assert goose_stop_reason(last([compaction]), sessions) == "model_error"
+    assert goose_stop_reason(last([{"type": "text", "text": NOTICES["model_error"]}]), sessions) is None
+    assert goose_stop_reason(last([{"type": "text", "text": NOTICES["max_turns"]}]), sessions) is None
+
+
+async def test_task_goes_in_on_stdin_so_the_system_prompt_is_kept(agent):
+    # Goose 1.54.0 drops --system when the task comes from `-i <file>`; only `-i -` (stdin) keeps it.
+    server, sandbox, _ = agent
+    await server.run(SimpleNamespace(cookies={}), run_body())
+    run = next(c.kwargs["command"] for c in sandbox.exec.await_args_list if "goose run" in c.kwargs["command"])
+    assert " -i - " in run and "/prompt.txt > " in run and " -i /" not in run
+    assert '--system="$(cat ' in run
+
+
+async def test_output_limit_stop_is_a_failed_incomplete_run(agent):
+    # vLLM answers a context overflow with an empty completion cut at the length limit; Goose persists it and exits 0.
+    server, sandbox, _ = agent
+    cut = {"id": "m10", "role": "assistant", "content": [], "metadata": {"outputTokenLimitReached": True}}
+    _serve_stdout(sandbox, json.dumps({"type": "message", "message": cut}))
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert result.goose_failed and result.goose_error_type == "length" and result.reward == 0
+    assert result.response.status == "incomplete"
+    assert result.response.incomplete_details.reason == "max_output_tokens"
+
+
+async def test_persisted_policy_text_is_never_read_as_a_goose_notice(agent):
+    # The policy's own final answer (persisted under its streamed id) may start like a notice.
+    server, sandbox, _ = agent
+    _serve_stdout(sandbox, _stream("m10", "Network error: the service in the task is down, so I could not finish."))
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert not result.goose_failed and result.goose_error_type is None
+
+
+async def test_compaction_that_fails_at_the_model_server_fails_the_request(agent):
+    server, sandbox, _ = agent
+    notice = "Ran into this error trying to compact: Server error: Server error (502 Bad Gateway) at http://m/v1."
+    _serve_stdout(sandbox, _stream("msg_notice", notice))
+    with pytest.raises(RuntimeError, match="model server"):
+        await server.run(SimpleNamespace(cookies={}), run_body())
+
+
+async def test_kill_before_the_deadline_is_an_infrastructure_failure(agent):
+    # 137 reaches the agent only for a kill before the deadline (the wrapper records a deadline kill as 124).
+    server, sandbox, _ = agent
+    run_exec = sandbox.exec.side_effect
+
+    async def exec_(command, **kwargs):
+        if "goose run" in command:
+            assert "-eq 137 ] && [ $((SECONDS - start)) -ge " in command
+            return SimpleNamespace(return_code=137, error_type=None, stdout="")
+        return await run_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = exec_
+    with pytest.raises(RuntimeError, match="exit 137"):
+        await server.run(SimpleNamespace(cookies={}), run_body())
+    assert not any(c.kwargs["url_path"] == "/verify" for c in server.server_client.post.await_args_list)
 
 
 async def test_goose_runs_under_an_in_sandbox_deadline(agent):
