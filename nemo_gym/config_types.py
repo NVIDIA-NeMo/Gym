@@ -654,6 +654,8 @@ class BaseServerConfig(BaseModel):
     host: str
     port: int
     num_workers: Optional[int] = None
+    # Overrides the top-level `uvicorn_reuse_port` for this server when set.
+    uvicorn_reuse_port: Optional[bool] = None
 
 
 class BaseRunServerConfig(BaseServerConfig):

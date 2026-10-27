@@ -2176,6 +2176,7 @@ class TestRunWebserverProxyKwargs:
         ray_enabled: bool | None = None,
         is_worker: bool = False,
         routes_sessions: bool = False,
+        server_reuse_port: bool | None = None,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -2202,7 +2203,12 @@ class TestRunWebserverProxyKwargs:
         monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
 
         server_config = BaseRunServerInstanceConfig(
-            name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=num_workers
+            name="my_server",
+            host="127.0.0.1",
+            port=8000,
+            entrypoint="app.py",
+            num_workers=num_workers,
+            uvicorn_reuse_port=server_reuse_port,
         )
         ray_setting = ray_enabled
 
@@ -2229,6 +2235,64 @@ class TestRunWebserverProxyKwargs:
 
         TestSimpleServer.run_webserver()
         return captured
+
+    @mark.parametrize(
+        ("config_dict", "num_workers", "uses_reuse_port"),
+        [
+            ({"uvicorn_reuse_port": True}, 4, True),
+            ({"uvicorn_reuse_port": True}, 1, False),
+            ({"uvicorn_reuse_port": True}, None, False),
+            ({"uvicorn_reuse_port": False}, 4, False),
+            ({}, 4, False),
+        ],
+    )
+    def test_reuse_port_launches_only_multi_worker_servers(
+        self, monkeypatch: MonkeyPatch, config_dict: dict, num_workers: int | None, uses_reuse_port: bool
+    ) -> None:
+        reuse_port_kwargs: dict = {}
+        monkeypatch.setattr(
+            nemo_gym.server_utils, "run_with_reuse_port", lambda **kwargs: reuse_port_kwargs.update(kwargs)
+        )
+
+        plain_kwargs = self._capture_uvicorn_kwargs(monkeypatch, config_dict, num_workers=num_workers)
+
+        launched, skipped = (reuse_port_kwargs, plain_kwargs) if uses_reuse_port else (plain_kwargs, reuse_port_kwargs)
+        assert skipped == {}
+        assert launched["port"] == 8000
+        if uses_reuse_port:
+            # The reuse-port launcher gets the same arguments uvicorn.run would, including the import string.
+            assert launched["workers"] == 4
+            assert launched["app"] == "a.b.app:app"
+
+    @mark.parametrize(
+        ("config_dict", "server_setting", "uses_reuse_port"),
+        [
+            ({}, True, True),
+            ({"uvicorn_reuse_port": False}, True, True),
+            ({"uvicorn_reuse_port": True}, False, False),
+            ({"uvicorn_reuse_port": True}, None, True),
+        ],
+    )
+    def test_a_servers_own_reuse_port_setting_wins_over_the_top_level_key(
+        self, monkeypatch: MonkeyPatch, config_dict: dict, server_setting: bool | None, uses_reuse_port: bool
+    ) -> None:
+        reuse_port_kwargs: dict = {}
+        monkeypatch.setattr(
+            nemo_gym.server_utils, "run_with_reuse_port", lambda **kwargs: reuse_port_kwargs.update(kwargs)
+        )
+
+        plain_kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch, config_dict, num_workers=4, server_reuse_port=server_setting
+        )
+
+        assert bool(reuse_port_kwargs) is uses_reuse_port
+        assert bool(plain_kwargs) is not uses_reuse_port
+
+    def test_reuse_port_is_refused_before_startup_is_reported_off_linux(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "reuse_port_supported", lambda: False)
+
+        with raises(RuntimeError, match="needs Linux"):
+            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_reuse_port": True}, num_workers=4)
 
     def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
         kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)

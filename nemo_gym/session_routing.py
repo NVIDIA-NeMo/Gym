@@ -14,7 +14,8 @@
 # limitations under the License.
 """Route each session's requests to the uvicorn worker that holds its state.
 
-uvicorn's workers share one listening socket, so a request reaches whichever worker accepts the connection,
+uvicorn's workers share one listening socket (unless `uvicorn_reuse_port` gives each its own),
+so a request reaches whichever worker accepts the connection,
 while a session's state lives in the memory of the worker that created it.
 With more than one worker, each worker also serves the same app on a private Unix socket,
 in a directory the main process creates for the server, and requests are routed by one rule:
