@@ -79,6 +79,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
+    is_responses_lifecycle_chunk,
     restore_namespace_tool_calls,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
@@ -127,10 +128,6 @@ logger = logging.getLogger(__name__)
 
 _CHAT_KEEPALIVE_SECONDS = 15.0
 _SSE_KEEPALIVE = SSE_KEEPALIVE
-# Responses lifecycle events that carry no model output. With `stream_keepalive_s` they open and hold
-# a stream long before the first output item, so they do not count toward time to first token.
-_RESPONSES_LIFECYCLE_SSE_PREFIXES = (b"event: response.created\n", b"event: response.in_progress\n")
-
 # A model server sets this attribute on an engine refusal it propagates on purpose (a length
 # refusal under its propagation setting). Its value is the envelope's string code:
 # ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` when the engine's message names the context window,
@@ -1796,7 +1793,8 @@ class _CaptureMiddleware:
                 if (
                     chunk
                     and chunk != _SSE_KEEPALIVE
-                    and not chunk.startswith(_RESPONSES_LIFECYCLE_SSE_PREFIXES)
+                    # Lifecycle events open a `stream_keepalive_s` stream long before the first output item.
+                    and not is_responses_lifecycle_chunk(chunk)
                     and state["ttft_ms"] is None
                 ):
                     state["ttft_ms"] = (time.perf_counter() - start) * 1000.0

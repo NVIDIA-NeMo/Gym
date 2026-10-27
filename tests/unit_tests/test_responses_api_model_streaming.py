@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
+    is_responses_lifecycle_chunk,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
     synthesize_responses_keepalive_sse,
@@ -1222,6 +1223,18 @@ def _keepalive_client(
 
 def _sse_payloads(text: str) -> list[dict]:
     return [json.loads(line[len("data: ") :]) for line in text.splitlines() if line.startswith("data: ")]
+
+
+def test_only_a_single_lifecycle_event_is_liveness() -> None:
+    created, progress = (
+        event.encode() for event in synthesize_responses_keepalive_sse("resp_x", include_created=True)
+    )
+    assert is_responses_lifecycle_chunk(created)
+    assert is_responses_lifecycle_chunk(progress)
+    # A chunk that carries output too is output.
+    assert not is_responses_lifecycle_chunk(created + b"event: response.completed\ndata: {}\n\n")
+    assert not is_responses_lifecycle_chunk(b"event: response.output_item.done\ndata: {}\n\n")
+    assert not is_responses_lifecycle_chunk(b": keep-alive\n\n")
 
 
 class TestResponsesStreamKeepalive:
