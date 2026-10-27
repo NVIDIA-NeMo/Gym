@@ -52,6 +52,19 @@ SOURCE_FNAME = "frontier_finance_public.jsonl"
 SOURCE_URL = f"https://huggingface.co/datasets/{HF_REPO_ID}/resolve/{HF_REVISION}/{SOURCE_FNAME}"
 
 DATE_SENTENCE = "You should answer all questions as if the current date is March 1, 2026."
+SUBMIT_SENTENCE = "Your submission will not be processed unless you call this tool."
+
+# Must match max_tool_calls and max_rollout_time_seconds in the frontierfinance server config.
+MAX_TOOL_CALLS = 200
+MAX_TOOL_CALL_SECONDS = 300
+TOOL_LIMITS_PARAGRAPH = f"""When making tool calls, you need to make sure you stay within the following limits:
+
+- The maximum number of tool calls allowed (None for no limit): {MAX_TOOL_CALLS}
+- The maximum wall-clock seconds allowed for tool calling (None for no limit): {MAX_TOOL_CALL_SECONDS}
+
+If you are told that you have reached either of these limits, you must call the `submit_final_result` tool with the best answer you have gathered so far.
+
+IMPORTANT: If any tool response returns with instructions indicating that tool call limit or time limit has reached, your VERY NEXT action MUST be to call `submit_final_result` with the best answer you have gathered so far. Do not make any other tool calls except `submit_final_result`. Failure to do so will cause the entire run to fail with no answer recorded."""
 
 RUBRIC_FIELDS = (
     "rubric_id",
@@ -71,13 +84,15 @@ def format_as_of_date(iso_date: str) -> str:
 
 
 def build_system_prompt(as_of_date: str) -> str:
-    if DATE_SENTENCE not in SYSTEM_PROMPT:
-        raise ValueError(
-            f"The Finance Agent v2 system prompt no longer contains {DATE_SENTENCE!r}, so the per-query "
-            "date cannot be set. Update DATE_SENTENCE to match benchmarks/finance_agent_v2/upstream_spec.json."
-        )
+    for anchor in (DATE_SENTENCE, SUBMIT_SENTENCE):
+        if anchor not in SYSTEM_PROMPT:
+            raise ValueError(
+                f"The Finance Agent v2 system prompt no longer contains {anchor!r}. Update the anchor to "
+                "match benchmarks/finance_agent_v2/upstream_spec.json."
+            )
     dated = f"You should answer all questions as if the current date is {format_as_of_date(as_of_date)}."
-    return SYSTEM_PROMPT.replace(DATE_SENTENCE, dated)
+    prompt = SYSTEM_PROMPT.replace(DATE_SENTENCE, dated)
+    return prompt.replace(SUBMIT_SENTENCE, f"{SUBMIT_SENTENCE}\n\n{TOOL_LIMITS_PARAGRAPH}")
 
 
 def _convert_rubric(query_id: str, rubric: dict) -> dict:

@@ -55,9 +55,11 @@ failed are masked and left out of all scores, as in the official grader.
 
 Grading uses the official prompt, parser, vote and metrics, and the recommended
 judge panel. Scores are comparable to published FrontierFinance results only when
-the same judges are used. Two differences remain: the agent harness and tools are
-Finance Agent v2's rather than the systems evaluated in the paper, and the date cap
-does not cover live web pages (see the resources server README).
+the same judges are used. The agent runs the Finance Agent v2 tools with the paper's
+limits of 200 tool calls and 300 seconds per question, stated in the system prompt as
+in the paper. Remaining differences: the tools are NeMo Gym's Finance Agent v2
+implementation rather than the paper's, and the date cap does not cover live web
+pages (see the resources server README).
 
 ## Licensing
 

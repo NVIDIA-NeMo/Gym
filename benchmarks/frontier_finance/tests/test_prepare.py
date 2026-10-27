@@ -14,10 +14,15 @@
 # limitations under the License.
 
 import json
+from pathlib import Path
 
 import pytest
+import yaml
 
 from benchmarks.frontier_finance import prepare as prepare_module
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _rubric(rubric_id: int, text: str, must_have: bool = True) -> dict:
@@ -85,6 +90,20 @@ class TestConvert:
         assert "as if the current date is October 31, 2024." in system["content"]
         assert "March 1, 2026" not in system["content"]
         assert "What did ACME report for FY2024 revenue?" in user["content"]
+
+    def test_prompt_states_limits_after_submit_instruction(self, tmp_path) -> None:
+        _, rows = _convert(tmp_path, [_row()])
+        system = rows[0]["responses_create_params"]["input"][0]["content"]
+        assert f"{prepare_module.SUBMIT_SENTENCE}\n\n{prepare_module.TOOL_LIMITS_PARAGRAPH}" in system
+        assert "(None for no limit): 200\n" in system
+        assert "(None for no limit): 300\n" in system
+
+    def test_prompt_limits_match_server_config(self) -> None:
+        config_path = REPO_ROOT / "resources_servers" / "frontierfinance" / "configs" / "frontierfinance.yaml"
+        config = yaml.safe_load(config_path.read_text())
+        server = config["frontier_finance_resources_server"]["resources_servers"]["frontierfinance"]
+        assert server["max_tool_calls"] == prepare_module.MAX_TOOL_CALLS
+        assert server["max_rollout_time_seconds"] == prepare_module.MAX_TOOL_CALL_SECONDS
 
     def test_tools_match_finance_agent_v2(self, tmp_path) -> None:
         _, rows = _convert(tmp_path, [_row()])

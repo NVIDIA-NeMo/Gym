@@ -225,6 +225,34 @@ class TestDateCap:
         await server._dispatch_tool("edgar_search", _request("undated"), {"query": "x", "end_date": "2026-02-01"})
         assert seen["edgar_search"]["end_date"] == "2026-02-01"
 
+    async def test_tool_call_limit_blocks_all_but_submit(self) -> None:
+        server = _make_server(max_tool_calls=2)
+        calls: List[str] = []
+
+        def fake_tool(name):
+            async def execute(args, state, logger):
+                calls.append(name)
+                return SimpleNamespace(output="ok")
+
+            return SimpleNamespace(execute=execute)
+
+        for name in ("calculator", "submit_final_result"):
+            server._tools[name] = fake_tool(name)
+        await server.seed_session(_request("a"), FrontierFinanceSeedSessionRequest())
+        await server.seed_session(_request("b"), FrontierFinanceSeedSessionRequest())
+
+        for _ in range(2):
+            await server._dispatch_tool("calculator", _request("a"), {"expression": "1+1"})
+        blocked = await server._dispatch_tool("calculator", _request("a"), {"expression": "1+1"})
+        assert "Tool call limit reached (2 / 2)" in blocked["results"]
+        await server._dispatch_tool("submit_final_result", _request("a"), {"final_result": "x"})
+        await server._dispatch_tool("calculator", _request("b"), {"expression": "1+1"})
+        assert calls == ["calculator", "calculator", "submit_final_result", "calculator"]
+
+        await server.seed_session(_request("a"), FrontierFinanceSeedSessionRequest())
+        await server._dispatch_tool("calculator", _request("a"), {"expression": "1+1"})
+        assert calls[-1] == "calculator" and len(calls) == 5
+
     async def test_seed_rejects_malformed_date(self) -> None:
         server = _make_server()
         with pytest.raises(ValueError):

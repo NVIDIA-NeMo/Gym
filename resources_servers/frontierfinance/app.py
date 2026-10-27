@@ -56,6 +56,7 @@ from resources_servers.finance_agent_v2.app import (
 logger = logging.getLogger(__name__)
 
 DATE_CAPPED_TOOLS = frozenset({"web_search", "edgar_search", "price_history"})
+SUBMIT_TOOL = "submit_final_result"
 METRIC_PREFIX = "frontier_finance/"
 _MAX_RECORDED_REPLY_CHARS = 20_000
 
@@ -92,6 +93,11 @@ class FrontierFinanceResourcesServerConfig(FinanceAgentV2ResourcesServerConfig):
     judge_max_retries: int = Field(default=2, description="Retries of a judge call that errored.")
     judge_thread_pool_size: int = Field(
         default=256, description="Threads that run the blocking official grader across concurrent verifies."
+    )
+    max_tool_calls: Optional[int] = Field(
+        default=None,
+        description="Tool calls allowed per rollout, or null for no limit. Past it, every tool except "
+        "submit_final_result returns an error asking the model to submit.",
     )
 
 
@@ -151,9 +157,7 @@ def cap_tool_dates(args: Dict[str, Any], as_of_date: str) -> Dict[str, Any]:
 
 def extract_final_answer(response: NeMoGymResponse) -> str:
     for output_item in reversed(response.output):
-        if getattr(output_item, "type", None) == "function_call" and getattr(output_item, "name", None) == (
-            "submit_final_result"
-        ):
+        if getattr(output_item, "type", None) == "function_call" and getattr(output_item, "name", None) == SUBMIT_TOOL:
             try:
                 args = json.loads(getattr(output_item, "arguments", "{}"))
             except (json.JSONDecodeError, TypeError):
@@ -258,6 +262,7 @@ class FrontierFinanceResourcesServer(FinanceAgentV2ResourcesServer):
         if len(set(names)) != len(names):
             raise ValueError(f"judge_panel names must be unique, got {names}")
         self._as_of_dates: Dict[str, str] = {}
+        self._tool_call_counts: Dict[str, int] = {}
         self._judge_executor = ThreadPoolExecutor(
             max_workers=self.config.judge_thread_pool_size, thread_name_prefix="frontier_finance_judge"
         )
@@ -269,10 +274,25 @@ class FrontierFinanceResourcesServer(FinanceAgentV2ResourcesServer):
             self._as_of_dates[session_id] = body.as_of_date
         else:
             self._as_of_dates.pop(session_id, None)
+        self._tool_call_counts[session_id] = 0
         return await super().seed_session(request, body)
 
     async def _dispatch_tool(self, tool_name: str, request: Request, args: dict) -> Dict[str, str]:
-        as_of_date = self._as_of_dates.get(request.session.get(SESSION_ID_KEY, ""))
+        session_id = request.session.get(SESSION_ID_KEY, "")
+        if tool_name != SUBMIT_TOOL and self.config.max_tool_calls is not None:
+            used = self._tool_call_counts.get(session_id, 0)
+            if used >= self.config.max_tool_calls:
+                return {
+                    "results": json.dumps(
+                        {
+                            "error": f"Tool call limit reached ({used} / {self.config.max_tool_calls}). "
+                            "No further tool calls will be executed. Call submit_final_result immediately "
+                            "with your best answer."
+                        }
+                    )
+                }
+            self._tool_call_counts[session_id] = used + 1
+        as_of_date = self._as_of_dates.get(session_id)
         if as_of_date and tool_name in DATE_CAPPED_TOOLS and isinstance(args, dict):
             args = cap_tool_dates(args, as_of_date)
         return await super()._dispatch_tool(tool_name, request, args)
@@ -325,6 +345,7 @@ class FrontierFinanceResourcesServer(FinanceAgentV2ResourcesServer):
             self._data_storage.pop(session_id, None)
             self._session_start_times.pop(session_id, None)
             self._as_of_dates.pop(session_id, None)
+            self._tool_call_counts.pop(session_id, None)
 
         rubrics = [Rubric.from_dict(r.model_dump()) for r in body.rubrics]
         num_must_have = sum(1 for r in rubrics if r.must_have)

@@ -48,7 +48,8 @@ frontier_finance_resources_server:
       judge_max_output_tokens: 32000
       judge_call_timeout: 600
       judge_max_retries: 2
-      max_rollout_time_seconds: 1200
+      max_rollout_time_seconds: 300
+      max_tool_calls: 200
       use_cache: true
       cache_dir: ${oc.select:frontier_finance_cache_dir,${oc.env:FRONTIER_FINANCE_CACHE_DIR,null}}
 
@@ -93,7 +94,7 @@ frontier_finance_agent:
         you have a final result, otherwise continue with the next tool call.
       max_time_seconds: 3600
       abort_on_tool_error_types: [RetryExhaustedError]
-      max_steps: 50
+      max_steps: 250
       truncate_on_overflow: true
       tool_call_timeout: 300
       resources_server:

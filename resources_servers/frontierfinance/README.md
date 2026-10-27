@@ -29,6 +29,23 @@ Two sources can still return later information:
 - Tavily filters by its own publish date for each page, which can be earlier than the
   page's latest edit.
 
+## Tool limits
+
+The FrontierFinance paper's Finance Agent v2 harness allows 200 tool calls and 300
+wall-clock seconds of tool calling per question, and states both in the system
+prompt. The server enforces the same limits:
+
+- `max_tool_calls: 200`. Past it, every tool except `submit_final_result` returns an
+  error telling the model to submit.
+- `max_rollout_time_seconds: 300`, measured from the start of the rollout. Past it,
+  tools return the same kind of error.
+
+Neither limit stops the rollout; the model still gets to submit an answer. The
+agent's `max_steps` and `max_time_seconds` are hard stops that end the rollout with
+no answer, so they are set well above the server limits. The prompt values come from
+`benchmarks/frontier_finance/prepare.py`; change them there and in the config
+together.
+
 ## Grading
 
 The `frontier-finance` package is installed from a pinned commit (see
