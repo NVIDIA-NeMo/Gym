@@ -8055,6 +8055,14 @@ class TestCodexRequests:
         assert types.count("response.created") == 1
         assert types[-3:] == ["response.output_item.done", "response.output_item.done", "response.completed"]
         assert client.create_chat_completion.await_args.kwargs["reasoning_effort"] == "max"
+        events = self._events(response.text)
+        assert {event["response"]["id"] for event in events if "response" in event} == {events[0]["response"]["id"]}
+
+    def test_keepalive_streams_are_refused_on_the_native_responses_path(self) -> None:
+        # vLLM issues the native path's response ids, which a keepalive stream cannot announce in advance.
+        server, _ = self._server(is_responses_native=True, stream_keepalive_s=0.02)
+        with raises(ValueError, match="stream_keepalive_s"):
+            server.setup_webserver()
 
     def test_non_streaming_request_forwards_the_effort_too(self) -> None:
         server, client = self._server(forward_unvalidated_reasoning_effort=True)
