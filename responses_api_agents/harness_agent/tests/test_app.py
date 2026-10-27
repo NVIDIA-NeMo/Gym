@@ -107,6 +107,7 @@ def test_config_defaults():
     cfg = _config()
     assert cfg.sandbox_image == "python:3.12-slim"
     assert cfg.sandbox_python == "python3"
+    assert cfg.require_tool_call is False
 
 
 def test_registry_exposes_all_harness_agents():
@@ -161,15 +162,15 @@ def test_sandbox_model_url_preserves_remote_hostname_and_port():
     assert url == "http://model-host:8000"
 
 
-def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
+def test_sandbox_model_url_defaults_to_model_server_not_backend():
     agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
     agent.server_client.global_config_dict = MagicMock()
-    with patch(
-        "responses_api_agents.harness_agent.app.get_first_server_config_dict",
-        return_value={"base_url": "http://vllm-node:9000/v1"},
-    ):
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model-host:6990")
+    backends = {"base_url": ["http://vllm-a:8000/v1", "http://vllm-b:8000/v1"]}
+    with patch("responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value=backends):
         url = agent._sandbox_model_url(MagicMock())
-    assert url == "http://vllm-node:9000"
+    assert url == "http://model-host:6990"
+    agent.server_client._build_server_base_url.assert_called_once_with(backends)
 
 
 @pytest.mark.parametrize("hostname", ["sandbox-gateway", "localhost"])
@@ -194,15 +195,16 @@ def test_sandbox_model_url_preserves_training_rollout_prefix():
     agent.server_client.global_config_dict = MagicMock()
     request = SimpleNamespace(path_params={}, url=SimpleNamespace(path="/run"))
     token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1/training-token-capture"})
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model:6990")
     try:
         with patch(
             "responses_api_agents.harness_agent.app.get_first_server_config_dict",
-            return_value={"base_url": "http://model:8000/v1"},
+            return_value={"base_url": "http://vllm:8000/v1"},
         ):
             url = agent._sandbox_model_url(request)
     finally:
         _RUN_CONTEXT.reset(token)
-    assert url == "http://model:8000/ng-rollout/rollout-1/training-token-capture"
+    assert url == "http://model:6990/ng-rollout/rollout-1/training-token-capture"
 
 
 async def test_run_preserves_rollout_path_and_verifier_fields():
@@ -270,6 +272,45 @@ async def test_verify_failure_closes_resource_sandbox():
         with pytest.raises(RuntimeError, match="verify failed"):
             await agent.run(MagicMock(cookies={}), body)
     agent._provider.close.assert_awaited_once_with(handle)
+
+
+@pytest.mark.parametrize(
+    ("output", "reward"),
+    [
+        ([], 0.0),
+        (
+            [
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "42"}],
+                }
+            ],
+            0.0,
+        ),
+        ([{"type": "function_call", "call_id": "c1", "name": "bash", "arguments": "{}"}], 1.0),
+        ([{"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": ""}], 1.0),
+    ],
+)
+async def test_require_tool_call_zeroes_runs_without_tool_calls(output, reward):
+    agent = _make_agent(require_tool_call=True)
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={}), MagicMock(cookies={})])
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+    )
+    response = NeMoGymResponse.model_validate(_response() | {"output": output})
+    with (
+        patch.object(HarnessAgent, "responses", new=AsyncMock(return_value=response)),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(side_effect=[{}, body.model_dump() | {"response": response.model_dump(), "reward": 1.0}]),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.reward == reward
+    assert result.harness_pre_gate_reward == 1.0
 
 
 @pytest.mark.parametrize("exception_type", [RuntimeError, asyncio.CancelledError])
@@ -355,6 +396,99 @@ async def test_resource_sandbox_survives_until_verification():
     agent._provider.create.assert_not_awaited()
     assert json.loads(uploaded["/work/runner_config.json"])["cwd"] == "/testbed"
     assert json.loads(uploaded["/work/agent_config.json"])["repo_dir"] == "/testbed"
+
+
+async def test_mcp_tools_of_the_seed_reach_the_in_box_claude_code():
+    """The resources server serves its tools over MCP. The box gets this rollout's session, at a host it reaches."""
+    agent = _make_agent(agent="claude_code", forward_mcp_tools=True)
+    agent._gym_tar = None
+    agent._provider.create = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.exec = AsyncMock(
+        # mkdir, the model reachability probe, the runner, its log tail
+        side_effect=[SandboxExecResult("", "", 0)] * 3 + [SandboxExecResult("RUNNER_DONE", "", 0)]
+    )
+    uploaded = {}
+
+    async def upload(_, source, target):
+        uploaded[target] = source.read_text()
+
+    agent._provider.upload_file = AsyncMock(side_effect=upload)
+    agent._provider.close = AsyncMock()
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(json.dumps(_response())))
+    seed = {"mcp": {"url_path": "/mcp", "transport": "http", "headers": {"X-NeMo-Gym-Session-Token": "tok-1"}}}
+    with patch("responses_api_agents.harness_agent.app.sandbox_server_url", return_value="http://10.0.0.5:9000"):
+        token = _RUN_CONTEXT.set({"mcp": agent._mcp_server_entry(seed)})
+    try:
+        with patch.object(agent, "_sandbox_model_url", return_value="http://10.0.0.5:8000"):
+            await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert json.loads(uploaded["/work/mcp.json"]) == {
+        "mcpServers": {
+            "rs": {
+                "type": "http",
+                "url": "http://10.0.0.5:9000/mcp",
+                "headers": {"X-NeMo-Gym-Session-Token": "tok-1"},
+            }
+        }
+    }
+    assert json.loads(uploaded["/work/agent_config.json"])["mcp_config"] == "__WORK_DIR__/mcp.json"
+
+
+async def test_forwarding_mcp_tools_does_not_silently_drop_a_users_mcp_config():
+    agent = _make_agent(agent="claude_code", forward_mcp_tools=True, agent_kwargs={"mcp_config": "/opt/mine.json"})
+    agent._gym_tar = None
+    agent._provider.create = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    seed = {"mcp": {"url_path": "/mcp", "transport": "http", "headers": {"X-NeMo-Gym-Session-Token": "tok-1"}}}
+    with patch("responses_api_agents.harness_agent.app.sandbox_server_url", return_value="http://10.0.0.5:9000"):
+        token = _RUN_CONTEXT.set({"mcp": agent._mcp_server_entry(seed)})
+    try:
+        with (
+            patch.object(agent, "_sandbox_model_url", return_value="http://10.0.0.5:8000"),
+            pytest.raises(ValueError, match="set only one of them"),
+        ):
+            await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    finally:
+        _RUN_CONTEXT.reset(token)
+    agent._provider.create.assert_not_awaited()
+
+
+def test_forwarding_mcp_tools_needs_a_server_that_serves_them():
+    agent = _make_agent(agent="claude_code", forward_mcp_tools=True)
+    with pytest.raises(ValueError, match="serve its tools over MCP"):
+        agent._mcp_server_entry({})
+
+
+@pytest.mark.parametrize(("agent_kwargs", "expected"), [({}, "/app"), ({"cwd": "/"}, "/")])
+async def test_task_workdir_does_not_override_explicit_agent_kwargs(agent_kwargs, expected):
+    agent = _make_agent(agent="deepagents", agent_kwargs=agent_kwargs)
+    agent._gym_tar = None
+    handle = MagicMock(provider_name="opensandbox")
+    agent._provider.connect = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("RUNNER_DONE", "", 0),
+        ]
+    )
+    uploaded = {}
+
+    async def upload(_, source, target):
+        uploaded[target] = source.read_text()
+
+    agent._provider.upload_file = AsyncMock(side_effect=upload)
+    response = _response()
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(json.dumps(response)))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="hello", metadata={"workdir": "/app"})
+    token = _RUN_CONTEXT.set({"sandbox_descriptor": {"sandbox_id": "box-1"}})
+    try:
+        with patch.object(agent, "_sandbox_model_url", return_value="https://model.example"):
+            await agent.responses(MagicMock(), body)
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert json.loads(uploaded["/work/runner_config.json"])["cwd"] == "/app"
+    assert json.loads(uploaded["/work/agent_config.json"])["cwd"] == expected
 
 
 async def test_resource_sandbox_requires_connectable_provider(tmp_path):
@@ -540,6 +674,18 @@ async def test_download_json_requires_exactly_one_row():
         await agent._download_json(MagicMock(), "/work/rollouts.jsonl")
 
 
+async def test_download_json_keeps_unicode_line_separators():
+    # A response quoting document text carries U+2028 / U+0085 inside strings; model_dump_json()
+    # leaves them unescaped, and they must not split the single JSONL row.
+    row = {"output": [{"type": "message", "content": "line\u2028break and\u0085next"}]}
+    agent = _make_agent()
+    agent._provider.download_file = AsyncMock(
+        side_effect=lambda _, __, path: path.write_text(json.dumps(row, ensure_ascii=False) + "\n")
+    )
+
+    assert await agent._download_json(MagicMock(), "/work/response.json") == row
+
+
 def test_gym_source_prebuilt_path_and_url():
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {}
@@ -554,3 +700,33 @@ def test_gym_source_prebuilt_path_and_url():
         assert remote._gym_tar is None
         assert remote._gym_source_url == "https://example.com/gym.tar.gz"
         build.assert_not_called()
+
+
+_SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+
+def test_sandbox_model_url_names_the_current_span_after_the_prefix(monkeypatch):
+    monkeypatch.setattr("responses_api_agents.harness_agent.app.trace_context_path_segment", lambda: _SEGMENT)
+    agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model-host:8000")
+    agent.server_client.global_config_dict = MagicMock()
+    with patch("responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value={}):
+        bare = agent._sandbox_model_url(MagicMock())
+        token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1"})
+        try:
+            prefixed = agent._sandbox_model_url(MagicMock())
+        finally:
+            _RUN_CONTEXT.reset(token)
+    assert bare == f"http://model-host:8000{_SEGMENT}"
+    assert prefixed == f"http://model-host:8000/ng-rollout/rollout-1{_SEGMENT}"
+
+
+def test_sandbox_model_url_override_keeps_the_span(monkeypatch):
+    monkeypatch.setattr("responses_api_agents.harness_agent.app.trace_context_path_segment", lambda: _SEGMENT)
+    agent = _make_agent(sandbox_model_base_url="http://sandbox-gateway:8000/v1")
+    token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1"})
+    try:
+        url = agent._sandbox_model_url(MagicMock())
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert url == f"http://sandbox-gateway:8000/ng-rollout/rollout-1{_SEGMENT}"

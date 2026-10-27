@@ -31,3 +31,11 @@ example_mcp_weather_claude_code_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/example_mcp_weather/data/example.jsonl
+
+example_mcp_weather_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: example_mcp_weather_claude_code_agent

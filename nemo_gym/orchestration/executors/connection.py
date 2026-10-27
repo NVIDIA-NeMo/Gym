@@ -37,7 +37,7 @@ class Connection(ABC):
     def run(self, commands: list[str]) -> str: ...
 
     @abstractmethod
-    def write_text(self, remote: Path, content: str) -> None: ...
+    def write_text(self, remote: Path, content: str, *, private: bool = False) -> None: ...
 
     def close(self) -> None:
         pass
@@ -55,8 +55,11 @@ class LocalConnection(Connection):
         # as it does over SSH.
         return _checked(["bash", "-s"], input="\n".join(commands), context="local commands")
 
-    def write_text(self, remote: Path, content: str) -> None:
+    def write_text(self, remote: Path, content: str, *, private: bool = False) -> None:
         remote.parent.mkdir(parents=True, exist_ok=True)
+        if private:
+            remote.touch(mode=0o600)
+            remote.chmod(0o600)
         remote.write_text(content, encoding="utf-8")
 
 
@@ -138,7 +141,7 @@ class SSHConnection(Connection):
             context=f"ssh commands on {self._hostname}",
         )
 
-    def write_text(self, remote: Path, content: str) -> None:
+    def write_text(self, remote: Path, content: str, *, private: bool = False) -> None:
         # A quoted heredoc delimiter: the payload reaches the file byte for byte,
         # with no parameter or command substitution applied to it on the way.
         # The heredoc supplies the newline before the delimiter, so a payload
@@ -146,7 +149,8 @@ class SSHConnection(Connection):
         # the remote manifest gains a blank line the local index does not have,
         # and the two stores stop being byte-identical.
         payload = content.removesuffix("\n")
-        script = f"cat > {shlex.quote(str(remote))} <<'GYM_EOF'\n{payload}\nGYM_EOF\n"
+        umask = "umask 077\n" if private else ""
+        script = f"{umask}cat > {shlex.quote(str(remote))} <<'GYM_EOF'\n{payload}\nGYM_EOF\n"
         _checked(
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input=script,

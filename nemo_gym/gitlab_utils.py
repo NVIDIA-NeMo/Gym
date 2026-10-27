@@ -14,12 +14,9 @@
 # limitations under the License.
 from os import environ
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import requests
-from mlflow import MlflowClient
-from mlflow.artifacts import get_artifact_repository
-from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
-from mlflow.exceptions import RestException
 
 from nemo_gym.config_types import (
     ConfigError,
@@ -30,12 +27,38 @@ from nemo_gym.config_types import (
 from nemo_gym.server_utils import get_global_config_dict
 
 
-def create_mlflow_client() -> MlflowClient:  # pragma: no cover
+if TYPE_CHECKING:
+    from mlflow import MlflowClient
+
+
+def has_gitlab_storage_credentials(config: MLFlowConfig) -> bool:
+    return bool(config.mlflow_tracking_uri and config.mlflow_tracking_token)
+
+
+def gitlab_storage_extras(config: Any) -> tuple[str, ...]:
+    """The install extras GitLab dataset storage needs when `config` carries its credentials.
+
+    A driver that installs Gym must add these, or a prepare step that downloads from GitLab fails.
+    """
+    return ("mlflow",) if has_gitlab_storage_credentials(MLFlowConfig.model_validate(config)) else ()
+
+
+def create_mlflow_client() -> "MlflowClient":  # pragma: no cover
+    # mlflow is an optional extra (`nemo-gym[mlflow]`): the GitLab dataset/model-registry
+    # integration is built on it, but a plain Gym install must not require it just to import
+    # this module. Import lazily here so the failure is scoped to this call and actionable.
+    try:
+        from mlflow import MlflowClient
+    except ImportError as e:
+        raise ConfigError(
+            "GitLab dataset storage needs the mlflow extra. Install with:\n  pip install nemo-gym[mlflow]"
+        ) from e
+
     global_config = get_global_config_dict()
     config = MLFlowConfig.model_validate(global_config)
 
     # Only the registry half of MLFlowConfig is needed here; experiment/run name are exporter-only.
-    if not (config.mlflow_tracking_uri and config.mlflow_tracking_token):
+    if not has_gitlab_storage_credentials(config):
         raise ConfigError(
             "GitLab dataset storage needs MLflow credentials. Add to env.yaml:\n"
             "  mlflow_tracking_uri: <your_gitlab_uri>\n"
@@ -52,6 +75,7 @@ def upload_jsonl_dataset(
     config: UploadJsonlDatasetGitlabConfig,
 ) -> None:  # pragma: no cover
     client = create_mlflow_client()
+    from mlflow.exceptions import RestException
 
     try:
         client.create_registered_model(config.dataset_name)
@@ -83,6 +107,8 @@ def download_jsonl_dataset(
 ) -> None:  # pragma: no cover
     # TODO: There is probably a much better way to do this, but it is not clear at the moment.
     client = create_mlflow_client()
+    from mlflow.artifacts import get_artifact_repository
+    from mlflow.environment_variables import MLFLOW_TRACKING_TOKEN
 
     model_version = client.get_model_version(config.dataset_name, config.version)
     run_id = model_version.run_id
@@ -94,12 +120,16 @@ def download_jsonl_dataset(
         download_link,
         headers={"Authorization": f"Bearer {MLFLOW_TRACKING_TOKEN.get()}"},
     )
-    with open(config.output_fpath, "w") as f:
+    # Relative outputs such as `data/x.jsonl` only exist in the Gym root; create the directory like the HF download.
+    output_fpath = Path(config.output_fpath)
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_fpath, "w") as f:
         f.write(response.content.decode())
 
 
 def is_model_in_gitlab(model_name: str) -> bool:  # pragma: no cover
     client = create_mlflow_client()
+    from mlflow.exceptions import RestException
 
     # model_name in gitlab is case sensitive
     try:

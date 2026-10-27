@@ -26,3 +26,11 @@ blackjack_gymnasium_agent:
         type: train
         jsonl_fpath: environments/blackjack/data/train.jsonl
         license: Apache 2.0
+
+blackjack_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: blackjack_gymnasium_agent

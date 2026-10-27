@@ -20,9 +20,26 @@ from omegaconf import DictConfig, ListConfig, open_dict
 
 MASKED_VALUE = "****"
 
+# Matched case-insensitively anywhere in a key name, so `DB_PASSWORD`, `client_secret`, `apiKey` and an
+# `Authorization` header entry all count. `authorization`, not `auth`, so keys like `author` stay visible.
+_SECRET_KEY_SUBSTRINGS = (
+    "token",
+    "key",
+    "header",
+    "password",
+    "passwd",
+    "secret",
+    "credential",
+    "bearer",
+    "cookie",
+    "authorization",
+)
 
-def looks_like_secret_key(key: str) -> bool:
-    return "token" in key or "key" in key or "header" in key
+
+def looks_like_secret_key(key: object) -> bool:
+    # OmegaConf allows non-string keys (ints, bools, enums), so match on their string form.
+    lowered_key = str(key).lower()
+    return any(substring in lowered_key for substring in _SECRET_KEY_SUBSTRINGS)
 
 
 def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
@@ -33,22 +50,38 @@ def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
         match = override_re.match(token)
         if match:
             prefix, key, _value = match.groups()
-            if looks_like_secret_key(key.rsplit(".", 1)[-1]):
+            # Any secret-shaped segment, not only the leaf: `...harbor.secrets.JUDGE_AUTH` is a secret too.
+            if any(looks_like_secret_key(segment) for segment in key.split(".")):
                 token = f"{prefix}{key}={MASKED_VALUE}"
         redacted.append(token)
     return redacted
 
 
 def recursively_hide_secrets(dict_config: DictConfig) -> None:
-    """Mask every token/key leaf in place with '****' so a config can be printed or exported.
+    """Mask every secret-shaped leaf in place with '****' so a config can be printed or exported.
+
+    A leaf is secret-shaped by its own name, or by sitting anywhere below a secret-shaped key: every
+    value of a `secrets:` mapping is a secret whatever its environment variable is called.
 
     Used by the config parser and the exporters.
     """
 
+    def mask_all(node) -> None:
+        for k, v in list(node.items()):
+            if isinstance(v, (DictConfig, dict)):
+                mask_all(v)
+            elif isinstance(v, (ListConfig, list)):
+                node[k] = [MASKED_VALUE] * len(v)
+            else:
+                node[k] = MASKED_VALUE
+
     def hide(node) -> None:
         for k, v in list(node.items()):
             if isinstance(v, (DictConfig, dict)):
-                hide(v)
+                if looks_like_secret_key(k):
+                    mask_all(v)
+                else:
+                    hide(v)
             elif isinstance(v, (ListConfig, list)):
                 if looks_like_secret_key(k):
                     node[k] = [MASKED_VALUE] * len(v)

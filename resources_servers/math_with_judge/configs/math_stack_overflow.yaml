@@ -38,3 +38,11 @@ math_with_judge_simple_agent:
           repo_id: nvidia/Nemotron-RL-math-OpenMathReasoning
           artifact_fpath: aime24_validation.jsonl
         license: Apache 2.0
+
+math_with_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: math_with_judge_simple_agent

@@ -29,3 +29,11 @@ assaybench_simple_agent:
         # Pre-materialized with benchmarks/prompts/eval/assaybench/paper.yaml; do not pass +prompt_config.
         jsonl_fpath: resources_servers/assaybench/data/example.jsonl
         license: MIT
+
+assaybench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: assaybench_simple_agent

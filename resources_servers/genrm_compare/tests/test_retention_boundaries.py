@@ -11,7 +11,12 @@ import pytest
 from fastapi import HTTPException
 
 import resources_servers.genrm_compare.app as genrm
-from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
+from resources_servers.genrm_compare.tests.support import request_with_session
+from resources_servers.genrm_compare.tests.test_cohort_lifecycle import (
+    collected_comparisons,
+    comparison_result,
+    member,
+)
 
 
 @pytest.fixture
@@ -22,7 +27,9 @@ def clock(monkeypatch):
 
 
 async def complete(server, group="group", attempt=0):
-    return await asyncio.gather(*(server.verify(member(i, group=group, attempt=attempt)) for i in range(2)))
+    return await asyncio.gather(
+        *(server.verify(request_with_session(), member(i, group=group, attempt=attempt)) for i in range(2))
+    )
 
 
 async def test_slow_judge_result_keeps_newest_attempt_fenced(server, clock):
@@ -32,9 +39,9 @@ async def test_slow_judge_result_keeps_newest_attempt_fenced(server, clock):
     async def compare(**kwargs):
         started.set()
         await release.wait()
-        return [3.0, 3.0], {}, [], []
+        return collected_comparisons([3.0, 3.0])
 
-    server._run_compare = compare
+    server._collect_comparisons = compare
     latest = asyncio.create_task(complete(server, attempt=1))
     await started.wait()
     clock[0] = 108
@@ -42,21 +49,21 @@ async def test_slow_judge_result_keeps_newest_attempt_fenced(server, clock):
     await latest
     clock[0] = 111
     with pytest.raises(HTTPException) as error:
-        await asyncio.wait_for(server.verify(member(0, attempt=0)), 0.1)
+        await asyncio.wait_for(server.verify(request_with_session(), member(0, attempt=0)), 0.1)
     assert error.value.status_code == 409
-    assert (await server.verify(member(0, attempt=1))).reward == 3
+    assert (await server.verify(request_with_session(), member(0, attempt=1))).reward == 3
 
 
 @pytest.mark.parametrize("eviction", ["ttl", "count"])
 @pytest.mark.parametrize("duplicates", [1, 2])
 async def test_finished_attempt_with_missing_result_is_rejected_without_rejudging(server, clock, eviction, duplicates):
-    judge = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    judge = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     server._run_single_comparison = judge
     await complete(server, "a")
     if eviction == "ttl":
         server.config.cohort_result_ttl_s = 10
         clock[0] = 108
-        assert (await server.verify(member(0, group="a"))).reward == 3
+        assert (await server.verify(request_with_session(), member(0, group="a"))).reward == 3
         clock[0] = 111
     else:
         server.config.max_terminal_cohorts = 2
@@ -64,11 +71,14 @@ async def test_finished_attempt_with_missing_result_is_rejected_without_rejudgin
         server.config.cohort_collection_timeout_s = 0.01
         for legacy_attempt in range(2):
             with pytest.raises(HTTPException):
-                await server.verify(member(0, group=None, attempt=legacy_attempt))
+                await server.verify(request_with_session(), member(0, group=None, attempt=legacy_attempt))
     calls = judge.await_count
     for _ in range(2):
         outcomes = await asyncio.wait_for(
-            asyncio.gather(*(server.verify(member(i, group="a")) for i in range(duplicates)), return_exceptions=True),
+            asyncio.gather(
+                *(server.verify(request_with_session(), member(i, group="a")) for i in range(duplicates)),
+                return_exceptions=True,
+            ),
             0.1,
         )
         assert all(isinstance(r, HTTPException) and r.status_code == 409 for r in outcomes)
@@ -79,12 +89,12 @@ async def test_finished_attempt_with_missing_result_is_rejected_without_rejudgin
 @pytest.mark.parametrize("conflicting_field", [None, "prompt", "principle"])
 async def test_count_eviction_keeps_retained_result_replayable(server, clock, conflicting_field):
     server.config.max_terminal_cohorts = 2
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     await complete(server, "a")
     clock[0] = 101
     await complete(server, "b", attempt=1)
     clock[0] = 102
-    await server.verify(member(0, group="a"))
+    await server.verify(request_with_session(), member(0, group="a"))
     clock[0] = 103
     await complete(server, "c")
     server._prune_terminal_cohorts()
@@ -98,7 +108,7 @@ async def test_count_eviction_keeps_retained_result_replayable(server, clock, co
         else:
             invalid.principle = "Different judging instructions"
         with pytest.raises(HTTPException) as error:
-            await server.verify(invalid)
+            await server.verify(request_with_session(), invalid)
         assert error.value.status_code == 409
         assert "inconsistent prompt or principle" in error.value.detail
     replay = await asyncio.wait_for(complete(server, "b", attempt=1), 0.1)
@@ -108,13 +118,13 @@ async def test_count_eviction_keeps_retained_result_replayable(server, clock, co
 
 async def test_rejected_expired_duplicate_does_not_extend_attempt_retention(server, clock):
     server.config.cohort_result_ttl_s = 10
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     await complete(server)
     clock[0] = 108
-    await server.verify(member(0))
+    await server.verify(request_with_session(), member(0))
     clock[0] = 111
     with pytest.raises(HTTPException) as error:
-        await asyncio.wait_for(server.verify(member(0)), 0.1)
+        await asyncio.wait_for(server.verify(request_with_session(), member(0)), 0.1)
     assert error.value.status_code == 409
     clock[0] = 119
     server._prune_terminal_cohorts()
@@ -148,7 +158,7 @@ async def test_cleanup_does_not_scan_active_prefix_with_finished_group(server, c
             body=body, prompt_key=server._group_cohort_key(body.group_id, 0), prompt_digest="p"
         )
     clock[0] = 111
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     await complete(server, "finished")
     original = server._latest_group_attempts
     server._latest_group_attempts = NoScan(original)
@@ -182,26 +192,28 @@ async def test_active_groups_do_not_evict_a_finished_result(server, whole_group,
             if judge_started == 3:
                 judging.set()
             await release.wait()
-        return [3.0, 3.0], {}, [], []
+        return collected_comparisons([3.0, 3.0])
 
-    server._run_compare = AsyncMock(side_effect=compare)
+    server._collect_comparisons = AsyncMock(side_effect=compare)
     active = []
     for group in range(3):
         for index in range(2 if phase == "evaluating" else 1):
             request = member(index, group=f"active-{group}")
             request.responses_create_params.input[0].content = f"active {group}"
-            active.append(asyncio.create_task(server.verify(request)))
+            active.append(asyncio.create_task(server.verify(request_with_session(), request)))
     try:
         if phase == "evaluating":
             await asyncio.wait_for(judging.wait(), 1)
         else:
             await asyncio.sleep(0)
         assert [r.reward for r in await complete(server, "done")] == [3, 3]
-        calls = server._run_compare.await_count
+        calls = server._collect_comparisons.await_count
         indices = range(2) if whole_group else [0]
-        retry = await asyncio.wait_for(asyncio.gather(*(server.verify(member(i, group="done")) for i in indices)), 0.1)
+        retry = await asyncio.wait_for(
+            asyncio.gather(*(server.verify(request_with_session(), member(i, group="done")) for i in indices)), 0.1
+        )
         assert [r.reward for r in retry] == [3] * len(indices)
-        assert server._run_compare.await_count == calls
+        assert server._collect_comparisons.await_count == calls
     finally:
         release.set()
         for task in active:
@@ -212,16 +224,16 @@ async def test_active_groups_do_not_evict_a_finished_result(server, whole_group,
 async def test_superseded_result_neither_uses_a_slot_nor_replays_after_eviction(server, clock):
     server.config.max_terminal_cohorts = 3
     server.config.cohort_collection_timeout_s = 0.02
-    judge = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    judge = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     server._run_single_comparison = judge
     await complete(server, "x1")
     await complete(server, "x2")
     clock[0] = 101
     await complete(server, "a")
     await complete(server, "a", attempt=1)
-    assert (await asyncio.wait_for(server.verify(member(0, group="x1")), 0.1)).reward == 3
+    assert (await asyncio.wait_for(server.verify(request_with_session(), member(0, group="x1")), 0.1)).reward == 3
     clock[0] = 102
-    await server.verify(member(0, group="x2"))
+    await server.verify(request_with_session(), member(0, group="x2"))
     clock[0] = 103
     await complete(server, "y")
     server._prune_terminal_cohorts()
@@ -231,6 +243,6 @@ async def test_superseded_result_neither_uses_a_slot_nor_replays_after_eviction(
     # Once the attempt record is gone, the caller owns stale-attempt detection.
     # This result was removed while its attempt was still tracked and must not replay.
     with pytest.raises(HTTPException) as error:
-        await server.verify(member(0, group="a"))
+        await server.verify(request_with_session(), member(0, group="a"))
     assert error.value.status_code == 503
     assert judge.await_count == calls

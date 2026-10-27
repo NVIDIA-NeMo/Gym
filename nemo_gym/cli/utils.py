@@ -20,7 +20,12 @@ from typing import Dict, Iterable, Optional
 
 def did_you_mean(value: str, candidates: Iterable[str]) -> str:
     """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
-    matches = difflib.get_close_matches(value, list(candidates), n=1)
+    # Exclude the exact input so it is not suggested as its own correction.
+    matches = difflib.get_close_matches(
+        value,
+        [candidate for candidate in candidates if candidate != value],
+        n=1,
+    )
     return f" Did you mean `{matches[0]}`?" if matches else ""
 
 

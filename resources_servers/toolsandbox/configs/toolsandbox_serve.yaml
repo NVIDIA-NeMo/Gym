@@ -73,3 +73,11 @@ toolsandbox_agent:
       # transition snapshots. response.output is consumed as a flat list;
       # transitions (list-of-lists) break downstream text extraction.
       return_transitions: false
+
+toolsandbox_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: toolsandbox_agent

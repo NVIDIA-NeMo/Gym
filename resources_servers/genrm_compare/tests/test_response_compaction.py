@@ -9,7 +9,8 @@ import pytest
 from fastapi import HTTPException
 
 import resources_servers.genrm_compare.app as genrm
-from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
+from resources_servers.genrm_compare.tests.support import request_with_session
+from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member
 from resources_servers.genrm_compare.tests.test_cohort_storage import assert_cohort_indices_match, training_member
 from resources_servers.genrm_compare.utils import extract_from_response_obj
 
@@ -35,17 +36,17 @@ async def test_scoring_text_survives_dictionary_shaped_python_inputs(server, sha
 
     async def compare(*, response_objs, **kwargs):
         compared.append([extract_from_response_obj(obj) for obj in response_objs])
-        return [1.0, 2.0], {}, [], []
+        return collected_comparisons([1.0, 2.0])
 
-    server._run_compare = compare
-    results = await asyncio.gather(*(server.verify(body) for body in requests))
+    server._collect_comparisons = compare
+    results = await asyncio.gather(*(server.verify(request_with_session(), body) for body in requests))
     assert compared == [expected_texts]
     assert [result.reward for result in results] == [1.0, 2.0]
     assert [result.response.model_dump() for result in results] == raw
 
 
 async def test_rejected_member_is_not_converted_and_cannot_fail_existing_group(server, monkeypatch):
-    first = asyncio.create_task(server.verify(member(0)))
+    first = asyncio.create_task(server.verify(request_with_session(), member(0)))
     await asyncio.sleep(0)
     cohort = next(iter(server._verify_cohorts.values()))
 
@@ -54,7 +55,7 @@ async def test_rejected_member_is_not_converted_and_cannot_fail_existing_group(s
 
     monkeypatch.setattr(server, "_comparison_response", reject_conversion)
     with pytest.raises(HTTPException) as error:
-        await server.verify(member(0, response_id="conflicting-response"))
+        await server.verify(request_with_session(), member(0, response_id="conflicting-response"))
     assert error.value.status_code == 409
     assert cohort.phase == "collecting" and not first.done()
     assert_cohort_indices_match(server)
@@ -76,16 +77,16 @@ async def test_active_judging_keeps_attempt_watermark_after_other_records_expire
         started.put_nowait(len(started_calls))
         started_calls.append(response_objs)
         await release.wait()
-        return [3.0, 3.0], {}, [], []
+        return collected_comparisons([3.0, 3.0])
 
-    server._run_compare = compare
+    server._collect_comparisons = compare
     old_members = [training_member(i) for i in range(2)]
     new_members = [training_member(i, attempt=1) for i in range(2)]
     for i, body in enumerate(new_members):
         body.response.output[1].content[0].text = f"replacement answer {i}"
-    old = [asyncio.create_task(server.verify(body)) for body in old_members]
+    old = [asyncio.create_task(server.verify(request_with_session(), body)) for body in old_members]
     assert await asyncio.wait_for(started.get(), 1) == 0
-    latest = [asyncio.create_task(server.verify(body)) for body in new_members]
+    latest = [asyncio.create_task(server.verify(request_with_session(), body)) for body in new_members]
     try:
         assert await asyncio.wait_for(started.get(), 1) == 1
         assert [[extract_from_response_obj(obj) for obj in call] for call in started_calls] == [
@@ -101,7 +102,7 @@ async def test_active_judging_keeps_attempt_watermark_after_other_records_expire
         assert server._verify_cohorts[server._group_cohort_key("group", 1)].phase == "evaluating"
         assert all(not task.done() for task in latest)
         with pytest.raises(HTTPException) as error:
-            await server.verify(old_members[0])
+            await server.verify(request_with_session(), old_members[0])
         assert error.value.status_code == 409
         assert "superseded by attempt 1" in error.value.detail
         assert_cohort_indices_match(server)

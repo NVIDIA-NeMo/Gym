@@ -13,7 +13,10 @@ frontierscience_research_frontierscience_judge_resources_server:
       judge_prompt_path: resources_servers/frontierscience_judge/prompts/research_judge.yaml
       judge_responses_create_params:
         input: []
-        max_output_tokens: 4096
+        # Override the inherited cap; omit token-limit fields from the API request.
+        max_output_tokens: null
+        reasoning:
+          effort: high
 
 frontierscience_research_frontierscience_judge_simple_agent:
   _inherit_from: frontierscience_judge_simple_agent
@@ -28,3 +31,10 @@ frontierscience_research_frontierscience_judge_simple_agent:
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/frontierscience_research/prepare.py
         license: Apache 2.0
+
+frontierscience_research_frontierscience_judge_environment_server:
+  _inherit_from: frontierscience_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: frontierscience_research_frontierscience_judge_simple_agent

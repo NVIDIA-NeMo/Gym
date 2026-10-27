@@ -16,20 +16,22 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
 import ray
 from harbor.job import Job
-from harbor.models.job.config import DatasetConfig, JobConfig, RetryConfig
+from harbor.models.job.config import JobConfig
 from harbor.models.task.paths import TaskPaths
 from harbor.models.trajectories import ContentPart, Step, Trajectory
-from harbor.models.trial.config import AgentConfig, EnvironmentConfig, VerifierConfig
 from harbor.models.trial.paths import TrialPaths
 from harbor.models.trial.result import TrialResult
-from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, field_validator
+from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, ValidationInfo, field_validator, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -49,61 +51,139 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 
 
 logger = logging.getLogger(__name__)
 
 NUM_SAMPLES_IN_PARALLEL_KEY_NAME = "num_samples_in_parallel"
+GYM_ROOT = Path(__file__).resolve().parents[2]
 
 _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 
 
+def resolve_harbor_path(path: Path, *, from_gym_root: bool) -> Path:
+    """Resolve paths from cwd by default, with an opt-in root for built-in datasets."""
+    return (GYM_ROOT / path).resolve() if from_gym_root else path.resolve()
+
+
+@contextmanager
+def temporary_worker_env(values: dict[str, str]) -> Iterator[None]:
+    """Install per-job variables without leaking them into the next Ray task."""
+    previous = {key: os.environ[key] for key in values if key in os.environ}
+    new_keys = values.keys() - previous.keys()
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key in new_keys:
+            os.environ.pop(key, None)
+        os.environ.update(previous)
+
+
 @ray.remote(scheduling_strategy="SPREAD", runtime_env={"py_executable": sys.executable})
-def harbor_job_worker(job_config_dict: dict, task_name: str) -> str:
+def harbor_job_worker(job_config_dict: dict, task_name: str, worker_env: dict[str, str]) -> str:
     global _RAY_WORKER_EVENT_LOOP
     logging.disable(logging.DEBUG)
-    if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
-        _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
-        asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
-    return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict, task_name))
+    with temporary_worker_env(worker_env):
+        if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
+            _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
+            asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
+        return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict, task_name))
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     harbor_ray_task_num_cpus: float = Field(default=0.25, ge=0)
-    harbor_jobs_dir: Path
-    harbor_debug: bool = Field(default=False)
-    harbor_max_retries: int = Field(default=0)
+    # Preserve cwd-based paths and stable resumable jobs for existing callers.
+    harbor_resolve_paths_from_gym_root: bool = False
+    harbor_unique_job_names: bool = False
+    # Passed as a task argument and installed inside the worker process. Do not
+    # use Ray runtime_env for secrets: Ray persists runtime_env values in logs.
+    harbor_worker_env: dict[str, str] = Field(default_factory=dict)
     harbor_reward_key: str = Field(default="reward", min_length=1)
-    harbor_dataset: DatasetConfig = Field(default_factory=DatasetConfig)
-    harbor_environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
-    harbor_agent: AgentConfig = Field(default_factory=AgentConfig)
-    harbor_verifier: VerifierConfig = Field(default_factory=VerifierConfig)
+    job: JobConfig
 
-    @field_validator("harbor_jobs_dir", mode="after")
+    @model_validator(mode="before")
     @classmethod
-    def normalize_jobs_dir(cls, harbor_jobs_dir: Path) -> Path:
-        harbor_jobs_dir = harbor_jobs_dir.resolve()
-        if harbor_jobs_dir.suffix.lower() == ".jsonl":
-            return harbor_jobs_dir.parent / "harbor"
-        return harbor_jobs_dir
+    def migrate_legacy_config(cls, value: object) -> object:
+        """Keep existing Gym YAMLs usable; new options belong directly in ``job``."""
+        if not isinstance(value, dict):
+            return value
+        # This is a compatibility map, not an allowlist of supported Harbor options.
+        legacy_fields = {
+            "harbor_jobs_dir": "jobs_dir",
+            "harbor_debug": "debug",
+            "harbor_max_retries": "retry",
+            "harbor_dataset": "datasets",
+            "harbor_environment": "environment",
+            "harbor_agent": "agents",
+            "harbor_verifier": "verifier",
+        }
+        supplied = value.keys() & legacy_fields.keys()
+        if not supplied:
+            return value
+        if "job" in value:
+            raise ValueError("Use job with Harbor's native names, or the legacy harbor_* fields, not both")
+        value = value.copy()
+        job = {}
+        for old_name in supplied:
+            setting = value.pop(old_name)
+            if old_name in {"harbor_dataset", "harbor_agent"}:
+                setting = [setting]
+            elif old_name == "harbor_max_retries":
+                setting = {"max_retries": setting}
+            job[legacy_fields[old_name]] = setting
+        value["job"] = job
+        return value
+
+    @field_validator("job", mode="before")
+    @classmethod
+    def single_trial_defaults(cls, value: object) -> object:
+        # Preserve Gym's defaults while accepting all fields from the installed Harbor schema.
+        defaults = {"n_concurrent_trials": 1, "quiet": True}
+        if isinstance(value, JobConfig):
+            return value.model_copy(update={k: v for k, v in defaults.items() if k not in value.model_fields_set})
+        if isinstance(value, dict):
+            return defaults | value
+        return value
+
+    @field_validator("job", mode="after")
+    @classmethod
+    def validate_job(cls, job: JobConfig, info: ValidationInfo) -> JobConfig:
+        """Enforce Gym's one-row/one-trial contract without overwriting user settings."""
+        if "job_name" in job.model_fields_set:
+            raise ValueError("job.job_name is assigned by Gym from the task and rollout indices")
+        if job.n_attempts != 1 or job.n_concurrent_trials != 1:
+            raise ValueError("job.n_attempts and job.n_concurrent_trials must be 1; Gym schedules rollouts")
+        if len(job.datasets) != 1 or len(job.agents) != 1:
+            raise ValueError("job must contain exactly one dataset and one agent")
+        if job.tasks or job.source_jobs or job.install_only:
+            raise ValueError("job.tasks, job.source_jobs and job.install_only conflict with Gym's per-row execution")
+        dataset = job.datasets[0]
+        if dataset.task_names or dataset.exclude_task_names or dataset.n_tasks is not None:
+            raise ValueError(
+                "job.datasets task_names, exclude_task_names and n_tasks are controlled by Gym input rows"
+            )
+        if not job.environment.delete:
+            raise ValueError("job.environment.delete must be true so each Gym rollout cleans up its environment")
+        job = job.model_copy(deep=True)
+        from_gym_root = info.data.get("harbor_resolve_paths_from_gym_root", False)
+        job.jobs_dir = resolve_harbor_path(job.jobs_dir, from_gym_root=from_gym_root)
+        if from_gym_root and job.datasets[0].path is not None:
+            job.datasets[0].path = resolve_harbor_path(job.datasets[0].path, from_gym_root=True)
+        if job.jobs_dir.suffix.lower() == ".jsonl":
+            job.jobs_dir = job.jobs_dir.parent / "harbor"
+        return job
 
     def build_job_config(self, task_name: str, job_name: str) -> JobConfig:
-        return JobConfig(
-            job_name=job_name,
-            jobs_dir=self.harbor_jobs_dir,
-            n_attempts=1,
-            n_concurrent_trials=1,
-            debug=self.harbor_debug,
-            quiet=True,
-            retry=RetryConfig(max_retries=self.harbor_max_retries),
-            datasets=[
-                self.harbor_dataset.model_copy(update={"task_names": [task_name]}),
-            ],
-            environment=self.harbor_environment.model_copy(update={"delete": True}),
-            agents=[self.harbor_agent],
-            verifier=self.harbor_verifier,
-        )
+        job = self.job.model_copy(deep=True)
+        if self.harbor_unique_job_names:
+            # Isolate repeated requests, including retries, without deleting prior evidence.
+            job_name = f"{job_name}-{uuid4().hex}"
+        job.job_name = job_name
+        job.datasets[0].task_names = [task_name]
+        return job
 
 
 class HarborRunRequest(BaseRunRequest):
@@ -119,6 +199,7 @@ class HarborVerifyResponse(BaseVerifyResponse):
 
 
 class HarborAgent(SimpleResponsesAPIAgent):
+    ray_enabled = True
     config: HarborAgentConfig
 
     _sem: asyncio.Semaphore = PrivateAttr()
@@ -130,17 +211,39 @@ class HarborAgent(SimpleResponsesAPIAgent):
         ## Harbor owns the full run() lifecycle.
         raise NotImplementedError
 
+    @staticmethod
+    def _score_fn(rollout: dict) -> dict[str, float]:
+        reward = rollout.get("reward")
+        ## A row without one is not a zero: it is a rollout nobody scored.
+        return {} if reward is None else {"accuracy": reward}
+
+    def compute_metrics(self, tasks: list[list[dict]]) -> dict:
+        """pass@k over whatever the task's verifier returned.
+
+        A benchmark scoring 0/1 gets the combinatorial estimator, a continuous one gets
+        max-of-k; `compute_pass_majority_metrics` decides per task. `answer_key` is left unset
+        because Harbor reports a score, not an extracted answer, so majority@k has nothing to
+        take a majority of. As in that helper, a task with fewer than k scored trials is left out
+        of pass@k. A failed trial goes to the sidecar as `harbor_failed`, so list that class in
+        `count_failure_classes_as_zero`, and set `count_missing_rollouts_as_zero` for trials that
+        left no row, to keep every task at every k.
+        """
+        metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=self._score_fn)
+        return metrics
+
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self._sem:
             try:
                 job_config = self.config.build_job_config(
                     task_name=body.task_name,
-                    ## Use a stable job name to allow resume.
+                    ## Stable names allow resume unless fresh jobs are configured.
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
 
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
-                    job_config.model_dump(mode="json"), body.task_name
+                    job_config.model_dump(mode="json"),
+                    body.task_name,
+                    dict(self.config.harbor_worker_env),
                 )
                 try:
                     trial_dir = Path(await job_ref)
@@ -382,7 +485,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         trial_paths = TrialPaths(trial_dir)
         trial = TrialResult.model_validate_json(trial_paths.result_path.read_text())
-        task_paths = TaskPaths(trial.config.task.get_local_path())
+        task_paths = TaskPaths(
+            resolve_harbor_path(
+                trial.config.task.get_local_path(), from_gym_root=self.config.harbor_resolve_paths_from_gym_root
+            )
+        )
         if trial.step_results:
             path_entries = [
                 (
@@ -442,7 +549,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 "response": NeMoGymResponse(
                     id=f"harbor-{trial.id}",
                     created_at=(trial.finished_at.timestamp() if trial.finished_at is not None else time.time()),
-                    model=self.config.harbor_agent.model_name,
+                    model=self.config.job.agents[0].model_name,
                     object="response",
                     output=output,
                     parallel_tool_calls=False,
@@ -486,7 +593,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
         response = NeMoGymResponse(
             id=f"harbor-error-t{body.task_index}-r{body.rollout_index}",
             created_at=time.time(),
-            model=self.config.harbor_agent.model_name,
+            model=self.config.job.agents[0].model_name,
             object="response",
             output=[],
             parallel_tool_calls=False,
@@ -529,15 +636,24 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if trial_result.task_name != task_name and Path(trial_result.task_name).name != task_name:
                     continue
 
-                exception_info = trial_result.exception_info or next(
+                failures = [
+                    result
+                    for result in [trial_result, *(trial_result.step_results or [])]
+                    if result.exception_info is not None
+                ]
+                ## Harbor still runs the tests after an agent timeout and scores that result, so Gym keeps it too,
+                ## but only when every recorded failure is such a graded timeout.
+                failed = next(
                     (
-                        step.exception_info
-                        for step in trial_result.step_results or []
-                        if step.exception_info is not None
+                        result
+                        for result in failures
+                        if result.exception_info.exception_type != "AgentTimeoutError"
+                        or result.verifier_result is None
                     ),
                     None,
                 )
-                if exception_info is not None:
+                if failed is not None:
+                    exception_info = failed.exception_info
                     ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
                     result_path.unlink()
                     raise RuntimeError(

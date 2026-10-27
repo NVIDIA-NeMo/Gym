@@ -21,3 +21,10 @@ apex25_math_with_judge_simple_agent:
         jsonl_fpath: benchmarks/apex25/data/apex25_withsys.jsonl
         prompt_config: benchmarks/apex25/prompts/with_system.yaml
         prepare_script: benchmarks/apex25/prepare.py
+
+apex25_math_with_judge_environment_server:
+  _inherit_from: math_with_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: apex25_math_with_judge_simple_agent

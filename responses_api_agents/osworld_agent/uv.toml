@@ -6,6 +6,7 @@
 required-version = ">=0.11.25"
 constraint-dependencies = [
     "grpcio>=1.81.0rc1",
+    "msgpack>=1.2.1",
 ]
 
 # Mirror Gym's public resolver policy because an explicit config file does not
@@ -20,6 +21,9 @@ override-dependencies = [
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
+    "wcwidth; sys_platform == 'never'",
+    "gprof2dot; sys_platform == 'never'",
+    "pathspec; sys_platform == 'never'",
 
     # Role-local repairs for legacy OSWorld dependency metadata.
     "grpcio-status==1.71.2",
@@ -40,7 +44,6 @@ exclude-dependencies = [
     "prettytable",
     "skops",
     "sqlalchemy",
-    "wcwidth",
     "werkzeug",
     "waitress",
     "diskcache",

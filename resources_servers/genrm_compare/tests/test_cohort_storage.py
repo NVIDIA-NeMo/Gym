@@ -14,7 +14,8 @@ from fastapi import HTTPException
 
 import resources_servers.genrm_compare.app as genrm
 from nemo_gym.openai_utils import TOKEN_METADATA_FIELDS, NeMoGymResponse
-from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
+from resources_servers.genrm_compare.tests.support import request_with_session
+from resources_servers.genrm_compare.tests.test_cohort_lifecycle import comparison_result, member
 from resources_servers.genrm_compare.utils import extract_from_response_obj
 
 
@@ -91,28 +92,29 @@ async def test_compact_cohort_preserves_all_scoring_inputs_and_response_echo(ser
         setattr(server.config, field, 0.4 if adjustment in (field, "all") else 0)
     requests = [training_member(i) for i in range(16)]
     raw = [body.response.model_dump() for body in requests]
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     reference = await server._run_compare([{"role": "user", "content": "2+2?"}], raw, principle=requests[0].principle)
     if adjustment is not None:
         assert reference[0] != [3.0] * 16
-    actual_compare = server._run_compare
-    compared = []
+    actual_collect = server._collect_comparisons
+    collected = []
 
-    async def compare(**kwargs):
+    async def collect(**kwargs):
         compact = kwargs["response_objs"]
         assert kwargs["conversation_history"] == [{"role": "user", "content": "2+2?"}]
         assert kwargs["principle"] == requests[0].principle
         assert [extract_from_response_obj(obj) for obj in compact] == [extract_from_response_obj(obj) for obj in raw]
         for response in compact:
             assert all(TOKEN_METADATA_FIELDS.isdisjoint(item) for item in response["output"])
-        result = await actual_compare(**kwargs)
-        compared.append(result)
+        result = await actual_collect(**kwargs)
+        collected.append(result)
         return result
 
-    server._run_compare = compare
-    tasks = {i: asyncio.create_task(server.verify(requests[i])) for i in reversed(range(16))}
+    server._collect_comparisons = collect
+    tasks = {i: asyncio.create_task(server.verify(request_with_session(), requests[i])) for i in reversed(range(16))}
     results = await asyncio.gather(*(tasks[i] for i in range(16)))
-    assert compared == [reference]
+    [(raw_results, metadata)] = collected
+    assert [result[:3] for result in raw_results] == reference[2] and metadata == reference[3]
     assert [r.reward for r in results] == reference[0]
     assert [r.response.model_dump() for r in results] == raw
     assert all(c.conversation_history == [] and c.principle is None for c in server._verify_cohorts.values())
@@ -144,19 +146,19 @@ async def test_only_new_members_are_compacted_and_history_is_converted_once(serv
     async def judge(*args, **kwargs):
         started.set()
         await release.wait()
-        return 3.0, 3.0, 3.5
+        return comparison_result(3.0, 3.0, 3.5)
 
     monkeypatch.setattr(NeMoGymResponse, "model_dump", dump)
     monkeypatch.setattr(server, "_comparison_response", compact)
     monkeypatch.setattr(genrm, "_input_to_conversation_history", history)
     server._run_single_comparison = judge
-    tasks = [asyncio.create_task(server.verify(body)) for body in requests]
+    tasks = [asyncio.create_task(server.verify(request_with_session(), body)) for body in requests]
     await asyncio.wait_for(started.wait(), 1)
-    duplicate = asyncio.create_task(server.verify(requests[0]))
+    duplicate = asyncio.create_task(server.verify(request_with_session(), requests[0]))
     await asyncio.sleep(0)
     release.set()
     await asyncio.gather(*tasks, duplicate)
-    await server.verify(requests[0])
+    await server.verify(request_with_session(), requests[0])
     assert dump_modes == ["json"] * (size + 2)
     assert compact_ids == [r.response.id for r in requests]
     assert len(history_calls) == 1
@@ -164,20 +166,20 @@ async def test_only_new_members_are_compacted_and_history_is_converted_once(serv
 
 async def test_training_token_change_still_conflicts_with_identical_text(server):
     requests = [training_member(i) for i in range(2)]
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
-    await asyncio.gather(*(server.verify(body) for body in requests))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
+    await asyncio.gather(*(server.verify(request_with_session(), body) for body in requests))
     changed = requests[0].model_copy(deep=True)
     changed.response.output[1].generation_token_ids[0] = 999
     with pytest.raises(HTTPException) as error:
-        await server.verify(changed)
+        await server.verify(request_with_session(), changed)
     assert error.value.status_code == 409
-    assert (await server.verify(requests[0])).reward == 3.0
+    assert (await server.verify(request_with_session(), requests[0])).reward == 3.0
 
 
 async def test_disconnected_request_can_be_freed_while_its_compact_answer_waits(server):
     request = training_member(0)
     body_ref, response_ref = weakref.ref(request), weakref.ref(request.response)
-    task = asyncio.create_task(server.verify(request))
+    task = asyncio.create_task(server.verify(request_with_session(), request))
     await asyncio.sleep(0)
     cohort = next(iter(server._verify_cohorts.values()))
     assert len(cohort.members) == 1
@@ -188,8 +190,11 @@ async def test_disconnected_request_can_be_freed_while_its_compact_answer_waits(
     gc.collect()
     assert body_ref() is None and response_ref() is None
     assert cohort.members[0].response_obj is not None
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
-    results = await asyncio.gather(server.verify(training_member(0)), server.verify(training_member(1)))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
+    results = await asyncio.gather(
+        server.verify(request_with_session(), training_member(0)),
+        server.verify(request_with_session(), training_member(1)),
+    )
     assert [r.reward for r in results] == [3.0, 3.0]
 
 
@@ -201,17 +206,17 @@ def clock(monkeypatch):
 
 
 async def complete(server, group):
-    return await asyncio.gather(*(server.verify(member(i, group=group)) for i in range(2)))
+    return await asyncio.gather(*(server.verify(request_with_session(), member(i, group=group)) for i in range(2)))
 
 
 async def test_replay_refreshes_watermark_but_not_terminal_expiry(server, clock):
     server.config.cohort_result_ttl_s = 10
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     await complete(server, "a")
     clock[0] = 101
     await complete(server, "b")
     clock[0] = 109
-    assert (await server.verify(member(0, group="a"))).reward == 3
+    assert (await server.verify(request_with_session(), member(0, group="a"))).reward == 3
     clock[0] = 110.5
     server._prune_terminal_cohorts()
     assert [c.group_id for c in server._verify_cohorts.values()] == ["b"]
@@ -225,8 +230,8 @@ async def test_replay_refreshes_watermark_but_not_terminal_expiry(server, clock)
 async def test_count_eviction_uses_completion_order_and_ignores_active_attempts(server, clock):
     server.config.cohort_result_ttl_s = None
     server.config.max_terminal_cohorts = 1
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
-    a = asyncio.create_task(server.verify(member(0, group="a")))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
+    a = asyncio.create_task(server.verify(request_with_session(), member(0, group="a")))
     await asyncio.sleep(0)
     clock[0] = 101
     await complete(server, "b")
@@ -234,8 +239,8 @@ async def test_count_eviction_uses_completion_order_and_ignores_active_attempts(
     await complete(server, "c")
     server._prune_terminal_cohorts()
     assert set(server._latest_group_attempts) == {"a", "c"}
-    assert (await server.verify(member(0, group="c"))).reward == 3
-    await server.verify(member(1, group="a"))
+    assert (await server.verify(request_with_session(), member(0, group="c"))).reward == 3
+    await server.verify(request_with_session(), member(1, group="a"))
     await a
     server._prune_terminal_cohorts()
     assert [c.group_id for c in server._verify_cohorts.values()] == ["a"]
@@ -243,8 +248,8 @@ async def test_count_eviction_uses_completion_order_and_ignores_active_attempts(
 
 async def test_expired_active_watermark_does_not_block_expiry_of_later_completed_group(server, clock):
     server.config.cohort_result_ttl_s = 10
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
-    active = asyncio.create_task(server.verify(member(0, group="active")))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
+    active = asyncio.create_task(server.verify(request_with_session(), member(0, group="active")))
     await asyncio.sleep(0)
     clock[0] = 101
     await complete(server, "done")
@@ -268,7 +273,7 @@ def test_pruning_all_active_watermarks_does_not_scan_or_evict_them(server, clock
         key = str(i)
         cohort = genrm._CohortState(prompt_digest="prompt", key=key, group_id=key)
         server._verify_cohorts[key] = cohort
-        server._latest_group_attempts[key] = genrm._GroupAttemptWatermark(0, "prompt")
+        server._latest_group_attempts[key] = genrm._GroupAttemptWatermark(0, "prompt", key)
     if expired:
         clock[0] += 11
     server._latest_group_attempts = NoScanOrder(server._latest_group_attempts)
@@ -297,8 +302,8 @@ def assert_cohort_indices_match(server):
 
 async def test_all_indices_retire_superseded_expired_and_legacy_groups(server, clock):
     server.config.cohort_result_ttl_s = 10
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
-    old = asyncio.create_task(server.verify(member(0, group="replace")))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
+    old = asyncio.create_task(server.verify(request_with_session(), member(0, group="replace")))
     await asyncio.sleep(0)
     assert_cohort_indices_match(server)
     clock[0] += 1
@@ -306,17 +311,17 @@ async def test_all_indices_retire_superseded_expired_and_legacy_groups(server, c
     assert_cohort_indices_match(server)
 
     clock[0] += 1
-    replacement = asyncio.create_task(server.verify(member(0, group="replace", attempt=1)))
+    replacement = asyncio.create_task(server.verify(request_with_session(), member(0, group="replace", attempt=1)))
     await asyncio.sleep(0)
     with pytest.raises(HTTPException):
         await old
     assert_cohort_indices_match(server)
-    await server.verify(member(1, group="replace", attempt=1))
+    await server.verify(request_with_session(), member(1, group="replace", attempt=1))
     await replacement
     assert_cohort_indices_match(server)
 
     clock[0] += 1
-    expiring = asyncio.create_task(server.verify(member(0, group="expire")))
+    expiring = asyncio.create_task(server.verify(request_with_session(), member(0, group="expire")))
     await asyncio.sleep(0)
     cohort = server._verify_cohorts[server._group_cohort_key("expire", 0)]
     await server._expire_collecting_cohort(cohort.key, cohort, 0)
@@ -336,38 +341,38 @@ async def test_all_indices_retire_superseded_expired_and_legacy_groups(server, c
 
 async def test_attempt_bump_refreshes_watermark_order_for_expiry(server, clock):
     server.config.cohort_result_ttl_s = 10
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     await complete(server, "a")
     clock[0] = 101
     await complete(server, "b")
     clock[0] = 109
-    first = asyncio.create_task(server.verify(member(0, group="a", attempt=1)))
+    first = asyncio.create_task(server.verify(request_with_session(), member(0, group="a", attempt=1)))
     await asyncio.sleep(0)
     clock[0] = 112
     server._prune_terminal_cohorts()
     assert list(server._latest_group_attempts) == ["a"]
     assert [(c.group_id, c.group_attempt) for c in server._verify_cohorts.values()] == [("a", 1)]
     assert_cohort_indices_match(server)
-    await server.verify(member(1, group="a", attempt=1))
+    await server.verify(request_with_session(), member(1, group="a", attempt=1))
     await first
 
 
 async def test_new_attempt_retires_completed_record_and_owns_active_watermark(server):
-    server._run_single_comparison = AsyncMock(return_value=(3.0, 3.0, 3.5))
+    server._run_single_comparison = AsyncMock(return_value=comparison_result(3.0, 3.0, 3.5))
     await complete(server, "a")
     completed = next(iter(server._verify_cohorts.values()))
-    first = asyncio.create_task(server.verify(member(0, group="a", attempt=1)))
+    first = asyncio.create_task(server.verify(request_with_session(), member(0, group="a", attempt=1)))
     await asyncio.sleep(0)
-    assert completed.phase == "completed" and completed.rewards == {0: 3.0, 1: 3.0}
+    assert completed.phase == "completed" and completed.results[0]["reward"] == completed.results[1]["reward"] == 3.0
     assert completed.key not in server._verify_cohorts
     assert completed.key not in server._terminal_cohorts
     with pytest.raises(HTTPException) as error:
-        await server.verify(member(0, group="a"))
+        await server.verify(request_with_session(), member(0, group="a"))
     assert error.value.status_code == 409
     active = server._verify_cohorts[server._group_cohort_key("a", 1)]
     assert active is not completed and active.group_attempt == 1
     assert_cohort_indices_match(server)
-    await server.verify(member(1, group="a", attempt=1))
+    await server.verify(request_with_session(), member(1, group="a", attempt=1))
     await first
     assert_cohort_indices_match(server)
 
@@ -376,7 +381,7 @@ async def test_new_attempt_retires_completed_record_and_owns_active_watermark(se
 async def test_conversion_failure_fails_identified_group_and_releases_peers(
     server, monkeypatch, conversion, existing_peer
 ):
-    peer = asyncio.create_task(server.verify(member(0))) if existing_peer else None
+    peer = asyncio.create_task(server.verify(request_with_session(), member(0))) if existing_peer else None
     if peer is not None:
         await asyncio.sleep(0)
 
@@ -388,7 +393,7 @@ async def test_conversion_failure_fails_identified_group_and_releases_peers(
     else:
         monkeypatch.setattr(genrm, "_input_to_conversation_history", fail)
     with pytest.raises(HTTPException) as error:
-        await server.verify(member(1 if existing_peer else 0))
+        await server.verify(request_with_session(), member(1 if existing_peer else 0))
     assert error.value.status_code == 503 and "bad request conversion" in error.value.detail
     if peer is not None:
         with pytest.raises(HTTPException) as error:
@@ -420,7 +425,7 @@ def test_pruning_retained_records_does_not_scan_the_full_registry(server, clock)
         key = str(i)
         cohort = genrm._CohortState(prompt_digest="prompt", key=key, group_id=key, phase="completed")
         server._verify_cohorts[key] = cohort
-        server._latest_group_attempts[key] = genrm._GroupAttemptWatermark(0, "prompt")
+        server._latest_group_attempts[key] = genrm._GroupAttemptWatermark(0, "prompt", key)
         server._record_terminal_cohort(cohort)
     original = server._verify_cohorts
     server._verify_cohorts = NoScanDict(original)
@@ -454,7 +459,7 @@ async def test_every_required_comparison_finishes_before_publish_without_blockin
         completed[group] += 1
         if completed["slow"] == expected - judges:
             ready.set()
-        return 3.0, 3.0, 3.5
+        return comparison_result(3.0, 3.0, 3.5)
 
     def request(i, group):
         body = training_member(i, group=group)
@@ -463,11 +468,13 @@ async def test_every_required_comparison_finishes_before_publish_without_blockin
         return body
 
     server._run_single_comparison = judge
-    slow = [asyncio.create_task(server.verify(request(i, "slow"))) for i in range(4)]
+    slow = [asyncio.create_task(server.verify(request_with_session(), request(i, "slow"))) for i in range(4)]
     try:
         await asyncio.wait_for(ready.wait(), 1)
         assert all(not t.done() for t in slow)
-        fast = await asyncio.wait_for(asyncio.gather(*(server.verify(request(i, "fast")) for i in range(4))), 1)
+        fast = await asyncio.wait_for(
+            asyncio.gather(*(server.verify(request_with_session(), request(i, "fast")) for i in range(4))), 1
+        )
         assert [r.reward for r in fast] == [3.0] * 4
         assert all(not t.done() for t in slow)
         release.set()

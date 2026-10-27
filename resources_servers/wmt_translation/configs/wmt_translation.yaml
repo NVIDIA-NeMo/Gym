@@ -16,6 +16,7 @@ wmt_translation:
       language_consistency_backend: null
       # Warn once per aggregation for source-target pairs below this 0-100 score.
       language_consistency_warning_threshold: 50.0
+      metric_profile: default
 
 wmt_translation_simple_agent:
   responses_api_agents:
@@ -33,3 +34,11 @@ wmt_translation_simple_agent:
         jsonl_fpath: resources_servers/wmt_translation/data/example.jsonl
         num_repeats: 1
         license: Creative Commons Attribution-ShareAlike 4.0 International
+
+wmt_translation_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: wmt_translation_simple_agent

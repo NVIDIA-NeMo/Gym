@@ -24,7 +24,12 @@ aggregate``), and retryable on resume.
 
 Boundary: a failed *call* (transport/timeout/auth/HTTP) → JudgeError → sidecar; a
 *received-but-unparseable* response is a legitimate wrong answer (let the parser
-score it, don't raise). Empty output is a per-benchmark call, so servers differ.
+score it, don't raise), unless the benchmark explicitly treats an invalid judge
+verdict as an unusable grade. FrontierScience Research uses that exception for
+missing/invalid final numeric rubric verdicts: retry through the judge-failure
+sidecar rather than assign zero points to the model answer. Completion checks
+must still reject a partial evaluation. Empty output is a per-benchmark call,
+so servers differ.
 
 Wrap the call, not the scoring around it: ``reraise_judge_errors`` relabels every
 exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
@@ -32,6 +37,7 @@ exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
 """
 
 import functools
+import re
 from typing import Any, Awaitable, Callable, Type, TypeVar
 
 from fastapi.encoders import jsonable_encoder
@@ -42,6 +48,15 @@ from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_sta
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
+
+
+def normalize_math_judge_verdict(text: str) -> str:
+    """Canonicalize whitespace inside A=B/A!=B markers without changing other text."""
+    return re.sub(
+        r"\[\[\s*A\s*(!\s*)?=\s*B\s*\]\]",
+        lambda match: "[[A!=B]]" if match.group(1) else "[[A=B]]",
+        text,
+    )
 
 
 class JudgeError(Exception):

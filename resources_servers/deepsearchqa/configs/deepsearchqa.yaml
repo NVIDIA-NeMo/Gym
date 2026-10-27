@@ -28,3 +28,11 @@ deepsearchqa_example_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/deepsearchqa/data/example.jsonl
+
+deepsearchqa_example_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: deepsearchqa_example_agent
