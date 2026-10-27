@@ -29,7 +29,7 @@ _UPLOAD_SLOTS = asyncio.Semaphore(4)
 
 
 def sha256_file(path: Path) -> str:
-    """Hash a native binary in bounded chunks."""
+    """Hash a Claude binary in bounded chunks."""
     digest = hashlib.sha256()
     with path.open("rb") as binary:
         for chunk in iter(lambda: binary.read(1024 * 1024), b""):

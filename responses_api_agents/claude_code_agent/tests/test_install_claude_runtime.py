@@ -88,7 +88,7 @@ def test_preinstalled_binary_needs_trusted_checksum_and_matching_version(tmp_pat
     assert not (tmp_path / "runtime" / "claude").exists()
 
 
-def test_installer_verifies_decompressed_native_bytes_and_check_only_reports_absence(tmp_path, binary):
+def test_installer_verifies_uncompressed_bytes_and_check_only_reports_absence(tmp_path, binary):
     source, checksum = binary
     runtime = tmp_path / "runtime"
     assert install(runtime, "--sha256", checksum, "--check-only").returncode == 3

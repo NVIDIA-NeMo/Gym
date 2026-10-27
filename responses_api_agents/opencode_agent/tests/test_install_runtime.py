@@ -145,11 +145,13 @@ def test_cached_runtime_needs_no_package_installation(sandbox: tuple[Path, dict[
     assert not (root / "download.log").exists()
 
 
-def test_wrong_cached_version_is_not_reused(sandbox):
+# A cached binary that prints the right version and then fails is unhealthy.
+@pytest.mark.parametrize("probe", ["echo 1.17.10", "echo 1.17.11; exit 7"])
+def test_wrong_or_unhealthy_cached_version_is_not_reused(sandbox, probe):
     root, env = sandbox
     (root / "runtime").mkdir()
     binary = root / "runtime/opencode"
-    binary.write_text("#!/bin/bash\necho 1.17.10\n")
+    binary.write_text(f"#!/bin/bash\n{probe}\n")
     binary.chmod(0o755)
     result = run_installer(root, env)
     assert result.returncode == 19, result.stderr
@@ -359,7 +361,7 @@ def seed_binary(
     )
 
 
-@pytest.mark.parametrize("failure", ["digest", "version", "unhealthy"])
+@pytest.mark.parametrize("failure", ["digest", "version", "unhealthy", "staging"])
 def test_invalid_seed_preserves_existing_executable(sandbox, failure):
     root, env = sandbox
     binary = root / "preinstalled-opencode"
@@ -371,8 +373,13 @@ def test_invalid_seed_preserves_existing_executable(sandbox, failure):
     binary.write_text(
         "#!/bin/bash\necho 1.17.11\nexit 7\n" if failure == "unhealthy" else "#!/bin/bash\necho 1.17.10\n"
     )
+    if failure == "staging":
+        # A command that fails while the copy is staged must not leave the copy behind.
+        (root / "bin/chmod").unlink()
+        (root / "bin/chmod").write_text("#!/bin/bash\nexit 1\n")
+        (root / "bin/chmod").chmod(0o755)
     result = seed_binary(root, env, binary, digest="0" * 64 if failure == "digest" else None)
-    message = "digest mismatch" if failure == "digest" else "version mismatch"
+    message = {"digest": "digest mismatch", "staging": "OpenCode setup failed"}.get(failure, "version mismatch")
     assert result.returncode != 0 and message in result.stderr
     assert target.read_bytes() == original and target.stat().st_ino == inode
     assert not list(target.parent.glob(".opencode-*"))

@@ -78,6 +78,19 @@ from responses_api_agents.claude_code_agent.setup_claude_code import ensure_clau
 
 
 LOG = logging.getLogger(__name__)
+# Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash.
+_BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
+    [ "$(id -u)" = 0 ] || { echo "Claude Code sandbox sessions require bash: preinstall it or use a root image." >&2; exit 1; }
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache bash || exit 1
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash || exit 1
+    else
+        echo "Claude Code sandbox sessions require bash: preinstall it (automatic installation requires apt-get or apk)." >&2
+        exit 1
+    fi
+fi
+"""
 
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -601,9 +614,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
                     self._check_sandbox_setup(result)
                 result = await sandbox.exec(
-                    f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
+                    _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
                     cwd="/",
-                    timeout_s=30,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
                 self._check_sandbox_setup(result)
                 await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")

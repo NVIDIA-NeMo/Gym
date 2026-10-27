@@ -23,6 +23,10 @@ process_identity() {
     echo "$1"
   fi
 }
+staged=
+ticket=
+# However the installer exits, remove a partly staged binary and leave the installer queue.
+trap '[ -z "$staged" ] || rm -f "$staged"; [ -z "$ticket" ] || : >"$queue/$ticket.done"' EXIT
 # Serialize preparation of the version-scoped cache in a shared task sandbox.
 if command -v flock >/dev/null 2>&1; then
   # The kernel releases the lock when the installer exits, however it exits.
@@ -42,10 +46,8 @@ else
       number=${number%.done}
       if [[ $number =~ ^[0-9]+$ ]] && ((number > last)); then last=$number; fi
     done
-    ticket=$((last + 1))
-    ln -s "$owner" "$queue/$ticket" 2>/dev/null && break
+    ln -s "$owner" "$queue/$((last + 1))" 2>/dev/null && { ticket=$((last + 1)); break; }
   done
-  trap ': >"$queue/$ticket.done"' EXIT
   until
     ahead=
     for ((number = 1; number < ticket; number++)); do
@@ -82,21 +84,21 @@ if [ -n "$source_binary" ]; then
   cp "$source_binary" "$staged"
   digest=$(sha256sum "$staged")
   if [ "${digest%% *}" != "$source_sha256" ]; then
-    rm -f "$staged"
     echo 'OpenCode executable digest mismatch' >&2
     exit 1
   fi
   chmod 755 "$staged"
   # The probe must exit successfully as well as print the exact version.
   if ! actual=$("$staged" --version) || [ "$actual" != "$version" ]; then
-    rm -f "$staged"
     echo 'OpenCode executable version mismatch' >&2
     exit 1
   fi
   mv -f "$staged" "$runtime/opencode"
+  staged=
 fi
 cached=false
-if [ -x "$runtime/opencode" ] && [ "$("$runtime/opencode" --version)" = "$version" ]; then
+# A cached binary must also exit successfully, not only print the version.
+if [ -x "$runtime/opencode" ] && actual=$("$runtime/opencode" --version) && [ "$actual" = "$version" ]; then
   cached=true
 fi
 missing=()
