@@ -1746,6 +1746,61 @@ def test_required_mcp_extension():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@mark.parametrize("sandbox_error_type", [None, "timeout"])
+async def test_sandbox_error_outranks_the_killed_sessions_last_message(tmp_path, monkeypatch, sandbox_error_type):
+    from fastapi import Request
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    client = MagicMock(spec=ServerClient)
+
+    async def post(**kwargs):
+        payload = kwargs["json"]
+        if kwargs["url_path"] == "/verify":
+            payload = payload | {"reward": 0.0, "library_reward": 0.0}
+        return SimpleNamespace(
+            cookies={},
+            json=AsyncMock(return_value={}),
+            ok=True,
+            read=AsyncMock(return_value=json.dumps(payload).encode()),
+            raise_for_status=lambda: None,
+        )
+
+    client.post = AsyncMock(side_effect=post)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = MagicMock(stop=AsyncMock(), upload=AsyncMock())
+
+    async def execute(command, **kwargs):
+        if "session list" in command:
+            return SimpleNamespace(return_code=0, error_type=None, stdout='[{"id":"session"}]', stderr="")
+        if "opencode run" in command and sandbox_error_type is not None:
+            return SimpleNamespace(return_code=124, error_type=sandbox_error_type, stdout="", stderr="")
+        return SimpleNamespace(return_code=0, error_type=None, stdout="Shell: bash\nOpenCode run finished", stderr="")
+
+    sandbox.exec = AsyncMock(side_effect=execute)
+    export = json.loads(Path(__file__).with_name("opencode_export_test_data.json").read_text())
+    # A killed session leaves its last assistant message with an abort error.
+    export["messages"][-1]["info"]["error"] = {"name": "MessageAbortedError"}
+
+    async def download(remote, local):
+        local.write_text(json.dumps(export))
+
+    sandbox.download = AsyncMock(side_effect=download)
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+    server._create_opencode_config = AsyncMock(return_value={})
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app_module, "_read_opencode_child_messages", lambda *args: [])
+    body = OpenCodeSandboxedAgentRunRequest.model_validate(
+        {"responses_create_params": {"input": [{"role": "user", "content": "Solve"}]}}
+    )
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/run", "headers": [], "session": {SESSION_ID_KEY: "trial"}}
+    )
+    result = await server.run(request, body)
+    assert result.opencode_error_type == (sandbox_error_type or "MessageAbortedError")
+
+
 @mark.parametrize("stop_reason", ["length", "stop"])
 @mark.parametrize("collect_observations", [False, True])
 @mark.parametrize("force_zero", [False, True])
