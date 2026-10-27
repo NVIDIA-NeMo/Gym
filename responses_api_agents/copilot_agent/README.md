@@ -96,7 +96,9 @@ are loaded as Copilot normally does.
 3. Copilot connects as a borrower and installs or reuses its runtime.
 4. The Environment Server calls the rollout-prefixed `/v1/responses` with the agent-session cookie.
 5. `sandbox_runner.py` runs `copilot -p` under the shared process supervisor and records its JSONL events.
-   Every model call goes to the rollout-prefixed Gym Model Server.
+   Every model call goes to the rollout-prefixed Gym Model Server. The supervisor and the runner run as
+   `gym-supervisor` and `gym-runner` (links to the sandbox's `python3`) from files without a `.py` suffix,
+   so a task agent's `pkill -f python3`, `pkill python3` or `killall python3` does not end Copilot.
 6. Agent close confirms harness termination, returns observations, removes session files, and disconnects.
 7. The Environment Server asks Resources to verify and close the task session.
 

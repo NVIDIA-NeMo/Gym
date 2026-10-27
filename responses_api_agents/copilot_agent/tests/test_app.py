@@ -124,7 +124,7 @@ class Sandbox:
     async def execute(self, command, **kwargs):
         if "--compaction-state" in command:
             return SimpleNamespace(return_code=0, error_type=None, stdout=json.dumps(self.compaction_state), stderr="")
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor" in command:
             return await self.launch(command, **kwargs)
         if "install_copilot_runtime.py" in command:
             return SimpleNamespace(return_code=0, error_type=None, stdout=json.dumps(RUNTIME) + "\n", stderr="")
@@ -143,6 +143,8 @@ class Sandbox:
         self.payload = json.loads(self.files[payload_path])
         directory = self.payload["directory"]
         assert kwargs["cwd"] == "/app"
+        # The runner opts in to the neutral process name, so a task's `pkill python3` cannot stop it.
+        assert f"{directory}/sandbox_runner " in command and "/bin/gym-runner" in command
         self.files[f"{directory}/cleanup.json"] = json.dumps(self.result)
         self.files[f"{directory}/runtime.json"] = json.dumps({"hostname": "task-container", "pid": 123})
         self.files[f"{directory}/events.jsonl"] = "\n".join(
