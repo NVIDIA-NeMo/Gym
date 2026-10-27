@@ -5,7 +5,10 @@
 
 from dataclasses import asdict, dataclass, field
 
+from nemo_gym.harness_capabilities.checks import PriorityTier
 from nemo_gym.health.types import Verdict
+
+from .media_fixture import prompt_content
 
 
 SUITE = "harness-p0-probes/v1"
@@ -25,6 +28,8 @@ class Scenario:
     expected_reward: float = 1.0
     steps: bool = True
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
+    tier: PriorityTier = "P0"
+    media: bool = False
 
     def task(self) -> dict:
         """Only the task reaches the harness; expectations stay in the runner."""
@@ -32,7 +37,12 @@ class Scenario:
             "task_id": self.name,
             "responses_create_params": {
                 "input": [
-                    {"role": "user", "content": "Run the requested shell checks, then report CONFORMANCE_DONE."}
+                    {
+                        "role": "user",
+                        "content": prompt_content()
+                        if self.media
+                        else "Run the requested shell checks, then report CONFORMANCE_DONE.",
+                    }
                 ],
             },
         }
@@ -80,6 +90,13 @@ SCENARIOS = (
         },
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
+    Scenario(
+        "media_round_trip",
+        "Two prompt images and a native tool image reach the model and survive trajectory collection.",
+        tool_steps=0,
+        tier="P1",
+        media=True,
+    ),
 )
 
 

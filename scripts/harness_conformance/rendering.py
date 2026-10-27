@@ -36,21 +36,22 @@ def render_table(report: dict) -> str:
         raise ValueError("table requires a full Gym commit SHA")
     statuses = report.get("statuses", {})
     rows = report["harnesses"]
-    lines = [BEGIN, "", "| Harness | P0 | Passing scenarios |", "| --- | --- | --- |"]
+    lines = [BEGIN, "", "| Harness | P0 | Passing P0 scenarios | Passing P1 scenarios |", "| --- | --- | --- | --- |"]
     for harness in HARNESSES:
         row = rows.get(harness)
         status = statuses.get(harness)
         if status is None:
             status = "not_run" if row is None else "passed" if row["verdict"] == "fulfilled" else "failed"
-        count = (
-            "—"
-            if row is None
-            else f"{sum(s['verdict'] == 'fulfilled' for s in row['scenarios'])}/{len(row['scenarios'])}"
-        )
+        counts = []
+        for tier in ("P0", "P1"):
+            scenarios = [s for s in (row or {}).get("scenarios", []) if s.get("tier", "P0") == tier]
+            counts.append(
+                f"{sum(s['verdict'] == 'fulfilled' for s in scenarios)}/{len(scenarios)}" if scenarios else "—"
+            )
         label = {"passed": "Passed", "failed": "Failed", "unavailable": "Unavailable", "not_run": "Not measured"}[
             status
         ]
-        lines.append(f"| `{harness}` | {label} | {count} |")
+        lines.append(f"| `{harness}` | {label} | {' | '.join(counts)} |")
     for row in rows.values():
         validate_row(row)
     if rows:

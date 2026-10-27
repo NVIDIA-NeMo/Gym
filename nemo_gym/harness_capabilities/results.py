@@ -118,7 +118,9 @@ def render_matrices(harnesses: dict) -> str:
         lines += [
             f"## {harness}",
             "",
-            "| Check | " + " | ".join(s["scenario"] for s in scenarios) + " |",
+            "| Check | "
+            + " | ".join(s["scenario"] + (f" ({s['tier']})" if s.get("tier", "P0") != "P0" else "") for s in scenarios)
+            + " |",
             "|---|" + "---|" * len(scenarios),
         ]
         for kind in ("schema", "semantic", "behavioral", "health"):

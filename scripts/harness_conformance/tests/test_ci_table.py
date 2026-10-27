@@ -40,6 +40,7 @@ def ci_evidence(tmp_path):
                 "scenarios": [
                     {
                         "scenario": s.name,
+                        "tier": s.tier,
                         "verdict": "not_fulfilled",
                         "checks": [{"id": "calls.outcome", "kind": "schema", "status": "fail"}],
                     }
