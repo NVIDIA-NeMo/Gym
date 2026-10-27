@@ -388,9 +388,11 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     assert sandbox.disconnect.await_count == 1 and sandbox.stop.await_count == 0
 
 
-def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path):
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path, mode):
     agent, sandbox = setup
-    install_artifact_runner(sandbox, tmp_path)
+    agent.config.system_prompt_mode = mode
+    payloads = install_artifact_runner(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
         request = start(client)
         assert activate(client, 1, "").status_code == 422
@@ -398,6 +400,15 @@ def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_pa
         assert activate(client, 2, instructions="Replace instructions").status_code == 422
         assert activate(client, 2, "A valid correction").status_code == 200
         assert sandbox.launch.call_count == 2
+        for index, payload in enumerate(payloads):
+            config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+            if mode == "replace":
+                assert config["agent"]["build"]["prompt"] == "Keep changes small"
+                assert "instructions" not in config
+            else:
+                assert "instructions" in config
+            assert payload["activation_id"] == index + 1
+        assert payloads[1]["harness_session_id"] == "opencode-session"
         close(client, request)
 
 

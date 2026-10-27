@@ -28,6 +28,28 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 
 The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
 
+### Pi and OpenCode prompt and tool controls
+
+Both `pi_agent` and `opencode_agent` accept `system_prompt_mode: append|replace`,
+defaulting to `append`. Replacement uses the harness's custom system prompt for
+the combined configured system prompt, request instructions and input system
+instructions. It keeps the user's task separate. Append mode retains each
+adapter's existing behavior. These controls apply to local calls and sandbox
+sessions; OpenCode continuations retain their established instructions.
+The harness may still add environment context, such as the date or working directory.
+OpenCode replacement selects its `build` agent, overriding a different default
+agent. Remove `--agent` selectors from `extra_args` in replacement mode; use
+append mode to retain custom agent selection.
+
+Pi's `enable_tools` defaults to `true`. Setting it to `false` disables Pi's
+built-in tools through `--no-builtin-tools`; separately configured MCP tools and
+session grants remain available and retain their validation. For a run with no
+tools, also omit MCP configuration and grants. OpenCode continues to select its
+tools through `opencode_config.tools`, for example `{"*": false}`.
+
+Record prompt replacement and tool selection as evaluation treatments: they can
+change results relative to the harness's default coding behavior.
+
 ## Run an integrated agent on a benchmark
 
 An experiment is a few composable YAML files: the model and provider, the benchmark, the agent, and the Environment Server that binds them. To change the agent or the benchmark, replace one file; the others stay as they are.
