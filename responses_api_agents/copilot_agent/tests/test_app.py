@@ -425,6 +425,18 @@ def test_omitted_provider_usage_stays_unknown(setup):
     assert "partial_model_usage_unavailable" in {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
 
 
+def test_span_without_an_event_still_counts(setup):
+    agent, sandbox = setup
+    # Background calls have chat spans but no assistant event; coverage needs only every event's span.
+    sandbox.otel = otel(
+        chat_span("chatcmpl-1", usage=(10, 3)), chat_span("chatcmpl-bg", usage=(4, 1)), chat_span("chatcmpl-2")
+    )
+    result, closed = run_session(agent)
+    assert (result.json()["usage"]["input_tokens"], result.json()["usage"]["output_tokens"]) == (24, 7)
+    records = closed.json()["agent_observations"]["records"]
+    assert [call["response_id"] for call in records[0]["model_calls"]] == ["chatcmpl-1", "chatcmpl-bg", "chatcmpl-2"]
+
+
 def test_missing_span_for_a_reported_call_keeps_usage_unknown(setup):
     agent, sandbox = setup
     # Events name chatcmpl-2, but its span never reached the file exporter.
