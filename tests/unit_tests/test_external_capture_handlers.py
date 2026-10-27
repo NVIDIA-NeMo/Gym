@@ -15,7 +15,8 @@ from nemo_gym.token_id_capture.external_capture import (
     VLLMWorkerCaptureHandler,
     make_external_capture_handler,
 )
-from nemo_gym.token_id_capture.lineage import InMemoryLineageStore
+from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.token_id_capture.replay import replay_context
 from nemo_gym.token_id_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.token_id_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
@@ -43,7 +44,7 @@ def _root_context(store: InMemoryLineageStore) -> CaptureContext:
         external_staging=True,
         request_items=[{"role": "user", "content": "go"}],
         capture_admission=CaptureAdmission(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c1",
             mode="text",
         ),
@@ -207,7 +208,7 @@ def test_megatron_handler_admits_multimodal_requests(content_part: dict[str, Any
 def _staged_coords(**overrides: Any) -> dict[str, Any]:
     """Return a valid ``staged`` acknowledgement for the ``_root_context`` call, with overrides."""
     kwargs: dict[str, Any] = {
-        "rollout_id": "rollout-1",
+        "capture_key": "rollout-1",
         "model_call_id": "c1",
         "prev_len": 0,
         "weight_version": 7,
@@ -221,6 +222,52 @@ def _staged_coords(**overrides: Any) -> dict[str, Any]:
     }
     kwargs.update(overrides)
     return CommitCoords(**kwargs).model_dump(mode="json")
+
+
+@HANDLER_CLASSES
+@pytest.mark.parametrize("framework", [False, True])
+async def test_only_framework_capture_persists_selection_and_validation_evidence(handler_cls, framework, tmp_path):
+    store = FileLineageStore(tmp_path)
+    context = _root_context(store)
+    context.parent_resolution_mode = "source_history" if framework else "fingerprint"
+    if framework:
+        context.capture_admission = context.capture_admission.model_copy(
+            update={"request_replay": replay_context(context.request_items, render_digest="f" * 64)}
+        )
+    handler = handler_cls()
+    token = set_token_sink(context)
+    try:
+        handler.prepare_response({"ng_commit_coords": _staged_coords()})
+        await handler.finalize_response(
+            {
+                "id": "response-1",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "item-1",
+                        "content": [{"type": "output_text", "text": "private model text"}],
+                    }
+                ],
+            }
+        )
+        assert context.committed
+        await store.close()
+        reopened = FileLineageStore(tmp_path)
+        row = (await reopened.manifest(context.rollout_id))["records"][0]
+        assert bool(row["output_items"]) is framework
+        assert row["response_status"] == ("completed" if framework else None)
+        assert bool(row["last_output_item"]) is framework
+        assert bool(row["replay"]) is framework
+        raw = b"".join(path.read_bytes() for path in tmp_path.glob("*.lineage.jsonl"))
+        assert bool(raw)
+        assert (b"private model text" in raw) is framework
+        assert row["response_id"] == "response-1" and row["output_fingerprint"]
+        await reopened.close()
+    finally:
+        reset_token_sink(token)
+        await store.close()
 
 
 @dataclass(frozen=True)
@@ -247,7 +294,7 @@ _FINALIZE_CASES = {
     ),
     "capture-failed": _FinalizeCase(
         coords_payload=CommitCoords(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c1",
             prev_len=0,
             weight_version=7,
@@ -262,11 +309,11 @@ _FINALIZE_CASES = {
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "malformed-missing-fields": _FinalizeCase(
-        coords_payload={"rollout_id": "rollout-1", "model_call_id": "c1"},
+        coords_payload={"capture_key": "rollout-1", "model_call_id": "c1"},
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "mismatched-rollout-id": _FinalizeCase(
-        coords_payload=_staged_coords(rollout_id="rollout-other"),
+        coords_payload=_staged_coords(capture_key="rollout-other"),
         expected_failure=INVALID_COMMIT_COORDS_REASON,
     ),
     "mismatched-model-call-id": _FinalizeCase(
@@ -298,7 +345,7 @@ def _assert_poisoned(
     assert manifest["records"] == []
     assert manifest["failures"] == [
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_call_id": "c1",
             "reason": reason,
         }

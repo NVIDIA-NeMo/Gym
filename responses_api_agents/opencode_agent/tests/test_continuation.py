@@ -14,6 +14,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
+from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
 from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
@@ -413,7 +414,7 @@ def test_first_expiry_before_launch_can_start_next_activation(setup, tmp_path, s
         return execute.return_value
 
     async def slow_upload(source, destination):
-        if stage == "upload" and destination.endswith("process_supervisor.py"):
+        if stage == "upload" and destination.endswith(f"/{SUPERVISOR_FILE}"):
             await asyncio.sleep(0.2)
         await upload(source, destination)
 
