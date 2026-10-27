@@ -118,6 +118,8 @@ _MODEL_ENDPOINT_ERRORS = (
         for code in _ENDPOINT_ERROR_STATUSES
     ),
     "currently experiencing high demand",  # Codex's message for an HTTP 500
+    "selected model is at capacity",  # Codex's message for an HTTP 503
+    "request timed out",  # Codex's message for a timed-out model request
     "reconnecting... waiting for network",
     # Not every stream disconnect: "...: Incomplete response returned, reason: max_output_tokens" is the
     # output cap, a gradable outcome.
@@ -1098,15 +1100,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
             error = error or "Codex ended without turn.completed"
         status = "failed" if error else "incomplete" if cleanup["timed_out"] or output_limited else "completed"
-        graded_error = None
         # A reported provider failure keeps its classified outcome, so the Environment Server decides it. A run
         # that never started a turn did no work to grade, and its stderr explains the failure (see below).
-        if error and failure is None and started and not reported_model_error and self.config.verify_after_agent_error:
-            graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup, events=events)
-            if graded_error is not None:
-                error = None
-                # A run that also hit its time limit is graded as a timeout.
-                status = "incomplete" if cleanup["timed_out"] else "failed"
+        gradable = bool(
+            error and failure is None and started and not reported_model_error and self.config.verify_after_agent_error
+        )
         response_usage = NeMoGymResponseUsage(
             input_tokens=usage["input_tokens"],
             output_tokens=usage["output_tokens"],
@@ -1114,7 +1112,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
         )
-        if reported_model_error and not completed:
+        # A failed run that may be scored can have done model work after the CLI's last usage total.
+        if (reported_model_error or gradable) and not completed:
             native_usage = parse_codex_usage(state.native_transcript)
             if native_usage is not None:
                 response_usage = native_usage
@@ -1251,6 +1250,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 error = f"{error}; stderr: {stderr}"
                 # Environment Servers keep the observations, not the 502 body, in their failure records.
                 state.observations.gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
+        graded_error = None
+        if gradable:
+            # The observations are stored first, so a close during the liveness probe still finds them.
+            graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup, events=events)
+            if graded_error is not None:
+                error = None
+                # A run that also hit its time limit is graded as a timeout.
+                status = "incomplete" if cleanup["timed_out"] else "failed"
+                for record in state.observations.records:
+                    if isinstance(record, AgentInvocation) and record.invocation_id == invocation_id:
+                        record.status = status
         if failure is not None:
             raise failure
         if error and not reported_model_error:
