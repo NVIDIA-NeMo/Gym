@@ -464,7 +464,14 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
     received = {}
 
     def fake_health_check(
-        run_dir, *, rollout_file=None, workers=None, ignored_checks=(), limits=None, json_output=False
+        run_dir,
+        *,
+        rollout_file=None,
+        workers=None,
+        ignored_checks=(),
+        limits=None,
+        json_output=False,
+        model_call_capture_dir=None,
     ):
         received.update(
             run_dir=run_dir,
@@ -472,6 +479,7 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
             workers=workers,
             ignored_checks=ignored_checks,
             json_output=json_output,
+            model_call_capture_dir=model_call_capture_dir,
         )
 
     monkeypatch.setattr(cli_eval, "health_check_rollouts", fake_health_check)
@@ -501,6 +509,7 @@ def test_health_check_cli_accepts_run_dir_workers_and_ignored_checks(
         "workers": 3,
         "ignored_checks": ["model_call_missing_token_counts", "model_call_zero_completion_tokens"],
         "json_output": True,
+        "model_call_capture_dir": None,
     }
 
 

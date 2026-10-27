@@ -10,13 +10,25 @@ Session control files (all paths are relative to session_dir):
 ===================== ==================== ===========================================
 Filename              Writer               When
 ===================== ==================== ===========================================
-process_supervisor.py Session              Uploaded before launch
+process_supervisor    Session              Uploaded before launch
+bin/gym-supervisor    Launch shell         Interpreter link for the supervisor
+bin/gym-runner        Launch shell         Interpreter link for a standard-library runner
 launch.claim          Launch or stop shell Atomically claims launch or fences it
 supervisor.pid        Launch shell         After claiming launch, before exec
 stop.request          Stop shell           Before signalling the supervisor
 cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
 output.log            Launch shell         Captures supervisor and harness diagnostics
 ===================== ==================== ===========================================
+
+Agents in the task sandbox often clean up with ``pkill -f python3``, ``pkill python3`` or
+``killall python3``. In a reference harness whose agent CLI is a native binary these
+commands are harmless; here they would stop the supervisor, which then ends the
+harness. So the supervisor, and a standard-library runner that opts in, run under
+interpreter links with neutral names, from files without a ``.py`` suffix. Their process
+names never mention python, and neither do their command lines when the runner opts in; a
+harness argv that keeps its own python (Hermes, Stirrup) still appears in the supervisor's
+command line. Gym's own stop path signals the recorded supervisor PID and does not depend
+on these names.
 """
 
 import json
@@ -32,7 +44,9 @@ from nemo_gym.sandbox.utils import read_text
 from nemo_gym.typed_exceptions import HarnessFailure
 
 
-SUPERVISOR_FILE = "process_supervisor.py"
+SUPERVISOR_FILE = "process_supervisor"
+SUPERVISOR_INTERPRETER = "bin/gym-supervisor"
+RUNNER_INTERPRETER = "bin/gym-runner"
 LAUNCH_CLAIM_FILE = "launch.claim"
 SUPERVISOR_PID_FILE = "supervisor.pid"
 STOP_REQUEST_FILE = "stop.request"
@@ -40,6 +54,8 @@ CLEANUP_RECEIPT_FILE = "cleanup.json"
 OUTPUT_LOG_FILE = "output.log"
 
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
+# The interpreter binary itself, past virtual-environment links and launcher shims.
+_RESOLVE_INTERPRETER = 'import os; print(os.readlink("/proc/self/exe"))'
 LOG = logging.getLogger(__name__)
 
 
@@ -97,6 +113,14 @@ def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float
     return cleanup_timeout, exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout)
 
 
+def check_stdlib_runner(command: list[str], *, python: str, stdlib_runner: bool) -> None:
+    """Reject ``stdlib_runner`` for a harness argv that the runner link cannot replace."""
+    if stdlib_runner and command[:1] != [python]:
+        raise ValueError(
+            f"stdlib_runner requires a harness argv that starts with the interpreter {python!r}; got {command[:1]!r}"
+        )
+
+
 def supervised_launch_command(
     *,
     session_dir: str,
@@ -104,6 +128,7 @@ def supervised_launch_command(
     timeout: float,
     cleanup_timeout: float,
     python: str,
+    stdlib_runner: bool = False,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -111,18 +136,37 @@ def supervised_launch_command(
     can load the supervisor before claiming a launch: a failed bootstrap cannot
     write a cleanup receipt. Supervisor and harness diagnostics share output.log.
     The supervisor stops the harness group; the sandbox owner stops escaped services.
+
+    The supervisor runs through ``bin/gym-supervisor``, a link to the binary behind
+    ``python``, so that python-matching kills in the task skip it. With ``stdlib_runner``,
+    the harness command, which must start with ``python``, runs through ``bin/gym-runner``
+    the same way. The links resolve a virtual environment to its base interpreter, so only
+    standard-library runners may opt in. When the link cannot be made or cannot load
+    the supervisor, both processes keep ``python``.
     """
+    check_stdlib_runner(command, python=python, stdlib_runner=stdlib_runner)
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
+    link = quote(f"{session_dir}/{SUPERVISOR_INTERPRETER}")
+    harness = join(command)
+    runner = ""
+    if stdlib_runner:
+        runner_link = quote(f"{session_dir}/{RUNNER_INTERPRETER}")
+        runner = f'run={quote(python)}; [ "$py" = {link} ] && ln -sfn "$real" {runner_link} && run={runner_link}; '
+        harness = f'"$run" {join(command[1:])}'
     return (
         f"[ -d {quote(session_dir)} ] && [ ! -L {claim_path} ] || exit 0; "
-        f"{quote(python)} -I {supervisor} --help >/dev/null || exit $?; "
-        f"trap '' TERM; ln -s launch {claim_path} 2>/dev/null || exit 0; "
+        f"py={quote(python)}; "
+        f"real=$({quote(python)} -I -c {quote(_RESOLVE_INTERPRETER)} 2>/dev/null) && "
+        f'{{ [ -d {quote(f"{session_dir}/bin")} ] || mkdir {quote(f"{session_dir}/bin")}; }} && ln -sfn "$real" {link} && '
+        f"{link} -I {supervisor} --help >/dev/null 2>&1 && py={link}; "
+        f'[ "$py" = {link} ] || {quote(python)} -I {supervisor} --help >/dev/null || exit $?; '
+        f"{runner}trap '' TERM; ln -s launch {claim_path} 2>/dev/null || exit 0; "
         f"echo $$ > {quote(f'{session_dir}/{SUPERVISOR_PID_FILE}')} && "
-        f"exec {quote(python)} -I {supervisor} "
+        f'exec "$py" -I {supervisor} '
         f"--timeout {timeout} --cleanup-timeout {cleanup_timeout} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
-        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {join(command)} "
+        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {harness} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )
 

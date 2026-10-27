@@ -1008,6 +1008,7 @@ class ServerClient(BaseModel):
         method: str,
         *,
         _control: bool = False,
+        _resend_after_disconnect: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """Call another server. ``_control`` sends the call over the reserved control pool."""
@@ -1061,7 +1062,8 @@ class ServerClient(BaseModel):
             # Sending it again would run the attempt a second time,
             # and the first run's sessions on other servers would never be freed: the second run replies,
             # so the controller never retires the attempt.
-            _resend_after_disconnect=not (self.checkpoint_enabled() and url_path == "/run"),
+            _resend_after_disconnect=_resend_after_disconnect
+            and not (self.checkpoint_enabled() and url_path == "/run"),
             **kwargs,
         )
 

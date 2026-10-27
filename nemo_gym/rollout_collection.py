@@ -61,7 +61,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, FailureEventRecord, is_materialized_task_row, validate_failure_event_map
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -80,6 +80,7 @@ from nemo_gym.global_config import (
     dataset_agent_pins,
     environment_server_agent_names,
     environment_server_attributed_agent,
+    get_first_server_config_dict,
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
@@ -156,6 +157,7 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
+from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
@@ -611,6 +613,8 @@ class _CompletedRollout:
     rollout_latency_ms: Optional[float]
     environment_server: Optional[str] = None
     environment_server_type: Optional[str] = None
+    # The `/run` wall clock in seconds, success or failure; None for a row that never started.
+    elapsed_s: Optional[float] = None
     dispatch_span_context: Optional["SpanContext"] = None
     # Row keys from the reply's diagnostic headers: the current failure and the observations any
     # reply forwards. Only the writer adds them, so run_examples yields the same result as before.
@@ -885,6 +889,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         except Exception as exc:
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
 
+    observations_read = False
     raw_observations = result.get(NG_AGENT_OBSERVATIONS_KEY)
     if raw_observations is not None:
         try:
@@ -921,8 +926,14 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         tools.append(projected)
                     else:
                         tools[position] = projected
+            observations_read = True
         except Exception as exc:
             gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
+
+    # Without a valid producer trajectory or valid observations, the empty tool list below is the collector's
+    # default, not a report that no tool ran.
+    if not producer_turns_observed and not observations_read:
+        gaps.append(ObservationGap(code="tool_timing_unavailable"))
 
     turns.sort(key=lambda turn: (turn.timestamp, turn.invocation_id, turn.turn_no))
 
@@ -1020,6 +1031,23 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         tool_calls=tools,
         gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
     )
+
+
+NG_POLICY_MODEL_SERVER_KEY = "ng_policy_model_server"
+
+
+def _record_policy_model_server(result: dict[str, Any], global_config: Any, agent_name: str | None) -> None:
+    """Name the agent's configured policy server on the record (landed or failed), so offline timing needs no
+    live config and a capture joined later from the capture dir is still partitioned by role."""
+    if not agent_name:
+        return
+    try:
+        model_server = get_first_server_config_dict(global_config, agent_name).get("model_server")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return
+    name = model_server.get("name") if hasattr(model_server, "get") else None
+    if isinstance(name, str) and name:
+        result[NG_POLICY_MODEL_SERVER_KEY] = name
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
@@ -1589,7 +1617,7 @@ class RunTimingReport:
 
     def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
         self._durations.append(seconds)
-        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) in ("timeout_exceeded", AGENT_TIMEOUT):
+        if classify_timeout(result):
             self._timed_out += 1
 
     def table(self) -> str:
@@ -3795,6 +3823,10 @@ class RolloutCollectionHelper(BaseModel):
                     # Result or failure, the record names the inputs it ran (task and dataset digests).
                     for key, value in _task_data_provenance(row).items():
                         result.setdefault(key, value)
+                if completed.elapsed_s is not None:
+                    # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
+                    # which resume reads to order dispatch.
+                    result[ELAPSED_S_KEY] = completed.elapsed_s
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -3824,6 +3856,8 @@ class RolloutCollectionHelper(BaseModel):
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
                 # No rollout happened, so there is nothing to capture, tokenize or average.
                 no_result = failure_class in _NO_RESULT_FAILURE_CLASSES or bool(result.get(NG_DISPATCH_DRAINED_KEY))
+
+                _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
@@ -4248,6 +4282,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                     limits=config.run_health_limits,
+                    model_call_capture_dirs=capture_dirs,
                 )
             except Exception:
                 logger.exception(
@@ -4255,6 +4290,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             else:
                 print(format_health_report(health_result))
+                export_run_health_timeouts(health_result)
 
         config.check_completion(expected=expected_rollouts, results=persisted_results)
         return results
@@ -4713,6 +4749,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        retry_requests: bool = True,
         run_timing: Optional[RunTimingReport] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
@@ -4806,16 +4843,27 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_span_context = None
                 try:
                     request_body = _episode_request_body(row) if _materialized_taskset(row) else row
-                    if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active():
-                        with _dispatch_span(row, self._dispatch_name(row), server_name=server_name) as span_context:
-                            dispatch_span_context = span_context
-                            res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
-                    else:
-                        res = await server_client.post(server_name=server_name, url_path="/run", json=request_body)
+                    dispatch_span = (
+                        _dispatch_span(row, self._dispatch_name(row), server_name=server_name)
+                        if is_span_group_enabled(GymSpanGroup.ROLLOUT) and is_trace_exporter_active()
+                        else nullcontext()
+                    )
+                    with dispatch_span as dispatch_span_context:
+                        res = await server_client.post(
+                            server_name=server_name,
+                            url_path="/run",
+                            json=request_body,
+                            **({"_resend_after_disconnect": False} if not retry_requests else {}),
+                        )
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     if run_timing is not None and isinstance(result, Mapping):
-                        run_timing.record_result(result, time.monotonic() - started)
+                        # Classify the record collection saves, as the run health summary does; the raw reply is
+                        # returned unchanged.
+                        episode = _materialized_taskset(row) is not None and _is_episode_response(result)
+                        run_timing.record_result(
+                            _episode_record(result) if episode else result, time.monotonic() - started
+                        )
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time.time() - started_at) * 1000
@@ -4826,6 +4874,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=rollout_latency_ms,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
                         failure_observations=_events_row_fields(getattr(res, "headers", None)),
                     )
@@ -4850,6 +4899,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         rollout_latency_ms=None,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
                         failure_observations=_collection_failure_fields(
                             e,
@@ -4890,6 +4940,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
+        retry_requests: bool = True,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -4948,6 +4999,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         by the dispatch budget gets ``_ng_failure_class="cancelled"`` with the ``_ng_dispatch_drained``
         and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
         failure row with ``_ng_failure_*`` fields.
+
+        ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
+        Connections that were never established can still be retried safely.
+        It does not convert failures to successful result rows.
         """
 
         return _RowResultIterator(
@@ -4961,6 +5016,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_budget_s=dispatch_budget_s,
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
+                **({"retry_requests": False} if not retry_requests else {}),
             )
         )
 
@@ -5333,6 +5389,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             else:
                 print(format_health_report(health_result))
+                export_run_health_timeouts(health_result)
 
         return aggregate_metrics_fpath
 
