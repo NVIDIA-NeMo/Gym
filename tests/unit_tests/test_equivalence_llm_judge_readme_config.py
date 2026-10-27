@@ -54,7 +54,7 @@ def test_readme_launch_gives_the_policy_judge_a_verdict_budget(monkeypatch: Monk
     # The shipped config grades with the policy model as judge; the README command gives that judge
     # enough output tokens to reach a verdict (a reasoning judge can spend all of a 256-token budget on
     # reasoning and return no [[A=B]]/[[A!=B]] marker). Placeholder endpoints only, and env.yaml/dotenv
-    # are skipped, so no developer credentials are read.
+    # are skipped, so no developer credentials are read; offline parsing probes no ports or hosts.
     monkeypatch.chdir(REPO_ROOT)
     overrides = _readme_start_overrides(monkeypatch)
     initial = OmegaConf.merge(
@@ -64,7 +64,7 @@ def test_readme_launch_gives_the_policy_judge_a_verdict_budget(monkeypatch: Monk
 
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
-            initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True
+            initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
         )
     )
 
