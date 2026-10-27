@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
 import sys
 from time import monotonic
@@ -22,6 +23,18 @@ EXPIRE_MARKER = "/session/expire.request"
 
 def _expiry_writes(session) -> int:
     return sum(1 for call in session.sandbox.upload.await_args_list if call.args[1] == EXPIRE_MARKER)
+
+
+@contextlib.asynccontextmanager
+async def _launched(session, launched: asyncio.Event):
+    """Start an activation and wait, bounded, for its launch; cancel it on exit if it is still running."""
+    activation = asyncio.create_task(execute(session))
+    try:
+        await asyncio.wait_for(launched.wait(), 2)
+        yield activation
+    finally:
+        activation.cancel()
+        await asyncio.gather(activation, return_exceptions=True)
 
 
 @pytest.fixture
@@ -602,19 +615,18 @@ async def test_expire_while_running_requests_the_timeout_path_once(session, rece
         return OK
 
     session.sandbox.exec.side_effect = exec_
-    activation = asyncio.create_task(execute(session))
-    await launched.wait()
-    execs = session.sandbox.exec.await_count
-    assert await session.expire(timeout=1, reason="budget") is True
-    assert await session.expire(timeout=1, reason="operator") is False
-    assert session.expire_reason == "budget"
-    # The marker is written as a file, once, with no exec the running harness could hold up.
-    assert _expiry_writes(session) == 1 and session.sandbox.exec.await_count == execs
-    assert not session.expired
-    session.sandbox.exec.side_effect = None
-    receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
-    finish.set()
-    assert await activation == "transcript"
+    async with _launched(session, launched) as activation:
+        execs = session.sandbox.exec.await_count
+        assert await session.expire(timeout=1, reason="budget") is True
+        assert await session.expire(timeout=1, reason="operator") is False
+        assert session.expire_reason == "budget"
+        # The marker is written as a file, once, with no exec the running harness could hold up.
+        assert _expiry_writes(session) == 1 and session.sandbox.exec.await_count == execs
+        assert not session.expired
+        session.sandbox.exec.side_effect = None
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
     assert session.expired and not session.expired_before_launch
     assert await session.expire(timeout=1) is False
     await session.close(timeout=1)
@@ -661,14 +673,13 @@ async def test_failed_expire_request_can_be_retried(session):
     upload.fail = True
     session.sandbox.exec.side_effect = exec_
     session.sandbox.upload.side_effect = upload
-    activation = asyncio.create_task(execute(session))
-    await launched.wait()
-    with pytest.raises(RuntimeError, match="Could not request test expiry: no dir"):
-        await session.expire(timeout=1, reason="budget")
-    assert session.expire_reason is None
-    assert await session.expire(timeout=1) is True
-    finish.set()
-    await activation
+    async with _launched(session, launched) as activation:
+        with pytest.raises(RuntimeError, match="Could not request test expiry: no dir"):
+            await session.expire(timeout=1, reason="budget")
+        assert session.expire_reason is None
+        assert await session.expire(timeout=1) is True
+        finish.set()
+        await asyncio.wait_for(activation, 5)
     await session.close(timeout=1)
 
 
@@ -690,18 +701,17 @@ async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
     upload.stall = True
     session.sandbox.exec.side_effect = exec_
     session.sandbox.upload.side_effect = upload
-    activation = asyncio.create_task(execute(session))
-    await launched.wait()
-    started = asyncio.get_running_loop().time()
-    with pytest.raises(RuntimeError, match="Could not request test expiry within 0.2 s"):
-        await session.expire(timeout=0.2, reason="budget")
-    assert asyncio.get_running_loop().time() - started < 1
-    assert session.expire_reason is None
-    upload.stall = False
-    assert await session.expire(timeout=1, reason="operator") is True
-    assert session.expire_reason == "operator"
-    finish.set()
-    await activation
+    async with _launched(session, launched) as activation:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(RuntimeError, match="Could not request test expiry within 0.2 s"):
+            await session.expire(timeout=0.2, reason="budget")
+        assert asyncio.get_running_loop().time() - started < 1
+        assert session.expire_reason is None
+        upload.stall = False
+        assert await session.expire(timeout=1, reason="operator") is True
+        assert session.expire_reason == "operator"
+        finish.set()
+        await asyncio.wait_for(activation, 5)
     await session.close(timeout=1)
 
 
@@ -728,9 +738,7 @@ async def test_failed_expire_write_keeps_the_stop_only_if_the_marker_landed(sess
 
     session.sandbox.exec.side_effect = exec_
     session.sandbox.upload.side_effect = upload
-    activation = asyncio.create_task(execute(session))
-    try:
-        await asyncio.wait_for(launched.wait(), 2)
+    async with _launched(session, launched) as activation:
         with pytest.raises(RuntimeError, match="Could not request test expiry"):
             await session.expire(timeout=1, reason="budget")
         assert session.expire_reason is None
@@ -738,9 +746,6 @@ async def test_failed_expire_write_keeps_the_stop_only_if_the_marker_landed(sess
         receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
         finish.set()
         assert await asyncio.wait_for(activation, 5) == "transcript"
-    finally:
-        activation.cancel()
-        await asyncio.gather(activation, return_exceptions=True)
     assert session.expired is marker_landed
     assert session.expire_reason == ("budget" if marker_landed else None)
     await session.close(timeout=1)
