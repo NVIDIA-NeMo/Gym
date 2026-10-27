@@ -46,8 +46,10 @@ from nemo_gym.tasks.harbor.compose_variables import (
     _warn_unset,
     compose_variables,
     inline_env_files,
+    literal_variables,
     residual_interpolation,
     restore_compose_types,
+    substitute_compose,
     substitute_with_empty,
 )
 from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
@@ -86,7 +88,9 @@ def compose_file(task: HarborTask) -> Path | None:
     return None
 
 
-def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
+def load_compose_document(
+    task: HarborTask, *, operator_variables: Mapping[str, str] | None = None
+) -> dict[str, Any] | None:
     """The task's Compose overlay with ``env_file`` entries inlined, ``${VAR}`` references resolved and the images
     prepare built standing in for the services it built (:func:`with_built_images`), ``main`` only when the loader
     resolved the task to its built image.
@@ -98,6 +102,12 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
     raises :class:`ImageConfigError` naming it; a variable nobody sets is an empty string, with a warning.
     The record is the one :func:`~nemo_gym.tasks.harbor.task.load_task` read (``task.built_images``): nothing is
     hashed here, which runs once per episode on the server.
+
+    ``operator_variables`` are the deployment's values (the environment server's ``compose_variables``), which
+    the server resolves at seed: they fill the names neither the task, the process environment nor Harbor's own
+    variables set (SWE-Interact's simulated user reads its model endpoint and key that way). With them a name
+    still unset fails here, before anything is provisioned; without them, as at prepare, it is an empty string
+    with a warning, the images and structure being all prepare reads.
     """
     path = compose_file(task)
     if path is None:
@@ -110,7 +120,14 @@ def load_compose_document(task: HarborTask) -> dict[str, Any] | None:
         # Interpolate first, as Compose does, so an env_file path may use ${CONTEXT_DIR}; env_file values are then
         # literal. Anything still carrying a ``$NAME`` afterwards fails here, at prepare, not at seed.
         variables = compose_variables(task, unset=unset)
-        document = substitute_with_empty(document, variables, unset)
+        # The deployment's values are literal to the document like every other source: a key or password may
+        # carry `$`, and nothing of the deployment's may trip the residual check or lose a `$$`.
+        operator_variables = literal_variables(operator_variables)
+        if operator_variables is not None:
+            variables = dict(operator_variables) | variables
+            document = substitute_compose(document, variables)
+        else:
+            document = substitute_with_empty(document, variables, unset)
         document = inline_env_files(document, path.parent, variables)
         # Interpolation hands back strings; the adapter reads healthcheck ``disable`` and ``retries`` by type.
         document = restore_compose_types(document)

@@ -121,7 +121,7 @@ from nemo_gym.rollout_collection import (
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
-from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware, ServerClient
+from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -454,7 +454,9 @@ class TestRolloutCollection:
         )
         dispatched = []
 
-        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+        async def post(
+            server_name: str, url_path: str, json: dict, *, _resend_after_disconnect: bool = True
+        ) -> FakeResponse:
             assert url_path == "/run"
             assert server_name == f"{json[AGENT_REF_KEY_NAME]['name']}_environment_server"
             dispatched.append(json)
@@ -720,7 +722,9 @@ class TestRolloutCollection:
         first_wave_started = asyncio.Event()
         release = asyncio.Event()
 
-        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+        async def post(
+            server_name: str, url_path: str, json: dict, *, _resend_after_disconnect: bool = True
+        ) -> FakeResponse:
             assert url_path == "/run"
             started.append((json[AGENT_REF_KEY_NAME]["name"], json[TASK_INDEX_KEY_NAME]))
             if len(started) == 2:
@@ -765,7 +769,9 @@ class TestRolloutCollection:
         first_wave_started = asyncio.Event()
         release = asyncio.Event()
 
-        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+        async def post(
+            server_name: str, url_path: str, json: dict, *, _resend_after_disconnect: bool = True
+        ) -> FakeResponse:
             nonlocal active_total, max_active_total
             assert url_path == "/run"
             active_total += 1
@@ -816,7 +822,9 @@ class TestRolloutCollection:
         all_started = asyncio.Event()
         release = asyncio.Event()
 
-        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+        async def post(
+            server_name: str, url_path: str, json: dict, *, _resend_after_disconnect: bool = True
+        ) -> FakeResponse:
             nonlocal active
             assert server_name == "gamma_environment_server"
             assert url_path == "/run"
@@ -1691,6 +1699,37 @@ class TestRolloutCollection:
 
         with pytest.raises(ClientResponseError):
             await next(RolloutCollectionHelper().run_examples([failing_row()]))
+
+    @pytest.mark.parametrize("retry_requests", [True, False])
+    @pytest.mark.parametrize("connection_refused", [False, True])
+    async def test_run_examples_controls_transport_replay(
+        self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool, connection_refused: bool
+    ) -> None:
+        """Framework callers can prevent replaying a /run after uncertain delivery."""
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
+        transport = MagicMock()
+        failure = (
+            ClientConnectorError(MagicMock(), ConnectionRefusedError("not sent"))
+            if connection_refused
+            else ServerDisconnectedError()
+        )
+        transport.request = AsyncMock(side_effect=[failure, FakeResponse(200, {"reward": 1})])
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        run = RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests)
+        if retry_requests or connection_refused:
+            _, result = await next(run)
+            assert result["reward"] == 1
+        else:
+            with pytest.raises(ServerDisconnectedError):
+                await next(run)
+        assert transport.request.await_count == (2 if retry_requests or connection_refused else 1)
+        for call in transport.request.call_args_list:
+            assert call.kwargs["url"] == "http://agent:1234/run"
+            assert "_resend_after_disconnect" not in call.kwargs
 
     @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
     async def test_run_examples_propagates_non_request_failures(
@@ -3407,8 +3446,9 @@ class TestRolloutCollection:
 
         assert mock_server_client.post.await_args.kwargs["server_name"] == "my_environment_server"
 
+    @pytest.mark.parametrize("tracing", [False, True])
     async def test_run_examples_with_metadata_carries_rollout_latency_alongside_result(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tracing: bool
     ) -> None:
         """Internal callers get the timing via _CompletedRollout, never through the result dict."""
         row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
@@ -3431,12 +3471,20 @@ class TestRolloutCollection:
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
         monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
 
-        completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row]))
+        span_context = object()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda _: tracing)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "is_trace_exporter_active", lambda: tracing)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "_dispatch_span", lambda *args, **kwargs: nullcontext(span_context)
+        )
+        completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row], retry_requests=False))
 
         assert completed.row is row
         assert completed.result == {"response": {}}
         assert isinstance(completed.rollout_latency_ms, float)
         assert completed.rollout_latency_ms >= 0
+        assert completed.dispatch_span_context is (span_context if tracing else None)
+        assert mock_server_client.post.call_args.kwargs["_resend_after_disconnect"] is False
 
     async def test_run_from_config_does_not_route_failures_unless_asked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -7256,7 +7304,7 @@ class TestDispatchBudget:
         }
 
     def _helper(self, posted: list) -> RolloutCollectionHelper:
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, *, _resend_after_disconnect=True):  # noqa: A002
             posted.append(json[TASK_INDEX_KEY_NAME])
             return MagicMock(status=200)
 
@@ -7678,7 +7726,7 @@ class TestDispatchOrderReachesTheServer:
 
         posted: list = []
 
-        async def post(server_name, url_path, json):  # noqa: A002
+        async def post(server_name, url_path, json, *, _resend_after_disconnect=True):  # noqa: A002
             posted.append(json[TASK_INDEX_KEY_NAME])
             await asyncio.sleep(0)
             return MagicMock(status=200)
@@ -11348,6 +11396,123 @@ class TestMultiAgentEnvironmentServers:
             ValueError, match="'outsider' is not an agent of environment server 'conversation': 'user', 'assistant'"
         ):
             RolloutCollectionHelper._validate_environment_servers([row], self._config())
+
+
+class TestDatasetAdmittedAgentsAtDispatch:
+    """A dataset an agent declares may name the harnesses it admits (`allowed_agents` on the entry, as a Harbor
+    dataset's `[gym]` table writes it); the pairing guard checks the agent's own type against it, for rows an
+    environment server runs (which binds no resources server) and for rows routed to the agent directly."""
+
+    @staticmethod
+    def _config(agent_type: str, admitted: object, **top: object) -> DictConfig:
+        entry = {"name": "tb21", "type": "benchmark", "verified": False, "jsonl_fpath": "tb21.jsonl"}
+        if admitted is not None:
+            entry["allowed_agents"] = admitted
+        return OmegaConf.create(
+            {
+                "harbor_tb21_agent": {"responses_api_agents": {agent_type: {"datasets": [entry]}}},
+                "harbor_tb21_environment": {
+                    "environment_servers": {
+                        "harbor": {"agent_server": {"type": "responses_api_agents", "name": "harbor_tb21_agent"}}
+                    }
+                },
+                **top,
+            }
+        )
+
+    ROW = {NG_ENVIRONMENT_SERVER_KEY: "harbor_tb21_environment"}
+
+    def test_an_agent_the_dataset_does_not_admit_is_refused_naming_both(self) -> None:
+        config = self._config("codex_agent", ["terminus_2_sandboxed_agent", "hermes_agent"])
+        with pytest.raises(ValueError) as exc:
+            RolloutCollectionHelper._validate_environment_servers([self.ROW], config)
+        message = str(exc.value)
+        assert "Rows would be scored by a verifier that does not accept the agent running them" in message
+        assert (
+            "rows routed to 'harbor_tb21_agent' run 'codex_agent', but its dataset 'tb21' admits only: "
+            "terminus_2_sandboxed_agent, hermes_agent"
+        ) in message
+        assert "--allow-unsupported-pairing" in message
+
+    @pytest.mark.parametrize("admitted", [None, ["hermes_agent"], "hermes_agent"], ids=["unset", "list", "bare"])
+    def test_an_admitted_agent_passes(self, admitted: object) -> None:
+        RolloutCollectionHelper._validate_environment_servers([self.ROW], self._config("hermes_agent", admitted))
+
+    def test_the_pairing_override_waives_it(self) -> None:
+        config = self._config("codex_agent", ["hermes_agent"], allow_unsupported_pairing=True)
+        RolloutCollectionHelper._validate_environment_servers([self.ROW], config)
+
+    def test_directly_routed_rows_meet_the_same_guard(self) -> None:
+        config = self._config("codex_agent", ["hermes_agent"])
+        rows = [{AGENT_REF_KEY_NAME: {"name": "harbor_tb21_agent"}}]
+        with pytest.raises(ValueError, match="its dataset 'tb21' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_agent_pairings(rows, config)
+
+    @staticmethod
+    def _materialized(taskset: str) -> dict:
+        return {
+            NG_ENVIRONMENT_SERVER_KEY: "harbor_tb21_environment",
+            "task_id": {"taskset": taskset, "task_id": "hello"},
+            "task_input": {"responses_create_params": {"input": []}},
+        }
+
+    def test_only_the_dataset_declaring_the_dispatched_rows_is_checked(self) -> None:
+        """Review (Yu He, M37): the guard read every dataset the agent declares, so an unrelated entry on the agent
+        refused rows of another dataset. A materialized row is matched to its entry by taskset: the unrestricted
+        dataset's rows pass, the restricted dataset's rows are refused naming it."""
+        config = self._config("codex_agent", ["hermes_agent"])
+        datasets = config["harbor_tb21_agent"]["responses_api_agents"]["codex_agent"]["datasets"]
+        datasets.append({"name": "other", "type": "benchmark", "verified": False, "jsonl_fpath": "other.jsonl"})
+        RolloutCollectionHelper._validate_environment_servers([self._materialized("other")], config)
+        with pytest.raises(ValueError, match="its dataset 'tb21' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_environment_servers([self._materialized("tb21")], config)
+        # The entry may route by an explicit taskset under another name; the match follows that key.
+        datasets[0]["taskset"] = "routed"
+        RolloutCollectionHelper._validate_environment_servers([self._materialized("tb21")], config)
+        with pytest.raises(ValueError, match="its dataset 'tb21' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_environment_servers([self._materialized("routed")], config)
+
+    def test_an_environment_server_rebound_to_another_agent_still_meets_the_datasets_list(self) -> None:
+        """Review (Yu He, M37): the entry sits on the agent block `gym eval run` generated; a run config edited to
+        route the taskset's environment server to another agent block, one that declares no datasets, must still
+        meet the dataset's list, so the lookup is by taskset over every agent block and not the executing agent's."""
+        config = self._config(
+            "hermes_agent", ["hermes_agent"], codex_runner={"responses_api_agents": {"codex_agent": {}}}
+        )
+        environment = config["harbor_tb21_environment"]["environment_servers"]["harbor"]
+        environment["agent_server"] = {"type": "responses_api_agents", "name": "codex_runner"}
+        with pytest.raises(ValueError) as exc:
+            RolloutCollectionHelper._validate_environment_servers([self._materialized("tb21")], config)
+        assert "rows routed to 'codex_runner' run 'codex_agent', but its dataset 'tb21' admits only: hermes_agent" in (
+            str(exc.value)
+        )
+        # Rebound to a block running an admitted harness, the rows pass.
+        config["codex_runner"] = {"responses_api_agents": {"hermes_agent": {}}}
+        RolloutCollectionHelper._validate_environment_servers([self._materialized("tb21")], config)
+
+    def test_an_entry_listing_the_rows_under_another_name_is_still_the_executing_agents_dataset(self) -> None:
+        """Review (Yu He, M37), follow-up: a hand-written entry may list pre-materialized rows under a name of its
+        own without a `taskset` key, so no entry declares the rows' taskset. The guard then checks the executing
+        agent's entries that set no taskset, as it did before the match by taskset, instead of checking nothing;
+        an entry that sets another taskset materializes its rows as that taskset and is not these rows' dataset."""
+        config = self._config("codex_agent", ["hermes_agent"])
+        entry = config["harbor_tb21_agent"]["responses_api_agents"]["codex_agent"]["datasets"][0]
+        entry["name"] = "tb21_eval"
+        rows = [self._materialized("terminal_bench_2_1")]
+        with pytest.raises(ValueError, match="its dataset 'tb21_eval' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_environment_servers(rows, config)
+        entry["taskset"] = "routed"
+        RolloutCollectionHelper._validate_environment_servers(rows, config)
+        del entry["taskset"]
+        # The same rows routed to the agent directly, without the environment server key.
+        routed = [{AGENT_REF_KEY_NAME: {"name": "harbor_tb21_agent"}, **rows[0]}]
+        del routed[0][NG_ENVIRONMENT_SERVER_KEY]
+        with pytest.raises(ValueError, match="its dataset 'tb21_eval' admits only: hermes_agent"):
+            RolloutCollectionHelper._validate_agent_pairings(routed, config)
+        # An admitted harness passes the renamed entry.
+        config = self._config("hermes_agent", ["hermes_agent"])
+        config["harbor_tb21_agent"]["responses_api_agents"]["hermes_agent"]["datasets"][0]["name"] = "tb21_eval"
+        RolloutCollectionHelper._validate_environment_servers(rows, config)
 
 
 class TestLiveHealthEvaluation:
