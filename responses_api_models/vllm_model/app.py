@@ -1294,6 +1294,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
+    def _mints_response_ids(self) -> bool:
+        # The Chat Completions conversion builds each response; the native path serves vLLM's.
+        return not self.config.is_responses_native
+
     def _preserve_envelope_id(self) -> bool:
         """Keep the backend envelope id only for requests with an active external-capture context."""
         context = current_capture_context()

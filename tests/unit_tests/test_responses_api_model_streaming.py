@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
+    is_responses_lifecycle_chunk,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
     synthesize_responses_keepalive_sse,
@@ -891,11 +892,14 @@ def test_no_dead_entries_in_streaming_consumed_types() -> None:
 
 
 class _EchoModel(SimpleResponsesAPIModel):
-    """Fake model server capturing the params its responses() receives."""
+    """Fake model server capturing the params its responses() receives. It mints its response ids."""
 
     config: BaseResponsesAPIModelConfig
     last_params: object = None
     model_config = {"arbitrary_types_allowed": True}
+
+    def _mints_response_ids(self) -> bool:
+        return True
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         object.__setattr__(self, "last_params", body)
@@ -1202,6 +1206,27 @@ class _SlowUnpropagatedErrorModel(_SlowUpstreamErrorModel):
         return False
 
 
+class _SlowFixedIdModel(_EchoModel):
+    """Returns ``resp_backend``, completed or cut at the output limit, after several keepalive intervals."""
+
+    status: str = "completed"
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        response = await super().responses(body)
+        update = {"id": "resp_backend", "status": self.status}
+        if self.status == "incomplete":
+            update["incomplete_details"] = {"reason": "max_output_tokens"}
+        return response.model_copy(update=update)
+
+
+class _UpstreamIdModel(_EchoModel):
+    """Serves the ids an upstream Responses API issued, which a keepalive stream cannot announce."""
+
+    def _mints_response_ids(self) -> bool:
+        return False
+
+
 class _SlowUnknownUsageModel(_UnknownUsageModel):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         await asyncio.sleep(_SLOW_CALL_S)
@@ -1224,6 +1249,18 @@ def _sse_payloads(text: str) -> list[dict]:
     return [json.loads(line[len("data: ") :]) for line in text.splitlines() if line.startswith("data: ")]
 
 
+def test_only_a_single_lifecycle_event_is_liveness() -> None:
+    created, progress = (
+        event.encode() for event in synthesize_responses_keepalive_sse("resp_x", include_created=True)
+    )
+    assert is_responses_lifecycle_chunk(created)
+    assert is_responses_lifecycle_chunk(progress)
+    # A chunk that carries output too is output.
+    assert not is_responses_lifecycle_chunk(created + b"event: response.completed\ndata: {}\n\n")
+    assert not is_responses_lifecycle_chunk(b"event: response.output_item.done\ndata: {}\n\n")
+    assert not is_responses_lifecycle_chunk(b": keep-alive\n\n")
+
+
 class TestResponsesStreamKeepalive:
     """``stream_keepalive_s`` holds a buffered Responses stream open while the backend computes."""
 
@@ -1237,6 +1274,32 @@ class TestResponsesStreamKeepalive:
     def test_rejects_non_positive_intervals(self, value: float) -> None:
         with pytest.raises(ValidationError):
             BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="", stream_keepalive_s=value)
+
+    @pytest.mark.parametrize("status", ["completed", "incomplete"])
+    def test_every_event_names_the_response_the_stream_ends_with(self, status: str) -> None:
+        client, server = _keepalive_client(_SlowFixedIdModel)
+        object.__setattr__(server, "status", status)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        events = _sse_payloads(resp.text)
+        assert events[1]["type"] == "response.in_progress", "keepalives opened the stream"
+        assert events[-1]["type"] == f"response.{status}"
+        assert {event["response"]["id"] for event in events if "response" in event} == {events[0]["response"]["id"]}
+        # A client that keys on the id response.created announced reaches the terminal state.
+        assert events[-1]["response"]["status"] == status
+
+    def test_capture_records_the_id_the_stream_announced(self) -> None:
+        client, _ = _keepalive_client(_SlowFixedIdModel)
+        with patch("nemo_gym.base_responses_api_model.capture_tokens", new=AsyncMock()) as capture:
+            resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        events = _sse_payloads(resp.text)
+        [call] = capture.await_args_list
+        assert call.args[0].id == events[0]["response"]["id"] == events[-1]["response"]["id"]
+
+    def test_refused_on_a_server_that_serves_upstream_ids(self) -> None:
+        with pytest.raises(ValueError, match="stream_keepalive_s"):
+            _keepalive_client(_UpstreamIdModel)
 
     def test_long_call_sends_keepalives_then_the_unchanged_response(self) -> None:
         client, server = _keepalive_client(_SlowEchoModel)
@@ -1252,8 +1315,9 @@ class TestResponsesStreamKeepalive:
         assert all(event["type"] == "response.in_progress" for event in keepalives[1:])
         assert {event["response"]["id"] for event in keepalives} == {keepalives[0]["response"]["id"]}
         assert all(event["response"]["status"] == "in_progress" for event in keepalives)
-        # After the keepalives, the stream is exactly what the buffered path sends after its response.created.
-        served = server.served.model_dump(mode="json", by_alias=True)
+        # After the keepalives, the stream is exactly what the buffered path sends after its response.created,
+        # for the response under the id the keepalives announced.
+        served = server.served.model_dump(mode="json", by_alias=True) | {"id": keepalives[0]["response"]["id"]}
         expected = "".join(synthesize_responses_sse(served, include_created=False))
         assert resp.text.endswith(expected)
         assert events[len(keepalives) :] == _sse_payloads(expected)

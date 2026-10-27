@@ -20,6 +20,7 @@ from nemo_gym._checkpoint.control import CheckpointRequest
 from nemo_gym.base_responses_api_model import _CaptureMiddleware, _reconstruct_streamed_response
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER
@@ -764,8 +765,12 @@ async def test_checkpoint_gate_keeps_framework_capture_pending_until_delivery(
         delivering.set()
         await deliver(ticket)
 
+    def answer(body) -> bool:
+        # Keep-alive comments and Responses lifecycle events are liveness: they may leave before the row.
+        return bool(body) and body != SSE_KEEPALIVE and not is_responses_lifecycle_chunk(body)
+
     async def observe(message):
-        if message.get("body") and message["body"] != SSE_KEEPALIVE:
+        if answer(message.get("body")):
             manifest = RolloutManifest.model_validate(await harness.ledger.manifest("attempt"))
             assert len(manifest.records) == 1 and not manifest.pending_call_ids
         sent.append(message)
@@ -790,7 +795,7 @@ async def test_checkpoint_gate_keeps_framework_capture_pending_until_delivery(
         before = RolloutManifest.model_validate(await harness.ledger.manifest("attempt"))
         assert not before.records and not before.failures
         assert before.pending_call_ids == [context.model_call_id]
-        assert not any(message.get("body") not in (None, b"", SSE_KEEPALIVE) for message in sent)
+        assert not any(answer(message.get("body")) for message in sent)
         if cancelled:
             call.cancel()
             await asyncio.gather(call, return_exceptions=True)
@@ -800,7 +805,7 @@ async def test_checkpoint_gate_keeps_framework_capture_pending_until_delivery(
             gate.open()
             await asyncio.wait_for(call, timeout=5)
             assert context.committed
-            assert any(message.get("body") not in (None, b"", SSE_KEEPALIVE) for message in sent)
+            assert any(answer(message.get("body")) for message in sent)
     finally:
         release.set()
         gate.open()

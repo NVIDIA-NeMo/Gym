@@ -446,11 +446,26 @@ def synthesize_responses_keepalive_sse(response_id: str, *, include_created: boo
     has returned. A client that bounds the silence between events (the Codex CLI's
     ``stream_idle_timeout_ms``, 300 s by default) abandons a long turn and re-sends it, and SSE
     comments do not reset that timer because the client's event parser drops them. The first
-    call opens the stream with ``response.created``; every call emits ``response.in_progress``
-    for the same placeholder response, which clients that track only items and the terminal
-    event ignore.
+    call opens the stream with ``response.created``; every call emits ``response.in_progress``.
+    Both name ``response_id``, the id of the response the stream ends with, and carry no output,
+    so clients that track only items and the terminal event ignore them.
     """
     response = {"id": response_id, "object": "response", "status": "in_progress", "output": []}
     if include_created:
         yield _sse_event({"type": "response.created", "response": response})
     yield _sse_event({"type": "response.in_progress", "response": response})
+
+
+_RESPONSES_LIFECYCLE_SSE_PREFIXES = (b"event: response.created\n", b"event: response.in_progress\n")
+
+
+def is_responses_lifecycle_chunk(chunk: bytes) -> bool:
+    """Whether ``chunk`` is exactly one ``response.created`` or ``response.in_progress`` SSE event.
+
+    Those events carry no model output. With ``stream_keepalive_s`` they open and hold a stream
+    long before generation finishes, so like SSE comments they are liveness, not the start of the
+    answer. A chunk that also carries another event is output.
+    """
+    return (
+        chunk.startswith(_RESPONSES_LIFECYCLE_SSE_PREFIXES) and chunk.endswith(b"\n\n") and chunk.count(b"\n\n") == 1
+    )
