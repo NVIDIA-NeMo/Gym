@@ -129,6 +129,32 @@ class CollectionFailure(NgFailureEvent):
     """Rollout collection's own operation failed."""
 
 
+_REPLIES_WITH_CAUSE = "_ng_replies_with_cause"
+
+
+def agent_boundary_failure(error: Exception, *, operation: str, stage: FailureStage | None = None) -> AgentFailure:
+    """The ``AgentFailure`` an agent route raises ``from error``; the server's reply keeps ``error``'s body and status.
+
+    It names the cause's type, not its text, and takes no kind from it.
+    """
+    failure = AgentFailure(
+        message=f"Agent operation {operation} failed: {type(error).__name__}", operation=operation, stage=stage
+    )
+    setattr(failure, _REPLIES_WITH_CAUSE, True)
+    return failure
+
+
+def reply_cause(error: BaseException) -> Exception | None:
+    """The exception whose reply a boundary wrapper from ``agent_boundary_failure`` stands for, else ``None``."""
+    cause = error.__cause__
+    return cause if vars(error).get(_REPLIES_WITH_CAUSE) and isinstance(cause, Exception) else None
+
+
+def is_agent_failure(error: BaseException) -> bool:
+    """Whether ``error``'s explicit chain already holds an agent boundary failure, local or rebuilt from a reply."""
+    return isinstance(find_typed_exception(error), AgentFailure)
+
+
 def boundary_type(error: NgFailureEvent) -> type[NgFailureEvent]:
     """The boundary class ``error`` is an instance of, nearest first; ``NgFailureEvent`` when it names none."""
     for cls in type(error).__mro__:

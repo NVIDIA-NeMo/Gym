@@ -1579,6 +1579,19 @@ def _retry_after_seconds(response: ClientResponse) -> Optional[float]:
     return (retry_at.replace(tzinfo=retry_at.tzinfo or timezone.utc) - datetime.now(timezone.utc)).total_seconds()
 
 
+async def _raise_exhausted(response: ClientResponse, content: bytes, last_failure: Optional[ModelFailure]) -> None:
+    """``raise_for_status`` for the last attempt; its error's explicit cause is that attempt's observed failure.
+
+    A cause ``raise_for_status`` set itself (a Gym server's rebuilt failure) is kept.
+    """
+    try:
+        await raise_for_status(response, content)
+    except ClientResponseError as error:
+        if last_failure is None or error.__cause__ is not None:
+            raise
+        raise error from last_failure
+
+
 def _retry_wait_seconds(tries: int, response: ClientResponse) -> float:
     """Full-jitter exponential backoff, or the provider's Retry-After, both capped."""
     retry_after = _retry_after_seconds(response)
@@ -1812,17 +1825,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
             # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
+            last_failure = None
             if not reply_forwards_failure(getattr(response, "headers", None)):
-                observe_failure(
-                    ModelFailure(
-                        MODEL_REQUEST_ERROR,
-                        f"HTTP {response.status} from the model server",
-                        operation="model_request",
-                        http_status=response.status,
-                        operation_id=operation_id,
-                        attempt_id=f"{operation_id}-{tries}",
-                    )
+                last_failure = ModelFailure(
+                    MODEL_REQUEST_ERROR,
+                    f"HTTP {response.status} from the model server",
+                    operation="model_request",
+                    http_status=response.status,
+                    operation_id=operation_id,
+                    attempt_id=f"{operation_id}-{tries}",
                 )
+                observe_failure(last_failure)
             content = await response.content.read()
             if response.status == 429 and _error_body_is_permanent_quota(content):
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
@@ -1841,13 +1854,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 and self.max_rate_limit_wait_seconds > 0
             ):
                 if waited + wait > self.max_rate_limit_wait_seconds:
-                    await raise_for_status(response, content)
+                    await _raise_exhausted(response, content, last_failure)
                 max_num_tries = max(max_num_tries, tries + 1)
 
             # Preserve the final error body for raise_for_status and avoid sleeping
             # after the last attempt. Reading intermediate bodies releases sockets.
             if tries >= max_num_tries:
-                await raise_for_status(response, content)
+                await _raise_exhausted(response, content, last_failure)
 
             kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
             print(

@@ -29,6 +29,7 @@ from pydantic import TypeAdapter, ValidationError
 from nemo_gym.agent_utils.process_supervisor import CLEANUP_PHASE_COUNT, CleanupReceipt, exec_timeout
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text
+from nemo_gym.typed_exceptions import HarnessFailure
 
 
 SUPERVISOR_FILE = "process_supervisor.py"
@@ -42,16 +43,21 @@ _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
 LOG = logging.getLogger(__name__)
 
 
-class HarnessTerminationError(RuntimeError):
+class HarnessTerminationError(HarnessFailure, RuntimeError):
     """A final supervisor receipt could not confirm the harness stopped.
 
     The sandbox owner must tear down the sandbox. Re-reading this terminal
     receipt cannot recover execution, but a borrowed client can release it.
+    It stays a ``RuntimeError`` for existing handlers; its failure event names the
+    harness but not the receipt's text, which stays on ``receipt`` and in ``str()``.
     """
 
     def __init__(self, *, harness: str, receipt: CleanupReceipt) -> None:
         self.receipt: CleanupReceipt = receipt
-        super().__init__(f"{harness} harness termination was not confirmed: {receipt['error']}")
+        HarnessFailure.__init__(
+            self, message=f"{harness} harness termination was not confirmed", operation="harness.terminate"
+        )
+        self.args = (f"{harness} harness termination was not confirmed: {receipt['error']}",)
 
 
 def _raise_terminal_failure(payload: object, *, harness: str) -> None:

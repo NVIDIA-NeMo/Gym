@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import wraps
 from time import monotonic
-from typing import Any, ClassVar, Optional
+from typing import Any, Awaitable, Callable, ClassVar, Optional
 from urllib.parse import urlsplit
 from warnings import warn
 
@@ -65,6 +65,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -89,6 +90,7 @@ from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
+from nemo_gym.typed_exceptions import agent_boundary_failure, is_agent_failure
 
 
 LOG = logging.getLogger(__name__)
@@ -316,6 +318,35 @@ class AgentSeedRejectedError(HTTPException, ValueError):
 def _log_seed_refusal(agent_session_id: str, error: AgentSeedRejectedError) -> None:
     # FastAPI answers an HTTPException inside the router, so no exception middleware logs the refusal.
     LOG.warning("Refused agent session seed %s: %s", agent_session_id, error.detail)
+
+
+def _has_exception_handler(app: FastAPI, error: BaseException) -> bool:
+    """Whether ``app`` registers a handler for ``error``'s type or a base of it, as Starlette dispatches."""
+    return any(cls in app.exception_handlers for cls in type(error).__mro__)
+
+
+def _agent_boundary(
+    endpoint: Callable[..., Awaitable[Any]], *, app: FastAPI, operation: str, stage: FailureStage | None = None
+):
+    """``endpoint`` with its failures raised as one ``AgentFailure`` caused by them; the reply body and status stay.
+
+    ``HTTPException``, cancellation and any error ``app`` has a handler for (such as a checkpoint ``ControlError``,
+    answered 409) pass through to that handler. A failure that already holds an agent failure (``/run`` calling
+    this server's ``/v1/responses``) is not wrapped again.
+    """
+
+    @wraps(endpoint)
+    async def bounded(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await endpoint(*args, **kwargs)
+        except HTTPException:
+            raise
+        except Exception as error:
+            if is_agent_failure(error) or _has_exception_handler(app, error):
+                raise
+            raise agent_boundary_failure(error, operation=operation, stage=stage) from error
+
+    return bounded
 
 
 class AgentSessionSetupError(Exception):
@@ -615,7 +646,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         self.setup_agent_checkpoint(app)
 
         agent_attributes = {"nemo.gym.server.name": self.config.name}
-        traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
+        traced_responses = _agent_boundary(
+            traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes),
+            app=app,
+            operation="agent.responses",
+        )
         app.post("/v1/responses")(traced_responses)
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
@@ -638,12 +673,32 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             with rollout_context(self.rollout_id_from_run(body)):
                 return await run(*args, **kwargs)
 
-        app.post("/run")(run_with_rollout_context)
+        app.post("/run")(_agent_boundary(run_with_rollout_context, app=app, operation="agent.run", stage="agent"))
         app.post("/aggregate_metrics")(self.aggregate_metrics)
-        app.post("/v1/agent_sessions")(self.seed_agent_session)
+        app.post("/v1/agent_sessions")(self._seed_agent_session_endpoint)
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
 
         return app
+
+    async def _seed_agent_session_endpoint(
+        self,
+        request: Request,
+        body: AgentSeedSessionRequest,
+        response: Response = None,
+    ) -> AgentSeedSessionResponse:
+        """``seed_agent_session`` over HTTP: a setup error leaves this server as an ``AgentFailure`` caused by it.
+
+        Direct callers of ``seed_agent_session`` still get the original error. An ``HTTPException`` keeps its status
+        and a cancellation stays a cancellation. The failure records the cause's type, not its text.
+        """
+        try:
+            return await self.seed_agent_session(request, body, response)
+        except HTTPException:
+            raise
+        except Exception as error:
+            if is_agent_failure(error) or _has_exception_handler(request.app, error):
+                raise
+            raise agent_boundary_failure(error, operation="agent.seed_session", stage="seed") from error
 
     async def seed_agent_session(
         self,
@@ -690,7 +745,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 except AgentSessionSetupError as error:
                     record.state = error.state
                     self._keep_failed_seed(body.agent_session_id, record)
-                    raise error.error from None
+                    # Raise the setup error itself with its own cause; only the wrapper's context is hidden.
+                    setup_error = error.error
+                    setup_error.__suppress_context__ = True
+                    raise setup_error
                 except AgentSeedRejectedError as error:
                     _log_seed_refusal(body.agent_session_id, error)
                     raise

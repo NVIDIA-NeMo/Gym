@@ -128,6 +128,7 @@ from nemo_gym.typed_exceptions import (
     observe_relayed_events,
     observing_failures,
     remote_failure,
+    reply_cause,
     safe_failure_header,
 )
 
@@ -609,7 +610,7 @@ async def request(
     send = _traced_request if traced else _request_with_retries
     counts = request_counts()
     if counts is None:
-        return await send(
+        response = await send(
             method,
             url,
             _internal=_internal,
@@ -621,10 +622,14 @@ async def request(
             _on_transport_failure=_on_transport_failure,
             **kwargs,
         )
+        # A Gym server's reply may forward failures it recovered from; they join this request's observations,
+        # whether or not traces are exported.
+        observe_relayed_events(getattr(response, "headers", None))
+        return response
     # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
     counts.outbound_in_flight += 1
     try:
-        return await send(
+        response = await send(
             method,
             url,
             _internal=_internal,
@@ -636,6 +641,10 @@ async def request(
             _on_transport_failure=_on_transport_failure,
             **kwargs,
         )
+        # A Gym server's reply may forward failures it recovered from; they join this request's observations,
+        # whether or not traces are exported.
+        observe_relayed_events(getattr(response, "headers", None))
+        return response
     finally:
         counts.outbound_in_flight -= 1
 
@@ -699,8 +708,6 @@ async def _traced_request(
 
         if span is not None:
             safe_set_span_attributes(span, {"http.response.status_code": response.status})
-        # A Gym server's reply may forward failures it recovered from; they join this request's observations.
-        observe_relayed_events(getattr(response, "headers", None))
         return response
 
 
@@ -1836,7 +1843,16 @@ class SimpleServer(BaseServer):
     async def _handle_with_failure_headers(self, request: Request, call_next):  # pragma: no cover
         try:
             return await call_next(request)
-        except ClientResponseError as e:
+        except BaseException as raised:
+            # An agent boundary wrapper replies with its cause's body and status; its header names the wrapper.
+            cause = reply_cause(raised)
+            return SimpleServer._failure_reply(
+                self, raised if cause is None else cause, boundary=raised if cause else None
+            )
+
+    def _failure_reply(self, e: BaseException, *, boundary: BaseException | None) -> JSONResponse:  # pragma: no cover
+        header_error = e if boundary is None else boundary
+        if isinstance(e, ClientResponseError):
             assert hasattr(e, "response_content"), (
                 "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
             )
@@ -1845,33 +1861,34 @@ class SimpleServer(BaseServer):
             print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
 
             # Relay only a validated, bounded event; invalid upstream metadata cannot spoil the reply.
-            inner = decode_header(e.headers)
+            inner = decode_header(e.headers) if boundary is None else None
             relay = encode_header(inner) if inner is not None else None
             headers = (
-                {FAILURE_EVENT_HEADER: relay} if relay is not None else safe_failure_header(e, server=self.config.name)
+                {FAILURE_EVENT_HEADER: relay}
+                if relay is not None
+                else safe_failure_header(header_error, server=self.config.name)
             )
             return JSONResponse(content=response_content, status_code=500, headers=headers)
-        except CancelledError as e:
+        if isinstance(e, CancelledError):
             return JSONResponse(
                 content="Request was cancelled",
                 status_code=500,
-                headers=safe_failure_header(e, server=self.config.name),
+                headers=safe_failure_header(header_error, server=self.config.name),
             )
-        except Exception as e:
+        if isinstance(e, Exception):
             print(
                 f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
 Formatted exception: {format_exc()}
 repr(e): {repr(e)}"""
             )
             return JSONResponse(
-                content=repr(e), status_code=500, headers=safe_failure_header(e, server=self.config.name)
+                content=repr(e), status_code=500, headers=safe_failure_header(header_error, server=self.config.name)
             )
-        except:
-            print_exc()
-            print(
-                f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
-            )
-            return JSONResponse(content="An unknown error occurred", status_code=500)
+        print_exc()
+        print(
+            f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
+        )
+        return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_cancellation_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ClientDisconnectCancellationMiddleware)

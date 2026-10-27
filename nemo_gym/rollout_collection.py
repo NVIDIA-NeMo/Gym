@@ -137,6 +137,7 @@ from nemo_gym.typed_exceptions import (
     DROPPED_ROW_KEY,
     EVENTS_ROW_KEY,
     MAX_CONFLICTED_IDS,
+    CollectionFailure,
     bounded_failure_events,
     conflicting_failure_ids,
     decode_conflicted_header,
@@ -144,6 +145,7 @@ from nemo_gym.typed_exceptions import (
     decode_events_header,
     decode_header,
     events_row_value,
+    failure_event_map,
     merge_failure_events,
     row_fields,
 )
@@ -676,6 +678,22 @@ def _failure_row_fields(headers: Any) -> Dict[str, Any]:
     if failure is not None and failure.failure_events_dropped:
         fields[DROPPED_ROW_KEY] = failure.failure_events_dropped
     return _merge_observation_fields(fields, _events_row_fields(headers))
+
+
+def _collection_failure_fields(exc: BaseException, failure_class: str, headers: Any) -> Dict[str, Any]:
+    """Collection's own failed `/run` dispatch as a CollectionFailure, its explicit cause the dispatch error.
+
+    A Gym server's failure that the client rebuilt from the reply stays the dispatch error's own cause, with its own
+    kind; the collector's kind is its routing class. The reply's forwarded observations are merged in by event id.
+    """
+    try:
+        raise CollectionFailure(
+            failure_class, message=f"Rollout dispatch failed: {type(exc).__name__}", operation="collection.run"
+        ) from exc
+    except CollectionFailure as failure:
+        events = failure_event_map(failure)
+        own = {"_ng_failure_id": failure.event_id, EVENTS_ROW_KEY: events_row_value(events)} if events else {}
+    return _merge_observation_fields(own, _failure_row_fields(headers))
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -4825,15 +4843,18 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # The status comes from the error when it carries one, and from the response
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
+                    failure_row = _agent_request_failure_row(e, status)
                     return _CompletedRollout(
                         row=row,
-                        result=_agent_request_failure_row(e, status),
+                        result=failure_row,
                         rollout_latency_ms=None,
                         environment_server=server_name,
                         environment_server_type=server_type,
                         dispatch_span_context=dispatch_span_context,
-                        failure_observations=_failure_row_fields(
-                            getattr(e, "headers", None) or getattr(res, "headers", None)
+                        failure_observations=_collection_failure_fields(
+                            e,
+                            failure_row[NG_FAILURE_CLASS_KEY],
+                            getattr(e, "headers", None) or getattr(res, "headers", None),
                         ),
                     )
                 finally:
