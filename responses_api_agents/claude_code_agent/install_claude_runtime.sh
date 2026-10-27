@@ -8,7 +8,7 @@
 # Prints the version of the verified runtime. --check-only exits 3 when the runtime is absent or unhealthy.
 
 set -euo pipefail
-version="" runtime="" expected="" source="" check_only="" compressed="" temporary="" lock_link=""
+version="" runtime="" expected="" source="" check_only="" compressed="" temporary="" queue="" ticket=""
 while (($#)); do
     case $1 in
         --version) version=$2 && shift 2 ;;
@@ -47,26 +47,40 @@ process_identity() {
     fi
 }
 
-trap 'rm -f -- "$temporary"; [[ -z $lock_link ]] || rm -f -- "$lock_link"' EXIT
+trap 'rm -f -- "$temporary"; [[ -z $ticket ]] || : >"$queue/$ticket.done"' EXIT
 mkdir -p -- "$(dirname -- "$runtime")"
 # Concurrent sessions in one sandbox share the runtime; only one may replace it.
 if command -v flock >/dev/null 2>&1; then
     exec 9>>"$runtime.lock"
     flock 9
 else
-    # Without flock, a symlink names the owner. A lock whose owner is gone is removed under a second
-    # lock and only after re-reading it, so a lock taken in the meantime is never removed.
+    # Without flock, installers queue: each takes the next number in the queue directory as a
+    # symlink naming its owner, then waits until every lower number is done or its owner is gone.
+    # Numbers are never removed or reused, so no installer, however it exits, can release another.
+    queue=$runtime.lock.d
+    mkdir -p "$queue"
     owner=$(process_identity $$)
-    until ln -s "$owner" "$runtime.lock.owner" 2>/dev/null; do
-        current=$(readlink "$runtime.lock.owner" 2>/dev/null) || current=
-        if [[ -n $current && $(process_identity "${current%% *}") != "$current" ]] &&
-            mkdir "$runtime.lock.reclaim" 2>/dev/null; then
-            [[ $(readlink "$runtime.lock.owner" 2>/dev/null) != "$current" ]] || rm -f "$runtime.lock.owner"
-            rmdir "$runtime.lock.reclaim"
-        fi
+    while :; do
+        last=0
+        for entry in "$queue"/*; do
+            number=${entry##*/}
+            number=${number%.done}
+            if [[ $number =~ ^[0-9]+$ ]] && ((number > last)); then last=$number; fi
+        done
+        ticket=$((last + 1))
+        ln -s "$owner" "$queue/$ticket" 2>/dev/null && break
+    done
+    until
+        ahead=
+        for ((number = 1; number < ticket; number++)); do
+            [[ -e $queue/$number.done ]] && continue
+            holder=$(readlink "$queue/$number" 2>/dev/null) || continue
+            [[ $(process_identity "${holder%% *}") != "$holder" ]] || { ahead=1; break; }
+        done
+        [[ -z $ahead ]]
+    do
         sleep 0.1
     done
-    lock_link=$runtime.lock.owner
 fi
 
 verify "$runtime/claude" 2>/dev/null && exit 0

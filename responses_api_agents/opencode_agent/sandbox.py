@@ -65,7 +65,18 @@ def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
 _TASK_DIRECTORY_KEYS = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 # Record the task's home and XDG directories, before OpenCode's overrides, for the
 # task_environment.mjs shell.env hook. Defaults follow the XDG specification.
-_TASK_ENV_SETUP = r"""json() { local value=${1//\\/\\\\}; printf '"%s"' "${value//\"/\\\"}"; }
+_TASK_ENV_SETUP = r"""json() {
+    local value=${1//\\/\\\\} code octal character escaped
+    value=${value//\"/\\\"}
+    # JSON forbids raw control characters; a bash string cannot hold NUL.
+    for ((code = 1; code < 32; code++)); do
+        printf -v octal '%03o' "$code"
+        printf -v character "\\$octal"
+        printf -v escaped '\\u%04x' "$code"
+        value=${value//"$character"/"$escaped"}
+    done
+    printf '"%s"' "$value"
+}
 home=${HOME:-~}
 printf '{"HOME": %s, "XDG_DATA_HOME": %s, "XDG_CONFIG_HOME": %s, "XDG_CACHE_HOME": %s, "XDG_STATE_HOME": %s}' \
     "$(json "$home")" \

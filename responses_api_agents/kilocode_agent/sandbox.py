@@ -35,8 +35,15 @@ TASK_ENVIRONMENT_PLUGIN = "task_environment.mjs"
 _ACTIVATION_SETUP = r"""rm -f -- "$session/task-environment.ready" || exit 1
 mkdir -p -- "$session/home" "$session/data" "$session/config" "$session/cache" || exit 1
 json_string() {
-    local value=${1//\\/\\\\}
+    local value=${1//\\/\\\\} code octal character escaped
     value=${value//\"/\\\"}
+    # JSON forbids raw control characters; a bash string cannot hold NUL.
+    for ((code = 1; code < 32; code++)); do
+        printf -v octal '%03o' "$code"
+        printf -v character "\\$octal"
+        printf -v escaped '\\u%04x' "$code"
+        value=${value//"$character"/"$escaped"}
+    done
     printf '"%s"' "$value"
 }
 home=${HOME:-$(unset HOME; echo ~)}

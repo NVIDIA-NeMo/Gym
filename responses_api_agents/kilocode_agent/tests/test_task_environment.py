@@ -162,3 +162,17 @@ def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, 
         assert receipt.read_text() == "ready\n"
     else:
         assert not receipt.exists()
+
+
+@pytest.mark.parametrize("home", ["/task/a\tb", "/task/new\nline", '/task/"quoted"\\back'])
+def test_recorded_task_directories_are_valid_json(tmp_path: Path, home: str) -> None:
+    from shlex import quote
+
+    from responses_api_agents.kilocode_agent.sandbox import _ACTIVATION_SETUP
+
+    env = {"PATH": os.environ["PATH"], "HOME": home, "XDG_CONFIG_HOME": f"{home}\x01\x1fconfig"}
+    setup = f"session={quote(str(tmp_path))}\n{_ACTIVATION_SETUP}"
+    result = subprocess.run(["bash", "-c", setup], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    recorded = json.loads((tmp_path / "task-env.json").read_text())
+    assert recorded["HOME"] == home and recorded["XDG_CONFIG_HOME"] == f"{home}\x01\x1fconfig"

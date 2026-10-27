@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(
 )
 # The installer's tools without flock, for its fallback lock.
 FALLBACK_TOOLS = ("bash", "sha256sum", "timeout", "mktemp", "gzip", "cat", "chmod", "mv", "rm", "mkdir", "dirname")
-FALLBACK_TOOLS += ("ln", "readlink", "rmdir", "sleep", "tr", "kill")
+FALLBACK_TOOLS += ("ln", "readlink", "sleep", "tr", "kill")
 
 
 @pytest.fixture
@@ -115,11 +115,12 @@ def _identity(pid: int) -> str:
     return f"{pid} {stat.read_text().rsplit(') ', 1)[1].split()[19]}" if stat.exists() else str(pid)
 
 
-def test_lock_left_by_a_killed_installer_is_reclaimed_without_flock(tmp_path, binary):
+def test_number_left_by_a_killed_installer_does_not_block_the_queue_without_flock(tmp_path, binary):
     source, checksum = binary
     exited = subprocess.Popen(["true"])
     exited.wait()
-    (tmp_path / "runtime.lock.owner").symlink_to(_identity(exited.pid))
+    (tmp_path / "runtime.lock.d").mkdir()
+    (tmp_path / "runtime.lock.d/1").symlink_to(_identity(exited.pid))
     result = subprocess.run(
         ["bash", str(INSTALLER), "--version", "2.1.108", "--runtime", str(tmp_path / "runtime")]
         + ["--sha256", checksum, "--source", str(source)],
@@ -129,14 +130,15 @@ def test_lock_left_by_a_killed_installer_is_reclaimed_without_flock(tmp_path, bi
         timeout=30,
     )
     assert (result.returncode, result.stdout) == (0, "2.1.108 (Claude Code)\n"), result.stderr
-    assert not (tmp_path / "runtime.lock.owner").is_symlink()
+    assert (tmp_path / "runtime.lock.d/2.done").exists()
 
 
 def test_installer_without_flock_waits_for_a_live_lock_owner(tmp_path, binary):
     source, checksum = binary
     holder = subprocess.Popen(["sleep", "30"])
     try:
-        (tmp_path / "runtime.lock.owner").symlink_to(_identity(holder.pid))
+        (tmp_path / "runtime.lock.d").mkdir()
+        (tmp_path / "runtime.lock.d/1").symlink_to(_identity(holder.pid))
         installer = subprocess.Popen(
             ["bash", str(INSTALLER), "--version", "2.1.108", "--runtime", str(tmp_path / "runtime")]
             + ["--sha256", checksum, "--source", str(source)],

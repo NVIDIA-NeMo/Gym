@@ -156,3 +156,15 @@ def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, 
     else:
         assert "failed to load plugin" in result.stderr
         assert not receipt.exists()
+
+
+@pytest.mark.parametrize("home", ["/task/a\tb", "/task/new\nline", '/task/"quoted"\\back'])
+def test_recorded_task_directories_are_valid_json(tmp_path: Path, home: str) -> None:
+    from responses_api_agents.opencode_agent.sandbox import runner_setup
+
+    env = {"PATH": os.environ["PATH"], "HOME": home, "XDG_CONFIG_HOME": f"{home}\x01\x1fconfig"}
+    setup = runner_setup(str(tmp_path), [str(tmp_path / "private")])
+    result = subprocess.run(["bash", "-c", setup], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    recorded = json.loads((tmp_path / "task-env.json").read_text())
+    assert recorded["HOME"] == home and recorded["XDG_CONFIG_HOME"] == f"{home}\x01\x1fconfig"

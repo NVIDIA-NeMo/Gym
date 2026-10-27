@@ -34,7 +34,6 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "sleep",
         "ln",
         "readlink",
-        "rmdir",
     )
     for name in (*tools, "mktemp", "sha256sum", "mv"):
         executable = shutil.which(name)
@@ -244,7 +243,9 @@ def identity(pid: int) -> str:
 
 
 @pytest.mark.parametrize("owner", ["exited", "reused"])
-def test_lock_of_a_killed_installer_is_reclaimed(sandbox: tuple[Path, dict[str, str]], owner: str) -> None:
+def test_number_of_a_killed_installer_does_not_block_the_queue(
+    sandbox: tuple[Path, dict[str, str]], owner: str
+) -> None:
     root, env = sandbox
     cache_runtime(root)
     process = subprocess.Popen(["true"] if owner == "exited" else ["sleep", "30"])
@@ -255,11 +256,12 @@ def test_lock_of_a_killed_installer_is_reclaimed(sandbox: tuple[Path, dict[str, 
         else:
             # A live process that reuses the owner's PID started later, so it does not hold the lock.
             recorded = f"{process.pid} {int(identity(process.pid).split()[1]) - 1}"
-        (root / "runtime.lock.owner").symlink_to(recorded)
+        (root / "runtime.lock.d").mkdir()
+        (root / "runtime.lock.d/1").symlink_to(recorded)
         result = run_installer(root, env)
         assert result.returncode == 0, result.stderr
-        assert not (root / "runtime.lock.owner").is_symlink()
-        assert not (root / "runtime.lock.reclaim").exists()
+        # The installer queued behind the dead owner's number and marked its own done.
+        assert (root / "runtime.lock.d/2").is_symlink() and (root / "runtime.lock.d/2.done").exists()
     finally:
         process.kill()
         process.wait()
@@ -280,7 +282,8 @@ def test_concurrent_installers_wait_for_the_lock_holder(sandbox: tuple[Path, dic
             time.sleep(0.01)
     else:
         holder = subprocess.Popen(["sleep", "30"])
-        (root / "runtime.lock.owner").symlink_to(identity(holder.pid))
+        (root / "runtime.lock.d").mkdir()
+        (root / "runtime.lock.d/1").symlink_to(identity(holder.pid))
     try:
         installer = subprocess.Popen(
             [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "1.17.11"], env=env
@@ -356,7 +359,7 @@ def seed_binary(
     )
 
 
-@pytest.mark.parametrize("failure", ["digest", "version"])
+@pytest.mark.parametrize("failure", ["digest", "version", "unhealthy"])
 def test_invalid_seed_preserves_existing_executable(sandbox, failure):
     root, env = sandbox
     binary = root / "preinstalled-opencode"
@@ -364,9 +367,13 @@ def test_invalid_seed_preserves_existing_executable(sandbox, failure):
     assert seed_binary(root, env, binary).returncode == 0
     target = root / "runtime/opencode"
     original, inode = target.read_bytes(), target.stat().st_ino
-    binary.write_text("#!/bin/bash\necho 1.17.10\n")
+    # An unhealthy probe prints the right version but fails.
+    binary.write_text(
+        "#!/bin/bash\necho 1.17.11\nexit 7\n" if failure == "unhealthy" else "#!/bin/bash\necho 1.17.10\n"
+    )
     result = seed_binary(root, env, binary, digest="0" * 64 if failure == "digest" else None)
-    assert result.returncode != 0 and f"{failure} mismatch" in result.stderr
+    message = "digest mismatch" if failure == "digest" else "version mismatch"
+    assert result.returncode != 0 and message in result.stderr
     assert target.read_bytes() == original and target.stat().st_ino == inode
     assert not list(target.parent.glob(".opencode-*"))
     assert not (root / "download.log").exists() and not (root / "packages.log").exists()
