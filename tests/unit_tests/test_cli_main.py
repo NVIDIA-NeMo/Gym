@@ -303,16 +303,21 @@ class TestEvalExportFlags:
 
 
 class TestEvalExportExporterArgument:
-    def test_defaults_to_atif_and_keeps_bare_overrides(self, monkeypatch: MonkeyPatch) -> None:
-        target, overrides = _dispatch_for(monkeypatch, ["eval", "export", "rollouts_jsonl_fpath=r.jsonl", "k=v"])
+    def test_defaults_to_atif_and_passes_overrides_through_unchanged(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "+rollouts_jsonl_fpath=r.jsonl", "+meta.k=v", "++a=1", "hydra.run.dir=/tmp/log", "~b"],
+        )
 
         assert target == "nemo_gym.cli.eval:export_run"
-        assert overrides == ["+exporter=atif", "+rollouts_jsonl_fpath=r.jsonl", "+k=v"]
-
-    def test_explicit_plus_and_dotted_keys_are_handled(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "+a=1", "meta.k=v"])
-
-        assert overrides == ["+exporter=atif", "+a=1", "+meta.k=v"]
+        assert overrides == [
+            "+exporter=atif",
+            "+rollouts_jsonl_fpath=r.jsonl",
+            "+meta.k=v",
+            "++a=1",
+            "hydra.run.dir=/tmp/log",
+            "~b",
+        ]
 
     def test_a_captured_override_follows_the_translated_flags_for_the_default_exporter(
         self, monkeypatch: MonkeyPatch
@@ -325,48 +330,24 @@ class TestEvalExportExporterArgument:
         assert overrides.index("+session_id='original'") < overrides.index("++session_id=override")
         assert overrides[0] == "+exporter=atif"
 
-    def test_hydra_settings_and_explicit_operators_are_left_alone(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(
-            monkeypatch,
-            [
-                "eval",
-                "export",
-                "atif",
-                "hydra.run.dir=/tmp/log",
-                "++a=1",
-                "~b",
-                "rollouts_jsonl_fpath=r.jsonl",
-                "meta.k=v",
-            ],
-        )
-
-        assert overrides == [
-            "+exporter=atif",
-            "hydra.run.dir=/tmp/log",
-            "++a=1",
-            "~b",
-            "+rollouts_jsonl_fpath=r.jsonl",
-            "+meta.k=v",
-        ]
-
     def test_positional_exporter_is_passed_as_an_override(self, monkeypatch: MonkeyPatch) -> None:
-        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "atif", "rollouts_jsonl_fpath=r.jsonl"])
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "atif", "+rollouts_jsonl_fpath=r.jsonl"])
 
         assert overrides == ["+exporter=atif", "+rollouts_jsonl_fpath=r.jsonl"]
 
     def test_deprecated_format_flag_still_selects_the_exporter(
-        self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+        self, monkeypatch: MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "--format", "atif"])
 
         assert overrides == ["+exporter=atif"]
-        assert "deprecated" in capsys.readouterr().err
+        assert "`--format` is deprecated" in caplog.text
 
     def test_unknown_exporter_is_rejected_with_the_choices(
         self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
     ) -> None:
         with pytest.raises(SystemExit):
-            _dispatch_for(monkeypatch, ["eval", "export", "nope", "rollouts_jsonl_fpath=r.jsonl"])
+            _dispatch_for(monkeypatch, ["eval", "export", "nope", "+rollouts_jsonl_fpath=r.jsonl"])
 
         assert "unknown exporter 'nope'; choose from: atif" in capsys.readouterr().err
 

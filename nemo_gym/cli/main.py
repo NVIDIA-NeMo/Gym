@@ -729,7 +729,7 @@ EXPORTER = Flag(
         nargs="?",
         metavar="EXPORTER",
         help=f"Exporter to run: {', '.join(RUN_EXPORTERS)} (default: {DEFAULT_RUN_EXPORTER}). "
-        "Exporter settings are `key=value` overrides, e.g. `rollouts_jsonl_fpath=results/rollouts.jsonl`.",
+        "Exporter settings are `+key=value` overrides, e.g. `+rollouts_jsonl_fpath=results/rollouts.jsonl`.",
     ),
 )
 
@@ -737,22 +737,13 @@ EXPORTER = Flag(
 def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
     exporter = args.exporter
     if args.format is not None:
-        print(
-            "Warning: `--format` is deprecated; pass the exporter name instead: `gym eval export <exporter>`.",
-            file=sys.stderr,
-        )
+        logger.warning("`--format` is deprecated; pass the exporter name instead: `gym eval export <exporter>`.")
         if exporter and exporter != args.format:
             args._parser.error(f"conflicting exporter: {exporter!r} and --format {args.format!r}")
         exporter = exporter or args.format
     exporter = exporter or DEFAULT_RUN_EXPORTER
     if exporter not in RUN_EXPORTERS:
         args._parser.error(f"unknown exporter {exporter!r}; choose from: {', '.join(RUN_EXPORTERS)}")
-    # Exporter settings are new config keys, which Hydra only accepts with a leading `+`; let users omit it.
-    # Hydra's own `hydra.*` settings already exist, so adding `+` would make Hydra reject them.
-    overrides = [
-        f"+{token}" if re.match(r"[A-Za-z_][\w.]*=", token) and not token.startswith(("hydra.", "hydra=")) else token
-        for token in overrides
-    ]
     dispatch("nemo_gym.cli.eval:export_run", [f"+exporter={exporter}", *overrides])
 
 

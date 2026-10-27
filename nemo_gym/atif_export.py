@@ -64,7 +64,7 @@ class AtifExportError(ConfigError):
 
 
 class ExportAtifConfig(RunExportConfig):
-    """Configuration for ``gym eval export --format atif``."""
+    """Settings of ``gym eval export atif``."""
 
     format: Literal["atif"] = "atif"
     output_dirpath: Path

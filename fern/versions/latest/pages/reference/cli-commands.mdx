@@ -965,7 +965,7 @@ gym eval aggregate \
 
 ### `gym eval export`
 
-Export a finished run with an exporter, chosen by the optional `EXPORTER` argument. `atif` is the default and, for now, the only exporter. Exporter settings are Hydra-style `key=value` arguments; the option flags below are equivalent forms for `atif`.
+Export a finished run with an exporter, chosen by the optional `EXPORTER` argument. `atif` is the default and, for now, the only exporter. Exporter settings are Hydra `+key=value` overrides; the option flags below are equivalent forms for `atif`.
 
 `atif` exports supported `ng_trajectory` attachments from a Gym rollouts JSONL file as ATIF v1.7. The command writes one ATIF
 trajectory per rollout plus a manifest that preserves Gym's task and rollout identity. It is a strict offline conversion:
@@ -988,10 +988,10 @@ row's `agent_ref.name`; `--agent-version` records the version of that agent impl
 
 ```bash
 gym eval export atif \
-    rollouts_jsonl_fpath=results/rollouts.jsonl \
-    output_dirpath=results/atif \
-    session_id=eval-2026-08-25 \
-    agent_version=1.2.3
+    +rollouts_jsonl_fpath=results/rollouts.jsonl \
+    +output_dirpath=results/atif \
+    +session_id=eval-2026-08-25 \
+    +agent_version=1.2.3
 ```
 
 See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-export) for the initial conversion boundary.
