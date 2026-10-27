@@ -551,7 +551,7 @@ async def test_kill_before_the_deadline_is_a_scored_failure(agent):
 
     async def exec_(command, **kwargs):
         if "goose run" in command:
-            assert "-eq 137 ] && [ $((SECONDS - start)) -ge " in command
+            assert "-eq 137 ] && [ $(($(date +%s) - start)) -ge " in command
             return SimpleNamespace(return_code=137, error_type=None, stdout="")
         return await run_exec(command, **kwargs)
 
@@ -654,3 +654,41 @@ def test_goose_only_messages_are_not_output():
     items = goose_messages_to_output(messages)
     assert [item.type for item in items] == ["function_call", "function_call_output", "message"]
     assert items[-1].content[0].text == "Done."
+
+
+async def test_delegate_model_server_failure_fails_the_request(agent, tmp_path):
+    # summon returns a delegate's (unpersisted) provider-error notice to the root as a successful tool result.
+    server, sandbox, _ = agent
+    archive = tmp_path / "delegate" / "sessions.tgz"
+    archive.parent.mkdir()
+    write_sessions_archive(archive)
+    db = archive.parent / "sessions" / "sessions.db"
+    con = sqlite3.connect(db)
+    notice = "Ran into this error: Server error: Server error (503 Service Unavailable) at http://m/v1: refit."
+    con.execute("update messages set content_json = ? where message_id = 'm3'", (json.dumps([_result("c1", notice)]),))
+    con.commit()
+    con.close()
+    archive.unlink()
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(db.parent, arcname="sessions")
+
+    async def download(remote, local):
+        Path(local).write_bytes(archive.read_bytes() if remote.endswith(".tgz") else b"")
+
+    sandbox.download.side_effect = download
+    with pytest.raises(RuntimeError, match="model server"):
+        await server.run(SimpleNamespace(cookies={}), run_body())
+
+
+def test_system_prompt_limit_counts_the_option_and_nul(agent):
+    # The argv value is "--system=<text>" plus its terminating NUL, capped at 128 KiB.
+    server, _, _ = agent
+    body = run_body()
+    body.responses_create_params.input = [{"role": "user", "content": "hi"}]
+    fits = "x" * (128 * 1024 - len("--system=") - 1)
+    server.config.system_prompt = fits + "x"
+    with pytest.raises(ValueError, match="argument limit"):
+        asyncio.run(server._run_goose(None, body, {}, Path("/nonexistent")))
+    server.config.system_prompt = fits
+    with pytest.raises(AttributeError):  # Past the limit check, at the first use of the (absent) sandbox.
+        asyncio.run(server._run_goose(None, body, {}, Path("/nonexistent")))

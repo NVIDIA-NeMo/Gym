@@ -258,14 +258,40 @@ def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None
     if not (last.get("id") and last["id"] not in persisted) and not any(b.get("type") == "error" for b in blocks):
         return None
     text = "".join(block.get("text") or block.get("message") or "" for block in blocks)
-    if text.startswith("Network error:") or _model_server_error(text):
+    if _model_server_error(text):
         return "model_server"
     return "max_turns" if text.startswith(GOOSE_MAX_TURNS_NOTICE) else "model_error"
 
 
 def _model_server_error(text: str) -> bool:
+    if text.startswith("Network error:"):
+        return True
     head = next((h for h in GOOSE_ERROR_NOTICES if text.startswith(h)), None)
     return head is not None and text[len(head) :].startswith(GOOSE_MODEL_SERVER_ERRORS)
+
+
+def delegate_model_server_failure(sessions: list[dict[str, Any]]) -> bool:
+    """Whether a delegate's model calls failed at the model server.
+
+    A delegate that hits a provider error ends with Goose's notice as its last message, which it does not persist, and
+    summon returns that text to the parent as the delegate tool's result. The parent carries on and Goose exits 0.
+    """
+    for session in sessions:
+        delegates = {
+            block["id"]
+            for message in session["messages"]
+            for block in message["content"]
+            if block.get("type") == "toolRequest"
+            and ((block.get("toolCall") or {}).get("value") or {}).get("name") == "delegate"
+        }
+        for message in session["messages"]:
+            for block in message["content"]:
+                if block.get("type") == "toolResponse" and block.get("id") in delegates:
+                    content = ((block.get("toolResult") or {}).get("value") or {}).get("content") or []
+                    text = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
+                    if _model_server_error(text):
+                        return True
+    return False
 
 
 def max_concurrent(intervals: list[tuple[int, int]]) -> int:
@@ -378,7 +404,7 @@ class GooseAgent(SimpleResponsesAPIAgent):
             (system if item.get("role") in ("system", "developer") else prompt).append(text)
         if not prompt:
             raise ValueError("Goose needs a user message")
-        if len("\n\n".join(system).encode()) >= MAX_SYSTEM_PROMPT_BYTES:
+        if len(("--system=" + "\n\n".join(system)).encode()) + 1 > MAX_SYSTEM_PROMPT_BYTES:
             raise ValueError(f"Goose system prompt exceeds the {MAX_SYSTEM_PROMPT_BYTES} byte argument limit")
 
         remote = "/tmp/nemo-gym-goose-" + uuid4().hex
@@ -424,10 +450,10 @@ class GooseAgent(SimpleResponsesAPIAgent):
         # reports afterwards.
         deadline = int(self.config.timeout - min(120, self.config.timeout / 4))
         command = (
-            f"start=$SECONDS; timeout --kill-after=10 {deadline} {quote(remote)}/goose run --name gym -i - "
+            f"start=$(date +%s); timeout --kill-after=10 {deadline} {quote(remote)}/goose run --name gym -i - "
             f"--max-turns {self.config.max_turns} --output-format stream-json {system_arg} < {quote(remote)}/prompt.txt "
             f"> {quote(remote)}/stdout.jsonl 2> {quote(remote)}/stderr.log; code=$?; "
-            f"[ $code -eq 137 ] && [ $((SECONDS - start)) -ge {deadline} ] && code=124; "
+            f"[ $code -eq 137 ] && [ $(($(date +%s) - start)) -ge {deadline} ] && code=124; "
             f"tar czf {quote(remote)}/sessions.tgz -C {quote(remote)}/root/data sessions; "
             f"echo $code > {quote(remote)}/exit_code; exit $code"
         )
@@ -472,7 +498,7 @@ class GooseAgent(SimpleResponsesAPIAgent):
         sessions = await to_thread(read_goose_sessions, root / "sessions" / "sessions.db")
         if not error_type:
             error_type = goose_stop_reason((root / "stdout.jsonl").read_text(errors="replace"), sessions)
-            if error_type == "model_server":
+            if error_type == "model_server" or delegate_model_server_failure(sessions):
                 raise RuntimeError(
                     "Goose's model calls failed at the model server (unreachable, failing, rejecting credentials or "
                     "missing the model)"
