@@ -46,9 +46,9 @@ agent loop .......... policy step -> tool calls -> /simulate_tool_call -> answer
   recordings show (a transient error, a blocked URL, an empty search), always recoverably, so that giving up costs
   reward ([design](docs/design.md#recoverable-obstacles)).
 - A **masked** rollout (`mask_sample: true`) is one whose outcome says nothing about the policy: the wall-clock cap,
-  a row too long for the policy's context, a simulator or judge failure. Gym leaves it out of the score instead of
-  counting a 0. A turn the policy left unfinished (step cap, runaway output, a later context overflow, an empty
-  final reply) scores 0.
+  a row too long for the policy's context (when the policy server reports it), a simulator or judge failure. Gym
+  leaves it out of the score instead of counting a 0. A turn the policy left unfinished (step cap, runaway output,
+  a later context overflow, an empty final reply) scores 0.
 
 ## Quick start
 
@@ -56,8 +56,10 @@ You need two OpenAI-compatible model servers (vLLM; see Gym's
 [vLLM guide](../../fern/versions/latest/pages/model-server/vllm.mdx)):
 
 - **Policy**: tool calling on (`--enable-auto-tool-choice --tool-call-parser <parser>`), a reasoning parser for a
-  reasoning model, and as long a context as you can give it: histories are never truncated, and a row that does not
-  fit is masked as `context_overflow`.
+  reasoning model, and as long a context as you can give it: histories are never truncated. A row that does not fit
+  comes back as an empty cut-off reply and scores 0; it is masked as `context_overflow` only when the policy server
+  reports the overflow (`propagate_context_overflow_errors: true` on a `vllm_model` policy; Gym's default is false).
+  Filter such rows out either way ([data](docs/data.md#picking-rl-rows)).
 - **Simulator and judge**: a fixed model for every policy you compare, never the policy itself, at reasoning effort
   `high` with its reasoning parser and full context window. Use a strong reasoning model, and check its verdicts on a
   few hand-checked turns before trusting scores ([design](docs/design.md#the-judge)). A judge request holds up to 200k
@@ -109,7 +111,7 @@ otherwise more turns hit the cap and are masked, and the score leaves out the sl
 
 | Step | When | Result |
 |---|---|---|
-| Masked | The agent stopped on `time_cap`, the context overflowed before its first step (`context_overflow` at `steps` 0: the row does not fit), or a tool result in the turn is a simulator failure. | `mask_sample: true`, no judge call |
+| Masked | The agent stopped on `time_cap`, the context overflowed before its first step (`context_overflow` at `steps` 0: the row does not fit; only when the policy server reports the overflow), or a tool result in the turn is a simulator failure. | `mask_sample: true`, no judge call |
 | Code gate | A call in the turn fails a code gate (below), or the turn is unfinished: it ended on `max_steps`, `max_output_tokens`, a later `context_overflow`, or `empty_output` from the policy (`unfinished_turn`; a failed request's empty reply is judged, see [design](docs/design.md#masking)). | `reward: 0.0`, `code_gate` set, no judge call |
 | Judged | Otherwise: each judge in `judges` returns its verdicts. | `reward: 1.0` if the turn is correct, else `0.0` |
 | Masked | No judge returned a usable verdict: one with every field the verdict schema (`prompts/evaluation_schema.json`) requires, each a string and one of the values the schema lists. Unusable ones are retried (`judge_max_attempts`). | `mask_sample: true`, `failure_kind: judge_failed` |
@@ -307,8 +309,9 @@ what to monitor during RL (stop-tool share, reasoning length, ask-the-user rate)
   in the workspace model, so a later read of one is answered in code with stale content.
 - **One turn.** The user's next message is not simulated; the judge decides whether stopping to ask was warranted.
   The rubric fails avoidable questions, but judging stops remains its least certain call.
-- **Rows too long for the policy are masked**, which flatters a policy with a small context window on the longest
-  rows. A context overflow later in the turn scores 0, which penalizes that policy on long rows.
+- **Rows too long for the policy** score 0 by default, which penalizes a policy with a small context window on the
+  longest rows; masking them (`propagate_context_overflow_errors: true`) flatters it instead. Filter them out. A
+  context overflow later in the turn scores 0 either way.
 - **Argument gates trust the row's schemas.** A harness that coerces a value or ignores an extra key runs calls the
   gate fails. This is rare, but Hermes runs some wrong-type calls, and calls to stop tools (such as the sandbox's
   `ask_user`) have no recorded result to check ([design](docs/design.md#code-gates)).
