@@ -584,9 +584,14 @@ class TestMavenMirror:
 class _RecordingAsyncSandbox:
     def __init__(self, provider_config) -> None:
         self.spec = None
+        self.setup = None
 
     async def start(self, spec) -> None:
         self.spec = spec
+
+    async def start_with_setup(self, spec, setup) -> None:
+        self.spec = spec
+        self.setup = setup
 
 
 class TestAgentNetworkPolicy:
@@ -612,13 +617,14 @@ class TestAgentNetworkPolicy:
         monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
         monkeypatch.setattr(agent_tools, "get_server_url", lambda name: model_url)
         server = SimpleNamespace(
+            _sandbox_files={},
             config=SimpleNamespace(
                 sandbox_config=sandbox_config or {},
                 sandbox_provider="sandbox",
                 enforce_agent_no_network=enforce,
                 sandbox_model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
                 name="swe_rebench",
-            )
+            ),
         )
         body = app.SWERebenchInstanceRequest(instance_id="o__r-1", repo="o/r", base_commit="abc", image_name="img")
         return await app.SWERebenchResourcesServer._create_sandbox(server, body, for_agent=for_agent)
@@ -683,3 +689,55 @@ class TestAgentNetworkPolicy:
     async def test_fails_closed(self, monkeypatch, provider: str, model_url: str) -> None:
         with pytest.raises(ValueError):
             await self._create(monkeypatch, enforce=True, for_agent=True, provider=provider, model_url=model_url)
+
+
+class TestSandboxSetup:
+    """sandbox_config.files and setup_command reach both the agent's and the evaluation sandbox."""
+
+    @staticmethod
+    async def _create(monkeypatch, sandbox_config: dict, files: dict[str, str] | None = None):
+        import resources_servers.swe_rebench.app as app
+
+        monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
+        monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
+        server = SimpleNamespace(
+            _sandbox_files=app.read_sandbox_files(sandbox_config.get("files", {})),
+            config=SimpleNamespace(
+                sandbox_config=sandbox_config,
+                sandbox_provider="sandbox",
+                enforce_agent_no_network=False,
+                sandbox_model_server=None,
+                name="swe_rebench",
+            ),
+        )
+        body = app.SWERebenchInstanceRequest(instance_id="o__r-1", repo="o/r", base_commit="abc", image_name="img")
+        return await app.SWERebenchResourcesServer._create_sandbox(server, body, files=files)
+
+    async def test_off_by_default(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, {})
+        assert sandbox.spec.files == {}
+        assert sandbox.setup is None
+
+    async def test_agent_sandbox_gets_the_files_and_setup(self, monkeypatch, tmp_path) -> None:
+        source = tmp_path / "wrapper.sh"
+        source.write_text("#!/bin/sh\n")
+        sandbox = await self._create(
+            monkeypatch, {"files": {"/tmp/wrapper.sh": str(source)}, "setup_command": "chmod +x /tmp/wrapper.sh"}
+        )
+        assert sandbox.spec.files == {"/tmp/wrapper.sh": "#!/bin/sh\n"}
+        assert sandbox.setup is not None
+
+    async def test_evaluation_files_win_on_a_shared_path(self, monkeypatch, tmp_path) -> None:
+        files = verification_files(_inputs())
+        shared = next(iter(files))
+        source = tmp_path / "other"
+        source.write_text("from sandbox_config")
+        extra = tmp_path / "extra"
+        extra.write_text("extra")
+        sandbox = await self._create(
+            monkeypatch, {"files": {shared: str(source), "/tmp/extra": str(extra)}}, files=files
+        )
+        assert sandbox.spec.files[shared] == files[shared]
+        assert sandbox.spec.files["/tmp/extra"] == "extra"

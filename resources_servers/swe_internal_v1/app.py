@@ -70,6 +70,7 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.sandbox_setup import read_sandbox_files, setup_command_runner
 
 
 class SweInternalV1ResourcesServerConfig(BaseResourcesServerConfig):
@@ -160,6 +161,8 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         self._session_id_to_base_commit: dict[str, str] = {}
+        # Read once, so a missing source fails at startup.
+        self._sandbox_files = read_sandbox_files(self.config.sandbox_config.get("files", {}))
         if self.config.enforce_agent_no_network:
             check_agent_network_config(
                 resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()),
@@ -212,7 +215,8 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir=body.workdir,
             env=env,
-            files=files or {},
+            # The evaluation's own files win over sandbox_config.files on a shared path.
+            files=self._sandbox_files | (files or {}),
             metadata=provider_metadata
             | self.config.sandbox_config.get("metadata", {})
             | {
@@ -223,7 +227,11 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
             provider_options=provider_options,
         )
         sandbox = AsyncSandbox(provider_config)
-        await sandbox.start(spec)
+        setup_command = self.config.sandbox_config.get("setup_command")
+        if setup_command:
+            await sandbox.start_with_setup(spec, setup_command_runner(setup_command))
+        else:
+            await sandbox.start(spec)
         return sandbox
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox | None) -> None:

@@ -81,3 +81,6 @@ holds only those rows.
 ```bash
 gym env start --config resources_servers/swe_internal_v1/configs/swe_internal_v1_opencode.yaml
 ```
+
+`sandbox_config.env`, `files` and `setup_command` add toolchain setup to the sandboxes; see
+[Sandbox toolchain setup](../swe_rebench/README.md#sandbox-toolchain-setup).
