@@ -207,6 +207,19 @@ in `env.yaml` under `sandbox.opensandbox.connection`. Until `sandbox/Dockerfile`
 published to a registry the cell pulls from, the config uses a stock `python:3.12-bookworm` image
 (pinned by digest) and installs pandas and openpyxl in the provider's setup commands.
 
+`sandbox_config.block_internet: true` takes the internet away from each sandbox: the server sets
+OpenSandbox's egress policy (`provider_options.network_policy`, built with Gym's
+`restricted_network_policy`) to refuse every outbound connection except to this server (the MCP
+endpoint and the file API) and the model servers, whose addresses it reads from Gym's config; a
+model server on loopback is left out. It fails closed: another sandbox provider, a server address
+a sandbox cannot reach, `host_relay`, or a `network_policy` of your own are refused. On an
+OpenSandbox cell the policy is enforced on addresses, not only on names: in a probe on 2026-10-27,
+public names did not resolve, bare public IPs and DNS over HTTPS timed out, and the node still
+answered. It is off in both configs, because their sandboxes download at start (Pi's Node runtime
+and package, and the OpenSandbox config's pandas and openpyxl); turning it on needs an image with
+those installed. Gym's sandboxed agents restrict only sandboxes they start themselves, so for these
+episodes, whose sandbox the resources server owns, the server sets the policy.
+
 Before the first run on a cell, `sandbox/probe_opensandbox.py` checks it from the node that will
 host Gym's servers: it starts one sandbox as the config would and reports the setup time, the task
 tools, a call back to the node with the source address the node sees (keep that address out of

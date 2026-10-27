@@ -33,6 +33,8 @@ from resources_servers.officeenv.app import (
     WORKSPACE_GUIDE,
     OfficeEnvResourcesServer,
     OfficeEnvResourcesServerConfig,
+    OfficeEnvSandboxConfig,
+    egress_urls,
     is_trusted_caller,
     relay_ports,
     tools_exposure_catalog,
@@ -507,6 +509,56 @@ def test_a_host_relay_starts_in_the_sandbox_before_it_is_lent(sandboxes, monkeyp
         assert sandbox.spec.env["OFFICEENV_API_URL"] == "http://127.0.0.1:8080"
         assert "relay.py host.lima.internal 8080 18173" in sandbox.commands[0]
         assert "relay ready" in sandbox.commands[1]
+
+
+# Sandboxes without the internet.
+
+OPENSANDBOX_NAMED = {
+    "sandbox": {"opensandbox": {}},
+    "policy_model": {"responses_api_models": {"vllm_model": {"host": "10.0.0.2", "port": 18173}}},
+    "judge_model": {"responses_api_models": {"vllm_model": {"host": "127.0.0.1", "port": 18200}}},
+    "pi_agent": {"responses_api_agents": {"pi_agent": {"host": "10.0.0.9", "port": 18300}}},
+}
+
+
+def test_a_sandbox_without_the_internet_reaches_only_this_server_and_the_model_servers(sandboxes, monkeypatch) -> None:
+    monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: OPENSANDBOX_NAMED)
+    with mcp_client(make_server(sandbox_config={**IMAGE, "block_internet": True})) as client:
+        assert client.post("/seed_session", json=seed_body()).status_code == 200
+    policy = sandboxes.started[0].spec.provider_options["network_policy"]
+    # this server (MCP and the file API) and the policy model; the judge on loopback is no sandbox's to reach
+    assert policy == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "10.0.0.1"}, {"action": "allow", "target": "10.0.0.2"}],
+    }
+    assert egress_urls(["http://10.0.0.1:8080"], OPENSANDBOX_NAMED) == [
+        "http://10.0.0.1:8080",
+        "http://10.0.0.2:18173",
+    ]
+    # Gym's OpenSandbox provider takes the policy as it is.
+    pytest.importorskip("opensandbox")
+    from opensandbox.models.sandboxes import NetworkPolicy
+
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProviderOptions
+
+    assert OpenSandboxProviderOptions.from_mapping({"network_policy": policy}).network_policy == policy
+    assert NetworkPolicy.model_validate(policy).default_action == "deny"
+
+
+def test_blocking_the_internet_needs_opensandbox_a_reachable_server_and_one_policy(sandboxes, monkeypatch) -> None:
+    blocked = {**IMAGE, "block_internet": True}
+    with mcp_client(make_server(sandbox_config=blocked)) as client:  # the fixture's provider is Docker
+        with pytest.raises(ValueError, match="OpenSandbox"):
+            client.post("/seed_session", json=seed_body())
+    monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: OPENSANDBOX_NAMED)
+    with mcp_client(make_server(host="127.0.0.1", sandbox_config=blocked)) as client:
+        with pytest.raises(ValueError, match="sandbox-reachable"):
+            client.post("/seed_session", json=seed_body())
+    assert not sandboxes.started
+    with pytest.raises(ValueError, match="one or the other"):
+        OfficeEnvSandboxConfig(block_internet=True, provider_options={"network_policy": {"defaultAction": "deny"}})
+    with pytest.raises(ValueError, match="host_relay"):
+        OfficeEnvSandboxConfig(block_internet=True, host_relay="host.lima.internal")
 
 
 # The file API.

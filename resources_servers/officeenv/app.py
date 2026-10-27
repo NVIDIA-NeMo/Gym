@@ -38,7 +38,9 @@ the simulated apps over HTTP instead of through the model's context. A sandbox c
 server, so sandbox mode guards it: seeding, closing, verification, the app catalog and the tool
 routes refuse callers other than this node and ``trusted_networks``, which leaves sandboxes the MCP
 endpoint and the file API; and session cookies and MCP tokens are signed with a per-process secret
-(``get_session_secret``) instead of Gym's key, which anyone can derive from the server's name.
+(``get_session_secret``) instead of Gym's key, which anyone can derive from the server's name. With
+``sandbox_config.block_internet`` a sandbox reaches nothing else: OpenSandbox's egress policy refuses
+every outbound connection except to this server and the model servers.
 
 For training, ``length_penalty`` (off by default) deducts AutomationBench's training length
 penalty from the reward and reports the two terms as ``reward_components``, so a trainer can
@@ -70,12 +72,13 @@ from officeenv.apps import available, get_app_class
 from officeenv.artifacts import ArtifactStore
 from officeenv.exposure import Catalog, ToolsExposure
 from officeenv.service import EpisodeService, Reply
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxConfig
+from nemo_gym.sandbox.agent_tools import restricted_network_policy
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
@@ -131,6 +134,19 @@ class OfficeEnvSandboxConfig(SandboxConfig):
         description="Host alias the sandbox forwards this server's and the model servers' loopback ports to "
         "(colima: host.lima.internal), for servers that bind loopback on a workstation; off by default",
     )
+    block_internet: bool = Field(
+        default=False,
+        description="Refuse the sandbox every outbound connection except to this server and the model servers "
+        "(OpenSandbox's egress policy, which this sets as provider_options.network_policy); OpenSandbox only",
+    )
+
+    @model_validator(mode="after")
+    def _one_egress_policy(self) -> "OfficeEnvSandboxConfig":
+        if self.block_internet and "network_policy" in self.provider_options:
+            raise ValueError("block_internet sets provider_options.network_policy; set one or the other")
+        if self.block_internet and self.host_relay:
+            raise ValueError("block_internet is OpenSandbox's egress policy; host_relay serves a workstation's Docker")
+        return self
 
 
 class OfficeEnvResourcesServerConfig(BaseResourcesServerConfig):
@@ -304,16 +320,44 @@ def _error_status(body: Any) -> int | None:
     return code if isinstance(code, int) and 400 <= code < 600 else 400
 
 
-def relay_ports(named_configs: Mapping[str, Any], *, own_port: int) -> list[int]:
-    """This server's port and every model server's: what a sandboxed harness connects to."""
-    ports = {own_port}
+def _model_servers(named_configs: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Every model server's config in Gym's merged config: the servers a sandboxed harness calls for completions."""
+    servers = []
     for block in named_configs.values():
         models = block.get("responses_api_models") if isinstance(block, Mapping) else None
-        for server in models.values() if isinstance(models, Mapping) else ():
-            port = server.get("port") if isinstance(server, Mapping) else None
-            if isinstance(port, int):
-                ports.add(port)
+        servers += [
+            server
+            for server in (models.values() if isinstance(models, Mapping) else ())
+            if isinstance(server, Mapping)
+        ]
+    return servers
+
+
+def relay_ports(named_configs: Mapping[str, Any], *, own_port: int) -> list[int]:
+    """This server's port and every model server's: what a sandboxed harness connects to."""
+    ports = {own_port} | {
+        server["port"] for server in _model_servers(named_configs) if isinstance(server.get("port"), int)
+    }
     return sorted(ports)
+
+
+def _reachable_from_a_sandbox(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host.lower().rstrip(".") != "localhost"
+    return not (address.is_loopback or address.is_unspecified)
+
+
+def egress_urls(own_urls: list[str], named_configs: Mapping[str, Any]) -> list[str]:
+    """What a sandbox without the internet may still reach: this server at ``own_urls`` (MCP and the file API) and
+    the model servers, read from Gym's config. A model server on loopback is left out: no sandbox reaches it."""
+    urls = list(own_urls)
+    for server in _model_servers(named_configs):
+        host = server.get("host")
+        if isinstance(host, str) and _reachable_from_a_sandbox(host):
+            urls.append(f"http://{host}:{server.get('port')}")
+    return urls
 
 
 async def start_relay(sandbox: AsyncSandbox, host: str, ports: list[int]) -> None:
@@ -523,7 +567,13 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         spec = replace(
             spec, env={**spec.env, "OFFICEENV_API_URL": files_api_url.rstrip("/"), "OFFICEENV_API_TOKEN": token}
         )
-        sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, named_configs))
+        provider_config = resolve_provider_config(self.config.sandbox_provider, named_configs)
+        if config.block_internet:
+            # Fails closed for a provider without network policies, or a server a sandbox cannot reach.
+            own_urls = [files_api_url, f"http://{self.config.host}:{self.config.port}"]
+            policy = restricted_network_policy(next(iter(provider_config)), egress_urls(own_urls, named_configs))
+            spec = replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
+        sandbox = AsyncSandbox(provider_config)
         try:
             if config.host_relay:
                 ports = relay_ports(named_configs, own_port=self.config.port)
