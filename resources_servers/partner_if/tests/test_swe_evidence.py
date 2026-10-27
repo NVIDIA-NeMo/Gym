@@ -380,10 +380,45 @@ def test_a_seed_refuses_a_contract_without_the_actors_prompt_before_starting_a_s
 
 
 def test_the_session_lifecycle_meets_gyms_close_contract():
+    server = swe_server()
     with started(FakeSandbox(), FakeSandbox()), patch(ANTI_CHEAT, AsyncMock()):
         check_resources_session_contract(
-            swe_server().setup_webserver(), ResourcesSeedSessionRequest.model_validate(seed_body()), keeps_state=True
+            server.setup_webserver(),
+            ResourcesSeedSessionRequest.model_validate(seed_body()),
+            keeps_state=True,
+            holds_state=lambda session_id: session_id in server._session_id_to_sandbox,
+            # A verify after close is masked: the session's sandbox, and with it the patch, is gone.
+            verify_body=swe_request().model_dump(mode="json"),
         )
+
+
+@pytest.mark.parametrize("seed_first", [False, True])
+def test_a_close_keeps_its_episode_so_another_episode_cannot_close_the_session_again(seed_first):
+    close = {"resources_session_id": "session-one", "episode_id": {"rollout_id": "r", "attempt": 0}}
+    other = close | {"episode_id": {"rollout_id": "other", "attempt": 0}}
+    with started(FakeSandbox()), patch(ANTI_CHEAT, AsyncMock()):
+        client = TestClient(swe_server().setup_webserver(), raise_server_exceptions=False)
+        if seed_first:
+            assert client.post("/seed_session", json=seed_body()).status_code == 200
+        assert client.post("/close_session", json=close).status_code == 200
+        assert client.post("/close_session", json=close).status_code == 200
+        assert client.post("/close_session", json=other).status_code == 409
+        assert client.post("/seed_session", json=seed_body()).status_code == 409
+
+
+async def test_a_retired_session_keeps_its_seeds_episode():
+    server = swe_server()
+    sandbox = FakeSandbox()
+    close = {"resources_session_id": "session-one", "episode_id": {"rollout_id": "r", "attempt": 0}}
+    other = close | {"episode_id": {"rollout_id": "other", "attempt": 0}}
+    with started(sandbox), patch(ANTI_CHEAT, AsyncMock()):
+        client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+        assert client.post("/seed_session", json=seed_body()).status_code == 200
+        await server.retire_session_state("session-one")
+        assert sandbox.stops == 1
+        assert client.post("/close_session", json=other).status_code == 409
+        assert client.post("/close_session", json=close).status_code == 200
+        assert client.post("/seed_session", json=seed_body()).status_code == 409
 
 
 def test_a_sandbox_that_fails_to_stop_stays_for_a_retried_close():

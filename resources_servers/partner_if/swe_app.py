@@ -26,6 +26,8 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionResponse,
     ReverifyMode,
 )
+from nemo_gym.episode_types import EpisodeId
+from nemo_gym.failure_kinds import SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
@@ -42,6 +44,7 @@ from resources_servers.partner_if.evidence import EvidenceBundle
 from resources_servers.partner_if.grading_contract import NO_ANSWER, GradingContract
 from resources_servers.partner_if.metrics import PartnerIFMetricsMixin
 from resources_servers.partner_if.native_evidence import visible_events
+from resources_servers.partner_if.receipt import masked_fields
 from resources_servers.partner_if.schema import VerifierMetadata
 from resources_servers.partner_if.verifier_fixture import create_fixture_server
 from resources_servers.scale_swe.app import (
@@ -140,7 +143,7 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
     # Seed, verify, close and retire hold the session's lock. A sandbox start awaits, and a close or a repeated seed
     # that ran meanwhile would leak its sandbox or start a second one.
     _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    _closed: ClosedResourcesSessionRecords[bool] = PrivateAttr()
+    _closed: ClosedResourcesSessionRecords[EpisodeId | None] = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
@@ -232,6 +235,9 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
         async with self._session_lock(session_id):
+            closed_episode = self._closed.get(session_id)
+            if closed_episode is not None and closed_episode != body.episode_id:
+                raise HTTPException(409, "Session belongs to another episode")
             seeded = self._seeds.get(session_id)
             if seeded is not None and seeded[0].episode_id != body.episode_id:
                 raise HTTPException(409, "Session belongs to another episode")
@@ -239,25 +245,29 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
                 # A sandbox that fails to stop raises and stays, so a retried close stops it again.
                 await sandbox.stop()
             self._forget(session_id)
-            self._closed.remember(session_id, True)
+            self._closed.remember(session_id, body.episode_id)
         # Later requests for a closed session are refused, so it needs no lock; any waiting on this one see the close.
         self._session_locks.pop(session_id, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def retire_session_state(self, session_id: str) -> None:
         async with self._session_lock(session_id):
+            seeded = self._seeds.get(session_id)
             sandbox = self._session_id_to_sandbox.get(session_id)
             self._forget(session_id)
-            self._closed.remember(session_id, True)
+            self._closed.remember(session_id, seeded[0].episode_id if seeded is not None else None)
             await self._stop_sandbox(sandbox)
         self._session_locks.pop(session_id, None)
 
     async def verify(self, request: Request, body: SWEIFVerifyRequest) -> SWEIFVerifyResponse:
-        actor_contract(body.verifier_metadata.partner_if)
+        contract = actor_contract(body.verifier_metadata.partner_if)
         session_id = request.session[SESSION_ID_KEY]
         async with self._session_lock(session_id):
             if session_id in self._closed:
-                raise HTTPException(409, "Session is closed")
+                # Its sandbox is gone, so neither its patch nor the native tests can run: the sample is masked.
+                return SWEIFVerifyResponse(
+                    **body.model_dump(), **masked_fields(contract, SESSION_LOST, "The session closed before verify")
+                )
             # Scale-SWE's verify extracts the actor's patch, stops its sandbox and runs the native tests.
             outcome = await super().verify(request, body)
         graded = await self.grade_if(body)
