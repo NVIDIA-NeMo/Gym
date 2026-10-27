@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym import PARENT_DIR
 import nemo_gym.uvicorn_reuse_port as uvicorn_reuse_port
+from nemo_gym import PARENT_DIR
 from nemo_gym.uvicorn_reuse_port import reuse_port_supported, run_with_reuse_port
 
 
