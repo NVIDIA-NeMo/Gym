@@ -42,7 +42,6 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
 from nemo_gym._checkpoint.settings import CHECKPOINT_BLOCK
-from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
 from nemo_gym.config_types import (
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
@@ -492,8 +491,6 @@ class GlobalConfigDictParser(BaseModel):
 
             return parser
 
-        hydra_main_module.get_args_parser = new_get_args_parser
-
         # This function is just to get the config object out of the hydra main call.
         # Need a closure. We simply use an outer ref of a list
         config_list = []
@@ -502,7 +499,14 @@ class GlobalConfigDictParser(BaseModel):
         def inner_hydra_wrapper(cfg: DictConfig) -> DictConfig:
             config_list.append(cfg)
 
-        inner_hydra_wrapper()
+        # Patched for this call only and restored after it: hydra reads the parser at call time, and a patch left
+        # behind would wrap the previous call's wrapper, one level per `gym` command parsed in a process, until a
+        # long test session (hundreds of `main()` calls) hits the recursion limit inside the nested wrappers.
+        hydra_main_module.get_args_parser = new_get_args_parser
+        try:
+            inner_hydra_wrapper()
+        finally:
+            hydra_main_module.get_args_parser = original_get_args_parser
 
         # Hydra installs a console log handler on stdout; move it to stderr so command stdout stays machine-readable
         # (e.g. `gym ... --json`). Diagnostics belong on stderr; only the requested data goes to stdout.
@@ -548,12 +552,6 @@ class GlobalConfigDictParser(BaseModel):
             else:
                 searched_locations = [root / config_path for root in component_search_roots()]
             config_path = _resolve_under_cwd_or_install(original_entry)
-            if not config_path.exists() and (canonical_entry := legacy_config_path_alias(original_entry)):
-                canonical_path = _resolve_under_cwd_or_install(canonical_entry)
-                if canonical_path.exists():
-                    logger.warning(f"Config path `{original_entry}` is deprecated; use `{canonical_entry}`.")
-                    config_paths[index] = canonical_entry
-                    config_path = canonical_path
 
             try:
                 extra_config = _load_config_yaml(config_path)
@@ -1013,46 +1011,6 @@ Use the name the composed config reports."""
             routes.update({str(key): value for key, value in declared.items()})
         global_config_dict["agent_map"] = routes
 
-    @staticmethod
-    def apply_legacy_agent_aliases(global_config_dict: DictConfig) -> None:
-        """Route legacy reasoning-gym agent names to their canonical instances."""
-        declared = global_config_dict.get("agent_map")
-        routes = dict(declared) if isinstance(declared, DictConfig) else {}
-        active_aliases = {}
-        for legacy, canonical in LEGACY_AGENT_ALIASES.items():
-            destination = routes.get(canonical, canonical)
-            if legacy not in global_config_dict and destination in global_config_dict:
-                active_aliases[legacy] = destination
-        if not active_aliases:
-            return
-
-        deprecated_uses = set()
-        selected = global_config_dict.get("agent_name")
-        if selected in active_aliases:
-            deprecated_uses.add(str(selected))
-            global_config_dict["agent_name"] = active_aliases[selected]
-
-        for key, destination in list(routes.items()):
-            if destination in active_aliases:
-                deprecated_uses.add(str(destination))
-                routes[key] = active_aliases[destination]
-        for legacy, destination in active_aliases.items():
-            routes.setdefault(legacy, destination)
-        global_config_dict["agent_map"] = routes
-
-        fan_out = global_config_dict.get("fan_out")
-        if isinstance(fan_out, DictConfig):
-            for key, destinations in fan_out.items():
-                if not isinstance(destinations, (list, ListConfig)):
-                    continue
-                replacements = [active_aliases.get(destination, destination) for destination in destinations]
-                deprecated_uses.update(destination for destination in destinations if destination in active_aliases)
-                fan_out[key] = replacements
-
-        if deprecated_uses:
-            replacements = ", ".join(f"`{legacy}` -> `{active_aliases[legacy]}`" for legacy in sorted(deprecated_uses))
-            logger.warning(f"Legacy agent names are deprecated; use {replacements}.")
-
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
     ) -> None:
@@ -1498,7 +1456,6 @@ Pass each config with --config (it builds the list for you), e.g.:
         # to environment servers, this should be updated.
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
         global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
-        self.apply_legacy_agent_aliases(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —

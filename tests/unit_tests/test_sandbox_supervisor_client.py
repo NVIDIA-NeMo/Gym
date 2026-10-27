@@ -5,6 +5,7 @@
 import asyncio
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -172,6 +173,73 @@ async def test_launch_supervises_harness_with_selected_or_private_python(session
     )
     assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": 0, "timed_out": False}
     assert set((session_dir / OUTPUT_LOG_FILE).read_text().splitlines()) == {"$(literal)", "stderr"}
+
+
+# Starts a non-Python tool, like an agent CLI, and waits for it.
+_RUNNER = """
+import pathlib, subprocess, sys
+tool = subprocess.Popen(["sleep", "60"])
+pathlib.Path(sys.argv[1]).write_text(str(tool.pid))
+tool.wait()
+"""
+
+
+def _alive(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().split(") ")[-1][0] != "Z"
+    except FileNotFoundError:
+        return False
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("pgrep") is None, reason="Linux /proc and pgrep")
+async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(session, tmp_path):
+    """pgrep matches exactly as pkill and killall would, without signalling anything on this host."""
+    sandbox, session_dir = session
+    shutil.copyfile(process_supervisor.__file__, session_dir / SUPERVISOR_FILE)
+    runner = session_dir / "sandbox_runner"
+    runner.write_text(_RUNNER)
+    tool_pid_file = session_dir / "tool.pid"
+    command = supervised_launch_command(
+        session_dir=str(session_dir),
+        command=[sys.executable, "-I", str(runner), str(tool_pid_file)],
+        timeout=60,
+        cleanup_timeout=1,
+        python=sys.executable,
+        stdlib_runner=True,
+    )
+    launch = asyncio.create_task(sandbox.exec(command, timeout_s=90))
+    try:
+        async with asyncio.timeout(10):
+            while not tool_pid_file.exists() or not tool_pid_file.read_text():
+                await asyncio.sleep(0.01)
+        supervisor_pid = int((session_dir / SUPERVISOR_PID_FILE).read_text())
+        (runner_pid,) = map(int, Path(f"/proc/{supervisor_pid}/task/{supervisor_pid}/children").read_text().split())
+        tool_pid = int(tool_pid_file.read_text())
+        for pid, name in ((supervisor_pid, "gym-supervisor"), (runner_pid, "gym-runner")):
+            assert Path(f"/proc/{pid}/comm").read_text().strip() == name
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+            assert "python" not in cmdline and ".py" not in cmdline, cmdline
+            assert Path(f"/proc/{pid}/exe").resolve() == Path(sys.executable).resolve()
+        # pkill -f python3 / python / "python3 -" / "\.py"; pkill python; killall python3 (an exact name).
+        for args in (
+            ["-f", "python3"],
+            ["-f", "python"],
+            ["-f", "python3 -"],
+            ["-f", r"\.py"],
+            ["python"],
+            ["-x", "python3"],
+        ):
+            matched = {int(pid) for pid in subprocess.run(["pgrep", *args], capture_output=True).stdout.split()}
+            assert not matched & {supervisor_pid, runner_pid}, args
+        assert all(map(_alive, (supervisor_pid, runner_pid, tool_pid)))
+    finally:
+        # Gym's own stop signals the recorded PID, whatever the process is called.
+        receipt = await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(tmp_path), timeout=5, harness="test"
+        )
+        await asyncio.wait_for(launch, timeout=10)
+    assert receipt["cleanup_confirmed"] is True and receipt["error"] is None
+    assert not any(map(_alive, (supervisor_pid, runner_pid, tool_pid)))
 
 
 @pytest.mark.parametrize("confirmed", [False, "true", 1])
