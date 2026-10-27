@@ -1022,11 +1022,17 @@ gym eval export mlflow \
 
 `evalrdl` uploads one run: the whole directory the rollouts file is in. Everything there is part of the upload (the
 rollouts and their sidecars, health reports, model-call captures and any benchmark-specific files), and nothing is copied
-or picked out, so keep each run in a directory of its own. The run still needs `<stem>_aggregate_metrics.json` and
+or picked out, so keep each run in a directory of its own (the export is refused when the directory holds another
+rollouts file, because EvalRDL would read both as one run). The run still needs `<stem>_aggregate_metrics.json` and
 `<stem>_resolved_config.yaml` there, like the `mlflow` and `wandb` exporters. The `evalrdl` SDK is installed into the
-exporter's own virtual environment, so it never enters Gym's environment. The SDK is served from a package index
-your organization provides; configure it through uv's own index settings (for example `UV_EXTRA_INDEX_URL`) when you run
-the command. The SDK finds your EvalRDL token itself, in the environment or its login cache.
+exporter's own virtual environment, so it never enters Gym's environment. The SDK is served by the EvalRDL
+service's own package index, `<service URL>/v1/client/simple/`; `evalrdl` is not on PyPI. Configure that index through
+uv's own index settings (for example `UV_EXTRA_INDEX_URL`) when you run the command, and do not point uv at an index that
+could carry another package named `evalrdl`, because the SDK runs with your token in its environment. The SDK reads the
+token from `$EVALRDL_TOKEN`, `$GITLAB_TOKEN` or `$GITLAB_PRIVATE_TOKEN`, then from `glab`, which cluster nodes usually
+lack, so set one of the variables there. The environment is built once and the SDK is not upgraded afterwards; when the
+service stops accepting an old client, the export fails and names the environment to delete, or pin a newer version with
+`+requirement=evalrdl==VERSION`.
 
 | Setting | Description |
 | --- | --- |
@@ -1040,9 +1046,11 @@ the command. The SDK finds your EvalRDL token itself, in the environment or its 
 | `+url=prod\|stg\|URL` | EvalRDL service. Defaults to the SDK's own choice. |
 | `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl`. |
 
-The result is `succeeded` when EvalRDL stored the run as new, and `skipped` when it already held the same content. An
-upload EvalRDL stored without a verdict before the timeout fails with exit code `3`, and one it refused fails with exit
-code `4`; both name the reason.
+The result is `succeeded` when EvalRDL stored the run as new, and `skipped` when it already held the same content. With
+`+wait=false` the run counts as `succeeded` once EvalRDL has stored it, and the upload token is in the result. When
+waiting, an upload EvalRDL stored without a verdict before the timeout fails with exit code `3`, and one it refused fails
+with exit code `4`; both name the reason. A worker still running after `+timeout` plus an hour for the upload itself is
+killed and the export fails.
 
 ```bash
 gym eval export evalrdl \

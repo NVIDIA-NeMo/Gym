@@ -24,10 +24,15 @@ from nemo_gym.exporters.isolated import ExportPreparationError, IsolatedExporter
 from nemo_gym.run_artifacts import RunArtifacts
 
 
+# Time the upload itself may take, before the wait for a verdict; past it the worker is killed.
+UPLOAD_ALLOWANCE_S = 3600
+
+
 class EvalRDLExportConfig(RunExportConfig):
     """Configuration for `gym eval export evalrdl`.
 
-    Credentials are not settings here: the EvalRDL SDK finds its token in the environment or its login cache.
+    Credentials are not settings here: the EvalRDL SDK reads its token from `$EVALRDL_TOKEN`, `$GITLAB_TOKEN` or
+    `$GITLAB_PRIVATE_TOKEN`, then from `glab`.
     """
 
     label: Optional[str] = Field(default=None, description="Label for the uploaded run.")
@@ -66,19 +71,35 @@ class EvalRDLExporter(IsolatedExporter):
     def required_packages(self) -> tuple[str, ...]:
         return (self.config.requirement,)
 
+    def worker_timeout_s(self, payload: dict[str, Any]) -> float:
+        """The wait for the verdict (when waiting) plus an allowance for the upload itself, which `timeout` excludes."""
+        return UPLOAD_ALLOWANCE_S + (self.config.timeout if self.config.wait else 0)
+
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
         """Describe the upload for the worker: the directory the rollouts are in, uploaded as it is.
 
         Everything in that directory is part of the run (the rollouts and their sidecars, health reports,
         model-call captures, benchmark-specific files), so nothing is picked out, staged or copied. The saved
-        config and the aggregate metrics are still required first, because the reader looks for them.
+        config and the aggregate metrics are still required first, as Gym's own rule for a complete run.
         """
         unexportable = unexportable_reason(artifacts)
         if unexportable is not None:
             raise ExportPreparationError(unexportable)
+        # `absolute`, not `resolve`: a symlinked rollouts file must not move the upload to its target's directory.
+        rollouts = artifacts.rollouts_jsonl_fpath.absolute()
+        others = sorted(
+            path.name
+            for path in rollouts.parent.glob("*rollouts.jsonl")
+            if path.name != rollouts.name and (path.name == "rollouts.jsonl" or path.name.endswith("_rollouts.jsonl"))
+        )
+        if others:
+            raise ExportPreparationError(
+                f"{rollouts.parent} also holds {', '.join(others)}. EvalRDL reads a directory as one run, so these "
+                "would be mixed into it; keep each run in a directory of its own."
+            )
         config = self.config
         return {
-            "run_dir": str(artifacts.rollouts_jsonl_fpath.resolve().parent),
+            "run_dir": str(rollouts.parent),
             "label": config.label,
             "tags": list(config.tags),
             "meta": config.meta,

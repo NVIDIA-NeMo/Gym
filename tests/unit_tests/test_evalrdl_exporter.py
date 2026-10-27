@@ -44,6 +44,16 @@ class RdlError(Exception):
     pass
 
 
+class ClientTooOld(RdlError):
+    pass
+
+
+class AuthError(RdlError):
+    def __init__(self, message, reason):
+        super().__init__(message)
+        self.reason = reason
+
+
 class IntakeRefused(RdlError):
     def __init__(self, reason, stage, upload_token):
         super().__init__(reason)
@@ -57,7 +67,7 @@ class UploadResult:
         self.run_id = "run-9"
         self.benchmark = "gpqa"
         self.n_rollouts = 2
-        self.needs_binding = False
+        self.needs_binding = os.environ.get("FAKE_EVALRDL_NEEDS_BINDING") == "1"
 
 
 class _Uploads:
@@ -77,6 +87,12 @@ class _Uploads:
             raise IntakeRefused("no gym markers", "decode", "tok-1")
         if mode == "rdl_error":
             raise RdlError("service unavailable")
+        if mode == "too_old":
+            raise ClientTooOld("client 0.0.1 is older than 0.0.300; run: pip install -U evalrdl")
+        if mode == "anonymous":
+            raise AuthError("no token was found", "anonymous")
+        if not wait:
+            return [UploadResult("accepted")]
         if mode == "two_results":
             return [UploadResult("committed"), UploadResult("committed")]
         return [UploadResult(mode)]
@@ -198,6 +214,55 @@ class TestRunDirectory:
 
         assert _sdk_call(fake_sdk)["path"] == str(tmp_path.resolve())
 
+    def test_a_symlinked_rollouts_file_is_uploaded_from_the_directory_it_is_linked_in(
+        self, tmp_path: Path, fake_sdk: dict[str, Any]
+    ) -> None:
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        real = _make_run(target)
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        link = run_dir / "gpqa_rollouts.jsonl"
+        link.symlink_to(real.rollouts_jsonl_fpath)
+        for sidecar in ("aggregate_metrics_json_fpath", "resolved_config_yaml_fpath"):
+            getattr(RunArtifacts(link), sidecar).write_bytes(getattr(real, sidecar).read_bytes())
+        linked = RunArtifacts(link)
+        stamp = real.rollouts_jsonl_fpath.stat().st_mtime + 10
+        os.utime(linked.aggregate_metrics_json_fpath, (stamp, stamp))
+
+        _exporter(linked, tmp_path).export(linked)
+
+        assert _sdk_call(fake_sdk)["path"] == str(run_dir.resolve())
+
+    @pytest.mark.parametrize("other", ["math_rollouts.jsonl", "rollouts.jsonl"])
+    def test_a_directory_holding_another_runs_rollouts_is_refused_before_any_environment_is_built(
+        self, tmp_path: Path, fake_sdk: dict[str, Any], other: str
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        (tmp_path / other).write_text("{}\n")
+
+        result = _exporter(artifacts, tmp_path).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert f"also holds {other}" in result.error and "directory of its own" in result.error
+        assert fake_sdk["requested"] == []
+        assert not fake_sdk["log"].exists()
+
+    def test_the_runs_own_sidecars_are_not_another_runs_rollouts(
+        self, tmp_path: Path, fake_sdk: dict[str, Any]
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+
+        assert _exporter(artifacts, tmp_path).export(artifacts).state is ExportState.SUCCEEDED
+
+    @pytest.mark.parametrize(("wait", "expected"), [(True, 1800 + 3600), (False, 3600)])
+    def test_the_worker_may_run_for_the_upload_allowance_plus_the_wait_for_a_verdict(
+        self, tmp_path: Path, wait: bool, expected: float
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+
+        assert _exporter(artifacts, tmp_path, wait=wait).worker_timeout_s({}) == expected
+
     @pytest.mark.parametrize(
         ("remove", "message"),
         [
@@ -314,6 +379,51 @@ class TestUpload:
 
         assert result.error == "EvalRDL refused the upload at stage 'decode': no gym markers"
         assert (result.detail["evalrdl_state"], result.detail["stage"]) == ("refused", "decode")
+
+    def test_without_waiting_an_accepted_upload_is_the_expected_outcome(
+        self, tmp_path: Path, fake_sdk: dict[str, Any]
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+
+        result = _exporter(artifacts, tmp_path, wait=False).export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED, result.error
+        assert result.detail["upload_token"] == "tok-1"
+
+    def test_a_committed_upload_that_needs_binding_says_so(
+        self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch, capfd: pytest.CaptureFixture
+    ) -> None:
+        monkeypatch.setenv("FAKE_EVALRDL_NEEDS_BINDING", "1")
+        artifacts = _make_run(tmp_path)
+
+        result = _exporter(artifacts, tmp_path).export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED
+        assert "needs_binding=true (upload token tok-1)" in capfd.readouterr().err
+
+    def test_a_client_that_is_too_old_names_the_environment_to_rebuild(
+        self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FAKE_EVALRDL_MODE", "too_old")
+        artifacts = _make_run(tmp_path)
+
+        result = _exporter(artifacts, tmp_path).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert result.error.startswith(
+            "ClientTooOld: client 0.0.1 is older than 0.0.300; run: pip install -U evalrdl."
+        )
+        assert "delete that directory to rebuild it" in result.error and "+requirement=evalrdl==" in result.error
+
+    def test_a_missing_token_names_the_environment_variables(
+        self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FAKE_EVALRDL_MODE", "anonymous")
+        artifacts = _make_run(tmp_path)
+
+        result = _exporter(artifacts, tmp_path).export(artifacts)
+
+        assert "Set EVALRDL_TOKEN (or GITLAB_TOKEN or GITLAB_PRIVATE_TOKEN)" in result.error
 
     def test_an_accepted_upload_points_at_its_token(
         self, tmp_path: Path, fake_sdk: dict[str, Any], monkeypatch: MonkeyPatch
