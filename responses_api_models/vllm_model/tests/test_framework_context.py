@@ -406,6 +406,41 @@ def test_measurement_matches_generation_prompt_and_options(monkeypatch, tmp_path
     assert len(harness.worker_calls) == int(with_parent) + 1
 
 
+@pytest.mark.parametrize("effort", ["max", "high"])
+def test_measurement_renders_the_reasoning_effort_generation_forwards(monkeypatch, tmp_path, effort):
+    # Codex sends effort `max`, which the SDK does not list. Measuring must accept it and render the
+    # prompt with the same reasoning_effort generation sends, since chat templates can depend on it.
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    harness.model.config.forward_unvalidated_reasoning_effort = True
+    harness.model.config.drop_unrepresentable_request_fields = True
+    body = {
+        "input": [{"role": "user", "content": "question"}],
+        "reasoning": {"effort": effort, "context": "all_turns"},
+        "include": ["reasoning.encrypted_content"],
+    }
+    measured, generated = [], []
+
+    async def tokenize(client, **body):
+        measured.append(body)
+        return {"prompt_token_count": 19, "ng_context_measured": True}
+
+    original_generate = NeMoGymAsyncOpenAI.create_chat_completion
+
+    async def generate(client, **body):
+        generated.append(body)
+        return await original_generate(client, **body)
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", tokenize)
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", generate)
+    assert_clean(harness.client.post("/ng-rollout/attempt/training-token-capture/context/measure", json=body))
+    assert_clean(harness.client.post("/ng-rollout/attempt/training-token-capture/v1/responses", json=body))
+    measured[0].pop(NG_CAPTURE_FIELD)
+    generated_prompt = harness.model._get_tokenize_chat_body(generated[0])
+    generated_prompt.pop(NG_CAPTURE_FIELD)
+    assert generated_prompt["reasoning_effort"] == effort
+    assert measured[0] == generated_prompt
+
+
 @pytest.mark.parametrize(
     "invalid_fields",
     [
