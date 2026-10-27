@@ -12313,3 +12313,44 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     assert "failure_kind" not in rollout_collection._counted_failure_row(record)
     plain = rollout_collection._episode_record(reply | {"failure": {"failure_reason": "bad task", "terminal": True}})
     assert "failure_kind" not in plain and not any(key.endswith("_step") for key in plain)
+
+
+@pytest.mark.parametrize("verifier_reference", ["model_call_id", "response_id"])
+@pytest.mark.parametrize("with_policy", [False, True])
+def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(verifier_reference, with_policy):
+    call_ids = ["policy", "judge"] if with_policy else ["judge"]
+    agent_refs = [{"model_call_id": call_id} for call_id in call_ids]
+    judge_ref = (
+        {"model_call_id": "judge"}
+        if verifier_reference == "model_call_id"
+        else {"model_ref": {"type": "responses_api_models", "name": "judge"}, "response_id": "shared-id"}
+    )
+    result = {
+        "ng_agent_observations": {
+            "source": "harness",
+            "records": [{"kind": "agent_invocation", "invocation_id": "agent", "model_calls": agent_refs}],
+        },
+        "ng_verifier_invocations": [{"invocation_id": "verify", "model_calls": [judge_ref]}],
+        "ng_model_call_capture": {
+            "calls": [
+                {
+                    "model_call_id": call_id,
+                    "model_ref": {"type": "responses_api_models", "name": call_id},
+                    # Response IDs are scoped to their model server.
+                    "response_id": "shared-id",
+                    "status_code": 200,
+                    "request": {"input": call_id},
+                    "response": {"id": "shared-id", "output": []},
+                }
+                for call_id in call_ids
+            ]
+        },
+    }
+    trajectory = _build_trajectory_record({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, result)
+    assert [ref.model_call_id for turn in trajectory.turns for ref in turn.model_calls] == (
+        ["policy"] if with_policy else []
+    )
+    assert [call.model_call_id for call in trajectory.model_calls] == call_ids
+    # Do not repair conflicting ownership silently: the checker must still see both claims.
+    assert [ref.model_call_id for ref in trajectory.invocations[0].model_calls] == call_ids
+    assert trajectory.verifier_invocations[0].model_calls[0].model_dump(exclude_none=True) == judge_ref
