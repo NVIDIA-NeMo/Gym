@@ -17,7 +17,7 @@ pins the release it runs.
 `requirements.txt` pins a release tag:
 
 ```
-officeenv @ git+ssh://git@gitlab-master.nvidia.com:12051/dmolinari/officeenv.git@v1.7.0
+officeenv @ git+ssh://git@gitlab-master.nvidia.com:12051/dmolinari/officeenv.git@v1.8.0
 ```
 
 OfficeEnv is not published yet, so building this server's venv needs SSH read access to that
@@ -46,7 +46,7 @@ every server, so that tree shadows the pinned release, and `/verify` reports its
 ```json
 {"responses_create_params": {"input": [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}], "tools": [...]},
  "officeenv": {"task_id": "...", "seed": 1, "actor": {...}, "apps": {...}, "exposure": {"mode": "api_search"}, "checks": [...]},
- "officeenv_version": "1.7.0",
+ "officeenv_version": "1.8.0",
  "task_id": "..."}
 ```
 
@@ -68,11 +68,12 @@ officeenv emit $E/renewal_escalation.json $E/schedule_kickoff.json $E/vendor_ter
   $E/ticket_triage.json $E/sprint_handover.json -o data/example.jsonl
 ```
 
-The example rollouts were collected on 2026-10-22 with `azure/openai/gpt-5.5` through this server
-and the simple agent (concurrency two). Four score 1.0; `schedule_kickoff` scores 0.75 because the
-slot the model picked overlaps a meeting injected during the episode (`gcalendar.no_conflicts`).
-Every error the metrics count is an authored fault (a transient error, rate limits) or a tool
-mistake the model recovered from. They are integration smokes, not a benchmark.
+The example rollouts were collected on 2026-10-27 with `azure/openai/gpt-5.5` against OfficeEnv
+1.8.0, through this server and the simple agent (concurrency two). Four score 1.0;
+`schedule_kickoff` scores 0.75 because the slot the model picked overlaps a meeting injected
+during the episode (`gcalendar.no_conflicts`). Every error the metrics count is an authored fault
+(a transient error, rate limits) or a tool mistake the model recovered from. They are integration
+smokes, not a benchmark.
 
 Training and validation sets are not committed.
 
