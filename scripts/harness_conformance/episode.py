@@ -8,6 +8,7 @@ import asyncio
 import importlib
 import importlib.util
 import json
+import math
 import os
 import shutil
 import socket
@@ -97,6 +98,10 @@ def _config(
         agent["max_steps"] = 6
     if harness in ("opencode", "pi"):
         agent["timeout"] = timeout
+        if not use_agent_sessions:
+            agent["workspace_root"] = str(directory / "workspace")
+    if harness == "openclaw":
+        agent["timeout"] = math.ceil(timeout)
         if not use_agent_sessions:
             agent["workspace_root"] = str(directory / "workspace")
     if harness == "opencode":
