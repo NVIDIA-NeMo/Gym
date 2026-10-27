@@ -18,6 +18,7 @@ def main() -> int:
     payload = json.loads((directory / "input.json").read_text())
     # Never accept an initialization receipt left by an earlier invocation.
     (directory / "task-environment.ready").unlink(missing_ok=True)
+    (directory / "required-mcp.ready").unlink(missing_ok=True)
     # Save the task's home and XDG directories for the shell.env hook, before Kilo's private overrides.
     task_home = os.environ.get("HOME") or str(Path.home())
     task_env = {"HOME": task_home}

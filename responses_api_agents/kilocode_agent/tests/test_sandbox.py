@@ -218,6 +218,7 @@ async def test_seed_selects_owner_and_installs_in_sandbox(borrowed: bool) -> Non
     provider = AsyncMock()
     with (
         patch(f"{APP}.resolve_provider_config", return_value={}),
+        patch(f"{APP}.resolve_provider_metadata", return_value={"source": "provider", "gym-agent": "overridden"}),
         patch(f"{APP}.get_global_config_dict", return_value={}),
         patch(f"{APP}.create_provider", return_value=provider),
         patch(f"{APP}.AsyncSandbox", return_value=sandbox) as api,
@@ -238,6 +239,12 @@ async def test_seed_selects_owner_and_installs_in_sandbox(borrowed: bool) -> Non
     else:
         spec = sandbox.start.call_args.args[0]
         assert spec.workdir == "/app" and spec.ttl_s == 2400
+        assert spec.metadata == {
+            "source": "provider",
+            "gym-agent": "kilocode",
+            "gym-session": "session-1",
+            "gym-rollout": "rollout-1-a2",
+        }
         assert agent.config.sandbox_config == {"image": "test"}
         sandbox.exec.assert_awaited_once_with("mkdir -p -- /app", cwd="/", timeout_s=30)
 
@@ -297,7 +304,7 @@ async def test_artifacts_keep_partial_output_without_inventing_exit_code() -> No
     session = state()
     with patch(f"{TRANSPORT}.read_text", side_effect=["partial", "diagnostic", RuntimeError("not written")]):
         artifacts = await session.collect_artifacts()
-    assert artifacts == KiloArtifacts(stdout="partial", stderr="diagnostic", exit_code=None)
+    assert artifacts == KiloArtifacts(stdout="partial", stderr="diagnostic", exit_code=None, required_mcp_ready=True)
 
 
 async def test_identical_activations_join_and_replay_independent_copies() -> None:
@@ -665,6 +672,7 @@ async def test_owned_sandbox_whose_start_cleanup_fails_is_retained_for_close() -
     sandbox.start.side_effect = RuntimeError("initial upload failed")
     with (
         patch(f"{APP}.resolve_provider_config", return_value={}),
+        patch(f"{APP}.resolve_provider_metadata", return_value={}),
         patch(f"{APP}.get_global_config_dict", return_value={}),
         patch(f"{APP}.create_provider", return_value=AsyncMock()),
         patch(f"{APP}.AsyncSandbox", return_value=sandbox),
