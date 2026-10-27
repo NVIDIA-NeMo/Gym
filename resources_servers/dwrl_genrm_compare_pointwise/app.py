@@ -29,16 +29,16 @@ Output:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import asyncio
 import math
 import logging
-from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -47,6 +47,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -55,6 +56,7 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionUserMessageParam,
     NeMoGymChatCompletionAssistantMessageParam,
 )
+from resources_servers.dwrl_genrm_compare_pointwise.cohort import Cohort, CohortRegistry, MemberJudgmentFailed
 from resources_servers.dwrl_genrm_compare_pointwise.utils import (
     GenRMOutputParseError,
     aggregate_scores,
@@ -67,10 +69,13 @@ from resources_servers.dwrl_genrm_compare_pointwise.utils import (
 
 logger = logging.getLogger(__name__)
 
-# Cohort state for verify(): buffer by prompt_key until num_rollouts_per_prompt received (Difference 1)
-_cohort_lock: asyncio.Lock = asyncio.Lock()
-_cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = defaultdict(list)
-_cohort_jit_buffers: Dict[str, Tuple[List[float, float], List[int, int]]] = defaultdict(lambda: ([], []))
+# Cohort state for verify(): rollouts are grouped by prompt_key until num_rollouts_per_prompt have arrived.
+_cohorts = CohortRegistry()
+
+
+def _response_digest(response_obj: Any) -> str:
+    """Fingerprint of a rollout's response, to tell a repeated request from a different rollout with the same index."""
+    return hashlib.sha256(json.dumps(response_obj, sort_keys=True, default=str).encode()).hexdigest()
 
 
 def flatten_to_single_turn(message_log):
@@ -134,7 +139,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
 
     # Comparison strategy
     #comparison_strategy: str = "circular"  # "all_pairs" or "circular"
-    num_judges_per_comparison: int = 1
+    num_judges_per_comparison: int = Field(default=1, ge=1)
 
     # Principle-based GenRM settings
     use_principle: bool = False
@@ -179,11 +184,27 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     bt_prompt: str
     dwrl_prompt: str
 
+    @model_validator(mode="after")
+    def _cohorts_need_a_single_worker_process(self) -> "GenRMCompareConfig":
+        # The rollouts of a prompt are grouped in memory (see cohort.py). With several uvicorn worker processes they
+        # would be spread over separate groups that never fill up, and every verify() call would wait forever.
+        if self.num_rollouts_per_prompt > 1 and self.num_workers is not None and self.num_workers > 1:
+            raise ValueError(
+                f"num_workers must be 1 when num_rollouts_per_prompt > 1 (got num_workers={self.num_workers}): "
+                "rollouts of one prompt have to be handled by the same process."
+            )
+        return self
+
 
 class GenRMCompareVerifyRequest(BaseVerifyRequest):
     """Verify request with optional principle for cohort-based GenRM comparison."""
 
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
     principle: Optional[str] = None  # Principle for principle-based GenRM; forwarded by agent when provided
+    task_index: Optional[int] = Field(default=None, alias=TASK_INDEX_KEY_NAME)
+    rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME)
+    prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
 
 
 class GenRMCompareRequest(BaseModel):
@@ -236,7 +257,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     config: GenRMCompareConfig
 
     async def verify(self, body: GenRMCompareVerifyRequest) -> BaseVerifyResponse:
-        """Verify a single rollout. When num_rollouts_per_prompt > 1, buffers by prompt and runs comparison when cohort is full."""
+        """Verify a single rollout.
+
+        When num_rollouts_per_prompt > 1, rollouts of the same prompt are grouped into a cohort. Each rollout
+        is judged as soon as it arrives, and the cohort's rewards are computed by whichever rollout finishes
+        judging last (see cohort.py). Every caller awaits until its cohort is complete and gets its reward.
+
+        A request that repeats one that is already being handled (same prompt, same `rollout_index` and the same
+        response, e.g. a client retry) takes no slot in the cohort and is not judged again: it waits for the reward
+        of the request it repeats. If that request failed, the repeat fails as well.
+        """
         cfg = self.config
         principle = body.principle
         if cfg.num_rollouts_per_prompt <= 1:
@@ -246,80 +276,64 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 reward=cfg.default_score,
             )
 
+        # Everything that can fail on malformed input is computed before joining the cohort, so a bad request
+        # never leaves a member slot that is never filled.
         input_messages = getattr(body.responses_create_params, "input", None) or []
-        prompt_key = get_prompt_key_from_input(
+        prompt_key = self._get_verify_cohort_key(
+            body,
             input_messages if isinstance(input_messages, list) else list(input_messages),
             principle,
         )
-        future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
+        conversation_history = _input_to_conversation_history(input_messages)
+        response_obj = body.response.model_dump() if hasattr(body.response, "model_dump") else body.response
 
-        _cohort_buffers[prompt_key].append((body, future))
+        # A rollout is identified by its index within its task, plus its response so that a different rollout that
+        # reuses the index is not mistaken for a repeat. Without an index nothing is treated as a repeat.
+        identity = None
+        if body.rollout_index is not None:
+            identity = (body.rollout_index, _response_digest(response_obj))
 
-        conversation_history = _input_to_conversation_history(getattr(body.responses_create_params, "input", []) or [])
-        buf = _cohort_buffers[prompt_key]
-        response_objs = [
-            (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
-        ]
-        principle_val = getattr(body, "principle", None) or principle
-
-        existing_results, existing_metadata = _cohort_jit_buffers[prompt_key]
-        #print(f"#### PROMPT_KEY_1 [ {prompt_key} ]  LEN_RESPONSE_OBJS: {len(response_objs)}  LEN_E_RESULTS: {len(existing_results)}  LEN_E_METADATA: {len(existing_metadata)}", flush=True)
-        new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
-            conversation_history, response_objs, existing_metadata, principle_val, False
+        cohort, member_idx, future, is_new = _cohorts.join(
+            prompt_key,
+            body,
+            size=cfg.num_rollouts_per_prompt,
+            num_judges=cfg.num_judges_per_comparison,
+            identity=identity,
         )
-        new_to_add = [(new_results[idx],s) for idx,s in enumerate(new_metadata) if s not in existing_metadata]
-        existing_results.extend([x[0] for x in new_to_add])
-        existing_metadata.extend([x[-1] for x in new_to_add])
-        #print(f"#### PROMPT_KEY_2 [ {prompt_key} ]  LEN_RESPONSE_OBJS: {len(response_objs)}  LEN_E_RESULTS: {len(existing_results)}  LEN_E_METADATA: {len(existing_metadata)}", flush=True)
 
-        cohort_ready = False
-        if len(response_objs) >= cfg.num_rollouts_per_prompt:
-            if len(response_objs) != cfg.num_rollouts_per_prompt:
-                print(f"#### BAD_PROMPT_KEY [ {prompt_key} ]  LEN_RESPONSE_OBJS: {len(response_objs)}  LEN_E_RESULTS: {len(existing_results)}  LEN_E_METADATA: {len(existing_metadata)}", flush=True)
-            assert len(response_objs) == cfg.num_rollouts_per_prompt, f"Len of response objs {len(response_objs)} does not equal num_rollouts {cfg.num_rollouts_per_prompt}"
-            assert len(existing_results) == len(existing_metadata)
-            if len(existing_metadata) < len(response_objs):
-                print(f"### SHOULD_NOT_HAPPEN1: len_response_obs: {len(response_objs)}  len_existing_results: {len(existing_metadata)}  existing_results: {existing_results}  existing_metadata: {existing_metadata}  new_results: {new_results}  new_metadata: {new_metadata}", flush=True)
-                new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
-                    conversation_history, response_objs, existing_metadata, principle_val, True
-                )
-                print(f"### SHOULD_NOT_HAPPEN2: len_response_obs: {len(response_objs)}  len_existing_results: {len(existing_results)}  existing_results: {existing_results}  existing_metadata: {existing_metadata}  new_results: {new_results}  new_metadata: {new_metadata}", flush=True)
-                new_to_add = [(new_results[idx],s) for idx,s in enumerate(new_metadata) if s not in existing_metadata]
-                existing_results.extend([x[0] for x in new_to_add])
-                existing_metadata.extend([x[-1] for x in new_to_add])
-            assert len(existing_results) == len(response_objs) and len(existing_metadata) == len(response_objs), f"FAILURE  existing_results: {existing_results}  existing_metadata: {existing_metadata}"
-            cohort_ready = True
-
-        # Only run for the final response
-        if cohort_ready:
-            existing_results, existing_metadata = _cohort_jit_buffers.pop(prompt_key)
-
-            # Sort to match the ordering of the original `_run_compare` logic
-            existing_results, existing_metadata = zip(
-                *sorted(
-                    zip(existing_results, existing_metadata), key=lambda pair: (pair[1][1], pair[1][0])
-                )
+        if not is_new:
+            logger.warning(
+                f"[GenRM] Repeated verify request for rollout_index={body.rollout_index} (task_index={body.task_index}, "
+                f"prompt_id={body.prompt_id}); waiting for the reward of the request that is already being handled"
+            )
+            # Shielded: cancelling this request must not cancel the future that the other requests are waiting on.
+            reward = await asyncio.shield(future)
+            return BaseVerifyResponse(
+                responses_create_params=body.responses_create_params,
+                response=body.response,
+                reward=reward,
             )
 
-            rewards, _, _, _ = aggregate_scores(
-                comparison_results=existing_results,
-                comparison_metadata=existing_metadata,
-                response_objs=response_objs,
-                aggregator_method=cfg.aggregator_method,
-                default_score=cfg.default_score,
-                reasoning_bonus=cfg.reasoning_bonus,
-                answer_bonus=cfg.answer_bonus,
-                top_percentile=cfg.top_percentile,
-                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
-                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
-            )
+        error: Optional[BaseException] = None
+        try:
+            judge_results = await self._judge_rollout(conversation_history, response_obj, principle)
+        except BaseException as e:  # Includes cancellation, e.g. the client disconnecting.
+            # Fill this member's slot with neutral results so the rest of the cohort is not left waiting.
+            error = e
+            judge_results = [(cfg.default_score, cfg.default_ranking)] * cfg.num_judges_per_comparison
 
-            cohort_buf = _cohort_buffers.pop(prompt_key)
-            for i, (_, f) in enumerate(cohort_buf):
-                if not f.done():
-                    f.set_result(rewards[i])
+        if error is None:
+            cohort.record(member_idx, judge_results)
+        else:
+            cohort.record_failure(member_idx, error, judge_results)
+        if cohort.is_complete:
+            self._finalize_cohort(cohort)
 
-        reward = await future
+        if error is not None:
+            raise error
+
+        # Shielded, because a repeated request may be waiting on the same future (see above).
+        reward = await asyncio.shield(future)
         return BaseVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
@@ -331,62 +345,84 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         app.post("/compare")(self.compare)
         return app
 
-    async def _run_jit_compare_using_most_recent_response_obj(
+    def _get_verify_cohort_key(
+        self,
+        body: GenRMCompareVerifyRequest,
+        input_messages: List[Any],
+        principle: Optional[str] = None,
+    ) -> str:
+        """Prefer task-scoped keys when available so identical prompt text from different tasks does not collide."""
+        prompt_key = get_prompt_key_from_input(input_messages, principle)
+        if body.task_index is not None:
+            return f"task_idx::{body.task_index}::{prompt_key}"
+        if body.prompt_id is not None:
+            return f"prompt_id::{body.prompt_id}::{prompt_key}"
+        return prompt_key
+
+    async def _judge_rollout(
         self,
         conversation_history: List[Dict[str, str]],
-        response_objs: List[Dict[str, Any]],
-        seen_comparison_metadata: List[Tuple[int, int]],
+        response_obj: Dict[str, Any],
         principle: Optional[str] = None,
-        final: bool = False,
-    ) -> Tuple[List[Tuple[float, float]], List[Tuple[int, int]]]:
-        #print("run_jit num_responses: ", len(response_objs), flush=True)
+    ) -> List[Tuple[float, float]]:
+        """Judge one rollout `num_judges_per_comparison` times, concurrently. Results are in judge order."""
+        results = await asyncio.gather(
+            *[
+                self._run_single_comparison(conversation_history, response_obj, principle=principle)
+                for _ in range(self.config.num_judges_per_comparison)
+            ]
+        )
+        return list(results)
+
+    def _finalize_cohort(self, cohort: Cohort) -> None:
+        """Compute the rewards of a fully judged cohort and resolve each member's future.
+
+        Called once, by the verify() call that records the last judge result. There is no await in here, so
+        no other task can observe the cohort half-finished.
+        """
         cfg = self.config
-        this_response_idx = len(response_objs) - 1
+        # From here on a repeat of one of its members is no longer recognized: it starts a cohort of its own.
+        _cohorts.finish(cohort)
+        try:
+            # Ordered by (judge_idx, member_idx), as in the original `_run_compare` logic.
+            comparison_results, comparison_metadata = cohort.ordered()
+            response_objs = [
+                (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response)
+                for b in cohort.payloads
+            ]
+            rewards, _, _, _ = aggregate_scores(
+                comparison_results=comparison_results,
+                comparison_metadata=comparison_metadata,
+                response_objs=response_objs,
+                aggregator_method=cfg.aggregator_method,
+                default_score=cfg.default_score,
+                reasoning_bonus=cfg.reasoning_bonus,
+                answer_bonus=cfg.answer_bonus,
+                top_percentile=cfg.top_percentile,
+                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
+                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+            )
+        except Exception as e:
+            # Fail every member instead of leaving the other callers waiting forever.
+            logger.exception("[GenRM] Failed to aggregate cohort scores")
+            for f in cohort.futures:
+                if not f.done():
+                    f.set_exception(e)
+                    f.exception()  # Mark as retrieved: not every future is awaited by someone.
+            return
 
-        comparison_pairs = list(range(cfg.num_rollouts_per_prompt))
-        comparison_tasks = []
-        comparison_metadata: List[Tuple[int, int]] = []
-        #print("run_jit comparison_pairs: ", comparison_pairs, flush=True)
-        #print("run_jit seen_comparison: ", seen_comparison_metadata, flush=True)
-        #print("run_jit this_response_idx: ", this_response_idx, flush=True)
-        for judge_idx in range(cfg.num_judges_per_comparison):
-            for i in comparison_pairs:
-                #print("run_jit now_processing i: ", i, flush=True)
-                # If one of the indices has not yet been run, continue
-                if not (i < len(response_objs)):
-                    #print("run_jit continue_1", flush=True)
-                    continue
-
-                # At least one of the indices must be this index
-                if i != this_response_idx and not final:
-                    #print("run_jit continue_2", flush=True)
-                    continue
-
-                this_comparison_metadata = (i, judge_idx)
-                #print("run_jit this_comparison_metadata: ", this_comparison_metadata, flush=True)
-
-                # Don't double count since this will trigger when both i and j are finished.
-                if this_comparison_metadata in seen_comparison_metadata + comparison_metadata:
-                    #print("run_jit continue_3", flush=True)
-                    continue
-
-                #print("run_jit comparison_tasks_append", flush=True)
-                comparison_tasks.append(
-                    self._run_single_comparison(
-                        conversation_history,
-                        response_objs[i],
-                        #response_objs[j],
-                        #pair_idx=(i, j),
-                        principle=principle,
-                    )
+        for member_idx, (reward, f) in enumerate(zip(rewards, cohort.futures)):
+            if f.done():
+                continue
+            if member_idx in cohort.failures:
+                # The request that judged this rollout raised its own error. Only a repeat of that request can be
+                # waiting here, and it must not be given the neutral reward that stands in for the missing judgment.
+                f.set_exception(
+                    MemberJudgmentFailed(f"The request judging this rollout failed: {cohort.failures[member_idx]!r}")
                 )
-                comparison_metadata.append(this_comparison_metadata)
-                #print("run_jit comparison_tasks_done", flush=True)
-
-        comparison_results = await asyncio.gather(*comparison_tasks)
-        #print(f"run_jit all_done:  comparison_results: {comparison_results}  comparison_metadata: {comparison_metadata}", flush=True)
-
-        return comparison_results, comparison_metadata
+                f.exception()  # Mark as retrieved: usually nobody is waiting on it.
+            else:
+                f.set_result(reward)
 
     async def _run_compare(
         self,
@@ -570,16 +606,25 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 raw_response_score = await response_score.json()
                 #print("### RAW_RESPONSE_SCORE: ", raw_response_score, flush=True)
                 
-                score = -999
-                for possible_tokens in raw_response_score['choices'][0]['logprobs']['content'][-1]['top_logprobs']:
+                top_logprobs = raw_response_score['choices'][0]['logprobs']['content'][-1]['top_logprobs']
+                score = None
+                for possible_tokens in top_logprobs:
                     if possible_tokens['token'] == cfg.score_token:
                         score = math.exp(possible_tokens['logprob'])
                         break
-                if score == -999:
-                    for possible_tokens in raw_response_score['choices'][0]['logprobs']['content'][-1]['top_logprobs']:
+                if score is None:
+                    for possible_tokens in top_logprobs:
                         if possible_tokens['token'].lower().strip() == cfg.score_token:
                             score = math.exp(possible_tokens['logprob'])
                             break
+                if score is None:
+                    # A token outside the top-k has a probability of at most 1/k, so 0 is the right order of magnitude.
+                    # This is also what happens, for every rollout, if `score_token` does not match the model's tokens.
+                    logger.warning(
+                        f"[GenRM] Score token {cfg.score_token!r} not found in the top {len(top_logprobs)} logprobs "
+                        f"{[t['token'] for t in top_logprobs]}; using a BT score of 0.0"
+                    )
+                    score = 0.0
                 print("### BT_SCORE: ", score, flush=True)
 
                 try:

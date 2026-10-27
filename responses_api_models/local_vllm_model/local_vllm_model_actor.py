@@ -59,6 +59,8 @@ class LocalVLLMModelActor:
         # vLLM doesn't expose a config for this yet, so we need to pass via environment variable.
         self.env_vars["VLLM_DP_MASTER_IP"] = node_ip  # This is the master node.
 
+        self._patch_openai_namespace_tool()
+        self._backfill_server_args()
         self._patch_signal_handler()
         self._patch_uvicorn_logger()
         self._maybe_patch_engine_stats()
@@ -70,6 +72,35 @@ class LocalVLLMModelActor:
 
         self.server_thread = Thread(target=_vllm_asyncio_task, args=(server_args,), daemon=True)
         self.server_thread.start()
+
+    def _patch_openai_namespace_tool(self) -> None:
+        # vLLM >= 0.25 imports openai.types.responses.NamespaceTool (added in openai 2.25).
+        # Gym pins an older openai, so provide a never-matching stand-in. It is only used in
+        # isinstance checks for Responses-API namespace tools, which an older client cannot build.
+        import openai.types.responses as responses
+
+        if not hasattr(responses, "NamespaceTool"):
+
+            class NamespaceTool:
+                pass
+
+            responses.NamespaceTool = NamespaceTool
+
+    def _backfill_server_args(self) -> None:
+        # app.py parses server_args with the vLLM in the Gym server venv, but this actor may run under a
+        # different vLLM (ray_worker_py_executable). Flags added in the newer vLLM are then missing from the
+        # Namespace and vLLM reads them unconditionally, e.g. get_non_default_args -> getattr(args, name).
+        # Fill the missing ones with this vLLM's own parser defaults. Flags that were renamed or removed
+        # between the two versions are not translated.
+        from vllm.entrypoints.openai.api_server import FlexibleArgumentParser, make_arg_parser
+
+        defaults = make_arg_parser(FlexibleArgumentParser()).parse_args([])
+        missing = {k: v for k, v in vars(defaults).items() if not hasattr(self.server_args, k)}
+        for k, v in missing.items():
+            setattr(self.server_args, k, v)
+
+        if missing:
+            print(f"Backfilled vLLM serve args missing from the parent's vLLM version: {sorted(missing)}")
 
     def _patch_signal_handler(self) -> None:
         # Pass through signal setting not allowed in threads.

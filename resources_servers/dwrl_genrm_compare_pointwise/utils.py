@@ -65,7 +65,7 @@ EMPTY_OUTPUT_PLACEHOLDER = "None"
 class GenRMOutputParseError(ValueError):
     """Raised when GenRM output cannot be parsed into expected JSON scores.
 
-    Expected format: {"score_1": <1-5>, "score_2": <1-5>, "ranking": <1-6>}
+    Expected format: {"score_1": <1-5>}
     """
 
     pass
@@ -190,31 +190,30 @@ def parse_genrm_output(
     default_score: float,
     *,
     raise_on_fail: bool = False,
-) -> Tuple[float, float, float]:
-    """Parse GenRM output to extract scores from JSON format.
+) -> float:
+    """Parse GenRM output to extract the pointwise score from JSON format.
 
     Searches for JSON in the output text, trying:
     1. Fenced JSON blocks (```json {...} ```)
     2. Any {...} JSON objects, taking the last valid one
 
     Expected JSON format:
-        {"score_1": <1-5>, "score_2": <1-5>, "ranking": <1-6>}
+        {"score_1": <1-5>}
 
     Args:
         output: Raw text output from GenRM model
         default_score: Default score if parsing fails
-        default_ranking: Default ranking if parsing fails
         raise_on_fail: If True, raise GenRMOutputParseError on failure
 
     Returns:
-        Tuple of (score_1, score_2, ranking)
+        The parsed score_1
 
     Raises:
         GenRMOutputParseError: If raise_on_fail=True and parsing fails
     """
 
-    def _try_parse(json_str: str) -> Optional[Tuple[float, float, float]]:
-        """Attempt to parse a JSON string into scores."""
+    def _try_parse(json_str: str) -> Optional[float]:
+        """Attempt to parse a JSON string into a score."""
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError:
@@ -227,8 +226,8 @@ def parse_genrm_output(
         if "overall" in parsed and isinstance(parsed["overall"], dict):
             parsed = parsed["overall"]
 
-        # Must have at least one expected key
-        if not any(k in parsed for k in ("score_1")):
+        # Must have the expected key
+        if "score_1" not in parsed:
             return None
 
         try:
@@ -283,7 +282,7 @@ def parse_genrm_output(
         #
         # Note: We keep this intentionally permissive because model outputs can include
         # extra prose around a JSON blob, and the JSON may be pretty-printed across lines.
-        last_valid: Optional[Tuple[float, float, float]] = None
+        last_valid: Optional[float] = None
         for json_str in _find_json_objects(output):
             result = _try_parse(json_str)
             if result is not None:
