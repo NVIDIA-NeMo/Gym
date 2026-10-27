@@ -69,28 +69,39 @@ gym env start \
   --resources-server agentic_turn_simulation \
   --model-type vllm_model \
   --model-url http://<policy-host>:8000/v1 --model <policy-model-name> --model-api-key EMPTY \
-  +judge_base_url=http://<judge-host>:8000/v1 +judge_api_key=EMPTY +judge_model_name=<judge-model-name> \
-  ++policy_model.responses_api_models.vllm_model.propagate_context_overflow_errors=true
+  +judge_base_url=http://<judge-host>:8000/v1 +judge_api_key=EMPTY +judge_model_name=<judge-model-name>
 
 # Rollouts on the example rows (terminal 2)
 gym eval run --no-serve \
   --agent agentic_turn_simulation_agent \
   --input resources_servers/agentic_turn_simulation/data/example.jsonl \
   --output results/agentic_turn_simulation_example.jsonl \
-  --num-repeats 1 --temperature 1.0 --max-output-tokens 32768
+  --num-repeats 1 --temperature 1.0 --max-output-tokens 65536
 ```
 
 - Outputs land next to `--output`: one rollout per line (`reward`, the verdicts, `stop_reason`, `mask_sample`,
   `failure_kind`), the metrics in `..._aggregate_metrics.json` (see [Scoring](#scoring)), and
   `..._materialized_inputs.jsonl`, which `gym eval reverify` and `gym eval profile` read. A rollout whose `/run`
   fails ends the run; add `++route_failures_to_sidecar=true` to record it in `..._failures.jsonl` and keep going.
-- `propagate_context_overflow_errors` lets the agent tell a context overflow from a truncated reply and shrink its
-  output budget to fit. Without it, a row that does not fit ends as `max_output_tokens` and scores 0 instead of
-  being masked.
 - Run one resources-server worker (`num_workers` unset or 1, the default): sessions live in its memory, and a call
   that reaches another worker finds no session.
 - The simulator and judge set throughput. For more than a few hundred rollouts, or to serve them from separate models,
   see [docs/training.md](docs/training.md#serving-the-simulator-and-the-judge).
+
+### Reference evaluation settings
+
+Reference evaluations use these settings:
+
+- 4 repeats per row (`--num-repeats 4`) and a policy reply budget of 65,536 tokens (`--max-output-tokens 65536`).
+- Agent caps `max_time_seconds` 1,200 (set with
+  `++agentic_turn_simulation_agent.responses_api_agents.agentic_turn_simulation_agent.max_time_seconds=1200` on
+  `gym env start`) and `max_steps` 50 (the default).
+- A GLM 5.3-class reasoning model as simulator and judge, at reasoning effort `high` and temperature 1 (the shipped
+  defaults).
+
+The turn's time cap counts wall time, the waits for simulated tool calls included, and the simulator and judge share
+one model server by default. Serve enough simulator and judge capacity, about 20 rollouts in flight per replica:
+otherwise more turns hit the cap and are masked, and the score leaves out the slowest turns.
 
 ## Scoring
 

@@ -37,8 +37,8 @@ episode loop.
   only text is kept as a step (on Cline rows the XML calls it completed run); one with a tool call, or with nothing
   visible, ends the turn as `max_output_tokens`, its calls unrun. When the prompt fits but prompt plus budget does
   not, the budget shrinks to what fits (and never grows again). Retries are not steps. Shrinking needs the overflow
-  error from the model server: set `propagate_context_overflow_errors: true` on a `vllm_model` policy. Any other
-  model-server error fails the rollout.
+  error from the model server (`propagate_context_overflow_errors: true` on a `vllm_model` policy; with Gym's default,
+  false, an overflow comes back as an empty cut-off reply). Any other model-server error fails the rollout.
 
 ## Token usage
 

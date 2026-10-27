@@ -179,7 +179,7 @@ gym eval run --no-serve \
   --agent agentic_turn_simulation_agent \
   --input data/candidates.jsonl \
   --output results/profile.jsonl \
-  --num-repeats 4 --temperature 1.0 --max-output-tokens 32768
+  --num-repeats 4 --temperature 1.0 --max-output-tokens 65536
 
 gym eval profile \
   --inputs results/profile_materialized_inputs.jsonl \

@@ -72,8 +72,7 @@ gym env start \
   --model-api-key EMPTY \
   +judge_base_url=http://<judge-host>:8000/v1 \
   +judge_api_key=EMPTY \
-  +judge_model_name=<judge-model-name> \
-  ++policy_model.responses_api_models.vllm_model.propagate_context_overflow_errors=true
+  +judge_model_name=<judge-model-name>
 ```
 
 ## Wall-clock caps and masking
@@ -83,10 +82,10 @@ gym env start \
   rollouts are masked depends on serving speed.
 - **Expect masked rollouts from the start**, mostly time caps, which track simulator and judge load more than the
   policy. Rows too long for the policy are masked only when the policy server reports the overflow
-  (`propagate_context_overflow_errors`, set above); without it they end as `max_output_tokens` and score 0. Filter them
-  out either way ([Data selection](#data-selection)). Gym's `coverage/masked_rollouts` counts masked rollouts (it
-  appears once at least one is masked); no metric breaks them down by reason, so count `failure_kind` in the rollouts
-  file ([snippet](../README.md#reporting-an-eval)).
+  (`propagate_context_overflow_errors: true` on a `vllm_model` policy; Gym's default is false); without it they end
+  as `max_output_tokens` and score 0. Filter them out either way ([Data selection](#data-selection)). Gym's
+  `coverage/masked_rollouts` counts masked rollouts (it appears once at least one is masked); no metric breaks them
+  down by reason, so count `failure_kind` in the rollouts file ([snippet](../README.md#reporting-an-eval)).
 - **Step and output caps score 0.** A turn that ends on `max_steps`, `max_output_tokens`, a context overflow after
   its first step or an empty final reply (`empty_output`) scores 0 without a judge (`unfinished_turn`), so the reward
   pushes the policy to converge within the caps ([why](design.md#masking)). Keep `max_steps` high enough that correct
