@@ -236,6 +236,40 @@ async def test_a_restored_cohort_nothing_continues_from_is_dropped(config, how):
     await restored.aclose()
 
 
+async def test_a_restored_cohort_pruned_before_its_retire_lets_the_group_re_form(config):
+    """A failed restore marks its sessions retired before it frees them. A prune in between drops the restored
+    cohort first; it must take the restored watermark too, or the restarted rollouts are refused."""
+    config = config.model_copy(update={"max_terminal_cohorts": 1, "cohort_result_ttl_s": None})
+    server, participant = seeded(config)
+    await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
+    records = await participant.export(None)
+    await server.aclose()
+
+    restored, restored_participant = await restore(config, records)
+    replacements = [next_attempt(episode) for episode in EPISODES]
+    await restored_participant.mark_retired(replacements)
+    # A failed group without an ID adds a second result; the attempt-record order stays within the limit.
+    restored.config.cohort_collection_timeout_s = 0.01
+    with pytest.raises(genrm.HTTPException, match="did not collect"):
+        await verify_as(restored, "legacy", member(0, group=None))
+    restored._prune_terminal_cohorts()
+    # The prune reached the restored cohort before its retire did.
+    assert "group_id::group::group_attempt::0" not in restored._verify_cohorts
+    for replacement in replacements:
+        await restored_participant.retire(replacement)
+    assert restored._latest_group_attempts == {} and restored._idle_groups == {}
+
+    restored.config.cohort_collection_timeout_s = 1.0
+    rewards = await asyncio.wait_for(
+        asyncio.gather(
+            *(verify_as(restored, f"fresh-{index}", member(index, answer=f"new-{index}")) for index in range(2))
+        ),
+        timeout=0.5,
+    )
+    assert all(reward.reward == 3.0 for reward in rewards)
+    await restored.aclose()
+
+
 async def test_a_restored_cohort_stays_once_a_member_has_replayed(config):
     sessions = ["s0", "s1", "s2"]
     config3 = config.model_copy(update={"num_rollouts_per_prompt": 3})
