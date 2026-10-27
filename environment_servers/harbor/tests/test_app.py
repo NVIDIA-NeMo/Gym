@@ -27,6 +27,7 @@ import nemo_gym.sandbox.providers.base as sandbox_base
 from environment_servers.harbor.app import (
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
+    HarborEpisodeRequest,
 )
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S, _is_image_pull_failure
 from environment_servers.harbor.tests.conftest import (
@@ -63,16 +64,20 @@ from environment_servers.harbor.verifier import (
     _verifier_start,
     parse_exit_record,
     parse_reward_file,
+    reward_components,
     select_reward,
+    summing_components,
     verifier_command,
 )
 from nemo_gym import failure_kinds
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import load_task
+from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.models import HarborEnvironment
@@ -123,9 +128,22 @@ class TestRewardFile:
         (tmp_path / "reward.json").write_text(json.dumps({"accuracy": 1, "speed": 0.25}))
         rewards, problem = parse_reward_file(tmp_path)
         assert problem is None and rewards == {"accuracy": 1.0, "speed": 0.25}
-        assert select_reward(rewards) is None
-        assert select_reward({"accuracy": 0.25}) == 0.25
+        # Without a `reward` key every key is a component and the reward is their sum; with one, the other keys
+        # are metrics and there are no components to name.
+        assert select_reward(rewards) == 1.25 and reward_components(rewards) == rewards
+        assert select_reward({"accuracy": 0.25}) == 0.25 and reward_components({"accuracy": 0.25}) == {
+            "accuracy": 0.25
+        }
         assert select_reward({"reward": 1.0, "other": 0.0}) == 1.0
+        assert reward_components({"reward": 1.0, "other": 0.0}) is None
+        # Finite keys whose sum is not: no reward.
+        assert select_reward({"a": 1e308, "b": 1e308}) is None
+
+    def test_components_must_sum_to_the_reward(self):
+        assert summing_components(1.0, {"a": 0.5, "b": 0.5}) == {"a": 0.5, "b": 0.5}
+        assert summing_components(0.3, {"a": 0.1, "b": 0.2}) == {"a": 0.1, "b": 0.2}  # within tolerance
+        assert summing_components(1.0, {"a": 0.5}) is None
+        assert summing_components(1.0, None) is None
 
     @pytest.mark.parametrize(
         ("name", "text", "fragment"),
@@ -254,6 +272,36 @@ class TestEpisode:
         assert payload["episode_id"] == {"rollout_id": "r1", "attempt": 0}
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
+
+    async def test_a_flat_single_turn_row_runs_as_the_canonical_one(self, tmp_path, monkeypatch):
+        """Review (CI bot, round 34): a single-turn `/run` request with the task fields beside
+        `responses_create_params` (the flat shape `SingleAgentTurnTaskInput` accepted before `HarborTaskInput`
+        replaced it) was rejected by the request schema before execution. It is the canonical row once validated,
+        and runs as it does."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        canonical = episode(task)
+        flat = HarborEpisodeRequest.model_validate(
+            {
+                "episode_id": {"rollout_id": "r1", "attempt": 0},
+                "task": {
+                    "task_id": {"taskset": "ds", "task_id": "hello"},
+                    "task_input": {
+                        "responses_create_params": {"input": [{"role": "user", "content": "Create hello.txt"}]},
+                        DIGEST_KEY: task.digest,
+                    },
+                },
+            }
+        )
+        assert flat.task.task_input == canonical.task.task_input
+        assert flat.model_dump(mode="json", exclude_unset=True) == canonical.model_dump(
+            mode="json", exclude_unset=True
+        )
+
+        response = await server.run_request(flat)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_rewards == {"reward": 1.0}
+        assert any("test.sh" in call["command"] and "timeout" in call["command"] for call in sandbox.execs)
 
     async def test_episodes_parse_and_hash_the_task_once(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
@@ -438,6 +486,21 @@ class TestDefaultUser:
         with caplog.at_level("WARNING"):
             assert (await run_episode(server, task, rollout="r2")).failure is None
         assert sandbox.default_user == 1000 and "USER 1000 names no user" in caplog.text
+
+    async def test_an_unnamed_numeric_agent_user_reaches_the_harness_as_the_integer_uid(self, tmp_path, monkeypatch):
+        """Review (CI bot, round 34): the harness was handed `[agent].user` as the task wrote it, the string
+        `"4242"`, while the seed had installed the integer uid (no passwd entry) as the sandbox's default; OpenSandbox
+        takes the string for an account name. The harness gets the user as installed: the integer."""
+        toml = TASK_TOML.replace("[agent]\ntimeout_sec = 300.0", "[agent]\ntimeout_sec = 300.0\nuser = 4242")
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        assert task.user == "4242"
+        assert (await run_episode(server, task)).failure is None
+        assert sandbox.default_user == 4242
+        (seed,) = server.server_client.seed_bodies()
+        assert seed["sandbox_access"]["user"] == 4242 and type(seed["sandbox_access"]["user"]) is int
 
     async def test_named_user_is_set_as_the_default_after_seed(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nUSER agent\n")
@@ -994,6 +1057,11 @@ TASK_TOOL_CONTEXT_DECLARATIONS = {
     "mcp_servers": '[[environment.mcp_servers]]\nname = "playwright"\ntransport = "sse"\nurl = "http://api:3080/sse"\n',
     "skills_dir": 'skills_dir = "/app/.skills"\n',
 }
+# A Compose sidecar's MCP server, the kind `task_mcp_grants` can grant (SWE-Interact's simulated user).
+GRANTABLE_MCP_SERVER = (
+    '[[environment.mcp_servers]]\nname = "user-server"\ntransport = "streamable-http"\n'
+    'url = "http://user-server:8000/mcp"\n'
+)
 
 
 def http_error_with_body(status: int, body: bytes) -> ClientResponseError:
@@ -1067,6 +1135,69 @@ class TestAgentStage:
         assert response.failure is None, response.failure
         assert response.result.reward == 1.0
         assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_a_task_whose_mcp_servers_are_all_granted_as_required_runs_on_a_harness_without_task_json(
+        self, tmp_path, monkeypatch
+    ):
+        """Hermes or Pi read no task.json, but take required MCP grants, or fail their seed when they cannot."""
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER, task_mcp_grants="required"
+        )
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        (seed,) = server.server_client.seed_bodies()
+        assert [(access["name"], access["required"]) for access in seed["tool_accesses"]] == [("user-server", True)]
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_a_grant_the_tool_access_schema_rejects_is_a_staged_terminal_failure(self, tmp_path, monkeypatch):
+        """The grant lookup runs inside the seed's try: a declaration the grant schema refuses (a name the session
+        contract does not accept) fails the episode at stage agent, terminal, instead of escaping as a 500."""
+        bad = GRANTABLE_MCP_SERVER.replace('name = "user-server"', 'name = "user server"')
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + bad, task_mcp_grants="required")
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "agent" and failure.terminal
+        assert not server.server_client.seed_bodies()
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+
+    @pytest.mark.parametrize(
+        ("grants", "declaration", "unreached"),
+        [
+            ("off", None, "MCP server 'user-server'"),
+            # An optional grant may be skipped by the harness without failing its seed.
+            ("optional", None, "MCP server 'user-server'"),
+            # Only streamable-http entries can be granted; an SSE server still needs task.json.
+            ("required", "mcp_servers", "MCP server 'playwright'"),
+            # A skills directory has no grant at all.
+            ("required", "skills_dir", "skills_dir"),
+        ],
+    )
+    async def test_task_tools_no_required_grant_covers_are_still_refused(
+        self, tmp_path, monkeypatch, grants, declaration, unreached
+    ):
+        extra = TASK_TOOL_CONTEXT_DECLARATIONS[declaration] if declaration else ""
+        # `skills_dir` belongs to the [environment] table, so it goes before the array-of-tables entry.
+        toml = TASK_TOML + extra + GRANTABLE_MCP_SERVER
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, task_mcp_grants=grants)
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "agent" and failure.terminal
+        assert unreached in failure.failure_reason
+        assert ("MCP server 'user-server'" in failure.failure_reason) is (grants != "required")
+        # The grant hint is offered only when it would help: an ungranted streamable-http server and grants not
+        # already required. An SSE server or a skills_dir under required grants gets no such advice.
+        assert ("task_mcp_grants: required" in failure.failure_reason) is (grants != "required")
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
 
     async def test_a_task_without_tool_declarations_runs_on_any_harness(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
@@ -1171,6 +1302,58 @@ class TestAgentStage:
         assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"
         assert not any("test.sh" in call["command"] for call in sandbox.execs)
         assert sandbox.stopped
+
+    @staticmethod
+    def failed_turn(outcome: str) -> dict:
+        response = agent_response().model_dump(mode="json")
+        response.update(
+            status="failed",
+            error={"code": "server_error", "message": "stream disconnected before completion"},
+            metadata={AGENT_OUTCOME_METADATA_KEY: outcome},
+        )
+        return response
+
+    @pytest.mark.parametrize(
+        ("outcome", "terminal"),
+        [('{"failure_kind":"unknown"}', False), ('{"failure_kind":"model_transport_error"}', False), ("{", True)],
+        ids=["unknown-retried", "transport-retried", "malformed-failed"],
+    )
+    async def test_failed_agent_response_is_not_scored(self, tmp_path, monkeypatch, outcome, terminal):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.turn_response = self.failed_turn(outcome)
+        server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+
+        response = await run_episode(server, task)
+
+        assert response.result is None
+        assert response.failure.stage == "agent" and response.failure.terminal is terminal
+        assert response.failure.failure_reason == "stream disconnected before completion"
+        assert response.failure.partial_response.status == "failed"
+        assert response.failure.agent_observations is not None
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+        assert sandbox.stopped and not server._sandboxes
+
+    async def test_failed_agent_response_with_a_verify_cause_is_scored(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.turn_response = self.failed_turn('{"failure_kind":"agent_limit"}')
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.response.status == "failed"
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_agent_outcome_policy_is_configurable(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.agent_outcome_policy = AgentOutcomePolicyConfig(
+            by_failure_kind={"unknown": OutcomeAction.VERIFY}
+        )
+        server.server_client.turn_response = self.failed_turn('{"failure_kind":"unknown"}')
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
 
     async def test_failed_close_is_a_cleanup_failure_with_the_turn_attached(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
@@ -1362,20 +1545,43 @@ class TestVerify:
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
         assert task.config.verifier.user is None and run["user"] == "app"
 
-    async def test_json_reward_with_components(self, tmp_path, monkeypatch):
+    async def test_json_reward_key_makes_the_other_keys_metrics(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"reward": 0.5, "tests_passed": 3})})
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         assert response.result.reward == 0.5
         assert response.result.verifier_rewards == {"reward": 0.5, "tests_passed": 3.0}
+        # `tests_passed` does not sum to the reward, so the row names no components at all (not a null).
+        assert response.result.reward_components is None
+        assert "reward_components" not in response.result.model_dump(mode="json")
 
-    async def test_ambiguous_reward_is_a_terminal_verification_failure(self, tmp_path, monkeypatch):
-        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 1, "b": 0})})
+    async def test_several_keys_without_reward_are_summed_components(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 0.75, "b": 0.25})})
         _, _, sandbox, response = await self.verified(tmp_path, monkeypatch, sandbox)
-        failure = response.failure
-        assert failure.stage == "verification" and failure.terminal
-        assert "several keys" in failure.failure_reason
-        assert failure.partial_response.id == "response"
+        result = response.result
+        assert response.failure is None and result.reward == 1.0 and result.failure_kind is None
+        assert result.reward_components == {"a": 0.75, "b": 0.25}
+        assert result.verifier_rewards == {"a": 0.75, "b": 0.25}
+        dumped = result.model_dump(mode="json")
+        assert sum(dumped["reward_components"].values()) == dumped["reward"]
         assert sandbox.stopped
+
+    async def test_one_key_without_reward_is_its_own_component(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"accuracy": 0.25})})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.reward == 0.25 and response.result.reward_components == {"accuracy": 0.25}
+        # reward.txt is a `reward` key.
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, FakeSandbox(verifier_files={"reward.txt": "1"}))
+        assert response.result.reward == 1.0 and response.result.reward_components is None
+
+    async def test_components_that_overflow_are_an_invalid_reward(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 1e308, "b": 1e308})})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert (
+            result.failure_kind == "harbor:invalid_reward" and "do not sum to a finite reward" in result.failure_reason
+        )
+        assert result.reward_components is None and result.verifier_return_code == 0
 
     async def test_missing_reward_scores_zero_and_is_measured(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(
@@ -2541,6 +2747,39 @@ class TestComposeAndRouting:
         )
         return captured
 
+    def test_a_sidecar_without_deploy_resources_is_warned_about_once_per_task(self, tmp_path, monkeypatch, caplog):
+        """G7 round 24, attempts 6 and 7: a Compose sidecar without `deploy.resources` gets the provider's default
+        sandbox size (`_sidecar_spec` hands the adapter no task resources), where Harbor's `docker compose` gives it
+        the host's, and the WebShop sidecar died at start for it. The default is unchanged; the seed now says, once
+        per task, which sidecars run at it and where a size goes, and a sized sidecar is not named."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  api:\n    image: org/api:1\n    expose: ['8080']\n"
+            "  kafka:\n    image: org/kafka:1\n    deploy:\n      resources:\n        limits:\n          memory: 2g\n"
+            "  cache:\n    image: org/api:1\n    cpus: 1\n"
+        )
+        for image in ("org/api:1", "org/kafka:1"):
+            write_image_config(task.path.parent, image, **IMAGE_CONFIGS[image]["config"])
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        captured = self.capture_compose_specs(monkeypatch)
+
+        with caplog.at_level("WARNING", logger="environment_servers.harbor.sandboxes"):
+            asyncio.run(server._create_compose(task, "r1"))
+            asyncio.run(server._create_compose(task, "r2"))
+
+        warnings = [r.getMessage() for r in caplog.records if "deploy.resources" in r.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("hello: Compose service(s) api declare no deploy.resources")
+        assert "sandbox provider's default size" in warnings[0] and "deploy.resources.limits" in warnings[0]
+        assert "kafka" not in warnings[0] and "cache" not in warnings[0]
+        # The sizes themselves are the adapter's to apply from the document: the specs still carry no task resources.
+        from nemo_gym.sandbox import SandboxResources
+
+        assert captured["specs"]["api"].resources == SandboxResources()
+        assert captured["specs"]["kafka"].resources == SandboxResources()
+
     def test_main_env_layers_image_env_under_the_compose_file_under_the_host_resolved_task_env(
         self, tmp_path, monkeypatch
     ):
@@ -3618,6 +3857,7 @@ def test_server_config_holds_only_deployment_settings():
     own = set(HarborEnvironmentServerConfig.model_fields) - set(BaseEnvironmentServerConfig.model_fields)
     assert own == {
         "agent_server",
+        "agent_outcome_policy",
         "tasksets",
         "sandbox_provider",
         "sandbox_ready_timeout_s",
@@ -3634,6 +3874,8 @@ def test_server_config_holds_only_deployment_settings():
         "harness_setup_allowance_s",
         "image_pull_retries",
         "separate_verifier_for_artifacts",
+        "task_mcp_grants",
+        "compose_variables",
     }
     source = inspect.getsource(HarborEnvironmentServerConfig).lower()
     assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))
@@ -4699,3 +4941,214 @@ class TestGeneralization:
             and escaped.failure.terminal
             and "invalid path" in escaped.failure.failure_reason
         )
+
+
+class TestVerifierNetwork:
+    """``[verifier].network_mode`` is the separate verifier sandbox's egress policy, applied when it is created.
+
+    OpenSandbox cannot switch a running sandbox from public to restricted (its egress API only patches rules
+    under the ``defaultAction`` the sandbox was created with), so the agent's sandbox stays as it is and the
+    phase policy shapes the verifier's own sandbox; any provider that cannot enforce it is refused at seed.
+    """
+
+    NO_NETWORK_TOML = SEPARATE_TOML.replace("[verifier]\n", '[verifier]\nnetwork_mode = "no-network"\n')
+    ALLOWLIST_TOML = SEPARATE_TOML.replace(
+        "[verifier]\n",
+        '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["PyPI.org", "*.nvidia.com", "pypi.org", "10.0.0.7"]\n',
+    )
+
+    def prepared(self, tmp_path, monkeypatch, *, toml, provider="opensandbox", **config):
+        agent = AgentSandbox()
+        server, task, _, created = make_server(tmp_path, monkeypatch, agent, **config)
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
+        )
+        verifier = FakeSandbox()
+        specs: list[SandboxSpec] = []
+
+        async def start_with_pull_retries(task, *, key, what, make, start):
+            # The real `_create_verifier_sandbox` built the spec; it reaches the provider through `start`.
+            class Starter:
+                async def start(self, spec):
+                    specs.append(spec)
+
+            assert agent.stopped, "the agent sandbox must be stopped before the verifier is created"
+            await start(Starter())
+            server._sandboxes[key] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_start_with_pull_retries", start_with_pull_retries)
+        return server, task, agent, verifier, specs, created
+
+    async def test_no_network_verifier_is_created_under_a_deny_all_policy(self, tmp_path, monkeypatch):
+        server, task, agent, verifier, specs, _ = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        response = await run_episode(server, task)
+        result = response.result
+        assert result is not None, response.failure
+        assert (result.reward, result.verifier_mode, result.verifier_network) == (1.0, "separate", "no-network")
+        (spec,) = specs
+        assert spec.image == "org/verifier:1"
+        assert spec.provider_options == {"network_policy": {"defaultAction": "deny", "egress": []}}
+        # The agent's own sandbox is created as before: public, with the deployment's options only.
+        assert "network_policy" not in server._sandbox_spec(task, "/app").provider_options
+        assert verifier.stopped and agent.stopped
+
+    async def test_allowlist_hosts_become_allow_rules_in_order_without_repeats(self, tmp_path, monkeypatch):
+        server, task, _, _, specs, _ = self.prepared(tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML)
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "allowlist"
+        assert specs[0].provider_options["network_policy"] == {
+            "defaultAction": "deny",
+            "egress": [
+                {"action": "allow", "target": "pypi.org"},
+                {"action": "allow", "target": "*.nvidia.com"},
+                {"action": "allow", "target": "10.0.0.7"},
+            ],
+        }
+
+    @pytest.mark.parametrize(
+        "deny",
+        [
+            {"defaultAction": "deny", "egress": [{"action": "allow", "target": "mirror.internal"}]},
+            # OpenSandbox reads a policy that names no defaultAction as deny.
+            {"egress": [{"action": "allow", "target": "mirror.internal"}]},
+            # Even a deployment that already allows every host the task names: the rule has no host matching.
+            {
+                "defaultAction": "deny",
+                "egress": [{"action": "allow", "target": t} for t in ("pypi.org", "*.nvidia.com", "10.0.0.7")],
+            },
+        ],
+        ids=["explicit-deny", "implicit-deny", "hosts-already-allowed"],
+    )
+    async def test_an_allowlist_cannot_widen_a_deny_by_default_deployment(self, tmp_path, monkeypatch, deny):
+        """The task's policy replaces the deployment's for the verifier sandbox, so under a deny-by-default
+        deployment a task allowlist would open hosts the operator closed; refused at seed, before any sandbox,
+        naming the hosts and the one remedy (an allow-by-default deployment), rather than intersected: there is
+        no host matching to get subtly wrong, so a deployment that happens to allow the same hosts is refused too."""
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML, sandbox_provider_options={"network_policy": deny}
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "[verifier] network policy" in failure.failure_reason
+        assert "allowed_hosts pypi.org, *.nvidia.com, 10.0.0.7 would widen this deployment's deny-by-default" in (
+            failure.failure_reason
+        )
+        assert "run the task on an allow-by-default deployment" in failure.failure_reason
+        assert created == [] and specs == []
+        # The deployment's options are not mutated.
+        assert server.config.sandbox_provider_options["network_policy"] == deny
+
+    async def test_an_empty_allowlist_is_no_network_and_passes_under_a_deny_by_default_deployment(
+        self, tmp_path, monkeypatch
+    ):
+        toml = self.ALLOWLIST_TOML.replace('["PyPI.org", "*.nvidia.com", "pypi.org", "10.0.0.7"]', "[]")
+        assert "allowed_hosts = []" in toml, toml
+        deny = {"defaultAction": "deny", "egress": []}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path, monkeypatch, toml=toml, sandbox_provider_options={"network_policy": deny}
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+
+    async def test_an_empty_network_policy_is_deny_all_and_refuses_an_allowlist_but_not_no_network(
+        self, tmp_path, monkeypatch
+    ):
+        """Review (round 36): `network_policy: {}` is deny-all in the 0.1.15 SDK (no `defaultAction` reads as deny,
+        no rules), so it is a present deny-by-default policy, not an absent one: a task allowlist is refused with the
+        same message, and `no-network` only narrows it and passes."""
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML, sandbox_provider_options={"network_policy": {}}
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "allowed_hosts pypi.org, *.nvidia.com, 10.0.0.7 would widen this deployment's deny-by-default" in (
+            failure.failure_reason
+        )
+        assert created == [] and specs == []
+        assert server.config.sandbox_provider_options["network_policy"] == {}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path / "no-network",
+            monkeypatch,
+            toml=self.NO_NETWORK_TOML,
+            sandbox_provider_options={"network_policy": {}},
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "no-network"
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+
+    async def test_a_network_policy_that_is_not_a_mapping_is_refused_at_seed(self, tmp_path, monkeypatch):
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML, sandbox_provider_options={"network_policy": "deny"}
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "sandbox_provider_options.network_policy must be a mapping, got str" in failure.failure_reason
+        assert created == [] and specs == []
+
+    async def test_no_network_only_narrows_a_deny_by_default_deployment_and_passes(self, tmp_path, monkeypatch):
+        deny = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "mirror.internal"}]}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, sandbox_provider_options={"network_policy": deny}
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "no-network"
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+
+    async def test_the_phase_policy_replaces_the_deployments_for_the_verifier_only(self, tmp_path, monkeypatch):
+        """Under an allow-by-default deployment (or none) the task's policy replaces the deployment's for the
+        verifier sandbox alone; a deny-by-default deployment admits only a narrowing policy (the tests above)."""
+        baseline = {"defaultAction": "allow", "egress": [{"action": "deny", "target": "evil.example"}]}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, sandbox_provider_options={"network_policy": baseline}
+        )
+        assert (await run_episode(server, task)).result is not None
+        assert server._sandbox_spec(task, "/app").provider_options["network_policy"] == baseline
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+        # The deployment's options are not mutated.
+        assert server.config.sandbox_provider_options["network_policy"] == baseline
+
+    @pytest.mark.parametrize("provider", ["docker", "daytona"])
+    async def test_providers_without_an_egress_policy_are_refused_at_seed(self, tmp_path, monkeypatch, provider):
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, provider=provider
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "[verifier] network policy" in failure.failure_reason
+        assert "requires the OpenSandbox network-policy provider" in failure.failure_reason
+        # Refused before anything was provisioned: no agent sandbox, no verifier.
+        assert created == [] and specs == []
+
+    async def test_hosts_the_policy_cannot_express_are_refused_at_seed(self, tmp_path, monkeypatch):
+        toml = self.ALLOWLIST_TOML.replace('"10.0.0.7"', '"10.0.0.0/8"')
+        server, task, _, _, _, created = self.prepared(tmp_path, monkeypatch, toml=toml)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal and created == []
+        assert "CIDR ranges are not supported" in response.failure.failure_reason
+
+    async def test_a_restricted_verifier_in_the_agents_sandbox_is_refused_at_seed(self, tmp_path, monkeypatch):
+        # The loader admits the policy for separate-mode tasks only; the seed keeps the invariant for a task
+        # object that did not come from it (here: separate mode switched off under the server).
+        server, task, _, _, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        monkeypatch.setattr(server, "_separate_verifier", lambda task: False)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal and created == []
+        assert "network policy cannot be changed after it started" in response.failure.failure_reason
+
+    def test_public_verifier_phase_adds_no_policy(self, tmp_path, monkeypatch):
+        server, task, _, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=SEPARATE_TOML)
+        assert server._verifier_network_policy(task) is None
+        spec = server._sandbox_spec(task, None, image="org/verifier:1", role="verifier", network_policy=None)
+        assert "network_policy" not in spec.provider_options

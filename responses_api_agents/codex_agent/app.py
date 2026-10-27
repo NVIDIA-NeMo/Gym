@@ -35,7 +35,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -868,8 +868,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"Codex installer exited {installed.return_code}, command={install_command}, "
                     f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                 )
-            for filename in ("sandbox_runner.py", "sandbox_transport.py"):
-                await sandbox.upload(Path(__file__).with_name(filename), f"{directory}/{filename}")
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            # The runner loads the transport from beside itself under this name.
+            await sandbox.upload(Path(__file__).with_name("sandbox_transport.py"), f"{directory}/sandbox_transport.py")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)

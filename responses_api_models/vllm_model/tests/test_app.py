@@ -1444,7 +1444,7 @@ class TestApp:
             token_sink=None,
             external_staging=True,
             capture_admission=CaptureAdmission(
-                rollout_id="rollout-1",
+                capture_key="rollout-1",
                 model_call_id="c2",
                 parent_call_id="c1",
                 prev_len=3,
@@ -1483,10 +1483,10 @@ class TestApp:
                 "created": FIXED_TIME,
                 "model": "dummy_model",
                 "ng_commit_coords": {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "digest_version": 2,
                     "extras_digest_version": 1,
-                    "rollout_id": "rollout-1",
+                    "capture_key": "rollout-1",
                     "model_call_id": "c1",
                     "parent_call_id": None,
                     "prev_len": 0,
@@ -1542,7 +1542,7 @@ class TestApp:
             admitted_at=1.5,
             request_items=[{"role": "user", "content": "go"}],
             capture_admission=CaptureAdmission(
-                rollout_id="rollout-1",
+                capture_key="rollout-1",
                 model_call_id="c1",
                 mode="text",
             ),
@@ -6267,7 +6267,7 @@ class TestTopLogprobsHandling:
                     model_call_id="c1",
                     token_sink=None,
                     external_staging=True,
-                    capture_admission=CaptureAdmission(rollout_id="r1", model_call_id="c1", mode="text"),
+                    capture_admission=CaptureAdmission(capture_key="r1", model_call_id="c1", mode="text"),
                 )
             )
         try:
@@ -6298,7 +6298,7 @@ class TestTopLogprobsHandling:
                 model_call_id="c1",
                 token_sink=None,
                 external_staging=True,
-                capture_admission=CaptureAdmission(rollout_id="r1", model_call_id="c1", mode="text"),
+                capture_admission=CaptureAdmission(capture_key="r1", model_call_id="c1", mode="text"),
             )
         )
         try:

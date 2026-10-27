@@ -30,7 +30,7 @@ from nemo_gym.tasks.harbor.dockerfile import (
     resolve_dockerfile,
 )
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HarborStep, HarborTaskConfig
 from nemo_gym.tasks.harbor.records import (
     BUILT_IMAGES_FILE,
     IMAGE_CONFIGS_FILE,
@@ -38,6 +38,7 @@ from nemo_gym.tasks.harbor.records import (
     VERIFIER_SERVICE,
     read_built_images,
     read_image_configs,
+    recorded_forced_tasks,
     recorded_service_images,
 )
 from nemo_gym.tasks.harbor.verifier_env import (
@@ -56,6 +57,12 @@ logger = logging.getLogger(__name__)
 
 TASK_FILE = "task.toml"
 INSTRUCTION_FILE = "instruction.md"
+STEPS_DIR = "steps"
+# Per-step Harbor features this loader does not run yet; a task using one is refused by name.
+UNSUPPORTED_STEP_FILES = ("workdir", "setup.sh")
+# The one value of the pre-1.3 `multi_step_reward_mode` key that older multi-step generators wrote: the per-step
+# average, which is the default `mean` roll-up the task gets once the key is dropped, so it is dropped silently.
+LEGACY_AGGREGATE_REWARD_MODE = "aggregate"
 DOCKERFILE = Path("environment") / "Dockerfile"
 # The names the loader accepts for a task's Compose overlay under ``environment/``, first match wins
 # (``nemo_gym.tasks.harbor.image_configs.compose_file``); Harbor's Docker environment reads the first one only.
@@ -65,6 +72,26 @@ COMPOSE_FILE_NAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml
 # How deep below a dataset root `discover_tasks` looks for task folders. Datasets group tasks by
 # category at most a few levels deep; hidden folders are never entered.
 MAX_DISCOVERY_DEPTH = 6
+
+
+@dataclass(frozen=True)
+class HarborTurn:
+    """One ``[[steps]]`` entry read from disk: the instruction the agent gets for that turn."""
+
+    name: str
+    instruction: str
+    config: HarborStep
+
+    @property
+    def tests_dir(self) -> Path:
+        """Relative to the task folder; may be absent, in which case the task's ``tests/`` is used alone."""
+        return Path(STEPS_DIR) / self.name / "tests"
+
+    @property
+    def solution_dir(self) -> Path:
+        """The step's own reference solution, relative to the task folder (Harbor's ``steps/<name>/solution/``);
+        may be absent, in which case the task's top-level ``solution/`` stands in for it (:meth:`HarborTask.turn_solution_dir`)."""
+        return Path(STEPS_DIR) / self.name / "solution"
 
 
 @dataclass(frozen=True)
@@ -99,8 +126,10 @@ class HarborTask:
     ``sandbox_user`` is the user the sandbox runs commands as when no user is asked for: the
     default user of the image the sandbox starts from. For a Dockerfile Gym runs itself that is
     the base image's recorded ``User`` (``None`` is root), not the Dockerfile's final ``USER`` or
-    ``[agent].user``; for a declared ``docker_image`` built from a pull-mode Dockerfile it is that
-    Dockerfile's final ``USER``. When neither is known the task's ``user`` stands in for it.
+    ``[agent].user``; for an image prepare built (forced over a declared ``docker_image`` too) it is
+    the built image's recorded ``User``, whatever ``[agent].user`` says; for a declared ``docker_image``
+    built from a pull-mode Dockerfile it is that Dockerfile's final ``USER``. When neither is known the
+    task's ``user`` stands in for it.
 
     ``built_image`` is the image prepare built from the task's ``environment/`` folder when the
     Dockerfile needed a build (``built-images.json``); ``image`` is then that image and the task
@@ -146,6 +175,10 @@ class HarborTask:
     image as it is. ``None`` for a declared image nothing is recorded for (as for a prebuilt ``docker_image``),
     when the verifier grades in the task's own image (the task's own fields describe that start), and in shared
     mode.
+
+    ``turns`` holds the task's ``[[steps]]`` in order; empty for a single-turn task. A multi-turn task
+    never sends ``instruction`` to the agent: each turn sends its own, and the top-level file may hold
+    material the agent must not see (SWE-Interact puts the full hidden specification there).
     """
 
     path: Path
@@ -171,6 +204,7 @@ class HarborTask:
     image_healthcheck: dict[str, Any] | None = None
     verifier_image_config: BaseImageConfig | None = None
     overlay_workdirs: tuple[OverlayWorkdir, ...] = ()
+    turns: tuple[HarborTurn, ...] = ()
 
     @property
     def needs_sandbox(self) -> bool:
@@ -184,7 +218,20 @@ class HarborTask:
 
     @property
     def has_solution(self) -> bool:
+        """Whether the oracle can run this task: ``solution/solve.sh`` for a single-turn task; for a multi-step
+        task a ``solve.sh`` for every step, its own under ``steps/<name>/solution/`` or the task's top-level one
+        (:meth:`turn_solution_dir`), as Harbor 0.22.0's oracle resolves each step's solution (``agents/oracle.py``)."""
+        if self.turns:
+            return all((self.turn_solution_dir(turn) / "solve.sh").is_file() for turn in self.turns)
         return (self.path / "solution" / "solve.sh").is_file()
+
+    def turn_solution_dir(self, turn: HarborTurn) -> Path:
+        """The folder the oracle gets at ``/solution`` for ``turn``: the step's own ``steps/<name>/solution/`` when
+        that folder exists, else the task's top-level ``solution/`` (which may be absent too), the fallback Harbor's
+        oracle applies per step. A step folder that exists is the step's answer even without a ``solve.sh``, as in
+        Harbor, where such a step fails rather than running the task's script."""
+        own = self.path / turn.solution_dir
+        return own if own.is_dir() else self.path / "solution"
 
 
 def has_compose_file(task_folder: Path) -> bool:
@@ -216,6 +263,13 @@ def built_image(task_folder: Path, root: Path | None = None) -> str | None:
     ``root`` is the dataset folder the record sits in (the task's parent by default).
     """
     return built_service_images(task_folder, root).get(MAIN_SERVICE)
+
+
+def _recorded_as_forced(root: Path, task_name: str) -> bool:
+    """Whether any ``built-images.json`` entry of ``root`` records ``task_name`` as built under ``builds.force``
+    over its declared image: one file read, so a declared-image task whose Dockerfile the loader can run pays
+    Harbor's hash of ``environment/`` (the key its own record sits under) only when such a record may exist."""
+    return any(task_name in recorded_forced_tasks(entry) for entry in read_built_images(root).values())
 
 
 def _build_required(dockerfile: Path, reason: Exception, root: Path) -> HarborTaskError:
@@ -289,6 +343,16 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         data = tomllib.loads((path / TASK_FILE).read_text())
         for key in HarborTaskConfig.unknown_keys(data):
             logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
+        legacy_mode = data.get("multi_step_reward_mode")
+        if legacy_mode is not None and legacy_mode != LEGACY_AGGREGATE_REWARD_MODE:
+            # Harbor 0.22.0 drops the key whatever it says and rolls the steps up with `mean` (or the task's own
+            # `multi_step_reward_strategy`); so does the mirror, and the task author hears which value was dropped.
+            logger.warning(
+                "%s: ignoring legacy key `multi_step_reward_mode = %r` (Harbor reads `multi_step_reward_strategy`, "
+                "`mean` when unset)",
+                path / TASK_FILE,
+                legacy_mode,
+            )
         config = HarborTaskConfig.model_validate(data)
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path / TASK_FILE}: {exc}") from exc
@@ -302,9 +366,26 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     phases = {"environment": config.environment, "agent": config.agent, "verifier": config.verifier}
     if config.verifier.environment is not None:
         phases["verifier.environment"] = config.verifier.environment
+    for step in config.steps:
+        phases[f"steps.{step.name}.agent"] = step.agent
+        phases[f"steps.{step.name}.verifier"] = step.verifier
     for name, phase in phases.items():
-        if phase.network_mode not in (None, "public") or phase.allowed_hosts:
+        if phase.network_mode in (None, "public") and not phase.allowed_hosts:
+            continue
+        if name != "verifier":
+            # The agent's sandbox is created public and a running sandbox's egress policy cannot be switched, so
+            # only the separate verifier's own sandbox can carry a phase policy (multi-step tasks verify in the
+            # agent's sandbox).
             raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
+        if config.is_shared_verifier:
+            raise HarborTaskError(
+                f"{path}: [verifier] network restrictions are not supported in Harbor's shared verifier mode: a "
+                "running sandbox's network policy cannot be changed after the agent's turn, so the restricted "
+                "policy is applied to the separate verifier's sandbox when it is created (declare "
+                '[verifier].environment_mode = "separate" or a [verifier.environment])'
+            )
+        if phase.allowed_hosts and phase.network_mode != "allowlist":
+            raise HarborTaskError(f"{path}: [verifier] allowed_hosts is only valid when network_mode='allowlist'")
     for name, environment in (
         ("environment", config.environment),
         ("verifier.environment", config.verifier.environment),
@@ -313,12 +394,14 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
             raise HarborTaskError(f"{path}: {name} Windows tasks are not supported yet")
 
     instruction_path = path / INSTRUCTION_FILE
-    if not instruction_path.is_file():
+    turns = _load_turns(path, config)
+    # Harbor reads a multi-step task's instructions from its steps; the top-level file is then optional.
+    if not turns and not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
-    if not (path / "tests").is_dir():
+    if not turns and not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder")
     try:
-        instruction = read_instruction(instruction_path)
+        instruction = read_instruction(instruction_path) if instruction_path.is_file() else ""
     except (OSError, UnicodeDecodeError) as exc:
         raise HarborTaskError(f"{instruction_path}: {exc}") from exc
     if not config.is_shared_verifier and not config.artifacts:
@@ -343,14 +426,17 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     built: str | None = None
     context_id: str | None = None
     built_images: dict[str, str] = {}
+    forced_tasks: set[str] = set()
 
     def recorded_builds() -> dict[str, str]:
         # Harbor's hash of environment/ is paid once per task, here, off the server's event loop (load_task runs
         # in a thread there): the build-mode branches and the Compose loader both read the record through it.
-        nonlocal context_id, built_images
+        nonlocal context_id, built_images, forced_tasks
         if context_id is None and dockerfile.parent.is_dir():
             context_id = context_digest(dockerfile.parent)
-            built_images = recorded_service_images(read_built_images(root).get(context_id))
+            record = read_built_images(root).get(context_id)
+            built_images = recorded_service_images(record)
+            forced_tasks = recorded_forced_tasks(record)
         return built_images
 
     # What Docker starts the image with: the record of the image the sandbox runs (built image), or the
@@ -368,12 +454,25 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         try:
             parsed = parse_dockerfile(dockerfile_text)
         except DockerfileNeedsBuild as exc:
-            if image is None:
-                # Build mode: prepare built the context once and recorded the image next to the tasks.
-                built = recorded_builds().get(MAIN_SERVICE)
-                if built is None:
-                    raise _build_required(dockerfile, exc, root) from exc
+            # Build mode: prepare built the context once and recorded the image next to the tasks. A task that
+            # declares docker_image runs it, unless prepare built its own Dockerfile for it under `builds.force`
+            # (Harbor's --force-build) and recorded the task as forced: that build then wins, as it does in Harbor.
+            # A record of main made for another task of the context, or before the override, is not this task's.
+            built = recorded_builds().get(MAIN_SERVICE)
+            if image is not None and path.name not in forced_tasks:
+                built = None
+            if built is None and image is None:
+                raise _build_required(dockerfile, exc, root) from exc
             parsed = None
+        if parsed is not None and image is not None and _recorded_as_forced(root, path.name):
+            # A pull or overlay mode Dockerfile next to a declared image contributes its settings to that image,
+            # unless prepare built it for this task under `builds.force` (Harbor's --force-build builds the file
+            # whatever it holds): the recorded build then runs as is, its RUN lines, USER and WORKDIR baked in.
+            built = recorded_builds().get(MAIN_SERVICE)
+            if path.name in forced_tasks and built is not None:
+                parsed = None
+            else:
+                built = None
         if built is not None:
             # The built image is pulled like a prebuilt one; its recorded configuration gives the
             # Dockerfile's final WORKDIR, ENV and USER.
@@ -454,8 +553,9 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     dockerfile_user = user
     if config.agent.user is not None:
         user = str(config.agent.user)
-    # The default user of the image the sandbox starts from (see HarborTask.sandbox_user).
-    if environment.docker_image is None and base_known:
+    # The default user of the image the sandbox starts from (see HarborTask.sandbox_user). A build forced over a
+    # declared docker_image is the image the sandbox starts from too: its own recorded User, never the override.
+    if (environment.docker_image is None or built is not None) and base_known:
         sandbox_user = base_user
     elif environment.docker_image is not None and resolved is not None and (base_known or dockerfile_user):
         sandbox_user = dockerfile_user
@@ -549,20 +649,26 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         image_healthcheck=image_healthcheck,
         verifier_image_config=verifier_image_config,
         overlay_workdirs=overlay_workdirs,
+        turns=turns,
     )
 
 
 def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> str:
     """The digest a task is materialized and served under: its folder's content hash plus the dataset slice applied to it.
 
-    ``dataset.toml``'s ``[gym]`` table changes the effective task without touching the folder, so the
-    defaults and the task's own override are folded in whenever the table is not empty. A dataset
-    without a ``[gym]`` table keeps the plain folder hash, which is also what the package store checks.
+    ``dataset.toml``'s ``[gym]`` table can change the effective task without touching the folder, so the
+    defaults and the task's own override are folded in whenever the table shapes tasks
+    (:attr:`GymDatasetConfig.shapes_tasks`). A dataset whose table shapes none, because it has no table or
+    declares only identity, run and catalog keys (``license``, ``type``, ``allowed_agents``, ``domain``,
+    ``verified``, ``[gym.defaults].num_repeats``), keeps the plain folder hash, which is also what the
+    package store checks: none of those keys says what the task is, so none enters its digest.
     """
-    if dataset.is_empty:
+    if not dataset.shapes_tasks:
         return folder_digest
+    # `num_repeats` is how often a run plays the task, not what the task is: left out of the slice too, so a
+    # shaping table with a repeat count hashes the same as one without.
     applied = {
-        "defaults": dataset.defaults.model_dump(mode="json"),
+        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}),
         "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
     }
     return hashlib.sha256(f"{folder_digest}\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
@@ -598,6 +704,43 @@ def iter_task_folders(root: Path, *, max_depth: int = MAX_DISCOVERY_DEPTH) -> li
             )
         seen[child.name] = child
     return found
+
+
+def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
+    """Read every ``[[steps]]`` entry as a turn, refusing the per-step features the server does not run yet.
+
+    Each turn needs ``steps/<name>/instruction.md`` and a ``test.sh``, its own under
+    ``steps/<name>/tests/`` or the task's under ``tests/``, which is the script Harbor runs for the step.
+    A step's own ``[steps.agent].user`` is read as written: the server switches the sandbox's default user,
+    the working directory's owner and the harness's user to it for that turn (and refuses a ``name:group``
+    pair at seed on a provider that switches user by name only, as it refuses the task's own).
+    """
+    turns: list[HarborTurn] = []
+    for step in config.steps:
+        where = f"{path / TASK_FILE} step {step.name!r}"
+        step_dir = path / STEPS_DIR / step.name
+        if not step_dir.is_dir():
+            raise HarborTaskError(f"{where}: {step_dir} does not exist")
+        for name in UNSUPPORTED_STEP_FILES:
+            if (step_dir / name).exists():
+                raise HarborTaskError(f"{where}: steps/{step.name}/{name} is not supported yet")
+        if step.healthcheck is not None or step.artifacts:
+            raise HarborTaskError(f"{where}: per-step healthcheck and artifacts are not supported yet")
+        if step.verifier.environment_mode == "separate" or step.verifier.environment is not None:
+            raise HarborTaskError(f"{where}: separate per-step verification is not supported yet")
+        if not (step_dir / "tests" / "test.sh").is_file() and not (path / "tests" / "test.sh").is_file():
+            raise HarborTaskError(f"{where}: no test.sh in steps/{step.name}/tests/ or tests/")
+        instruction_path = step_dir / INSTRUCTION_FILE
+        if not instruction_path.is_file():
+            raise HarborTaskError(f"{where}: steps/{step.name}/{INSTRUCTION_FILE} is missing")
+        try:
+            instruction = read_instruction(instruction_path)
+        except (OSError, UnicodeDecodeError) as exc:
+            raise HarborTaskError(f"{instruction_path}: {exc}") from exc
+        turns.append(HarborTurn(name=step.name, instruction=instruction, config=step))
+    if turns and not config.is_shared_verifier:
+        raise HarborTaskError(f"{path / TASK_FILE}: multi-step tasks with a separate verifier are not supported yet")
+    return tuple(turns)
 
 
 def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = None) -> list[HarborTask]:
