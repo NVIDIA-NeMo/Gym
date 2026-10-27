@@ -274,12 +274,15 @@ def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_
     assert call.client_assistant_message_id == "assistant-message"
 
 
+@pytest.mark.parametrize("tool_name", ["bash", "exec"])
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
-def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name):
+def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name, tool_name):
     scenario = SCENARIO[scenario_name]
     probe = Probe(scenario, tmp_path)
     messages = [{"role": "user", "content": "Run checks"}]
-    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    tool = copy.deepcopy(TOOL)
+    tool["function"]["name"] = tool_name
+    body = {"model": "conformance-model", "messages": messages, "tools": [tool]}
     with TestClient(probe.model_app()) as client:
         for status in scenario.http_errors:
             response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
@@ -289,6 +292,8 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
             assert response.status_code == 200
             message = response.json()["choices"][0]["message"]
             call = message["tool_calls"][0]
+            assert call["id"].isalnum()  # OpenClaw normalizes non-alphanumeric IDs.
+            assert call["function"]["name"] == tool_name
             execution = subprocess.run(
                 json.loads(call["function"]["arguments"])["command"],
                 shell=True,
