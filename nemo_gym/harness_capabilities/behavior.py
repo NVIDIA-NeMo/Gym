@@ -7,6 +7,10 @@ import json
 from collections import Counter
 from collections.abc import Callable
 
+from pydantic import ValidationError
+
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.responses_converter import message_content_to_text
 
 from .checks import BehavioralCheck
@@ -26,6 +30,13 @@ def _terminal_error_reported(attempts: list[dict], responses: list[dict], expect
     if not attempts or any(attempt["status_code"] != expected_status for attempt in attempts):
         return False
     if len(responses) != 1 or responses[0].get("status") != "failed":
+        return False
+    raw = _mapping(responses[0].get("metadata")).get(AGENT_OUTCOME_METADATA_KEY)
+    try:
+        outcome = AgentOutcome.model_validate_json(raw)
+    except ValidationError:
+        return False
+    if outcome.failure_kind != MODEL_REQUEST_ERROR or outcome.status_code != expected_status:
         return False
     message = _mapping(_mapping(attempts[-1].get("response")).get("error")).get("message")
     reported = _mapping(responses[0].get("error")).get("message")
@@ -237,7 +248,8 @@ def inspect_behavior(
             tier="P0",
             evidence=("TE-1",),
             location="witness.json",
-            reason="the EnvironmentServer did not receive a failed response retaining the terminal model error",
+            reason="the EnvironmentServer must receive a failed response retaining the model error and "
+            "ng_agent_outcome with model_request_error and the witnessed HTTP status",
             predicate=lambda: _terminal_error_reported(attempts, agent_responses, http_errors[-1])
             if terminal_error
             else True,

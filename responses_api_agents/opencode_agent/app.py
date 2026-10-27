@@ -39,7 +39,7 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -237,7 +237,7 @@ def _without_empty_tools(opencode_config: dict[str, Any]) -> dict[str, Any]:
 
 
 class _ImportedSession(BaseModel):
-    """The root session and stored message IDs after ``sandbox_runner.py --import``."""
+    """The root session and stored message IDs after the runner's ``--import``."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
     session_id: str = Field(min_length=1)
@@ -915,7 +915,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
             if ripgrep is not None:
                 # OpenCode 1.17.11 runs the rg on PATH, else <XDG_CACHE_HOME>/opencode/bin/rg, else downloads one.
                 # The private cache keeps the pin off task shells' PATH; an rg on the task PATH still takes precedence.
@@ -972,7 +972,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> None:
         """Copy a pinned file into session storage through the runner, which checks the copy's SHA-256 first."""
         command = (
-            f"{quote(state.python_executable)} -I {quote(state.session.session_dir + '/sandbox_runner.py')} {mode} "
+            f"{quote(state.python_executable)} -I {quote(f'{state.session.session_dir}/{RUNNER_FILE}')} {mode} "
             f"{quote(pin.sandbox_path)} {pin.digest} {quote(target)}"
         )
         result = await state.session.sandbox.exec(
@@ -1003,7 +1003,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         )
         timeout = self.config.sandbox_install_timeout_seconds
         command = (
-            f"{quote(state.python_executable)} -I {quote(directory + '/sandbox_runner.py')} "
+            f"{quote(state.python_executable)} -I {quote(f'{directory}/{RUNNER_FILE}')} "
             f"--import {quote(directory + '/import.json')} {quote(self.config.session_import_path)} {timeout}"
         )
         result = await state.session.sandbox.exec(command, cwd=state.session.workdir, timeout_s=timeout + 30)

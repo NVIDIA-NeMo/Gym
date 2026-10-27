@@ -18,7 +18,7 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedRejectedError
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -278,7 +278,7 @@ async def test_exports_follow_capture_and_precede_session_file_removal(setup, tm
     assert argv[:7] == [
         "python3",
         "-I",
-        f"{directory}/sandbox_runner.py",
+        f"{directory}/{RUNNER_FILE}",
         "--export",
         directory,
         directory,
@@ -398,7 +398,7 @@ def host_export_session(tmp_path, *, failing=(), streams="separate"):
     database.parent.mkdir(parents=True)
     workdir = tmp_path / "task"
     workdir.mkdir()
-    shutil.copyfile(sandbox_runner.__file__, conversation / "sandbox_runner.py")
+    shutil.copyfile(sandbox_runner.__file__, conversation / RUNNER_FILE)
     with sqlite3.connect(database) as connection:
         connection.executescript("""
             create table session(id text, parent_id text, time_created integer);
@@ -647,7 +647,7 @@ async def test_pinned_ripgrep_is_staged_where_opencode_looks_and_replaces_the_pa
     assert shlex.split(events[stage]) == [
         "python3",
         "-I",
-        f"{directory}/sandbox_runner.py",
+        f"{directory}/{RUNNER_FILE}",
         "--stage-executable",
         "/mnt/cache/rg",
         PIN,
@@ -921,7 +921,8 @@ async def test_configured_interpreter_and_path_prefix_reach_every_sandbox_comman
     assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[-2:] == [python, prefix]
     for marker in ("os.path.isfile", "--stage-executable", "--stage-archive", "--import", "--export", "--snapshot"):
         assert shlex.split(events[index(events, marker)])[0] == python, marker
-    assert f"exec {shlex.quote(python)} -I " in events[index(events, "--receipt")]
+    # The supervisor launch starts from the configured interpreter; it runs through a link to it when it can.
+    assert f"py={shlex.quote(python)}; " in events[index(events, "--receipt")]
     directory = sandbox.directory
     for name in ("input.json", "import.json"):
         assert json.loads(sandbox.files[f"{directory}/{name}"])["path_prefix"] == [prefix], name

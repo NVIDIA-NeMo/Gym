@@ -56,11 +56,11 @@ import time
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, get_args
 
 import orjson
 
-from nemo_gym._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, next_attempt
+from nemo_gym._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, CheckpointMode, next_attempt
 from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
 from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
 from nemo_gym.episode_types import EpisodeId
@@ -95,6 +95,8 @@ class CoordinationError(RuntimeError):
 class Participant:
     server_name: str
     kind: ParticipantKind
+    # What the server can capture; a ``restart_only`` server's rollouts start over after a crash.
+    mode: CheckpointMode
 
 
 @dataclass(frozen=True)
@@ -164,10 +166,13 @@ async def discover(client: ServerClient, *, auth_token: str) -> Participants:
                 )
                 if response.status == 404:
                     return
-                kind = (await _payload(response))["kind"]
+                status = await _payload(response)
+            kind, mode = status["kind"], status.get("mode")
             if kind not in PREPARE_ORDER:
                 raise ValueError(f"unknown participant kind {kind!r}")
-            members.append(Participant(server_name=name, kind=kind))
+            if mode not in get_args(CheckpointMode):
+                raise ValueError(f"participant reports no checkpoint mode (got {mode!r})")
+            members.append(Participant(server_name=name, kind=kind, mode=mode))
         except TimeoutError:
             failures[name] = f"no status reply within {_DISCOVER_TIMEOUT_SECONDS:g} seconds"
         except Exception as error:

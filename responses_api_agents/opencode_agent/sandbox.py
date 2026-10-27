@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -293,9 +293,10 @@ class OpenCodeSandboxSession(AgentSessionState):
             argv=[
                 self.python_executable,
                 "-I",
-                f"{self.persistent_directory}/sandbox_runner.py",
+                f"{self.persistent_directory}/{RUNNER_FILE}",
                 f"{self.session.session_dir}/input.json",
             ],
+            stdlib_runner=True,
         )
 
     def take_export_gaps(self) -> list[ObservationGap]:
@@ -337,7 +338,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             try:
                 async with exec_timeout:
                     result = await self.session.sandbox.exec(
-                        f"{quote(self.python_executable)} -I {quote(self.persistent_directory + '/sandbox_runner.py')} "
+                        f"{quote(self.python_executable)} -I {quote(f'{self.persistent_directory}/{RUNNER_FILE}')} "
                         f"--export {quote(self.session.session_dir)} {quote(self.persistent_directory)} "
                         f"{quote(self.export_dir)} {runner_budget:.3f}",
                         cwd=self.session.workdir,
@@ -486,7 +487,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
         captured = await self.session.sandbox.exec(
-            f"{quote(self.python_executable)} -I {quote(self.persistent_directory + '/sandbox_runner.py')} "
+            f"{quote(self.python_executable)} -I {quote(f'{self.persistent_directory}/{RUNNER_FILE}')} "
             f"--snapshot {quote(self.session.session_dir)} {quote(self.persistent_directory)}",
             cwd=self.session.workdir,
             timeout_s=timeout,
