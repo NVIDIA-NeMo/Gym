@@ -219,6 +219,18 @@ class TestStaging:
         assert fake_sdk["requested"] == []
         assert not fake_sdk["log"].exists()
 
+    def test_an_aggregate_file_with_a_failed_agent_is_refused_before_any_environment_is_built(
+        self, tmp_path: Path, fake_sdk: dict[str, Any]
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        artifacts.aggregate_metrics_json_fpath.write_text('[{"agent_ref": {"name": "bad"}, "aggregation_error": {}}]')
+
+        result = _exporter(artifacts, tmp_path).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "Aggregation failed for agents: bad" in result.error
+        assert fake_sdk["requested"] == []
+
 
 class TestUpload:
     def test_every_setting_reaches_the_sdk(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
