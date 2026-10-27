@@ -10,6 +10,7 @@ import io
 import ipaddress
 import json
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -144,6 +145,7 @@ class FakeSandbox:
     started: list["FakeSandbox"] = []
     stopped: list["FakeSandbox"] = []
     fail_on: str | None = None  # "start", "serialize" or "stop": that step raises
+    on_stop: Callable[[], None] | None = None  # runs as a sandbox stops
 
     def __init__(self, provider_config: dict) -> None:
         self.provider_config = provider_config
@@ -171,12 +173,14 @@ class FakeSandbox:
     async def stop(self) -> None:
         if FakeSandbox.fail_on == "stop":
             raise RuntimeError("the provider could not stop the sandbox")
+        if FakeSandbox.on_stop is not None:
+            FakeSandbox.on_stop()
         FakeSandbox.stopped.append(self)
 
 
 @pytest.fixture
 def sandboxes(monkeypatch) -> type[FakeSandbox]:
-    FakeSandbox.started, FakeSandbox.stopped, FakeSandbox.fail_on = [], [], None
+    FakeSandbox.started, FakeSandbox.stopped, FakeSandbox.fail_on, FakeSandbox.on_stop = [], [], None, None
     monkeypatch.setattr(officeenv_app, "AsyncSandbox", FakeSandbox)
     monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: {"sandbox": {"docker": {}}})
     return FakeSandbox
@@ -352,6 +356,82 @@ def test_retiring_a_session_stops_its_sandbox(sandboxes) -> None:
         asyncio.run(server.retire_session_state("rs-1"))
         assert sandboxes.stopped == sandboxes.started and len(server.service.store) == 0
         assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).status_code == 401
+
+
+def test_verify_stops_the_sandbox_and_closes_the_tools_before_grading(sandboxes) -> None:
+    server = make_server()
+    when_stopped = []  # (the world still there, the episode's tools closed)
+    sandboxes.on_stop = lambda: when_stopped.append(
+        (server.service.store.get("rs-1") is not None, server._episodes["rs-1"].grading)
+    )
+    with mcp_client(server) as client:
+        seeded = client.post("/seed_session", json=seed_body())
+        auth = file_auth(server)
+        grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+        verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies)
+        assert verified.status_code == 200 and verified.json()["reward"] == 0.0, verified.text
+        assert when_stopped == [(True, True)]  # the tools closed and the sandbox stopped before grading
+        assert sandboxes.stopped == sandboxes.started
+        # a process left running in the sandbox reaches neither the file API nor the episode's tools any more
+        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).status_code == 401
+        called = rpc(client, "tools/call", {"name": "gdrive_list_files", "arguments": {}}, grant).json()["result"]
+        assert called["isError"] is True
+        assert client.post("/close_session", json=close_body(), cookies=seeded.cookies).status_code == 200
+        assert len(sandboxes.stopped) == 1  # close stops nothing twice
+
+
+def test_while_verification_stops_the_sandbox_the_episodes_tools_refuse(sandboxes) -> None:
+    server = make_server()
+    with mcp_client(server) as client:
+        seeded = client.post("/seed_session", json=seed_body())
+        grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+        server._episodes["rs-1"].grading = True  # as /verify sets it before it awaits the sandbox's stop
+        called = rpc(client, "tools/call", {"name": "gdrive_list_files", "arguments": {}}, grant).json()["result"]
+        assert called["isError"] is True and "verification has started" in json.dumps(called)
+        refused = client.post("/gdrive_list_files", json={}, cookies=seeded.cookies)
+        assert refused.status_code == 409 and server.service.store.get("rs-1") is not None
+
+
+def test_an_upload_streaming_in_when_verification_begins_writes_nothing(sandboxes, monkeypatch) -> None:
+    """Verification revokes the file API token, but an upload the token admitted earlier may still be streaming in:
+    once its body has arrived it is refused, so it cannot change what is graded."""
+    server = make_server()
+    with mcp_client(server) as client:
+        seeded = client.post("/seed_session", json=seed_body())
+        auth = file_auth(server)
+        read_body = OfficeEnvResourcesServer._content_args
+
+        async def body_then_verification(request):
+            args = await read_body(request)
+            server._episodes["rs-1"].grading = True  # as /verify sets it, while this body streamed in
+            return args
+
+        monkeypatch.setattr(OfficeEnvResourcesServer, "_content_args", staticmethod(body_then_verification))
+        replaced = client.put("/officeenv/files/gdrive/F_LEDGER", content=b"vendor,total\n", headers=auth)
+        server._episodes["rs-1"].grading = False
+        created = client.post(
+            "/officeenv/files", params={"app": "gdrive", "name": "late.csv"}, content=b"a,b\n", headers=auth
+        )
+        assert replaced.status_code == 409 and created.status_code == 409, (replaced.text, created.text)
+        server._episodes["rs-1"].grading = False
+        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).text == LEDGER  # unchanged
+        listed = client.post("/gdrive_list_files", json={}, cookies=seeded.cookies)
+        assert listed.status_code == 200 and "late.csv" not in listed.text
+
+
+def test_a_failed_stop_before_grading_still_grades_and_close_stops_it(sandboxes) -> None:
+    server = make_server()
+    with mcp_client(server) as client:
+        seeded = client.post("/seed_session", json=seed_body())
+        auth = file_auth(server)
+        sandboxes.fail_on = "stop"
+        verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies)
+        assert verified.status_code == 200 and verified.json()["reward"] == 0.0, verified.text
+        assert sandboxes.stopped == [] and server._episodes["rs-1"].sandbox is not None
+        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).status_code == 401
+        sandboxes.fail_on = None
+        assert client.post("/close_session", json=close_body(), cookies=seeded.cookies).status_code == 200
+        assert sandboxes.stopped == sandboxes.started and not server._episodes
 
 
 def test_shutdown_stops_the_sandboxes_of_open_episodes(sandboxes) -> None:

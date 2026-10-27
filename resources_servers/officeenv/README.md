@@ -150,14 +150,18 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
 1. borrows a sandbox: the seed starts one from `sandbox_config.image` (built from
    `sandbox/Dockerfile`) with Gym's sandbox provider named by `sandbox_provider`, and lends it to
    the harness as `SandboxAccess`. Seeding the episode again lends the same sandbox;
-   `/close_session` stops it, and so does shutting the server down;
+   verification stops it (or `/close_session`, when verification did not), and so does shutting
+   the server down;
 2. moves file content between the workspace and Google Drive without passing it through the
    model: the sandbox gets `OFFICEENV_API_URL` and `OFFICEENV_API_TOKEN`, and `OFFICEENV.md` in
    the workspace documents the file API (`GET`/`PUT /officeenv/files/{app}/{file_id}`,
    `POST /officeenv/files?app=&name=&parent=&mime_type=`). Text and binary files (an XLSX
    workbook, say) move byte for byte; uploads are limited to 20 MB;
 3. ends when Pi's run ends: `finish_tool_names: [user_complete_task]`, its timeout, or the model
-   stopping. Verification grades the world as for any row.
+   stopping. `/verify` first closes the episode's tools and file API and stops its sandbox, then
+   grades the world as for any row: a process the harness left running in the background can act
+   until verification starts, but not while the world is graded. A failed stop is logged and
+   grading goes on; `/close_session` stops the sandbox then.
 
 The instance name (`oe`) is the grant name Pi prefixes to each tool, so it stays short (the
 longest tool name is 56 characters). Rows come from OfficeEnv's sandbox example tasks:
