@@ -8,7 +8,7 @@ An exporter takes a finished run, the rollouts file and the files `gym eval run`
 
 ## How an Export Runs
 
-1. `gym eval export <name> key=value ...` resolves its configuration like every Gym command (command line, `env.yaml`) and loads the exporter class registered under `<name>`.
+1. `gym eval export <name> +key=value ...` resolves its configuration like every Gym command (command line, `env.yaml`) and loads the exporter class registered under `<name>`.
 2. The exporter's settings model validates that configuration before anything else happens.
 3. The exporter's `export(artifacts)` runs and returns an `ExportResult`.
 4. The command prints the state and the result's `detail`, and exits with the result's exit code when it failed. With `result_json_fpath`, the result is also kept as a JSON file.
@@ -111,7 +111,7 @@ The registry holds dotted paths, not classes, so `gym eval export --help` lists 
 
 ```bash
 gym eval export --help        # lists summary
-gym eval export summary rollouts_jsonl_fpath=results/rollouts.jsonl destination_dirpath=results/summaries
+gym eval export summary +rollouts_jsonl_fpath=results/rollouts.jsonl +destination_dirpath=results/summaries
 ```
 
 **With `gym eval submit`.** An entry for the exporter under `export` in a submit config is validated against the settings model before anything is sent: unknown settings and invalid values are rejected. Submit fills in `rollouts_jsonl_fpath` and `result_json_fpath` per benchmark. If your exporter needs names derived from the benchmark or submission, such as a run name, add a branch for it in `export_run_settings` in `nemo_gym/orchestration/exports.py`.
