@@ -227,7 +227,9 @@ def fake_acme_sdk(tmp_path: Path, monkeypatch: MonkeyPatch) -> dict[str, Any]:
 
     monkeypatch.setattr(isolated, "ensure_exporter_environment", fake_environment)
     monkeypatch.setattr(
-        isolated, "_worker_environment", lambda: {**os.environ, "PYTHONPATH": str(sdk_root), "FAKE_ACME_LOG": str(log)}
+        isolated,
+        "_worker_environment",
+        lambda python: {**os.environ, "PYTHONPATH": str(sdk_root), "FAKE_ACME_LOG": str(log)},
     )
     monkeypatch.setenv("FAKE_ACME_MODE", "uploaded")
     return {"log": log, "requested": requested}
