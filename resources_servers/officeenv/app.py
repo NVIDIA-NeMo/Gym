@@ -41,7 +41,7 @@ from officeenv.service import EpisodeService, Reply
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
@@ -54,8 +54,11 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 
 
@@ -223,15 +226,13 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         # Nothing below awaits, so no other request runs between the checks and the updates.
         if session_id in self._closed:
-            raise HTTPException(status_code=409, detail=f"Resources session {session_id} is already closed")
+            raise ResourcesSessionConflictError(f"Resources session {session_id} is already closed")
         episode = self._episodes.get(session_id)
         if episode is None:
             reply = self._seed(session_id, body.task_data)
             episode = self._episodes[session_id] = _Episode(body.episode_id, body.task_id, reply.body["tools"])
         elif (episode.episode_id, episode.task_id) != (body.episode_id, body.task_id):
-            raise HTTPException(
-                status_code=409, detail="resources_session_id is already bound to another episode or task"
-            )
+            raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         # Gym's session routing names the cookie session after the ID too; this keeps the two the same without it.
         request.session[SESSION_ID_KEY] = session_id
         _SEEDED_TOOLS.set(episode.tools)
@@ -268,12 +269,12 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         if closed is None:
             episode = self._episodes.get(session_id)
             if episode is not None and episode.episode_id != body.episode_id:
-                raise HTTPException(status_code=409, detail="episode_id does not match the seeded resources session")
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             self._episodes.pop(session_id, None)
             self._discard(session_id)
             self._closed.remember(session_id, body.episode_id)
         elif closed != body.episode_id:
-            raise HTTPException(status_code=409, detail="episode_id does not match the closed resources session")
+            raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def retire_session_state(self, session_id: str) -> None:
@@ -286,8 +287,11 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
 
     async def tool_call(self, request: Request, tool_name: str) -> Response:
         # app-level errors are tool outputs the model sees (200); only a body that is no JSON
-        # object (400) and a call without a session (409) are integration failures
-        reply = self.service.call(request.session[SESSION_ID_KEY], tool_name, await request.body())
+        # object (400) and a call without a session (404) are integration failures
+        session_id = request.session[SESSION_ID_KEY]
+        if self.service.store.get(session_id) is None:
+            raise ResourcesSessionLostError("This session has ended.")
+        reply = self.service.call(session_id, tool_name, await request.body())
         return Response(content=reply.text(), media_type="application/json", status_code=reply.status)
 
     async def verify(
@@ -295,9 +299,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     ) -> OfficeEnvVerifyResponse | OfficeEnvLengthPenaltyVerifyResponse:
         result = self.service.verify(request.session[SESSION_ID_KEY])
         if result.get("officeenv_failure") == "no_session":
-            # the rollout has no session to grade (verified twice, or the server restarted):
-            # the reward measures the environment, not the policy
-            result = {**result, "mask_sample": True, "failure_kind": SESSION_LOST}
+            # Never seeded, verified already, closed, or gone with a restart: the world went with
+            # it, so the reward would measure the environment, not the policy.
+            result = result | lost_session_verification(result["failure_reason"])
         if not self.config.length_penalty.enabled:
             return OfficeEnvVerifyResponse(**{**body.model_dump(), **result})
         penalty = length_penalty_fields(result["reward"], body.response, self.config.length_penalty)

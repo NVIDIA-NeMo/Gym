@@ -241,7 +241,7 @@ def test_structured_reports_round_trip_through_http(client: TestClient, forbidde
 def test_integration_failures_keep_their_statuses(client: TestClient, server: OfficeEnvResourcesServer) -> None:
     row = gym_row(SPEC, "x")
     before_seed = client.post("/slack_list_channels", json={})
-    assert before_seed.status_code == 409 and before_seed.json()["error"]["code"] == "no_session"
+    assert before_seed.status_code == 404 and before_seed.json()["detail"]["failure_kind"] == SESSION_LOST
 
     cookies = client.post("/seed_session", json=row).cookies
     malformed = client.post(
@@ -288,7 +288,17 @@ def test_the_example_rows_match_the_pinned_officeenv(client: TestClient) -> None
 
 
 def test_environment_server_sessions_keep_the_resources_session_contract(server: OfficeEnvResourcesServer) -> None:
-    check_resources_session_contract(server.setup_webserver(), seed_request(), keeps_state=True)
+    def holds_state(session_id: str) -> bool:
+        return session_id in server.service.store.sessions or session_id in server.service.notes
+
+    seed = seed_request()
+    check_resources_session_contract(
+        server.setup_webserver(),
+        seed,
+        keeps_state=True,
+        holds_state=holds_state,
+        verify_body=environment_verify_body(seed),
+    )
 
 
 def test_an_environment_server_episode_runs_under_its_resources_session_id(
@@ -342,7 +352,7 @@ def test_retiring_a_session_frees_its_world(client: TestClient, server: OfficeEn
     (session_id,) = server.service.store.sessions
     asyncio.run(server.retire_session_state(session_id))
     assert len(server.service.store) == 0
-    assert client.post("/slack_list_channels", json={}, cookies=cookies).status_code == 409
+    assert client.post("/slack_list_channels", json={}, cookies=cookies).status_code == 404
 
 
 # The MCP exposure.

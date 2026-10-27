@@ -122,8 +122,9 @@ guarded weighted mean by default), it returns:
 - `officeenv_server_version`: the OfficeEnv version that graded the rollout.
 
 Checks on the policy's replies read every message it sent, including any it sent after completing
-the task. A rollout without a session to grade (verified twice, or the server restarted) gets
-reward 0 with `mask_sample: true` and `failure_kind: session_lost`.
+the task. A rollout without a session to grade (never seeded, verified already, closed, or lost
+to a server restart) gets reward 0 with `mask_sample: true` and `failure_kind: session_lost`, and
+a tool call without a session answers 404 with the same `failure_kind`.
 
 ## Training length penalty
 
