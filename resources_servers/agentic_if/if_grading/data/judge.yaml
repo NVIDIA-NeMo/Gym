@@ -4,9 +4,12 @@
 #   (`checker_questions`).
 # - Identity: resources_servers.agentic_if.if_grading.configuration.config_hash hashes every key below except `version`, `changed` and
 #   `note`. Every cached verdict records that hash; a verdict made under another hash is never reused.
-version: v2-rule-judge-12
-changed: 2026-10-14
+version: v2-rule-judge-13
+changed: 2026-10-27
 note: >-
+  v13: the judge model is GPT-6 Sol instead of GLM-5.3, so a GLM-5.3 policy is not graded by its own model. Re-judging
+  106 questions of saved runs, the two agreed on 103 and each answered the same in two runs; on the 3 they split,
+  GPT-6 Sol's stricter verdict was the better-supported one.
   v12: a rule's judge question is asked together with the instruction the model was given, as the model saw it, where
   it was and the text around it (`instruction_prompt`, `instruction`). The question stays the checklist of what to look
   for; where the instruction says more (a condition, an exception, a scope, or the message it applies to), the
@@ -14,11 +17,11 @@ note: >-
   plain `prompt` stays for the language checker and for a run whose instruction is not known.
 
 model:
-  name: nvidia/zai-org/glm-5.3      # nv-inference, through the resources server's `judge_model_server`
+  name: azure/openai/gpt-6-sol      # nv-inference, through the resources server's `judge_model_server`
   api: responses
   temperature: 0.6                  # reasoning models are never run at temperature 0
   reasoning_effort: low
-  reasoning_summary: auto           # GLM-5.3 reasons on nv-inference only when a summary is asked for
+  reasoning_summary: auto           # kept from the GLM-5.3 judge, with which the switch was compared
   max_output_tokens: 8192
   votes: 1                          # odd; with more than one, the majority answer counts; a context's `votes` overrides it
   attempts: 4                       # a call without a readable verdict is retried; then the grading stops with an error

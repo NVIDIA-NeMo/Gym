@@ -46,7 +46,7 @@ def test_judge_sends_the_calibrated_prompt_and_model_settings():
         question="Did it use FINISH?", context_name=config["contexts"]["run"]["title"], context="ASSISTANT: FINISH"
     )
     assert sent[0] == {
-        "model": "nvidia/zai-org/glm-5.3",
+        "model": "azure/openai/gpt-6-sol",
         "input": [{"role": "user", "content": expected}],
         "temperature": 0.6,
         "reasoning": {"effort": "low", "summary": "auto"},
@@ -59,8 +59,8 @@ def test_judge_sends_the_calibrated_prompt_and_model_settings():
 
 def test_the_shipped_judge_configuration_keeps_its_identity():
     # Results record this hash; prompts, model settings and votes are all part of it.
-    assert config_hash(load_config()) == "5bf772a4a461"  # pragma: allowlist secret
-    assert Judge(lambda body: reply(YES)).hash == "5bf772a4a461"
+    assert config_hash(load_config()) == "d67934d3fbbc"  # pragma: allowlist secret
+    assert Judge(lambda body: reply(YES)).hash == "d67934d3fbbc"  # pragma: allowlist secret
 
 
 @pytest.mark.parametrize(

@@ -58,7 +58,7 @@ agentic_if_judge_model:
       entrypoint: app.py
       openai_base_url: ${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.select:judge_api_key,null}
-      openai_model: nvidia/zai-org/glm-5.3
+      openai_model: azure/openai/gpt-6-sol
       # Each attempt of a judge call gets 600 s and one HTTP try; this policy retries it twice more, and the grader
       # then asks again up to its own attempts (if_grading/data/judge.yaml). A judge outage so ends as judge_failed,
       # which reverification recovers, instead of holding the episode until its deadline.

@@ -699,7 +699,7 @@ async def test_each_judge_call_s_reply_id_and_usage_are_reported_and_kept_with_t
     # What lands in rollouts.jsonl: each call's reply ID, the model that answered and tokens, and their totals.
     assert row_view["judge_calls"][0] == {
         "response_id": "judge-reply-1",
-        "model": "nvidia/zai-org/glm-5.3",
+        "model": "azure/openai/gpt-6-sol",
         "input_tokens": 1200,
         "output_tokens": 300,
         "reasoning_tokens": 120,

@@ -43,8 +43,8 @@ in OpenCode 1.17.11 with this configuration, not the model alone.
   - `mean/if_frac`: the share of applicable checks passed, averaged;
   - `mean/task_and_if`: the share that pass both the task and every check.
 - `if/graded`, `if/not_applicable` and `if/error` count rollouts; only graded rollouts enter the rates.
-- Judge: `resources_servers/agentic_if/if_grading/data/judge.yaml` (`v2-rule-judge-12`), which asks
-  `nvidia/zai-org/glm-5.3` at `https://inference-api.nvidia.com/v1` with temperature 0.6 and low reasoning effort,
+- Judge: `resources_servers/agentic_if/if_grading/data/judge.yaml` (`v2-rule-judge-13`), which asks
+  `azure/openai/gpt-6-sol` at `https://inference-api.nvidia.com/v1` with temperature 0.6 and low reasoning effort,
   up to 4 attempts per check. Its calls are not among the rollout's captured model calls, which belong to the agent.
   Each rollout reports them in `judge_calls` (each call's reply ID and token usage) and `judge_usage` (totals), and
   each vote is saved with the episode under the resources server's `artifacts_dir`.

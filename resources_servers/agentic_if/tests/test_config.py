@@ -52,7 +52,7 @@ def test_the_judge_model_server_serves_the_model_judge_yaml_names():
         "entrypoint": "app.py",
         "openai_base_url": "${oc.select:judge_base_url,https://inference-api.nvidia.com/v1}",
         "openai_api_key": "${oc.select:judge_api_key,null}",
-        "openai_model": "nvidia/zai-org/glm-5.3",
+        "openai_model": "azure/openai/gpt-6-sol",
         "upstream_request_timeout_seconds": 600,
         "upstream_max_num_tries": 1,
         "upstream_retry_policy": {"max_attempts": 3, "backoff_initial_seconds": 5},
