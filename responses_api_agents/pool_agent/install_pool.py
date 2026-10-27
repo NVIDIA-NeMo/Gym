@@ -18,10 +18,10 @@ from pathlib import Path
 # Updating the runtime requires reviewing and updating these pins together.
 RELEASE_SHA256: dict[str, dict[str, str]] = {
     "v1.0.16": {
-        "linux-amd64": "e86aa8c9feef003540673ab494e91bfadc273218d531c43d662cafb69e464146",
-        "linux-arm64": "466343b66b03ee4e66476fcc69be1eb5bf8e9155a4ab73e0e72a232d1f8d2a12",
-        "darwin-amd64": "6d75fae2d7de6c35b6b467b5f682935e3ecde8ff611cb620c56b7bd607e0afde",
-        "darwin-arm64": "0932af3eb2b57a863acacb664ec8b2b1d3a76c2570a788b086001608cc585f74",
+        "linux-amd64": "e86aa8c9feef003540673ab494e91bfadc273218d531c43d662cafb69e464146",  # pragma: allowlist secret
+        "linux-arm64": "466343b66b03ee4e66476fcc69be1eb5bf8e9155a4ab73e0e72a232d1f8d2a12",  # pragma: allowlist secret
+        "darwin-amd64": "6d75fae2d7de6c35b6b467b5f682935e3ecde8ff611cb620c56b7bd607e0afde",  # pragma: allowlist secret
+        "darwin-arm64": "0932af3eb2b57a863acacb664ec8b2b1d3a76c2570a788b086001608cc585f74",  # pragma: allowlist secret
     }
 }
 
