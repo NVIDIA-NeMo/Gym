@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import socket
 from unittest.mock import call, patch
 
@@ -30,6 +31,7 @@ from nemo_gym.orchestration.ray_serve_gateway import (  # noqa: E402
     free_local_port,
     max_replicas_per_node,
     parse_args,
+    proxy_session,
 )
 
 
@@ -168,6 +170,19 @@ def test_deployment_options_carries_replica_count_and_placement():
 def test_proxy_timeout_does_not_cut_off_long_requests():
     # aiohttp's default total timeout is 300 s; a long generation must not be turned into a 500.
     assert PROXY_TIMEOUT.total is None
+
+
+def test_proxy_session_does_not_cap_concurrent_connections():
+    # aiohttp's default connector allows 100 open connections, so a replica never had more than
+    # 100 requests in its vLLM no matter how large max-num-seqs was.
+    async def limits() -> tuple[int, int]:
+        session = proxy_session()
+        try:
+            return session.connector.limit, session.connector.limit_per_host
+        finally:
+            await session.close()
+
+    assert asyncio.run(limits()) == (0, 0)
     assert PROXY_TIMEOUT.sock_read is None
 
 
