@@ -323,8 +323,14 @@ class BaseExporter(Exporter):
         self._exported_artifacts, self._pending_run_id = artifacts, None
         try:
             saved_config = OmegaConf.load(artifacts.resolved_config_yaml_fpath)
+            upload = self._upload_enabled(saved_config)
+            if upload and not artifacts.rollouts_jsonl_fpath.is_file():
+                return ExportResult.failed(
+                    f"Rollouts file not found: {artifacts.rollouts_jsonl_fpath}. "
+                    "Pass `+upload_rollouts=false` to export without the rollouts."
+                )
             metrics = flatten_aggregate_metrics(orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()))
-            rollouts = self._rollouts_to_upload(artifacts, saved_config)
+            rollouts = self._read_rollouts(artifacts) if upload else None
             with self:
                 self._log_config(saved_config)
                 self._log_metrics(metrics)
@@ -341,14 +347,16 @@ class BaseExporter(Exporter):
 
     @staticmethod
     def _why_not_exportable(artifacts: RunArtifacts) -> Optional[str]:
-        """What is missing for the run to be exported faithfully, or None when it can be."""
+        """What is missing for the run to be exported faithfully, or None when it can be.
+
+        The rollouts file is not needed unless the rollouts are uploaded, which `export` checks. When it is there,
+        the aggregate metrics must not be older than it.
+        """
         rollouts = artifacts.rollouts_jsonl_fpath
-        if not rollouts.is_file():
-            return f"Rollouts file not found: {rollouts}"
         aggregate_metrics = artifacts.aggregate_metrics_json_fpath
         if not aggregate_metrics.is_file():
             return f"Aggregate metrics not found: {aggregate_metrics}. Run `gym eval aggregate` first."
-        if aggregate_metrics.stat().st_mtime < rollouts.stat().st_mtime:
+        if rollouts.is_file() and aggregate_metrics.stat().st_mtime < rollouts.stat().st_mtime:
             return f"Aggregate metrics {aggregate_metrics} are older than {rollouts}. Run `gym eval aggregate` again."
         if not artifacts.resolved_config_yaml_fpath.is_file():
             return (
@@ -380,18 +388,19 @@ class BaseExporter(Exporter):
             return f"Aggregation failed for agents: {', '.join(failed)}. Run `gym eval aggregate` again."
         return None
 
-    def _rollouts_to_upload(self, artifacts: RunArtifacts, saved_config: DictConfig) -> Optional[list[dict[str, Any]]]:
-        """The rollouts a live run would have uploaded, or None when the run's upload intent is off.
+    def _upload_enabled(self, saved_config: DictConfig) -> bool:
+        """Whether the rollouts are uploaded, as a live run would have decided.
 
         An explicit `upload_rollouts=` on the export command wins; otherwise the run's own saved setting does.
         """
         explicit = _upload_intent(self.global_config_dict)
         if "upload_rollouts" in explicit.model_fields_set:
-            upload = explicit.upload_rollouts
-        else:
-            upload = _upload_intent(saved_config).upload_rollouts
-        if not upload:
-            return None
+            return explicit.upload_rollouts
+        return _upload_intent(saved_config).upload_rollouts
+
+    @staticmethod
+    def _read_rollouts(artifacts: RunArtifacts) -> list[dict[str, Any]]:
+        """The rollouts a live run would have uploaded."""
         from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
 
         # Rows flagged as drained stand for tasks the dispatch budget never started, so there is nothing to upload,

@@ -237,11 +237,47 @@ class TestRunMustBeExportable:
         assert result.state is ExportState.FAILED
         assert "Saved run config not found" in result.error
 
-    def test_missing_rollouts(self, tmp_path: Path) -> None:
-        result = _backend(RunArtifacts(tmp_path / "none.jsonl")).export(RunArtifacts(tmp_path / "none.jsonl"))
+    def test_missing_rollouts_fail_when_they_would_be_uploaded_and_say_how_to_skip_them(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        artifacts.rollouts_jsonl_fpath.unlink()
+        backend = _backend(artifacts)
+
+        result = backend.export(artifacts)
 
         assert result.state is ExportState.FAILED
-        assert "Rollouts file not found" in result.error
+        assert f"Rollouts file not found: {artifacts.rollouts_jsonl_fpath}" in result.error
+        assert "+upload_rollouts=false" in result.error
+        assert backend.events == []
+        assert not artifacts.exporter_run_id_fpath("recording").exists()
+
+    @pytest.mark.parametrize("where", ["command", "saved config"])
+    def test_missing_rollouts_are_fine_when_they_are_not_uploaded(self, tmp_path: Path, where: str) -> None:
+        artifacts = _make_run(tmp_path, saved_config={"upload_rollouts": False} if where == "saved config" else None)
+        artifacts.rollouts_jsonl_fpath.unlink()
+        backend = _backend(artifacts, **({"upload_rollouts": False} if where == "command" else {}))
+
+        result = backend.export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED, result.error
+        assert result.detail["uploaded_rollouts"] is False
+        assert backend.metrics == [flatten_aggregate_metrics(AGGREGATE_ENTRIES)]
+        assert backend.rollouts == []
+        assert artifacts.exporter_run_id_fpath("recording").read_text() == "backend-run-7"
+
+    def test_the_freshness_check_needs_the_rollouts_file_to_compare_against(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        artifacts.rollouts_jsonl_fpath.unlink()
+        os.utime(artifacts.aggregate_metrics_json_fpath, (1, 1))
+
+        assert _backend(artifacts, upload_rollouts=False).export(artifacts).state is ExportState.SUCCEEDED
+
+    def test_a_run_with_nothing_left_fails_on_what_every_export_needs(self, tmp_path: Path) -> None:
+        artifacts = RunArtifacts(tmp_path / "none.jsonl")
+
+        result = _backend(artifacts, upload_rollouts=False).export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "Aggregate metrics not found" in result.error
 
     def test_a_run_that_cannot_be_exported_does_not_open_the_backend(self, tmp_path: Path) -> None:
         artifacts = _make_run(tmp_path)

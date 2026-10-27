@@ -1002,7 +1002,8 @@ saved config next to the rollouts, so they cannot export a run that predates the
 credentials (`mlflow_tracking_uri`, `wandb_api_key`, ...) come from the export command itself (arguments or `env.yaml`),
 never from the run's saved config, which masks them. A backend SDK's own environment variables, such as
 `WANDB_API_KEY`, are also used when the command sets no key. Rollouts are uploaded unless the run's saved
-`upload_rollouts` is false; pass `+upload_rollouts=true|false` to override.
+`upload_rollouts` is false; pass `+upload_rollouts=true|false` to override. The rollouts file itself is only needed
+when the rollouts are uploaded, so `+upload_rollouts=false` also exports a run whose rollouts file is gone.
 
 Once a run is exported, `<stem>_<exporter>_run_id` is written next to the rollouts and later exports of the same run
 are skipped without contacting the backend. Delete that file to export again. A failed export leaves no marker, so it can
