@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import json
+import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -38,23 +40,32 @@ class SummaryExporter(Exporter):
     config: SummaryExportConfig
 
     def export(self, artifacts: RunArtifacts) -> ExportResult:
-        problem = unexportable_reason(artifacts)
-        if problem is not None:
-            return ExportResult.failed(problem)
-
-        destination = self.config.destination_dirpath / f"{artifacts.rollouts_jsonl_fpath.stem}_summary.json"
-        if destination.exists():
-            return ExportResult.skipped(reason="already exported", destination=str(destination))
-
-        with artifacts.rollouts_jsonl_fpath.open("rb") as rollouts:
-            rollout_count = sum(1 for line in rollouts if line.strip())
-        summary = {
-            "rollouts": rollout_count,
-            "aggregate_metrics": json.loads(artifacts.aggregate_metrics_json_fpath.read_text()),
-        }
         try:
+            problem = unexportable_reason(artifacts)
+            if problem is not None:
+                return ExportResult.failed(problem)
+
+            # Runs often share a rollouts filename, so name the summary after the whole path.
+            rollouts = artifacts.rollouts_jsonl_fpath
+            run_id = hashlib.sha256(str(rollouts.resolve()).encode()).hexdigest()[:8]
+            destination = self.config.destination_dirpath / f"{rollouts.stem}_{run_id}_summary.json"
+            if destination.exists():
+                return ExportResult.skipped(reason="already exported", destination=str(destination))
+
+            with rollouts.open("rb") as lines:
+                rollout_count = sum(1 for line in lines if line.strip())
+            summary = {
+                "rollouts": rollout_count,
+                "aggregate_metrics": json.loads(artifacts.aggregate_metrics_json_fpath.read_text()),
+            }
+            # Publish only a complete file, because the existence check above treats any file as done.
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(json.dumps(summary, indent=2))
+            temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+            try:
+                temporary.write_text(json.dumps(summary, indent=2))
+                temporary.replace(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
         except OSError as exc:
             return ExportResult.failed(str(exc))
         return ExportResult.succeeded(destination=str(destination), rollouts=rollout_count)

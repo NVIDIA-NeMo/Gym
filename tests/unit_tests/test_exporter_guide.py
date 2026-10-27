@@ -75,7 +75,8 @@ class TestSummaryExporter:
 
         result = exporter.export(artifacts)
 
-        destination = tmp_path / "out" / "rollouts_summary.json"
+        [destination] = (tmp_path / "out").iterdir()
+        assert destination.name.startswith("rollouts_") and destination.name.endswith("_summary.json")
         assert result.state is ExportState.SUCCEEDED
         assert result.detail == {"destination": str(destination), "rollouts": 2}
         assert json.loads(destination.read_text()) == {"rollouts": 2, "aggregate_metrics": [{"mean/reward": 0.5}]}
@@ -113,6 +114,69 @@ class TestSummaryExporter:
         )
 
         assert exporter.export(artifacts).state is ExportState.FAILED
+
+    def test_runs_with_the_same_rollouts_filename_get_their_own_summary(self, tmp_path: Path) -> None:
+        summary = _load_example("summary_exporter")
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        first, second = _make_run(tmp_path / "a"), _make_run(tmp_path / "b")
+        second.aggregate_metrics_json_fpath.write_text('[{"mean/reward": 0.9}]')
+        os.utime(second.aggregate_metrics_json_fpath, (second.rollouts_jsonl_fpath.stat().st_mtime + 10,) * 2)
+        results = [
+            summary.SummaryExporter.from_global_config(
+                _settings(run, tmp_path, destination_dirpath=str(tmp_path / "out"))
+            ).export(run)
+            for run in (first, second)
+        ]
+
+        assert [result.state for result in results] == [ExportState.SUCCEEDED, ExportState.SUCCEEDED]
+        written = sorted(
+            json.loads(path.read_text())["aggregate_metrics"][0]["mean/reward"]
+            for path in (tmp_path / "out").iterdir()
+        )
+        assert written == [0.5, 0.9]
+
+    def test_a_write_that_fails_midway_leaves_nothing_to_be_skipped_and_is_retried(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        summary = _load_example("summary_exporter")
+        artifacts = _make_run(tmp_path)
+        exporter = summary.SummaryExporter.from_global_config(
+            _settings(artifacts, tmp_path, destination_dirpath=str(tmp_path / "out"))
+        )
+        real_write_text = Path.write_text
+
+        def write_a_prefix_then_fail(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
+            real_write_text(self, data[:5], *args, **kwargs)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        monkeypatch.setattr(Path, "write_text", write_a_prefix_then_fail)
+        failed = exporter.export(artifacts)
+        monkeypatch.setattr(Path, "write_text", real_write_text)
+
+        assert failed.state is ExportState.FAILED
+        assert list((tmp_path / "out").iterdir()) == []
+        assert exporter.export(artifacts).state is ExportState.SUCCEEDED
+
+    def test_an_unreadable_rollouts_file_is_a_failed_result(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        summary = _load_example("summary_exporter")
+        artifacts = _make_run(tmp_path)
+        exporter = summary.SummaryExporter.from_global_config(
+            _settings(artifacts, tmp_path, destination_dirpath=str(tmp_path / "out"))
+        )
+        real_open = Path.open
+
+        def deny_the_rollouts(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == artifacts.rollouts_jsonl_fpath:
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", deny_the_rollouts)
+
+        result = exporter.export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "Permission denied" in result.error
 
     def test_the_destination_setting_is_required(self, tmp_path: Path) -> None:
         summary = _load_example("summary_exporter")
@@ -235,6 +299,28 @@ class TestAcmeExporter:
 
         assert result.state is ExportState.FAILED
         assert "Could not stage the aggregate metrics: [Errno 28] No space left on device" in result.error
+        assert fake_acme_sdk["requested"] == []
+
+    @pytest.mark.parametrize("failing", ["mkdir", "precondition"])
+    def test_other_filesystem_failures_while_preparing_are_failed_results(
+        self, tmp_path: Path, fake_acme_sdk: dict[str, Any], monkeypatch: MonkeyPatch, failing: str
+    ) -> None:
+        acme = _load_example("acme_exporter")
+        artifacts = _make_run(tmp_path)
+        exporter = acme.AcmeExporter.from_global_config(_settings(artifacts, tmp_path, project="demo"))
+
+        def disk_full(*args: Any, **kwargs: Any) -> None:
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        if failing == "mkdir":
+            monkeypatch.setattr(Path, "mkdir", disk_full)
+        else:
+            monkeypatch.setattr(acme, "unexportable_reason", disk_full)
+
+        result = exporter.export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "No space left on device" in result.error
         assert fake_acme_sdk["requested"] == []
 
     def test_a_run_that_cannot_be_exported_fails_before_an_environment_is_built(

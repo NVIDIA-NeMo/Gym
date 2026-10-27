@@ -44,13 +44,13 @@ class AcmeExporter(IsolatedExporter):
         return (self.config.requirement,)
 
     def build_payload(self, artifacts: RunArtifacts, workdir: Path) -> dict[str, Any]:
-        problem = unexportable_reason(artifacts, rollouts_required=False)
-        if problem is not None:
-            raise ExportPreparationError(problem)
-
-        staged_dir = workdir / "run"
-        staged_dir.mkdir()
         try:
+            problem = unexportable_reason(artifacts, rollouts_required=False)
+            if problem is not None:
+                raise ExportPreparationError(problem)
+
+            staged_dir = workdir / "run"
+            staged_dir.mkdir()
             shutil.copy2(artifacts.aggregate_metrics_json_fpath, staged_dir)
         except OSError as exc:
             raise ExportPreparationError(f"Could not stage the aggregate metrics: {exc}") from exc
