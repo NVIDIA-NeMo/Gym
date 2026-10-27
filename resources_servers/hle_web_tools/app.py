@@ -53,6 +53,7 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     SimpleResourcesServer,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, request
@@ -383,6 +384,8 @@ class QuestionSpans:
 
     def __init__(self, question: str, span_words: int):
         words = question_words(question)
+        # Identifies the question without keeping its text, so a retried seed can be told from a re-seed.
+        self.digest = hashlib.sha256("\x1f".join(words).encode()).hexdigest()
         self.span_words = min(span_words, len(words)) if words else 0
         n = self.span_words
         self.ngrams = frozenset(words[i : i + n] for i in range(len(words) - n + 1)) if n else frozenset()
@@ -629,7 +632,24 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         question = extract_question(body.model_dump(), self.config.question_field)
-        if question is None:
+        current = self._session_spans.get(session_id)
+        if current is not None:
+            # A session carries one question for its whole life. A retried seed with the same question is served
+            # again; a seed that would change or drop the question is a conflict, so a caller who holds a session
+            # (a sandbox reaching the plain route with the rollout's credentials) cannot swap the span check
+            # out from under it. A fresh session seeded from inside the sandbox is NOT caught here: that needs
+            # an authenticated seed channel (see the README).
+            if question is None or QuestionSpans(question, self.config.verbatim_span_words).digest != current.digest:
+                logger.warning(
+                    "hle_web_tools refused to re-seed session %s with %s",
+                    session_id,
+                    "no question" if question is None else "a different question",
+                )
+                raise ResourcesSessionConflictError(
+                    "This session was already seeded with a question; a session cannot be re-seeded with another."
+                )
+            self._session_spans.move_to_end(session_id)
+        elif question is None:
             logger.warning(
                 "hle_web_tools session %s seeded without a question (field %r or a user message): %s",
                 session_id,
@@ -638,7 +658,6 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
                 if self.config.require_seeded_question
                 else "the verbatim-span rule cannot apply to its queries",
             )
-            self._session_spans.pop(session_id, None)
         else:
             self._session_spans[session_id] = QuestionSpans(question, self.config.verbatim_span_words)
             self._session_spans.move_to_end(session_id)

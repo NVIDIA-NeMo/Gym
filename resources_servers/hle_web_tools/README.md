@@ -15,9 +15,16 @@ egress policy admits the tool-server host can call them directly; a call without
 token lands in a fresh session that carries no question. The policy therefore does not depend on the
 transport: every blocklist family applies on both routes, and `web_search` is refused for any session
 that was not seeded with a question (`require_seeded_question`, default on), so the one session-dependent
-rule fails closed instead of being skipped. What this server cannot tell apart is a seed sent by the
-agent server from one sent by the sandbox itself: keeping the sandbox from seeding its own session is the
-job of the egress policy, which the Diamond README discusses under Sandboxed agents.
+rule fails closed instead of being skipped. A seeded session keeps its question for its whole life: a
+retried seed with the same question is served again, and a seed that would change or drop the question
+is refused with HTTP 409, so a caller holding a session cannot swap the span check out from under it.
+What this server still cannot tell apart is a seed sent by the agent server from one sent by the sandbox
+itself for a **fresh** session: `/seed_session` is an unauthenticated route, and a sandbox whose egress
+policy admits the tool-server host (`network_access: model_and_tools` allows the whole host, so it always
+does) can seed a new session with a question of its choice and search from it without the span rule.
+Closing that needs an authenticated seed channel (a secret the agent server holds and the sandbox never
+sees); until then the span rule is a check on a cooperative harness, not on the sandboxed model, and the
+Diamond README lists it as a residual under Reference preset.
 
 ## Tools
 
@@ -62,8 +69,9 @@ Beyond the families, the protocol's own refusals:
   Environment Server's `task_data` is read the same way. A search from a session that was not seeded
   with a question (a seed without one, or a plain-HTTP call carrying no session) is refused with the
   family `unseeded_session`, and a seed without a question is logged at WARNING; set
-  `require_seeded_question: false` to serve such sessions without the span rule instead. The words of a
-  blocked span are never logged, only their count.
+  `require_seeded_question: false` to serve such sessions without the span rule instead. A seeded
+  session cannot be re-seeded with another question (HTTP 409; a retry with the same question is
+  served). The words of a blocked span are never logged, only their count.
 - **Fetch URLs** must be `http(s)` without credentials. The URL, its percent-decoded forms (up to four
   rounds, so double encoding does not help) and every URL wrapped inside any of them are checked
   against the URL-shaped families and the text families: the path remainder of the Wayback Machine
@@ -138,6 +146,6 @@ pytest resources_servers/hle_web_tools/tests/test_app.py
 
 Model-free; the Tavily transport is stubbed. Each rule family has one test built on rules taken from
 the upstream blocklist, plus the two query refusals, the fail-closed refusal of a cookie-less
-`POST /web_search` after a seed, wrapper decoding, the cap and marker, the exact two-tool list over a
+`POST /web_search` after a seed, the 409 on re-seeding a session with another question, wrapper decoding, the cap and marker, the exact two-tool list over a
 real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check, key failover and the
 blocklist digest pin.

@@ -224,6 +224,27 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
     assert backend.search.await_count == 2
 
 
+async def test_reseeding_a_seeded_session_with_another_question_is_refused(server, caplog):
+    """A session keeps the question it was seeded with: a retried seed (same question) is served again, a seed
+    that would swap or drop the question answers 409, so the span check cannot be replaced from the plain route
+    by a caller holding the session. A fresh session seeded by the same caller is not caught here (README)."""
+    backend = stub_backend(server, results=[result("https://example.com/ok")])
+    await seed(server, {"question": QUESTION}, "session-a")
+    await seed(server, {"question": QUESTION.upper() + "  "}, "session-a")  # a retry: same words, other spelling
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        with pytest.raises(module.ResourcesSessionConflictError) as swapped:
+            await seed(server, {"question": NEUTRAL_QUESTION}, "session-a")
+        with pytest.raises(module.ResourcesSessionConflictError):
+            await seed(server, {"responses_create_params": {"input": []}}, "session-a")
+    assert swapped.value.status_code == 409
+    assert "refused to re-seed session session-a with a different question" in caplog.text
+    assert "refused to re-seed session session-a with no question" in caplog.text
+    eight = "Theta characteristic: how many odd spin structures admit paper"
+    assert (await search(server, eight, "session-a")).refused  # the original question still governs the session
+    assert not (await search(server, "boiling point of water", "session-a")).refused
+    assert backend.search.await_count == 1
+
+
 async def test_search_from_a_session_without_a_seeded_question_is_refused(caplog):
     """The plain POST route stays served next to /mcp: a call without the rollout's cookie or token lands in a
     fresh session with no question, which must fail closed rather than skip the verbatim-span rule."""
