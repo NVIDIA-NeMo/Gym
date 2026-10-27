@@ -71,11 +71,16 @@ _EXA_DEEP_ANSWER_MAX_FRACTION = 0.5
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
-    # key must be present (validated below). exclude_domains are honored by both.
-    search_provider: str = "tavily"
+    # Search/browse backend. "you" (default), "tavily" or "exa". The chosen provider's
+    # key must be present (validated below). exclude_domains are honored by all three.
+    search_provider: str = "you"
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
+    ydc_api_key: str | List[str] | None = None
+    # You.com /v1/search runs with highlights extraction (query-relevant passages per
+    # page); browse pulls full page markdown through /v1/contents. This is the max
+    # seconds You.com may spend crawling a page for /v1/contents.
+    you_crawl_timeout: int = 60
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
@@ -124,12 +129,14 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
+        if self.search_provider == "you" and not self.ydc_api_key:
+            raise ValueError("ydc_api_key is required when search_provider='you'")
         if self.search_provider == "tavily" and not self.tavily_api_key:
             raise ValueError("tavily_api_key is required when search_provider='tavily'")
         if self.search_provider == "exa" and not self.exa_api_key:
             raise ValueError("exa_api_key is required when search_provider='exa'")
-        if self.search_provider not in ("tavily", "exa"):
-            raise ValueError(f"search_provider must be 'tavily' or 'exa', got {self.search_provider!r}")
+        if self.search_provider not in ("you", "tavily", "exa"):
+            raise ValueError(f"search_provider must be 'you', 'tavily' or 'exa', got {self.search_provider!r}")
         if self.exa_search_type not in _EXA_SEARCH_TYPES:
             raise ValueError(
                 f"exa_search_type must be one of {sorted(_EXA_SEARCH_TYPES)}, got {self.exa_search_type!r}"
@@ -569,6 +576,91 @@ class ExaAIOHTTPClient(BaseModel):
         return await self._post("/contents", body)
 
 
+# Cap on one You.com hit's inline snippet. Without it a single hit's highlights (up to ~15k
+# chars measured) can exceed a query's budget slice on its own, so the budget loop breaks on the
+# first hit and the model sees an empty result although You.com returned several.
+_YOU_MAX_SNIPPET_CHARS = 5000
+
+
+class YouAIOHTTPClient(BaseModel):
+    """Async You.com REST client over NeMo Gym's global aiohttp client (no SDK dep).
+
+    Same retry + rate-limit-tagging loop as ExaAIOHTTPClient. ``search`` hits /v1/search
+    with highlights extraction; ``get_contents`` hits /v1/contents for full page markdown.
+    """
+
+    # You.com rejects exclude_domains lists longer than this; the rest is enforced
+    # client-side by _is_url_excluded.
+    MAX_EXCLUDE_DOMAINS: ClassVar[int] = 500
+
+    headers: Dict[str, str]
+    base_url: str = "https://ydc-index.io"
+    debug: bool = False
+
+    async def _post(self, endpoint: str, body: Dict[str, Any]) -> Any:
+        request_kwargs = {
+            "method": "POST",
+            "headers": self.headers,
+            "url": f"{self.base_url}{endpoint}",
+            "data": json.dumps(body),
+        }
+
+        MAX_NUM_TRIES = 3  # mirror the Tavily/Exa clients
+        max_num_tries = MAX_NUM_TRIES
+        tries = 0
+        while tries < max_num_tries:
+            tries += 1
+            response = await request(**request_kwargs)
+
+            if response.status in (401, 403):
+                _abort_on_invalid_api_key("you", response.status, (await response.content.read()).decode())
+
+            if response.status in RETRY_ERROR_CODES:
+                rate_limited = response.status in RATE_LIMIT_ERROR_CODES
+                if rate_limited:
+                    # don't let rate limits burn the retry budget
+                    max_num_tries += 1
+                _count_provider_retry(response.status)
+                content = (await response.content.read()).decode()
+                tag = "you_rate_limit" if rate_limited else "you_retry"
+                print(
+                    f"[browsecomp][tool_fail][{tag}] endpoint={endpoint} status={response.status} "
+                    f"try={tries} body={content[:300]}",
+                    flush=True,
+                )
+                await sleep(0.5)
+                continue
+
+            # A non-retryable error (e.g. 400) must raise, not be returned as if it were
+            # results: that would turn a bad request into silent "No results found." rows.
+            await raise_for_status(response)
+
+            data = await response.json()
+            if self.debug:
+                print(f"Received the following You.com response: status={response.status}")
+            return data
+
+        await raise_for_status(response)
+
+    async def search(
+        self, query: str, num_results: int, exclude_domains: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "query": query,
+            "count": num_results,
+            "extraction": {"extraction_mode": "highlights"},
+        }
+        if exclude_domains:
+            body["exclude_domains"] = list(exclude_domains)[: self.MAX_EXCLUDE_DOMAINS]
+        return await self._post("/v1/search", body)
+
+    async def get_contents(self, urls: List[str], crawl_timeout: int) -> Any:
+        # /v1/contents answers with a bare array, one entry per requested URL.
+        return await self._post(
+            "/v1/contents", {"urls": list(urls), "formats": ["markdown"], "crawl_timeout": crawl_timeout}
+        )
+
+
 # ---------------------------------------------------------------------------
 # Terminal/disk mode: per-session page workspace (pages/ + manifest.tsv) and a
 # read-only bash tool. Ported from the reference harness.
@@ -919,6 +1011,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _exa_clients: Optional[List[ExaAIOHTTPClient]] = PrivateAttr(default=None)
+    _you_clients: Optional[List[YouAIOHTTPClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
@@ -961,6 +1054,21 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 for k in exa_api_keys
             ]
             print(f"Search provider: exa ({len(self._exa_clients)} key(s))")
+
+        # You.com clients (built only when a You.com key is configured). One client per
+        # key; round-robined like Tavily/Exa. Native aiohttp REST (no SDK dep).
+        ydc_api_keys = self.config.ydc_api_key
+        if isinstance(ydc_api_keys, str):
+            ydc_api_keys = [ydc_api_keys]
+        if ydc_api_keys:
+            self._you_clients = [
+                YouAIOHTTPClient(
+                    headers={"X-API-Key": k, "Content-Type": "application/json"},
+                    debug=self.config.debug,
+                )
+                for k in ydc_api_keys
+            ]
+            print(f"Search provider: you ({len(self._you_clients)} key(s))")
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
@@ -1095,6 +1203,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     def _select_exa_client(self) -> ExaAIOHTTPClient:
         client = self._exa_clients[self._num_requests % len(self._exa_clients)]
+        self._num_requests += 1
+        return client
+
+    def _select_you_client(self) -> YouAIOHTTPClient:
+        client = self._you_clients[self._num_requests % len(self._you_clients)]
         self._num_requests += 1
         return client
 
@@ -1240,6 +1353,102 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             print(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results", flush=True)
         return results_string
 
+    @staticmethod
+    def _you_result_body(result: Dict[str, Any]) -> str:
+        """Highlights from /v1/search, falling back to snippets/description for a hit the
+        extractor returned nothing for, so the model still sees something to act on."""
+        highlights = (result.get("contents") or {}).get("highlights") or []
+        snippets = highlights or result.get("snippets") or []
+        return " ... ".join(h for h in snippets if h) or result.get("description") or ""
+
+    async def _you_search_one(
+        self, query: str, max_length: int, metrics: "TavilySearchMetrics", page_writer: Optional["_PageWriter"] = None
+    ) -> str:
+        """You.com search with highlights extraction: highlight snippets returned INLINE.
+
+        When a page_writer is available (terminal mode), each result's highlights are also
+        written to pages/ and the entry carries a [Saved to] path, matching the shape the
+        tool description promises. Snippets stay inline either way."""
+        if len(query) > 400:
+            return "Query is too long"
+
+        client = self._select_you_client()
+        call_start = time()
+        try:
+            results = await client.search(
+                query, num_results=self.config.max_results, exclude_domains=self._exclude_domains
+            )
+        except Exception as e:
+            self._record_call(metrics, "search", "you", "error", call_start)
+            print(f"[browsecomp][tool_fail][you_search] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
+        # Client-side exclusion covers registries longer than the API's exclude_domains cap.
+        web = [
+            r for r in (results.get("results") or {}).get("web") or [] if not self._is_url_excluded(r.get("url") or "")
+        ]
+        # Contamination guard: applied above the pages/ write so a contaminated hit is
+        # never written to disk (see _exa_search_one).
+        offered, _ = _filter_results(web, "search", "you")
+        blocks = [f"[Search Query]: {query}"]
+        running_len = len(blocks[0])
+        returned = 0
+        for ri, result in enumerate(offered, start=1):
+            title = result.get("title", "") or ""
+            url = result.get("url", "") or ""
+            body = self._you_result_body(result)
+            snippet = body
+            if len(snippet) > _YOU_MAX_SNIPPET_CHARS:
+                snippet = snippet[:_YOU_MAX_SNIPPET_CHARS] + "\n... [truncated]"
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
+            if running_len + len(entry) > max_length:
+                break
+            if page_writer is not None and body:
+                # Written only once the entry is known to fit, so no page lands in pages/
+                # without a [Saved to] line ever shown to the model. The page keeps the full
+                # highlights; only the inline snippet is capped.
+                content = body[: self.config.max_page_bytes]
+                saved = page_writer.write_search_result(query, ri, title, url, content)
+                entry += f"[Saved to]: {saved} ({len(content)} bytes)\n"
+            blocks.append(entry)
+            running_len += len(entry)
+            returned += 1
+        results_string = "\n".join(blocks)
+        self._record_call(
+            metrics,
+            "search",
+            "you",
+            "success",
+            call_start,
+            num_results_offered=len(offered),
+            num_results_returned=returned,
+            chars_returned=len(results_string),
+        )
+        if returned < len(offered):
+            print(
+                f"[browsecomp][search_truncated][you] query={query[:120]!r} "
+                f"returned={returned}/{len(offered)} budget={max_length}",
+                flush=True,
+            )
+        elif not offered:
+            print(f"[browsecomp][search_empty][you] query={query[:120]!r} provider returned 0 results", flush=True)
+        return results_string
+
+    @staticmethod
+    def _normalize_you_contents(raw: Any, urls: List[str]) -> List[Dict[str, str]]:
+        """/v1/contents -> [{"url", "raw_content"}, ...]. The API answers with a bare array
+        whose entries have been seen both as {"url", "markdown"} dicts and as plain strings
+        (positional with the requested urls); accept either."""
+        normalized = []
+        for i, r in enumerate(raw or []):
+            positional_url = urls[i] if i < len(urls) else ""
+            if isinstance(r, dict):
+                normalized.append(
+                    {"url": r.get("url") or positional_url, "raw_content": r.get("markdown") or r.get("text") or ""}
+                )
+            elif isinstance(r, str):
+                normalized.append({"url": positional_url, "raw_content": r})
+        return normalized
+
     async def _search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
         if len(query) > 400:
             return "Query is too long"
@@ -1341,7 +1550,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             body.max_total_length if body.max_total_length is not None else self.config.search_max_total_length
         )
         max_per_query_length = total_length // len(body.queries)
-        if self.config.search_provider == "exa":
+        if self.config.search_provider == "you":
+            # You.com: highlight snippets inline; in terminal mode also written to pages/.
+            you_page_writer = self._get_page_writer(sid)
+            results = await asyncio.gather(
+                *[self._you_search_one(q, max_per_query_length, metrics, you_page_writer) for q in body.queries]
+            )
+        elif self.config.search_provider == "exa":
             # Exa: highlight snippets inline. Pages are written only when
             # exa_search_writes_pages is on and the session has a workspace; otherwise the
             # historical highlights-only behaviour is unchanged.
@@ -1382,7 +1597,18 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # fetch full page content (provider-specific); normalize to a list of
         # {url, raw_content} so the shared disk/inline formatting below is provider-agnostic.
         start_time = time()
-        if self.config.search_provider == "exa":
+        if self.config.search_provider == "you":
+            you_client = self._select_you_client()
+            print(f"[you_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
+            try:
+                raw = await you_client.get_contents(urls=urls, crawl_timeout=self.config.you_crawl_timeout)
+            except Exception as e:
+                self._record_call(metrics, "browse", "you", "error", start_time)
+                print(f"[browsecomp][tool_fail][you_contents] urls={urls} error={e}", flush=True)
+                return BrowseResponse(results_string=f"Failed to extract content: {e}")
+            self._record_call(metrics, "browse", "you", "success", start_time)
+            result_list = self._normalize_you_contents(raw, urls)
+        elif self.config.search_provider == "exa":
             exa_client = self._select_exa_client()
             print(f"[exa_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
             try:

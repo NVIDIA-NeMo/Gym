@@ -5,10 +5,14 @@ requiring multi-hop investigation through search and page-level browsing.
 
 ## Overview
 
-This resources server provides two browsing tools backed by [Tavily](https://tavily.com/):
+This resources server provides two browsing tools backed by a configurable search provider:
 
 - **`search`** — parallel web search returning top results with content snippets
 - **`browse`** — full-page content extraction from given URLs
+
+Select the provider with `search_provider`: `you` ([You.com](https://you.com/), default), `exa`, or `tavily`.
+For `you`, `search` calls `/v1/search` with highlights extraction and `browse` calls `/v1/contents`
+for full-page markdown.
 
 Reward is computed via an LLM judge that compares the model's final answer against the ground truth.
 
@@ -17,7 +21,7 @@ Reward is computed via an LLM judge that compares the model's final answer again
 Add to your `env.yaml` (or pass via CLI):
 
 ```yaml
-tavily_api_key: <YOUR_TAVILY_KEY>   # or a list of keys for rotation
+ydc_api_key: <YOUR_YOU_COM_KEY>   # or a list of keys for rotation; use exa_api_key / tavily_api_key with search_provider=exa|tavily
 exclude_domains_file_path: /path/to/excluded_domains.json
 
 judge_model_base_url: <YOUR_JUDGE_MODEL_URL>
