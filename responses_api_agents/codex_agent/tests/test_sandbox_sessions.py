@@ -1915,7 +1915,7 @@ async def test_session_rollouts_are_copied_to_the_logs_dir(tmp_path):
     await state(tmp_path / "session", None).copy_session_rollouts()
 
 
-async def test_collect_copies_session_rollouts_before_reading_events(setup):
+async def test_collect_copies_session_rollouts_after_reading_events(setup):
     agent, sandbox = setup
     agent.config.sandbox_logs_dir = "/logs/agent"
     body = seed()
@@ -1925,9 +1925,37 @@ async def test_collect_copies_session_rollouts_before_reading_events(setup):
     sandbox.files[f"{state.session.session_dir}/events.jsonl"] = events()
     sandbox.exec.reset_mock()
     assert await state.collect_artifacts() == events()
-    copy = sandbox.exec.await_args_list[0]
+    copy = sandbox.exec.await_args_list[-1]
     assert f"{state.session.session_dir}/home/.codex/sessions" in copy.args[0]
     assert "/logs/agent/sessions" in copy.args[0]
+
+
+def test_a_slow_session_rollout_copy_does_not_cost_the_run(setup):
+    """The optional copy ends before the capture budget does, so the run is still returned and graded."""
+    agent, sandbox = setup
+    agent.config.sandbox_logs_dir = "/logs/agent"
+    agent.config.session_close_timeout_seconds = 3
+    execute = sandbox.exec.side_effect
+
+    async def hanging_copy(command, **kwargs):
+        if "cp -R" in command:
+            await asyncio.sleep(10)  # Past the capture budget; bounded so a regression fails instead of hanging.
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = hanging_copy
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["status"] == "completed"
+    assert body["usage"]["total_tokens"] == 22
+    assert closed.status_code == 200, closed.text
+    invocation = closed.json()["agent_observations"]["records"][0]
+    assert invocation["status"] == "completed"
+    assert "Fixed" in json.dumps(invocation["conversation"])
+    assert any("cp -R" in call.args[0] for call in sandbox.exec.await_args_list)
 
 
 @pytest.mark.parametrize("value", ["/", "relative", "/logs/../tmp"])
