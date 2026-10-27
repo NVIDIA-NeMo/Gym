@@ -115,6 +115,7 @@ def test_no_serve_collection_saves_the_config_before_collecting(tmp_path: Path, 
             {
                 "input_jsonl_fpath": str(tmp_path / "tasks.jsonl"),
                 "output_jsonl_fpath": str(rollouts),
+                "disable_health_check": True,
                 "policy_api_key": "sk-canary",
                 "url": "${oc.env:NO_SERVE_BASE_FOR_TEST}/v1",
                 "attempt": attempt["n"],
