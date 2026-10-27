@@ -1310,6 +1310,34 @@ async def test_close_during_the_startup_stderr_read_keeps_the_observations(setup
     assert [record.status for record in closed.agent_observations.records] == ["failed"]
 
 
+async def test_close_during_the_grading_probe_keeps_the_observations(setup):
+    agent, sandbox = setup
+    agent.config.verify_after_agent_error = True
+    sandbox.result["return_code"] = -9  # killed mid-turn, after a tool call and a message
+    records = [json.loads(line) for line in events().splitlines()][:-1]
+    records.insert(0, [-1.0, {"type": "turn.started"}])
+    sandbox.events = "\n".join(json.dumps(record) for record in records)
+    probing = asyncio.Event()
+
+    async def hanging_status():
+        probing.set()
+        await asyncio.sleep(10)  # Bounded so a regression fails instead of hanging.
+        return SandboxStatus.RUNNING
+
+    sandbox.status = hanging_status
+    request, session_id, task = await activate(agent, sandbox)
+    await asyncio.wait_for(probing.wait(), 5)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    invocation, *tools = closed.agent_observations.records
+    assert invocation.status == "failed"
+    assert "Fixed" in json.dumps([item.model_dump(mode="json") for item in invocation.conversation])
+    assert [tool.tool_call_id for tool in tools] == ["tool-1"]
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
 async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
@@ -2172,7 +2200,11 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
             if url_path == "/verify":
                 assert not any(record.state is not None for record in agent._session_records.values())
                 assert sandbox.disconnect.await_count == 1
-                assert body["response"]["usage"]["total_tokens"] == (22 if outcome == "completed" else 0)
+                if outcome == "completed":
+                    assert body["response"]["usage"]["total_tokens"] == 22
+                else:
+                    # The graded run did model work after the CLI's last total: its usage is unknown, not zero.
+                    assert body["response"]["usage"] is None
                 assert body["response"]["status"] == ("completed" if outcome == "completed" else "failed")
                 return Response({**body, "reward": 1.0})
             assert url_path == "/close_session"
@@ -2212,7 +2244,10 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         assert (resources_name, "/verify") not in calls
     else:
         assert result.get("reward") == 1.0, result
-        assert result["response"]["usage"]["total_tokens"] == (22 if outcome == "completed" else 0)
+        if outcome == "completed":
+            assert result["response"]["usage"]["total_tokens"] == 22
+        else:
+            assert result["response"]["usage"] is None
         assert result["ng_agent_observations"]["source"] == "codex"
     assert close_receipts[-1].agent_observations.source == "codex"
     assert close_receipts[-1].agent_observations.records[0].status == (
@@ -3122,6 +3157,70 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
         assert observed_tool["status"] == "completed"
         assert invocation["conversation"][1]["call_id"] == observed_tool["tool_call_id"] == "provider-call"
         assert invocation["conversation"][2]["output"] == native_output
+
+
+@pytest.mark.parametrize("usage_source", ["native", "missing"])
+def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
+    """A killed run that is graded reports the native cumulative usage, or none, never the CLI's zero."""
+    agent, sandbox = setup
+    agent.config.verify_after_agent_error = True
+    sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
+    sandbox.result["return_code"] = -9  # killed after a completed tool call, before turn.completed
+    tool = {"id": "item_1", "type": "command_execution", "command": "printf retained", "status": "in_progress"}
+    records = [
+        {"type": "turn.started"},
+        {"type": "item.started", "item": tool},
+        {"type": "item.completed", "item": tool | {"status": "completed", "exit_code": 0, "aggregated_output": "ok"}},
+    ]
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(records))
+    transcript = native_transcript(
+        [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}]
+    )
+    if usage_source == "native":
+        transcript += "\n" + json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 20,
+                            "output_tokens": 8,
+                            "total_tokens": 28,
+                            "cached_input_tokens": 3,
+                            "reasoning_output_tokens": 2,
+                        }
+                    },
+                },
+            }
+        )
+    original_publish = sandbox.publish
+
+    def publish():
+        original_publish()
+        sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n'
+
+    sandbox.publish = publish
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        client.post("/v1/agent_sessions/close", json=close_body(session_id))
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["error"]) == ("failed", None)
+    assert body["metadata"]["graded_agent_error"].startswith("exit -9: ")
+    assert "ng_agent_outcome" not in body["metadata"]
+    if usage_source == "native":
+        assert body["usage"] == {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "total_tokens": 28,
+            "input_tokens_details": {"cached_tokens": 3},
+            "output_tokens_details": {"reasoning_tokens": 2},
+        }
+    else:
+        assert body["usage"] is None
 
 
 async def test_activation_failure_takes_precedence_over_recorded_rejection(setup):
