@@ -543,8 +543,9 @@ async def test_compaction_that_fails_at_the_model_server_fails_the_request(agent
         await server.run(SimpleNamespace(cookies={}), run_body())
 
 
-async def test_kill_before_the_deadline_is_an_infrastructure_failure(agent):
-    # 137 reaches the agent only for a kill before the deadline (the wrapper records a deadline kill as 124).
+async def test_kill_before_the_deadline_is_a_scored_failure(agent):
+    # 137 reaches the agent only for a kill before the deadline (the wrapper records a deadline kill as 124). The sandbox
+    # cgroup is shared with the policy's commands, so an out-of-memory kill is the episode's failure, not a retry.
     server, sandbox, _ = agent
     run_exec = sandbox.exec.side_effect
 
@@ -555,9 +556,9 @@ async def test_kill_before_the_deadline_is_an_infrastructure_failure(agent):
         return await run_exec(command, **kwargs)
 
     sandbox.exec.side_effect = exec_
-    with pytest.raises(RuntimeError, match="exit 137"):
-        await server.run(SimpleNamespace(cookies={}), run_body())
-    assert not any(c.kwargs["url_path"] == "/verify" for c in server.server_client.post.await_args_list)
+    result = await server.run(SimpleNamespace(cookies={}), run_body())
+    assert result.goose_failed and result.goose_exit_code == 137 and result.goose_error_type == "killed"
+    assert result.reward == 0
 
 
 async def test_goose_runs_under_an_in_sandbox_deadline(agent):

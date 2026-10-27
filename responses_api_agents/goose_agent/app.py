@@ -418,9 +418,10 @@ class GooseAgent(SimpleResponsesAPIAgent):
         system_arg = f'--system="$(cat {quote(remote)}/system.txt)"' if system else ""
         # Goose is stopped inside the sandbox before the provider deadline, because some providers only stop waiting at
         # theirs (Goose keeps running) and some raise instead of returning a timeout. A kill after the deadline (137) is
-        # recorded as the deadline's 124, so any other 137 is an out-of-memory or external kill. The task goes in on stdin:
-        # Goose drops --system for `-i <file>`. Sessions are archived even when Goose fails, so partial transcripts stay
-        # inspectable. The exit code file records that Goose finished, whatever the provider reports afterwards.
+        # recorded as the deadline's 124, so any other 137 is a kill before it (`killed`, usually out of memory). The
+        # task goes in on stdin: Goose drops --system for `-i <file>`. Sessions are archived even when Goose fails, so
+        # partial transcripts stay inspectable. The exit code file records that Goose finished, whatever the provider
+        # reports afterwards.
         deadline = int(self.config.timeout - min(120, self.config.timeout / 4))
         command = (
             f"start=$SECONDS; timeout --kill-after=10 {deadline} {quote(remote)}/goose run --name gym -i - "
@@ -456,7 +457,9 @@ class GooseAgent(SimpleResponsesAPIAgent):
         if return_code == 124 and not error_type:
             error_type = "timeout"
         elif return_code == 137:
-            raise RuntimeError("Goose was killed before its deadline (exit 137: out of memory or an external kill)")
+            # Killed before the deadline: usually an out-of-memory kill in the sandbox cgroup, which the policy's own
+            # commands share, so it is scored as the episode's failure rather than retried.
+            error_type = "killed"
         # Export failures propagate, so retrying such a request cannot become a scored zero.
         for name in ("stdout.jsonl", "stderr.log", "sessions.tgz"):
             await sandbox.download(f"{remote}/{name}", root / name)
