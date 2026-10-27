@@ -37,8 +37,9 @@ prompt. The server enforces the same limits:
 
 - `max_tool_calls: 200`. Past it, every tool except `submit_final_result` returns an
   error telling the model to submit.
-- `max_rollout_time_seconds: 300`, measured from the start of the rollout. Past it,
-  tools return the same kind of error.
+- `max_tool_time_seconds: 300`, the total time spent inside tool calls. Model
+  generation time does not count, so a slow model endpoint does not shrink the
+  budget. Past it, tools return the same kind of error.
 
 Neither limit stops the rollout; the model still gets to submit an answer. The
 agent's `max_steps` and `max_time_seconds` are hard stops that end the rollout with

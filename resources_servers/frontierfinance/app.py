@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any, Dict, List, Optional, Sequence
@@ -98,6 +99,12 @@ class FrontierFinanceResourcesServerConfig(FinanceAgentV2ResourcesServerConfig):
         default=None,
         description="Tool calls allowed per rollout, or null for no limit. Past it, every tool except "
         "submit_final_result returns an error asking the model to submit.",
+    )
+    max_tool_time_seconds: Optional[float] = Field(
+        default=None,
+        description="Seconds spent inside tool calls allowed per rollout, or null for no limit. Model "
+        "generation time does not count. Past it, every tool except submit_final_result returns an error "
+        "asking the model to submit.",
     )
 
 
@@ -263,6 +270,7 @@ class FrontierFinanceResourcesServer(FinanceAgentV2ResourcesServer):
             raise ValueError(f"judge_panel names must be unique, got {names}")
         self._as_of_dates: Dict[str, str] = {}
         self._tool_call_counts: Dict[str, int] = {}
+        self._tool_seconds: Dict[str, float] = {}
         self._judge_executor = ThreadPoolExecutor(
             max_workers=self.config.judge_thread_pool_size, thread_name_prefix="frontier_finance_judge"
         )
@@ -275,27 +283,42 @@ class FrontierFinanceResourcesServer(FinanceAgentV2ResourcesServer):
         else:
             self._as_of_dates.pop(session_id, None)
         self._tool_call_counts[session_id] = 0
+        self._tool_seconds[session_id] = 0.0
         return await super().seed_session(request, body)
+
+    def _tool_limit_error(self, session_id: str) -> Optional[str]:
+        used_calls = self._tool_call_counts.get(session_id, 0)
+        max_calls = self.config.max_tool_calls
+        if max_calls is not None and used_calls >= max_calls:
+            reason = f"Tool call limit reached ({used_calls} / {max_calls})"
+        else:
+            used_seconds = self._tool_seconds.get(session_id, 0.0)
+            max_seconds = self.config.max_tool_time_seconds
+            if max_seconds is None or used_seconds < max_seconds:
+                return None
+            reason = f"Tool time limit reached ({used_seconds:.0f}s / {max_seconds:.0f}s)"
+        return json.dumps(
+            {
+                "error": f"{reason}. No further tool calls will be executed. Call submit_final_result "
+                "immediately with your best answer."
+            }
+        )
 
     async def _dispatch_tool(self, tool_name: str, request: Request, args: dict) -> Dict[str, str]:
         session_id = request.session.get(SESSION_ID_KEY, "")
-        if tool_name != SUBMIT_TOOL and self.config.max_tool_calls is not None:
-            used = self._tool_call_counts.get(session_id, 0)
-            if used >= self.config.max_tool_calls:
-                return {
-                    "results": json.dumps(
-                        {
-                            "error": f"Tool call limit reached ({used} / {self.config.max_tool_calls}). "
-                            "No further tool calls will be executed. Call submit_final_result immediately "
-                            "with your best answer."
-                        }
-                    )
-                }
-            self._tool_call_counts[session_id] = used + 1
+        if tool_name == SUBMIT_TOOL:
+            return await super()._dispatch_tool(tool_name, request, args)
+        if limit_error := self._tool_limit_error(session_id):
+            return {"results": limit_error}
+        self._tool_call_counts[session_id] = self._tool_call_counts.get(session_id, 0) + 1
         as_of_date = self._as_of_dates.get(session_id)
         if as_of_date and tool_name in DATE_CAPPED_TOOLS and isinstance(args, dict):
             args = cap_tool_dates(args, as_of_date)
-        return await super()._dispatch_tool(tool_name, request, args)
+        start = time.monotonic()
+        try:
+            return await super()._dispatch_tool(tool_name, request, args)
+        finally:
+            self._tool_seconds[session_id] = self._tool_seconds.get(session_id, 0.0) + time.monotonic() - start
 
     async def _judge_complete(self, judge: FrontierFinanceJudgeConfig, system: str, user: str) -> str:
         params: Dict[str, Any] = {
@@ -346,6 +369,7 @@ class FrontierFinanceResourcesServer(FinanceAgentV2ResourcesServer):
             self._session_start_times.pop(session_id, None)
             self._as_of_dates.pop(session_id, None)
             self._tool_call_counts.pop(session_id, None)
+            self._tool_seconds.pop(session_id, None)
 
         rubrics = [Rubric.from_dict(r.model_dump()) for r in body.rubrics]
         num_must_have = sum(1 for r in rubrics if r.must_have)

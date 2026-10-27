@@ -253,6 +253,32 @@ class TestDateCap:
         await server._dispatch_tool("calculator", _request("a"), {"expression": "1+1"})
         assert calls[-1] == "calculator" and len(calls) == 5
 
+    async def test_tool_time_limit_counts_only_tool_time(self, monkeypatch) -> None:
+        server = _make_server(max_tool_time_seconds=10)
+        clock = {"now": 0.0}
+        monkeypatch.setattr("resources_servers.frontierfinance.app.time.monotonic", lambda: clock["now"])
+        calls: List[str] = []
+
+        def fake_tool(name, seconds):
+            async def execute(args, state, logger):
+                calls.append(name)
+                clock["now"] += seconds
+                return SimpleNamespace(output="ok")
+
+            return SimpleNamespace(execute=execute)
+
+        server._tools["web_search"] = fake_tool("web_search", 6)
+        server._tools["submit_final_result"] = fake_tool("submit_final_result", 0)
+        await server.seed_session(_request("a"), FrontierFinanceSeedSessionRequest())
+
+        await server._dispatch_tool("web_search", _request("a"), {"query": "x"})
+        clock["now"] += 1000
+        await server._dispatch_tool("web_search", _request("a"), {"query": "x"})
+        blocked = await server._dispatch_tool("web_search", _request("a"), {"query": "x"})
+        assert "Tool time limit reached (12s / 10s)" in blocked["results"]
+        await server._dispatch_tool("submit_final_result", _request("a"), {"final_result": "x"})
+        assert calls == ["web_search", "web_search", "submit_final_result"]
+
     async def test_seed_rejects_malformed_date(self) -> None:
         server = _make_server()
         with pytest.raises(ValueError):

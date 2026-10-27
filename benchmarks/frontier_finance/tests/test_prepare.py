@@ -103,7 +103,8 @@ class TestConvert:
         config = yaml.safe_load(config_path.read_text())
         server = config["frontier_finance_resources_server"]["resources_servers"]["frontierfinance"]
         assert server["max_tool_calls"] == prepare_module.MAX_TOOL_CALLS
-        assert server["max_rollout_time_seconds"] == prepare_module.MAX_TOOL_CALL_SECONDS
+        assert server["max_tool_time_seconds"] == prepare_module.MAX_TOOL_CALL_SECONDS
+        assert server["max_rollout_time_seconds"] is None
 
     def test_tools_match_finance_agent_v2(self, tmp_path) -> None:
         _, rows = _convert(tmp_path, [_row()])

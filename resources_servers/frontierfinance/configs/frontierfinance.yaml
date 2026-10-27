@@ -48,7 +48,8 @@ frontier_finance_resources_server:
       judge_max_output_tokens: 32000
       judge_call_timeout: 600
       judge_max_retries: 2
-      max_rollout_time_seconds: 300
+      max_rollout_time_seconds: null
+      max_tool_time_seconds: 300
       max_tool_calls: 200
       use_cache: true
       cache_dir: ${oc.select:frontier_finance_cache_dir,${oc.env:FRONTIER_FINANCE_CACHE_DIR,null}}

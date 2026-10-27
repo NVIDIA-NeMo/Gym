@@ -54,7 +54,7 @@ SOURCE_URL = f"https://huggingface.co/datasets/{HF_REPO_ID}/resolve/{HF_REVISION
 DATE_SENTENCE = "You should answer all questions as if the current date is March 1, 2026."
 SUBMIT_SENTENCE = "Your submission will not be processed unless you call this tool."
 
-# Must match max_tool_calls and max_rollout_time_seconds in the frontierfinance server config.
+# Must match max_tool_calls and max_tool_time_seconds in the frontierfinance server config.
 MAX_TOOL_CALLS = 200
 MAX_TOOL_CALL_SECONDS = 300
 TOOL_LIMITS_PARAGRAPH = f"""When making tool calls, you need to make sure you stay within the following limits:
