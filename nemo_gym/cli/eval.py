@@ -642,9 +642,14 @@ def e2e_rollout_collection():  # pragma: no cover
         # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
         try:
             if health_check_enabled and driver_path:
+                from nemo_gym.rollout_health import capture_dirs_for_health
+
                 # The built-in collector reports under its run lock, before shutdown.
                 _health_check_collected_rollouts(
-                    output_fpath, rollout_collection_config, None if driver_path else rch._landed_keys
+                    output_fpath,
+                    rollout_collection_config,
+                    None if driver_path else rch._landed_keys,
+                    model_call_capture_dirs=capture_dirs_for_health(global_config_dict),
                 )
         finally:
             rh.shutdown()
@@ -687,7 +692,12 @@ def _remove_health_reports(output_fpath: Path) -> None:
 
 
 def _health_check_collected_rollouts(
-    output_fpath: Path, config: Any, landed_keys: set | None = None, *, coverage: dict | None = None
+    output_fpath: Path,
+    config: Any,
+    landed_keys: set | None = None,
+    *,
+    coverage: dict | None = None,
+    model_call_capture_dirs: Sequence[Path] = (),
 ) -> None:
     """Write the quality summary for whatever a run collected; a run that never started collection has none.
 
@@ -697,6 +707,7 @@ def _health_check_collected_rollouts(
     """
     if not output_fpath.exists():
         return
+    from nemo_gym.health.timeouts import export_run_health_timeouts
     from nemo_gym.rollout_health import (
         JournalHealthUnavailable,
         format_health_report,
@@ -741,6 +752,7 @@ def _health_check_collected_rollouts(
             limits=config.run_health_limits,
             # This run's coverage describes its own rows; listed shards are checked with their own histories.
             run_coverage=None if shards is not None else [coverage],
+            model_call_capture_dirs=model_call_capture_dirs,
         )
     except JournalHealthUnavailable as error:
         print(f"Rollout health checks skipped: {error}")
@@ -748,6 +760,7 @@ def _health_check_collected_rollouts(
         logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
     else:
         print(format_health_report(health_result))
+        export_run_health_timeouts(health_result)
 
 
 def _check_collection_completion(
@@ -842,6 +855,7 @@ def health_check_rollouts(
     ignored_checks: Sequence[str] = (),
     limits: Any = None,
     json_output: bool = False,
+    model_call_capture_dir: str | Path | None = None,
 ):
     """Run rollout quality verification for an existing run directory.
 
@@ -858,6 +872,7 @@ def health_check_rollouts(
         ignored_checks=ignored_checks,
         limits=limits,
         json_output=json_output,
+        model_call_capture_dir=model_call_capture_dir,
     )
 
 

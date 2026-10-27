@@ -63,7 +63,6 @@ from nemo_gym.config_types import (
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.failure_kinds import (
-    AGENT_TIMEOUT,
     CANCELLED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
     ENVIRONMENT_SERVER_FAILED,
@@ -89,6 +88,7 @@ from nemo_gym.global_config import (
     dataset_agent_pins,
     environment_server_agent_names,
     environment_server_attributed_agent,
+    get_first_server_config_dict,
     get_global_config_dict,
     label_runs,
     pairing_override_enabled,
@@ -178,6 +178,7 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
+from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
@@ -682,6 +683,8 @@ class _CompletedRollout:
     diagnostics: Optional[Dict[str, Any]] = None
     environment_server: Optional[str] = None
     environment_server_type: Optional[str] = None
+    # The `/run` wall clock in seconds, success or failure; None for a row that never started.
+    elapsed_s: Optional[float] = None
     dispatch_span_context: Optional["SpanContext"] = None
 
 
@@ -874,6 +877,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         except Exception as exc:
             gaps.append(ObservationGap(code="producer_trajectory_invalid", detail=type(exc).__name__))
 
+    observations_read = False
     raw_observations = result.get(NG_AGENT_OBSERVATIONS_KEY)
     if raw_observations is not None:
         try:
@@ -910,8 +914,14 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         tools.append(projected)
                     else:
                         tools[position] = projected
+            observations_read = True
         except Exception as exc:
             gaps.append(ObservationGap(code="agent_observations_invalid", detail=type(exc).__name__))
+
+    # Without a valid producer trajectory or valid observations, the empty tool list below is the collector's
+    # default, not a report that no tool ran.
+    if not producer_turns_observed and not observations_read:
+        gaps.append(ObservationGap(code="tool_timing_unavailable"))
 
     turns.sort(key=lambda turn: (turn.timestamp, turn.invocation_id, turn.turn_no))
 
@@ -1009,6 +1019,23 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         tool_calls=tools,
         gaps=list({(gap.code, gap.invocation_id, gap.detail): gap for gap in gaps}.values()),
     )
+
+
+NG_POLICY_MODEL_SERVER_KEY = "ng_policy_model_server"
+
+
+def _record_policy_model_server(result: dict[str, Any], global_config: Any, agent_name: str | None) -> None:
+    """Name the agent's configured policy server on the record (landed or failed), so offline timing needs no
+    live config and a capture joined later from the capture dir is still partitioned by role."""
+    if not agent_name:
+        return
+    try:
+        model_server = get_first_server_config_dict(global_config, agent_name).get("model_server")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return
+    name = model_server.get("name") if hasattr(model_server, "get") else None
+    if isinstance(name, str) and name:
+        result[NG_POLICY_MODEL_SERVER_KEY] = name
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
@@ -1536,7 +1563,7 @@ class RunTimingReport:
 
     def record_result(self, result: Mapping[str, Any], seconds: float) -> None:
         self._durations.append(seconds)
-        if result.get("timed_out") or result.get(NG_FAILURE_CLASS_KEY) in ("timeout_exceeded", AGENT_TIMEOUT):
+        if classify_timeout(result):
             self._timed_out += 1
 
     def table(self) -> str:
@@ -3586,6 +3613,7 @@ class RolloutCollectionHelper(BaseModel):
         # Hold ownership from identity validation through final aggregation/reporting.
         self._collection_started = False
         self._store = None
+        self._health_capture_dirs: List[Path] = []
         with run_lock(Path(config.output_jsonl_fpath)):
             try:
                 return await self._run_locked_from_config(config)
@@ -3599,6 +3627,7 @@ class RolloutCollectionHelper(BaseModel):
                         config,
                         self._landed_keys,
                         coverage=self._store.coverage() if self._store is not None else None,
+                        model_call_capture_dirs=self._health_capture_dirs,
                     )
                     if cli_eval._terminated:
                         report()  # The small provisional summary must finish within Slurm's KillWait.
@@ -3708,6 +3737,8 @@ class RolloutCollectionHelper(BaseModel):
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
         capture_dirs = model_call_capture_dirs_from_config(global_config)
+        # The post-run health check times failed rollouts from the same captures.
+        self._health_capture_dirs = capture_dirs
         observability_enabled = observability_enabled_from_config(global_config)
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
@@ -3735,14 +3766,19 @@ class RolloutCollectionHelper(BaseModel):
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
             clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
-        token_capture_rows = [
-            row
-            for row in input_rows
-            if token_id_capture_enabled_for_agent(
-                global_config,
-                self._agent_name_for_row(row, global_config),
-            )
-        ]
+        # Participation depends only on the agent name and the static global config.
+        # Decide it once per agent, so the per-row and per-rollout checks below do not revalidate the global config.
+        token_capture_enabled_by_agent: dict[str | None, bool] = {}
+
+        def token_capture_enabled_for_row(row: dict[str, Any]) -> bool:
+            agent_name = self._agent_name_for_row(row, global_config)
+            if agent_name not in token_capture_enabled_by_agent:
+                token_capture_enabled_by_agent[agent_name] = token_id_capture_enabled_for_agent(
+                    global_config, agent_name, config=token_capture_config
+                )
+            return token_capture_enabled_by_agent[agent_name]
+
+        token_capture_rows = [row for row in input_rows if token_capture_enabled_for_row(row)]
         if (
             token_capture_config.token_id_capture.rebuild_response
             and token_capture_rows
@@ -3970,6 +4006,10 @@ class RolloutCollectionHelper(BaseModel):
                     # Result or failure, the record names the inputs it ran (task and dataset digests).
                     for key, value in _task_data_provenance(row).items():
                         result.setdefault(key, value)
+                if completed.elapsed_s is not None:
+                    # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
+                    # which resume reads to order dispatch.
+                    result[ELAPSED_S_KEY] = completed.elapsed_s
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -3999,6 +4039,8 @@ class RolloutCollectionHelper(BaseModel):
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
                 # No score exists. Judge failures may still carry real generation evidence.
                 no_result = no_persist or structured_failure or failure_class in _NO_RESULT_FAILURE_CLASSES
+
+                _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
@@ -4036,10 +4078,7 @@ class RolloutCollectionHelper(BaseModel):
                 recoverable_generation = matches_failure_class(
                     result, {"judge_failed", "judge_invalid"}
                 ) and isinstance(result.get("response"), dict)
-                if (not no_result or recoverable_generation) and token_id_capture_enabled_for_agent(
-                    global_config,
-                    self._agent_name_for_row(row, global_config),
-                ):
+                if (not no_result or recoverable_generation) and token_capture_enabled_for_row(row):
                     token_capture_build = await finalize_rollout_token_capture(
                         result, token_source, mask_incomplete_when_attributed=mask_incomplete_when_attributed
                     )
@@ -5017,11 +5056,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     await raise_for_status(res)
                     stage = "response"
                     result = await get_response_json(res)
-                    if run_timing is not None and isinstance(result, Mapping):
-                        run_timing.record_result(result, time.monotonic() - started)
                     if (typed_outcomes or validate_results) and _materialized_taskset(row) is not None:
                         stage = "result"
                         result = _native_episode_record(row, result)
+                    if run_timing is not None and isinstance(result, Mapping):
+                        # Classify the record collection saves, as the run health summary does.
+                        episode = _materialized_taskset(row) is not None and _is_episode_response(result)
+                        run_timing.record_result(
+                            _episode_record(result) if episode else result, time.monotonic() - started
+                        )
                     outcome = result
                     if typed_outcomes or validate_results:
                         stage = "result"
@@ -5042,6 +5085,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         diagnostics=diagnostics,
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
                     )
                 except Exception as e:
@@ -5085,6 +5129,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         diagnostics=_failure_diagnostics(failure),
                         environment_server=server_name,
                         environment_server_type=server_type,
+                        elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
                     )
                 finally:
@@ -5798,6 +5843,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
             else:
                 print(format_health_report(health_result))
+                export_run_health_timeouts(health_result)
 
         return aggregate_metrics_fpath
 
