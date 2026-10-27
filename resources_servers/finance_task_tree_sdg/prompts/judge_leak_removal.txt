@@ -12,4 +12,4 @@ The revision passes only if all of the following hold:
 
 Be strict: if any condition is doubtful, fail the revision.
 
-Return only the JSON object required by the response schema: {"verdict": "pass"} or {"verdict": "fail"}.
+Return only the JSON object required by the response schema: "verdict" is "pass" or "fail"; "failed_criteria" lists the numbers of the criteria that do not hold (empty on pass); "reason" states in one or two sentences why each listed criterion fails (empty on pass).

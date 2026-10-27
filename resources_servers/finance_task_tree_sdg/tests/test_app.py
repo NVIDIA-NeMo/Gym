@@ -34,6 +34,7 @@ from resources_servers.finance_task_tree_sdg.app import (
     FinanceTaskTreeSdgServer,
     SdgVerifyRequest,
     accepted_submission,
+    validate_eligibility,
     validate_leak_proposal,
     validate_revised_question,
     validate_verdict,
@@ -46,7 +47,7 @@ from resources_servers.finance_task_tree_sdg.sec_tools import (
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_STAGES = ("question_gen", "leak_proposal", "leak_removal", "answer_gen", "adjudicate")
+_STAGES = ("eligibility", "question_gen", "leak_proposal", "leak_removal", "answer_gen", "adjudicate")
 _QUESTION = (
     "For Apple Inc., using the fiscal 2023 Form 10-K as originally filed, what was the ratio of "
     "operating income to net sales, in percent rounded to one decimal place?"
@@ -259,6 +260,36 @@ def test_verdict_labels_come_from_candidates() -> None:
         validate_verdict({"question_valid": "yes", "selected": "none"}, ["A"])
 
 
+def test_eligibility_codes_come_from_the_seeded_catalog() -> None:
+    catalog = ["1311", "4911", "6021"]
+    assert validate_eligibility(
+        {"scope": "restricted", "sic_codes": ["6021", "1311", "6021"], "reason": "banks and E&P"}, catalog
+    ) == {"scope": "restricted", "sic_codes": ["1311", "6021"], "reason": "banks and E&P"}
+    general = validate_eligibility({"scope": "any_industry", "sic_codes": [], "reason": "general"}, catalog)
+    assert general["sic_codes"] == []
+    with pytest.raises(ToolError, match="not in the provided list"):
+        validate_eligibility({"scope": "restricted", "sic_codes": ["9999"], "reason": "x"}, catalog)
+    with pytest.raises(ToolError, match="must not be empty"):
+        validate_eligibility({"scope": "restricted", "sic_codes": [], "reason": "x"}, catalog)
+    with pytest.raises(ToolError, match="must be empty"):
+        validate_eligibility({"scope": "unsupported", "sic_codes": ["1311"], "reason": "x"}, catalog)
+    with pytest.raises(ToolError, match="reason"):
+        validate_eligibility({"scope": "any_industry", "sic_codes": []}, catalog)
+
+
+async def test_eligibility_verify_has_no_judge() -> None:
+    server = _server("eligibility")
+    server.server_client.post = AsyncMock()
+    submission = {"scope": "restricted", "sic_codes": ["6021"], "reason": "needs loan allowances"}
+    result = await server.verify(
+        MagicMock(session={}),
+        _request(_response(_call("submit_eligibility", submission)), {"sic_codes": ["6021", "4911"]}),
+    )
+    assert result.reward == 1.0
+    assert result.sdg_result == {"stage": "eligibility", "status": "mapped", **submission}
+    server.server_client.post.assert_not_awaited()
+
+
 def test_accepted_submission_skips_failed_and_unfinished_calls() -> None:
     output = [
         *_call("submit_question", {"question": "bad"}, "call-1", "[ERROR] question must be longer"),
@@ -307,6 +338,23 @@ async def test_question_gen_verify_returns_only_the_verdict(tmp_path: Path) -> N
     audit = json.loads(audit_files[0].read_text())
     assert audit["verdict"] == "pass"
     assert _JUDGE_SECRET in json.dumps(audit)
+
+
+async def test_judge_fail_reason_stays_in_the_audit_file(tmp_path: Path) -> None:
+    server = _server("question_gen", tmp_path)
+    reply = json.dumps({"verdict": "fail", "failed_criteria": [3], "reason": _JUDGE_SECRET})
+    server.server_client.post = AsyncMock(return_value=_judge_reply(reply))
+    result = await server.verify(
+        MagicMock(session={}), _request(_response(_call("submit_question", {"question": _QUESTION})))
+    )
+
+    assert result.reward == 0.0
+    assert result.sdg_result["judge"] == {"verdict": "fail", "model": "private-judge", "parsed": True}
+    assert _JUDGE_SECRET not in result.model_dump_json()
+
+    audit = json.loads(next((tmp_path / "audit" / "question_gen").rglob("*.json")).read_text())
+    assert audit["failed_criteria"] == [3]
+    assert audit["reason"] == _JUDGE_SECRET
 
 
 async def test_unparseable_judge_reply_fails_closed(tmp_path: Path) -> None:

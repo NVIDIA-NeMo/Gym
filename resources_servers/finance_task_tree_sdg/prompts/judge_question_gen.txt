@@ -12,4 +12,4 @@ The question passes only if every criterion holds:
 
 Be strict: if any criterion is doubtful, fail the question.
 
-Return only the JSON object required by the response schema: {"verdict": "pass"} or {"verdict": "fail"}.
+Return only the JSON object required by the response schema: "verdict" is "pass" or "fail"; "failed_criteria" lists the numbers of the criteria that do not hold (empty on pass); "reason" states in one or two sentences why each listed criterion fails (empty on pass).

@@ -14,9 +14,12 @@
 # limitations under the License.
 """Task-tree finance question SDG: one resources server, configured per stage.
 
-Each stage is one rollout followed by an in-verify judge. The judge returns only
-pass or fail; its full output is written to ``audit_dir`` and never appears in the
-verify response, so no judge token reaches a later stage's model.
+Each question stage is one rollout followed by an in-verify judge. The judge
+returns only pass or fail; its full output is written to ``audit_dir`` and never
+appears in the verify response, so no judge token reaches a later stage's model.
+
+The ``eligibility`` stage runs once per task-tree leaf before sampling: it maps
+the leaf to the SIC industries whose companies can support it, with no judge.
 """
 
 from __future__ import annotations
@@ -69,10 +72,11 @@ from resources_servers.finance_task_tree_sdg.sec_tools import AsOfEdgarSearchToo
 
 logger = logging.getLogger(__name__)
 
-Stage = Literal["question_gen", "leak_proposal", "leak_removal", "answer_gen", "adjudicate"]
+Stage = Literal["eligibility", "question_gen", "leak_proposal", "leak_removal", "answer_gen", "adjudicate"]
 
 REJECTION_CODES = ("data_unavailable", "condition_not_met", "company_ineligible", "document_mismatch", "other")
 LEAK_ACTIONS = ("delete", "generalize")
+ELIGIBILITY_SCOPES = ("any_industry", "restricted", "unsupported")
 
 _PROMPT_DIR = Path(__file__).with_name("prompts")
 _JUDGE_PROMPTS: dict[str, str] = {
@@ -81,6 +85,7 @@ _JUDGE_PROMPTS: dict[str, str] = {
     "leak_removal": "judge_leak_removal.txt",
 }
 _DONE_TOOLS: dict[str, tuple[str, ...]] = {
+    "eligibility": ("submit_eligibility",),
     "question_gen": ("submit_question", "submit_rejection"),
     "leak_proposal": ("submit_leak_proposal",),
     "leak_removal": ("submit_revised_question",),
@@ -88,6 +93,7 @@ _DONE_TOOLS: dict[str, tuple[str, ...]] = {
     "adjudicate": ("submit_verdict",),
 }
 _STAGE_TOOLS: dict[str, tuple[str, ...]] = {
+    "eligibility": ("submit_eligibility",),
     "question_gen": ("edgar_search", "fetch_url", "python_exec", "submit_question", "submit_rejection"),
     "leak_proposal": ("submit_leak_proposal",),
     "leak_removal": ("submit_revised_question",),
@@ -95,11 +101,16 @@ _STAGE_TOOLS: dict[str, tuple[str, ...]] = {
     "adjudicate": ("edgar_search", "fetch_url", "python_exec", "submit_verdict"),
 }
 _SEC_TOOLS = ("edgar_search", "fetch_url")
+# failed_criteria and reason are written to the audit file only; verify never returns them.
 _VERDICT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["verdict"],
-    "properties": {"verdict": {"type": "string", "enum": ["pass", "fail"]}},
+    "required": ["verdict", "failed_criteria", "reason"],
+    "properties": {
+        "verdict": {"type": "string", "enum": ["pass", "fail"]},
+        "failed_criteria": {"type": "array", "items": {"type": "integer"}},
+        "reason": {"type": "string"},
+    },
 }
 _SAFE_PATH_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -155,6 +166,28 @@ def _tool_ok(message: str) -> PlainTextResponse:
 def _non_empty_str(args: dict[str, Any], key: str) -> Optional[str]:
     value = args.get(key)
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def validate_eligibility(args: dict[str, Any], sic_codes: list[str]) -> dict[str, Any]:
+    scope = args.get("scope")
+    if scope not in ELIGIBILITY_SCOPES:
+        raise ToolError(f"scope must be one of {list(ELIGIBILITY_SCOPES)}")
+    codes = args.get("sic_codes")
+    if not isinstance(codes, list) or not all(isinstance(code, str) for code in codes):
+        raise ToolError("sic_codes must be a list of strings (use an empty list unless scope is 'restricted')")
+    codes = sorted({code.strip() for code in codes})
+    if scope == "restricted":
+        if not codes:
+            raise ToolError("sic_codes must not be empty when scope is 'restricted'")
+        unknown = [code for code in codes if code not in set(sic_codes)]
+        if unknown:
+            raise ToolError(f"these SIC codes are not in the provided list: {unknown}")
+    elif codes:
+        raise ToolError(f"sic_codes must be empty when scope is {scope!r}")
+    reason = _non_empty_str(args, "reason")
+    if reason is None:
+        raise ToolError("reason is required")
+    return {"scope": scope, "sic_codes": codes, "reason": reason}
 
 
 def validate_question(args: dict[str, Any], config: FinanceTaskTreeSdgConfig) -> str:
@@ -358,6 +391,9 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
             if tool is None:
                 raise ToolError(f"Tool '{name}' is not configured.")
             return await tool.run(args, as_of=session.as_of)
+        if name == "submit_eligibility":
+            validate_eligibility(args, list(session.sdg.get("sic_codes", [])))
+            return "Eligibility submitted."
         if name == "submit_question":
             validate_question(args, self.config)
             return "Question submitted."
@@ -423,8 +459,10 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
 
         raw = await reraise_judge_errors(asyncio.wait_for(request_judge(), timeout=self.config.judge_call_timeout_s))
         verdict: Optional[str] = None
+        parsed: dict[str, Any] = {}
         try:
-            value = _parse_json_object(_responses_output_text(raw)).get("verdict")
+            parsed = _parse_json_object(_responses_output_text(raw))
+            value = parsed.get("verdict")
             verdict = value if value in ("pass", "fail") else None
         except (ValueError, RecursionError):
             verdict = None
@@ -437,6 +475,8 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
                 "rollout_id": body.capture_rollout_id,
                 "judge_model": model,
                 "verdict": verdict,
+                "failed_criteria": parsed.get("failed_criteria"),
+                "reason": parsed.get("reason"),
                 "judge_input": [message.model_dump() for message in params.input],
                 "judge_response": raw,
             },
@@ -465,6 +505,9 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
         if stage == "adjudicate":
             labels = [item["label"] for item in body.sdg.get("candidates", [])]
             result.update(status="adjudicated", **validate_verdict(args, labels))
+            return self._respond(body, 1.0, result)
+        if stage == "eligibility":
+            result.update(status="mapped", **validate_eligibility(args, list(body.sdg.get("sic_codes", []))))
             return self._respond(body, 1.0, result)
 
         trace = format_trace(body.response)

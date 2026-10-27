@@ -1,11 +1,12 @@
 # Finance task-tree SDG
 
 Resources server for generating expert finance research questions from a task tree. One server
-implementation serves five stages; each stage has its own config in `configs/` and is selected by
+implementation serves six stages; each stage has its own config in `configs/` and is selected by
 `stage`.
 
 | Stage | Tools | Submit tool | Verify |
 | --- | --- | --- | --- |
+| `eligibility` | none | `submit_eligibility` | passthrough |
 | `question_gen` | `edgar_search`, `fetch_url`, `python_exec` | `submit_question` or `submit_rejection` | judge |
 | `leak_proposal` | none | `submit_leak_proposal` | judge |
 | `leak_removal` | none | `submit_revised_question` | judge |
@@ -23,7 +24,12 @@ mapping:
 - `question` from `leak_proposal` on, `question_gen_trace` for `leak_proposal`, `leak_proposal`
   for `leak_removal`, and `candidates` (`[{label, answer}]`) for `adjudicate`.
 
-Verify returns the row plus `reward` and `sdg_result`. `sdg_result.status` is one of
+`eligibility` runs once per task-tree leaf before sampling; its `sdg` carries `sample_id` and
+`leaf_id` (both the leaf id) and `sic_codes`, the SIC codes present in the company list.
+`submit_eligibility` takes `scope` (`any_industry`, `restricted`, or `unsupported`), `sic_codes`
+(non-empty and drawn from the row's list only when `restricted`), and `reason`.
+
+Verify returns the row plus `reward` and `sdg_result`. `sdg_result.status` is one of `mapped`,
 `judge_pass`, `judge_fail`, `judge_unparsed`, `rejected`, `no_submission`, `answered`,
 `no_answer`, or `adjudicated`. Judged stages reward 1 only on `judge_pass`.
 
@@ -35,7 +41,8 @@ including the XBRL API, are not blocked.
 
 ## Judge isolation
 
-The judge returns only `{"verdict": "pass" | "fail"}`. Its full input and output are written to
+The judge returns `{"verdict", "failed_criteria", "reason"}`; verify passes on only the verdict.
+The criteria, reason, and the judge's full input and output are written to
 `audit_dir/<stage>/<sample_id>/<rollout_id>.json` when `audit_dir` is set and never appear in
 the verify response, so no judge text reaches a later stage's model. The judge defaults to
 `policy_model`; NVFlow rebinds `judge_model_server` to its judge role.
