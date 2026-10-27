@@ -57,10 +57,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, TypedDict, runtime_checkable
+from typing import Literal, Protocol, TypedDict, runtime_checkable
 
 from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+
+
+# Internal worker acknowledgement: this call was refused before generation or staging.
+CAPTURE_REFUSAL_HEADER = "x-ng-capture-refused"
+ParentResolutionMode = Literal["fingerprint", "source_history"]
 
 
 class RolloutRemovalPayload(TypedDict):
@@ -95,6 +100,14 @@ class TokenCaptureFrozenError(RuntimeError):
     The freeze already judged completeness from the durable intent ledger.
     A post-freeze mark would mutate the consumed snapshot and break its retirement.
     """
+
+
+class CaptureAdmissionError(ValueError):
+    """Refuse a request whose capture state cannot safely admit generation."""
+
+
+class CaptureInputError(ValueError):
+    """Reject request history that capture cannot represent."""
 
 
 class TokenCaptureRetiredError(TokenCaptureFrozenError):
@@ -199,6 +212,16 @@ class CaptureLedger(LineageResolver, Protocol):
     ``manifest`` returns both kinds of rows without including token arrays.
     ``retire`` and ``delete`` remove the rows of rollouts the framework no longer needs.
     Records must be visible to every serving worker before ``record`` returns.
+
+    Framework-owned capture additionally requires ``begin_call(rollout_id,
+    model_call_id)`` and ``close_admissions(rollout_id)``. They share one atomic
+    admission boundary: close returns a manifest and rejects new calls, while
+    existing intents may still commit. These extensions do not freeze writes.
+
+    ``refuse_call(rollout_id, model_call_id)`` optionally settles an intent after
+    the worker acknowledges a refusal before generation or staging. Such calls
+    remain in the audit ledger but are excluded from the training manifest.
+    An error status or message alone is not this acknowledgement.
     """
 
     async def record(self, commit: CaptureLedgerCommit) -> None:

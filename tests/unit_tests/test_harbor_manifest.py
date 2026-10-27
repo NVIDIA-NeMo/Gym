@@ -895,6 +895,73 @@ class TestGymIdentityKeys:
         assert read_dataset_config(folder).is_empty
 
 
+class TestTrainingMetadataKeys:
+    """`[gym]` gains `allowed_agents`, `domain`, `verified` and `[gym.defaults].num_repeats` (M37): each is
+    validated by the loader, none shapes a task, and the table is no longer empty with any of them set."""
+
+    def write(self, tmp_path, text: str):
+        folder = tmp_path / "ds"
+        if not folder.exists():
+            write_task(folder / "a")
+        (folder / "dataset.toml").write_text(text)
+        return folder
+
+    def test_keys_parse_and_leave_tasks_alone(self, tmp_path):
+        from nemo_gym.config_types import Domain
+
+        folder = self.write(
+            tmp_path,
+            '[gym]\nallowed_agents = ["hermes_agent"]\ndomain = "coding"\nverified = true\n'
+            "[gym.defaults]\nnum_repeats = 4\n",
+        )
+        config = read_dataset_config(folder)
+        assert config.allowed_agents == ["hermes_agent"] and config.domain is Domain.CODING
+        assert config.verified is True and config.defaults.num_repeats == 4
+        assert config.admits("hermes_agent") and not config.admits("terminus_2_sandboxed_agent")
+        assert not config.is_empty and not config.shapes_tasks
+        task = load_task(folder / "a")
+        assert apply_dataset_config(task.config, "a", config) is task.config
+
+    def test_absent_keys_admit_any_agent_and_run_once(self):
+        config = GymDatasetConfig()
+        assert config.allowed_agents is None and config.admits("anything")
+        assert config.domain is None and config.verified is False and config.defaults.num_repeats == 1
+
+    @pytest.mark.parametrize(
+        "key",
+        ["allowed_agents", "domain", "verified", "num_repeats"],
+    )
+    def test_each_key_alone_marks_the_table_as_set(self, key):
+        value = {"allowed_agents": ["a"], "domain": "math", "verified": True}.get(key)
+        data = {"defaults": {"num_repeats": 2}} if key == "num_repeats" else {key: value}
+        config = GymDatasetConfig.model_validate(data)
+        assert not config.is_empty and not config.shapes_tasks
+
+    @pytest.mark.parametrize(
+        ("text", "fragment"),
+        [
+            ('[gym]\nallowed_agents = "hermes_agent"\n', "allowed_agents"),  # a bare string, not a list
+            ("[gym]\nallowed_agents = []\n", "names no agent"),
+            ('[gym]\nallowed_agents = ["a", "a"]\n', "more than once"),
+            ('[gym]\nallowed_agents = [" a"]\n', "is not an agent name"),
+            (
+                '[gym]\ndomain = "cooking"\n',
+                "domain must be one of Gym's domain values .math, coding, .*not 'cooking'",
+            ),
+            ('[gym]\nverified = "yes"\n', "verified"),
+            ("[gym.defaults]\nnum_repeats = 0\n", "num_repeats"),
+            ('[gym.defaults]\nnum_repeats = "2"\n', "num_repeats"),
+            ("[gym.defaults]\nnum_repeats = 1.5\n", "num_repeats"),
+            ("[gym]\nverfied = true\n", "verfied"),  # misspelt keys stay errors
+        ],
+    )
+    def test_bad_values_are_refused_with_the_file_named(self, tmp_path, text, fragment):
+        folder = self.write(tmp_path, text)
+        with pytest.raises(ValueError, match=fragment) as exc:
+            read_dataset_config(folder)
+        assert str(folder / "dataset.toml") in str(exc.value)
+
+
 def registry_of(repo: Path, names: tuple[str, ...]) -> RegistryDataset:
     return RegistryDataset(
         "ds", "1.0", "", tuple(RegistryTask(name, repo.as_uri(), "HEAD", f"tasks/{name}") for name in names)

@@ -43,7 +43,7 @@ from contextlib import AbstractAsyncContextManager, AbstractContextManager, cont
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal, Optional, Protocol, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, Optional, Protocol, TypeVar, get_args
 
 import orjson
 from fastapi import APIRouter, FastAPI, Header, Request
@@ -339,6 +339,9 @@ class CheckpointParticipant(ABC):
     """
 
     kind: ClassVar[str]
+    # What this participant's server can capture; its status reports it beside ``kind``, so a controller knows from
+    # discovery alone which servers' rollouts start over after a crash.
+    mode: CheckpointMode
     record_model: ClassVar[type[CheckpointRecord]]
 
     def __init__(self) -> None:
@@ -561,6 +564,12 @@ class ParticipantControlPlane:
     """Checkpoint-ID fencing, phase machine, lease, and storage that drive one participant."""
 
     def __init__(self, participant: CheckpointParticipant, *, instance_name: str, lease_grace_seconds: float) -> None:
+        mode = getattr(participant, "mode", None)
+        if mode not in get_args(CheckpointMode):
+            raise ValueError(
+                f"{type(participant).__name__} declares no checkpoint mode (got {mode!r}); "
+                f"expected one of {get_args(CheckpointMode)}"
+            )
         self.participant = participant
         self.instance_name = instance_name
         self.lease_grace_seconds = lease_grace_seconds
@@ -586,6 +595,7 @@ class ParticipantControlPlane:
     def status(self) -> dict[str, Any]:
         return {
             "kind": self.participant.kind,
+            "mode": self.participant.mode,
             "instance": self.instance_name,
             "phase": self.phase.value,
             "checkpoint_id": self.checkpoint_id,

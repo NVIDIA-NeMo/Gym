@@ -37,8 +37,15 @@ description = "One-line description of the dataset."
 # neither key the dataset evaluates as a benchmark and never enters a training split.
 # type = "validation"
 # license = "Apache 2.0"
+# The harnesses admitted to run the dataset (responses_api_agents/<name>); unset admits any. Catalog
+# metadata: one of Gym's domain values, and whether the rewards were baselined and reviewed.
+# allowed_agents = ["hermes_agent"]
+# domain = "coding"
+# verified = false
 
 [gym.defaults]
+# Rollouts per task for an evaluation; `+num_repeats=` on the command line replaces it.
+num_repeats = 1
 # Scale every task's [agent] and [verifier] timeout_sec, and its cpus, memory_mb and storage_mb.
 timeout_multiplier = 1.0
 resource_multiplier = 1.0

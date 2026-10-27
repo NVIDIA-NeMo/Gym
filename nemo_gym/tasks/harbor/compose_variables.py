@@ -431,6 +431,15 @@ def _literal(value: str) -> str:
     return value.replace("$", "$$")
 
 
+def literal_variables(variables: Mapping[str, str] | None) -> dict[str, str] | None:
+    """A deployment's ``compose_variables`` values as the document reads literals (:func:`_literal` on each), the way
+    every source of :func:`compose_variables` is escaped; ``None`` (no deployment values, as at prepare) stays
+    ``None``."""
+    if variables is None:
+        return None
+    return {key: _literal(value) for key, value in variables.items()}
+
+
 def _task_env(task: HarborTask, env: Mapping[str, Any]) -> dict[str, str]:
     """``[environment].env`` as Harbor's ``resolve_env_vars`` hands it to ``docker compose`` (see
     :func:`compose_variables`), each value literal to the document (:func:`_literal`)."""

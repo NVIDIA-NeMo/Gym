@@ -3,12 +3,11 @@
 """Represent explicit provider policy errors as typed refusal responses."""
 
 import json
-import re
 import time
 from uuid import uuid4
 
 
-def provider_refusal(status: int, body, allowed_codes: frozenset[str]):
+def provider_refusal(status: int, body: object, allowed_codes: frozenset[str]) -> dict[str, str] | None:
     if status != 400 or not allowed_codes:
         return None
     pending = [body.decode(errors="replace") if isinstance(body, bytes) else body]
@@ -28,21 +27,23 @@ def provider_refusal(status: int, body, allowed_codes: frozenset[str]):
             if isinstance(value.get("message"), str):
                 pending.append(value["message"])
         elif isinstance(value, str):
-            start = value.find("{")
-            if start < 0:
+            # Decode enclosing JSON strings before looking inside their object text.
+            starts = [index for char in ("{", '"') if (index := value.find(char)) >= 0]
+            if not starts:
                 continue
+            fragment = value[min(starts) :]
             try:
-                decoded, _ = json.JSONDecoder().raw_decode(value[start:])
-                pending.append(decoded)
+                decoded, _ = json.JSONDecoder().raw_decode(fragment)
             except ValueError:
-                # LiteLLM can quote an already JSON-escaped provider envelope.
-                decoded = re.sub(
-                    r'\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])',
-                    lambda match: json.loads('"' + match.group(0) + '"'),
-                    value,
-                )
-                if decoded != value:
-                    pending.append(decoded)
+                # Some LiteLLM envelopes escape only quotes, not backslashes.
+                # Undo that one layer without touching provider-value escapes.
+                if not fragment.startswith("{"):
+                    continue
+                try:
+                    decoded, _ = json.JSONDecoder().raw_decode(fragment.replace('\\"', '"'))
+                except ValueError:
+                    continue
+            pending.append(decoded)
     return None
 
 

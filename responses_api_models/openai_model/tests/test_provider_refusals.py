@@ -90,3 +90,18 @@ async def test_default_and_unrelated_errors_are_not_converted(status, codes, bod
 def test_configuration_cannot_label_capacity_error_as_refusal():
     with pytest.raises(ValueError):
         server(provider_refusal_codes=["service_unavailable"])
+
+
+@pytest.mark.parametrize("message", ["First line\nSecond line", r"literal \n", 'embedded "quotes"', r"C:\path\file"])
+@pytest.mark.parametrize("encoding", ["direct", "quote_only", "json_string"])
+def test_provider_message_escapes_are_preserved(message, encoding):
+    body = {"error": {"code": "bio_policy", "message": message}}
+    encoded = json.dumps(body)
+    if encoding == "quote_only":
+        encoded = encoded.replace('"', '\\"')
+    elif encoding == "json_string":
+        encoded = json.dumps(encoded)
+    wire = json.dumps(
+        {"error": {"code": "400", "message": "OpenAIException - " + encoded + "\nNo fallback."}}
+    ).encode()
+    assert provider_refusal(400, wire, ALLOWED) == body["error"]

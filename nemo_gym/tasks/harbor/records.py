@@ -149,6 +149,14 @@ def recorded_service_records(entry: Any) -> dict[str, dict[str, Any]]:
     return {MAIN_SERVICE: {**flags, "image": str(image)}} if image else {}
 
 
+def recorded_forced_tasks(entry: Any) -> set[str]:
+    """The tasks one ``built-images.json`` entry records as built under ``builds.force`` over their declared
+    ``docker_image`` (``forced_tasks``); the loader runs the recorded ``main`` for them and the declared image for
+    every other task that declares one. ``set()`` for an entry without the key."""
+    tasks = entry.get("forced_tasks") if isinstance(entry, dict) else None
+    return {str(task) for task in tasks} if isinstance(tasks, list) else set()
+
+
 def recorded_service_images(entry: Any) -> dict[str, str]:
     """The images one ``built-images.json`` entry records, by Compose service name (:func:`recorded_service_records`
     without the flags)."""
