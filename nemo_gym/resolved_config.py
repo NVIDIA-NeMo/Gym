@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -21,7 +23,7 @@ from nemo_gym.path_utils import resolved_config_path_for
 from nemo_gym.secret_utils import hide_secrets_in_container
 
 
-def write_resolved_config(global_config_dict: DictConfig, output_fpath: Path) -> Path:
+def write_resolved_config(global_config_dict: Mapping[str, Any], output_fpath: Path) -> Path:
     """Save the run's config beside its rollouts file as `<stem>_resolved_config.yaml`.
 
     Secret-shaped values are masked and interpolations stay as `${...}` strings, so the file is
@@ -30,7 +32,12 @@ def write_resolved_config(global_config_dict: DictConfig, output_fpath: Path) ->
     """
     path = resolved_config_path_for(output_fpath)
     path.parent.mkdir(parents=True, exist_ok=True)
-    masked = hide_secrets_in_container(OmegaConf.to_container(global_config_dict, resolve=False))
+    container = (
+        OmegaConf.to_container(global_config_dict, resolve=False)
+        if isinstance(global_config_dict, DictConfig)
+        else dict(global_config_dict)
+    )
+    masked = hide_secrets_in_container(container)
     text = OmegaConf.to_yaml(OmegaConf.create(masked))
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:

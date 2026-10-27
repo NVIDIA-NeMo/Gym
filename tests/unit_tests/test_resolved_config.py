@@ -69,6 +69,19 @@ def test_write_resolved_config_masks_secrets_and_keeps_interpolations(tmp_path: 
     assert "literal" not in path.read_text()
 
 
+def test_write_resolved_config_accepts_a_plain_dict(tmp_path: Path) -> None:
+    config = {"policy_api_key": "sk-canary", "url": "http://${base}/v1", "base": "x"}  # pragma: allowlist secret
+
+    path = write_resolved_config(config, tmp_path / "rollouts.jsonl")
+
+    assert yaml.safe_load(path.read_text()) == {
+        "policy_api_key": MASKED_VALUE,
+        "url": "http://${base}/v1",
+        "base": "x",
+    }
+    assert "sk-canary" not in path.read_text()
+
+
 def test_write_resolved_config_overwrites_and_leaves_no_temp_files(tmp_path: Path) -> None:
     rollouts = tmp_path / "rollouts.jsonl"
     write_resolved_config(OmegaConf.create({"attempt": 1}), rollouts)
