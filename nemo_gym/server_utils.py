@@ -89,6 +89,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
+    maybe_get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
@@ -369,17 +370,27 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> ClientSession:  # pragma: no cover
+) -> ClientSession:
     global _GLOBAL_AIOHTTP_CLIENT
 
     if _GLOBAL_AIOHTTP_CLIENT is not None:
         return _GLOBAL_AIOHTTP_CLIENT
 
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=global_config_dict_parser_config,
-        global_config_dict_parser_cls=global_config_dict_parser_cls,
-    )
-    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
+    # Read only a config this process already has, cached or injected through NEMO_GYM_CONFIG_DICT; never parse
+    # its argv here, which in a Ray task worker exits the process. A process with neither gets the default client
+    # limits: env.yaml and +global_aiohttp_* do not reach it. An explicit parser config or class still parses.
+    global_config_dict = maybe_get_global_config_dict()
+    if global_config_dict is None and (
+        global_config_dict_parser_config is not None or global_config_dict_parser_cls is not GlobalConfigDictParser
+    ):
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=global_config_dict_parser_config,
+            global_config_dict_parser_cls=global_config_dict_parser_cls,
+        )
+    if global_config_dict is None:
+        cfg = GlobalAIOHTTPAsyncClientConfig()
+    else:
+        cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
 
     return set_global_aiohttp_client(cfg)
 
@@ -958,6 +969,7 @@ class ServerClient(BaseModel):
         method: str,
         *,
         _control: bool = False,
+        _resend_after_disconnect: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """Call another server. ``_control`` sends the call over the reserved control pool."""
@@ -1011,7 +1023,8 @@ class ServerClient(BaseModel):
             # Sending it again would run the attempt a second time,
             # and the first run's sessions on other servers would never be freed: the second run replies,
             # so the controller never retires the attempt.
-            _resend_after_disconnect=not (self.checkpoint_enabled() and url_path == "/run"),
+            _resend_after_disconnect=_resend_after_disconnect
+            and not (self.checkpoint_enabled() and url_path == "/run"),
             **kwargs,
         )
 
@@ -1662,6 +1675,15 @@ def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
     return entrypoint_class_flag(entrypoint_fpath, "ray_enabled")
 
 
+def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
+    """Raise when the server asks for several workers but cannot run with them."""
+    if not server.config.num_workers or server.config.num_workers <= 1:
+        return
+    reason = server.multiple_workers_unsupported_reason()
+    if reason is not None:
+        raise ValueError(f"{server.config.name} needs num_workers=1: {reason}")
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
     # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
@@ -1682,6 +1704,17 @@ class SimpleServer(BaseServer):
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        """Why this server cannot run with `num_workers > 1`, or None when it can.
+
+        With several workers, uvicorn imports the entrypoint in each worker and serves its module-level `app`.
+        A server whose state or resources several workers cannot share overrides this and returns the reason,
+        and `run_webserver` refuses `num_workers > 1` with it before uvicorn starts.
+        The reason reads as the end of the sentence "<server> needs num_workers=1: <reason>".
+        It is a method rather than a class attribute so that a server can decide from its config.
+        """
+        return None
 
     def setup_checkpoint_participant(self, app: FastAPI) -> None:
         """Take part in partial-rollout checkpoints on the app ``setup_webserver`` built, if it does not yet.
@@ -1920,6 +1953,8 @@ repr(e): {repr(e)}"""
         )
         server = cls(config=server_config, server_client=server_client)
         startup.mark("init_server")
+        # Before the dry-run return, so a dry run reports the misconfiguration too.
+        refuse_unsupported_num_workers(server)
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
