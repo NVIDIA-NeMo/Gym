@@ -121,22 +121,22 @@ def _get_nemo_gym_install_flags() -> str:
     return flags
 
 
-# A requirements line that installs Gym from a direct reference: `-e nemo-gym[dev,sandbox] @ ../../` in a server of a
-# Gym checkout, or `-e nemo-gym[dev] @ ../../../Gym` in a server of an external repository developed against one. The
-# ERE is the same pattern for grep.
-_DIRECT_NEMO_GYM_REQUIREMENT_ERE = r"^[[:space:]]*(-e[[:space:]]+)?nemo[-_]gym[[:space:]]*(\[[^]]*\])?[[:space:]]*@"
-_DIRECT_NEMO_GYM_REQUIREMENT_RE = re.compile(r"^\s*(?:-e\s+)?nemo[-_]gym\s*(?:\[(?P<extras>[^\]]*)\])?\s*@")
+# A requirements line that installs Gym in any form: `-e nemo-gym[dev,sandbox] @ ../../` in a server of a Gym checkout,
+# `-e nemo-gym[dev] @ ../../../Gym` in an external repository developed against one, or a pin such as `nemo-gym==0.7.0`.
+# A server outside a Gym checkout gets Gym from its parent installation instead. The ERE is the same pattern for grep.
+_NEMO_GYM_REQUIREMENT_ERE = r"^[[:space:]]*(-e[[:space:]]+)?nemo[-_]gym([^A-Za-z0-9_.-]|$)"
+_NEMO_GYM_REQUIREMENT_RE = re.compile(r"^\s*(?:-e\s+)?nemo[-_]gym(?![A-Za-z0-9_.-])\s*(?:\[(?P<extras>[^\]]*)\])?")
 
 
 def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
-    """The extras a server requests on its direct Gym requirement, formatted as `[a,b]`, or "" for none.
+    """The extras a server requests on its Gym requirement lines, formatted as `[a,b]`, or "" for none.
 
-    A server outside a Gym checkout gets Gym from its parent installation instead of its `nemo-gym[...] @ <path>`
-    line, so the line's extras must be carried over or their dependencies are never installed.
+    A server outside a Gym checkout gets Gym from its parent installation instead of its own `nemo-gym[...]` line, so
+    the line's extras must be carried over or their dependencies are never installed.
     """
     extras: list[str] = []
     for line in requirements_fpath.read_text().splitlines():
-        match = _DIRECT_NEMO_GYM_REQUIREMENT_RE.match(line)
+        match = _NEMO_GYM_REQUIREMENT_RE.match(line)
         if match is None or not match.group("extras"):
             continue
         for extra in match.group("extras").split(","):
@@ -326,17 +326,20 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{override_flag}-r requirements.txt {head_server_dep_args}"""
             else:
                 extras = _local_nemo_gym_extras(dir_path / "requirements.txt")
+                # Outside the install root, `../..` is the server's own repository (for example `-e ../..` installing
+                # it), so only the server's Gym requirements are replaced. A built-in server in a wheel install keeps
+                # dropping every `../..` line: there it points into site-packages, at files a wheel does not ship.
+                if dir_path.resolve().is_relative_to(PARENT_DIR.resolve()):
+                    other_requirements = "grep -v -F '../..' requirements.txt"
+                else:
+                    other_requirements = f"grep -v -E {shlex.quote(_NEMO_GYM_REQUIREMENT_ERE)} requirements.txt"
                 if parent_gym_checkout:
-                    # Replace only the server's own Gym requirement; other local paths such as `-e ../../shared_lib`
-                    # exist beside a checkout and are kept.
                     gym_requirement = shlex.quote(f"-e {PARENT_DIR}{extras}")
-                    other_requirements = f"grep -v -E {shlex.quote(_DIRECT_NEMO_GYM_REQUIREMENT_ERE)} requirements.txt"
                     install_flags = ""
                 else:
                     # install nemo-gym from pypi instead of relative path in requirements.txt
                     # with support for pre-releases, custom indexes, and version pinning
                     gym_requirement = f"'nemo-gym{extras}{_get_nemo_gym_version_spec()}'"
-                    other_requirements = "grep -v -F '../..' requirements.txt"
                     install_flags = _get_nemo_gym_install_flags()
                 install_cmd = (
                     f"""(echo {gym_requirement} && {other_requirements}) | """
