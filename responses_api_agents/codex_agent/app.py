@@ -118,6 +118,8 @@ _MODEL_ENDPOINT_ERRORS = (
         for code in _ENDPOINT_ERROR_STATUSES
     ),
     "currently experiencing high demand",  # Codex's message for an HTTP 500
+    "selected model is at capacity",  # Codex's message for an HTTP 503
+    "request timed out",  # Codex's message for a timed-out model request
     "reconnecting... waiting for network",
     # Not every stream disconnect: "...: Incomplete response returned, reason: max_output_tokens" is the
     # output cap, a gradable outcome.

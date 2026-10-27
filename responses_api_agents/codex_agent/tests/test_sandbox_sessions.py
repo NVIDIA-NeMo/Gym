@@ -898,6 +898,38 @@ def test_codex_0154_endpoint_outage_is_retried_not_graded(setup, case, ending) -
     assert agent_outcome_policy(response) == OutcomeAction.RETRY
 
 
+# Codex's own messages for an endpoint at capacity (HTTP 503) and a timed-out model request (see
+# test_native_errors_use_captured_attempt_facts).
+CODEX_NATIVE_ENDPOINT_FAILURES = {
+    "capacity": "Selected model is at capacity. Please try a different model.",
+    "request-timeout": "request timed out",
+}
+
+
+@pytest.mark.parametrize("ending", ["reported", "killed-after-reporting"])
+@pytest.mark.parametrize("case", list(CODEX_NATIVE_ENDPOINT_FAILURES))
+def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) -> None:
+    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.openai_utils import NeMoGymResponse
+
+    agent, sandbox = setup
+    message = CODEX_NATIVE_ENDPOINT_FAILURES[case]
+    assert _model_endpoint_error([(9.0, event) for event in codex_error(message)]) is not None
+    # Codex exits 1 on the reported failure, or its runner is killed right after it reports it.
+    sandbox.result["return_code"] = 1 if ending == "reported" else -9
+    result, closed, probed = run_codex_transcript(agent, sandbox, [{"type": "turn.started"}, *codex_error(message)])
+    assert not probed
+    assert closed["agent_observations"]["records"][0]["status"] == "failed"
+    if ending == "killed-after-reporting":
+        assert result.status_code == 502, result.text
+        return
+    assert result.status_code == 200, result.text
+    response = NeMoGymResponse.model_validate(result.json())
+    assert (response.status, response.error.message) == ("failed", message)
+    assert "graded_agent_error" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+
+
 @pytest.mark.parametrize(
     "message, action",
     [
@@ -954,6 +986,7 @@ def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup, endin
     transcript = [
         {"type": "turn.started"},
         *(retry_notice(message) for message, _ in CODEX_0154_ENDPOINT_FAILURES.values()),
+        *(retry_notice(message) for message in CODEX_NATIVE_ENDPOINT_FAILURES.values()),
         WAITING,
         *[json.loads(line)[1] for line in events().splitlines()][:-1],  # model output, no turn.completed
     ]
