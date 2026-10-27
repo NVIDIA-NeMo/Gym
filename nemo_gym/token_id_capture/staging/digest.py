@@ -35,7 +35,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-STAGING_SCHEMA_VERSION = 2
+STAGING_SCHEMA_VERSION = 3
 STAGING_DIGEST_VERSION = 2
 EXTRAS_DIGEST_VERSION = 1
 
@@ -205,7 +205,7 @@ def compute_staging_digest(
     schema_version: int,
     digest_version: int,
     extras_digest_version: int,
-    rollout_id: str,
+    capture_key: str,
     model_call_id: str,
     parent_call_id: str | None,
     mode: str,
@@ -227,8 +227,8 @@ def compute_staging_digest(
         raise ValueError(f"unsupported staging digest version {digest_version}")
     if type(extras_digest_version) is not int or extras_digest_version != EXTRAS_DIGEST_VERSION:
         raise ValueError(f"unsupported extras digest version {extras_digest_version}")
-    if not rollout_id or not model_call_id:
-        raise ValueError("rollout_id and model_call_id must be non-empty")
+    if not capture_key or not model_call_id:
+        raise ValueError("capture_key and model_call_id must be non-empty")
     if parent_call_id == "":
         raise ValueError("parent_call_id must be non-empty when present")
     if mode not in ("text", "token_in"):
@@ -252,7 +252,7 @@ def compute_staging_digest(
     _validate_digest(extras_digest, field="extras_digest")
 
     payload = bytearray(struct.pack(">BBB", schema_version, digest_version, extras_digest_version))
-    payload.extend(_encode_text(rollout_id))
+    payload.extend(_encode_text(capture_key))
     payload.extend(_encode_text(model_call_id))
     payload.extend(_encode_optional_text(parent_call_id))
     payload.extend(_encode_text(mode))

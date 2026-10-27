@@ -17,8 +17,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess
@@ -236,12 +238,15 @@ class TestApp:
 
         assert (response.status, response.usage) == ("completed", None)
         assert "stop_reason" not in response.metadata
+        assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
 
     @pytest.mark.asyncio
-    async def test_a_run_ended_by_a_rejected_request_is_a_failed_response_that_used_no_tokens(self) -> None:
+    @pytest.mark.parametrize("status", [400, 413, 422])
+    async def test_a_run_ended_by_a_rejected_request_is_a_failed_response_that_used_no_tokens(self, status) -> None:
         report = _report(
             stop_reason="model_error",
-            model_error="Error code: 400 - rejected",
+            model_error="rejected",
+            model_error_status=status,
             observations={"status": "failed", "model_response_ids": []},
         )
 
@@ -250,8 +255,11 @@ class TestApp:
         )
 
         assert response.status == "failed"
-        assert (response.error.code, response.error.message) == ("server_error", "Error code: 400 - rejected")
+        assert (response.error.code, response.error.message) == ("server_error", "rejected")
         assert response.metadata["stop_reason"] == "model_error"
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=MODEL_REQUEST_ERROR, status_code=status
+        )
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
@@ -280,6 +288,10 @@ class TestApp:
         )
 
         assert (response.status, response.usage) == ("failed", None)
+        # A report without a structured status must not guess from the error message.
+        assert (
+            AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]).failure_kind == "unknown"
+        )
 
     @pytest.mark.asyncio
     async def test_usage_without_detail_fields_has_no_cached_or_reasoning_counts(self) -> None:

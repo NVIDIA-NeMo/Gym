@@ -127,7 +127,7 @@ def _mock_port_allocation(monkeypatch):
 
 
 class TestPlanBenchmarkCommand:
-    def _config(self, tmp_path: Path, *, prompt_config: str | None = None, **plan_args: object) -> dict:
+    def _config(self, tmp_path: Path, **plan_args: object) -> dict:
         prepare_script = tmp_path / "prepare.py"
         prepare_script.write_text("")
         dataset = {
@@ -136,8 +136,6 @@ class TestPlanBenchmarkCommand:
             "jsonl_fpath": str(tmp_path / "benchmark.jsonl"),
             "prepare_script": str(prepare_script),
         }
-        if prompt_config is not None:
-            dataset["prompt_config"] = prompt_config
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
             json.dumps({"fake_agent": {"responses_api_agents": {"simple_agent": {"datasets": [dataset]}}}})
@@ -178,17 +176,6 @@ class TestPlanBenchmarkCommand:
         self._run(config, self._prepare_module(tmp_path, [_row("a"), _row("b")]))
 
         assert [task["task_id"]["task_id"] for task in json.loads(out.read_text())["tasks"]] == ["b"]
-
-    def test_prompt_templates_are_refused(self, tmp_path: Path, capsys) -> None:
-        config = self._config(
-            tmp_path, prompt_config="benchmarks/prompts/generic/math.yaml", plan_output_fpath=str(tmp_path / "p")
-        )
-
-        with pytest.raises(SystemExit):
-            self._run(config)
-
-        assert "plans do not support prompt templates yet" in " ".join(capsys.readouterr().out.split())
-        assert not (tmp_path / "p").exists()
 
     def test_several_benchmarks_are_refused(self, tmp_path: Path, capsys) -> None:
         config = self._config(tmp_path, plan_output_fpath=str(tmp_path / "p"))
