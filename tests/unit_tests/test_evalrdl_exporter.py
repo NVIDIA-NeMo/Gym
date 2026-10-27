@@ -107,7 +107,7 @@ def fake_sdk(tmp_path: Path, monkeypatch: MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(
         isolated,
         "_worker_environment",
-        lambda: {**os.environ, "PYTHONPATH": str(sdk_root), "FAKE_EVALRDL_LOG": str(log)},
+        lambda python: {**os.environ, "PYTHONPATH": str(sdk_root), "FAKE_EVALRDL_LOG": str(log)},
     )
     monkeypatch.setenv("FAKE_EVALRDL_MODE", "committed")
     return {"log": log, "requested": requested}
