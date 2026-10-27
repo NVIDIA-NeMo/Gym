@@ -15,6 +15,22 @@ environment_server_routes:
   swe_rebench: swe_rebench_environment
   swemer_v1: swemer_v1_environment
 
+# The typed session adapters support the shared harness as well as the flat one.
+scale_swe_resources_server:
+  resources_servers:
+    scale_swe:
+      allowed_agents: [opencode_agent, opencode_sandboxed_agent]
+
+swe_rebench_resources_server:
+  resources_servers:
+    swe_rebench:
+      allowed_agents: [opencode_agent, opencode_sandboxed_agent]
+
+swemer_v1_resources_server:
+  resources_servers:
+    swemer_v1:
+      allowed_agents: [opencode_agent, opencode_sandboxed_agent]
+
 opencode_agent:
   responses_api_agents:
     opencode_agent:
