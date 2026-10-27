@@ -47,6 +47,8 @@ judge_model:
 browsecomp_benchmark_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
+      # The published run used Exa; BrowseComp's default provider is You.com.
+      search_provider: exa
       exa_api_key: ${oc.select:exa_api_key,null}
       # Exa's multi-step research search, as the published run used (Gym's default is auto).
       exa_search_type: deep

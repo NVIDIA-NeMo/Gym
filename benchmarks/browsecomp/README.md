@@ -4,7 +4,7 @@
 browsecomp_benchmark_resources_server:
   resources_servers:
     browsecomp_advanced_harness:
-      tavily_api_key: ???
+      ydc_api_key: ???   # default provider is You.com; for exa/tavily set search_provider and the matching key
       exclude_domains_file_path: ???
 Qwen3-235B-A22B-Instruct-2507-FP8:
   responses_api_models:
