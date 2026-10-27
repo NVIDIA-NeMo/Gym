@@ -10323,7 +10323,63 @@ class TestTurnsFromModelCalls:
         assert perf["completion_tokens"] == 6
         assert perf["token_observability_coverage"] == 1.0
 
-    @pytest.mark.parametrize("conflict", ["invocation", "response", "model", "ambiguous"])
+    @pytest.mark.parametrize("reference_key", ["model_call_id", "response_id", "both"])
+    @pytest.mark.parametrize("ownership", ["different_owner", "root_first", "root_last"])
+    def test_compaction_exclusion_preserves_conflicting_ownership(self, reference_key: str, ownership: str) -> None:
+        from nemo_gym.harness_capabilities.checker import inspect_record
+
+        model_ref = {"type": "responses_api_models", "name": "policy_model"}
+        helper_ref = {"model_ref": model_ref}
+        if reference_key in ("model_call_id", "both"):
+            helper_ref["model_call_id"] = "summary"
+        if reference_key in ("response_id", "both"):
+            helper_ref["response_id"] = "resp-summary"
+        root_refs = [{"model_call_id": "policy"}]
+        if ownership != "different_owner":
+            root_refs.append({"model_call_id": "summary"})
+        invocations = [
+            {"kind": "agent_invocation", "invocation_id": "root", "model_calls": root_refs},
+            {"kind": "agent_invocation", "invocation_id": "other", "model_calls": [{"model_call_id": "summary"}]},
+        ]
+        if ownership == "root_last":
+            invocations.reverse()
+        compaction = {"kind": "context_compaction", "invocation_id": "root", "model_calls": [helper_ref]}
+        result = {
+            "ng_agent_observations": {"source": "harness", "records": [*invocations, compaction]},
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": call_id,
+                        "response_id": f"resp-{call_id}",
+                        "model_ref": model_ref,
+                        "response": {"output": []},
+                        "status_code": 200,
+                    }
+                    for call_id in ("policy", "summary")
+                ]
+            },
+        }
+
+        _attach_trajectory_record({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, result)
+
+        trajectory = result[NG_TRAJECTORY_KEY]
+        assert [ref["model_call_id"] for turn in trajectory["turns"] for ref in turn["model_calls"]] == ["policy"]
+        assert [call["model_call_id"] for call in trajectory["model_calls"]] == ["policy", "summary"]
+        # Keep both ownership claims: excluding a helper must not repair the evidence.
+        assert {
+            invocation["invocation_id"]: [ref["model_call_id"] for ref in invocation["model_calls"]]
+            for invocation in trajectory["invocations"]
+        } == {
+            invocation["invocation_id"]: [ref["model_call_id"] for ref in invocation["model_calls"]]
+            for invocation in invocations
+        }
+        assert result[NG_AGENT_OBSERVATIONS_KEY]["records"][-1] == compaction
+        if ownership != "different_owner":
+            checks = {check["id"]: check for check in inspect_record(result)["checks"]}
+            assert checks["ownership.call_owner"]["status"] == "fail"
+            assert checks["steps.attempt_accounting"]["status"] == "pass"
+
+    @pytest.mark.parametrize("conflict", ["response", "model", "ambiguous"])
     def test_invalid_compaction_reference_does_not_hide_policy_calls(self, conflict: str) -> None:
         from nemo_gym.rollout_observability import ContextCompactionObservation
 
@@ -10335,9 +10391,7 @@ class TestTurnsFromModelCalls:
         }
         if conflict == "ambiguous":
             calls.append(calls[0].model_copy(deep=True))
-        compaction = ContextCompactionObservation.model_validate(
-            {"invocation_id": "other" if conflict == "invocation" else "root", "model_calls": [reference]}
-        )
+        compaction = ContextCompactionObservation.model_validate({"invocation_id": "root", "model_calls": [reference]})
         turns = nemo_gym.rollout_collection._turns_from_model_calls(
             "task", "rollout", [self._invocation("root", ["policy"])], calls, None, compactions=[compaction]
         )

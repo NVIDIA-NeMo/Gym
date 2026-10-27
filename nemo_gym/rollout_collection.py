@@ -701,7 +701,8 @@ def _turns_from_model_calls(
     A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
     in the raw evidence but do not become turns: even a single-agent rollout may capture judge
     or auxiliary calls that do not belong to the agent. Compaction helpers remain invocation-owned
-    calls for token accounting, but never become policy turns.
+    calls for token accounting, but never become policy turns, even when agent ownership claims
+    conflict. Preserve those claims for validation rather than choosing which owner is correct.
     Explicit verifier ownership also excludes a call from turns when an agent incorrectly references it;
     retain both ownership claims for validation.
     """
@@ -717,7 +718,7 @@ def _turns_from_model_calls(
             if ref.response_id:
                 invocation_by_response_id[ref.response_id] = invocation.invocation_id
 
-    compaction_calls: set[tuple[str, int]] = set()
+    compaction_calls: set[int] = set()
     for compaction in compactions:
         for ref in compaction.model_calls:
             matches = [
@@ -729,7 +730,7 @@ def _turns_from_model_calls(
             ]
             # Unresolved or ambiguous references must not silently hide policy calls.
             if len(matches) == 1:
-                compaction_calls.add((compaction.invocation_id, id(matches[0])))
+                compaction_calls.add(id(matches[0]))
 
     turns: list[TrajectoryTurn] = []
     turn_counts: Counter = Counter()
@@ -744,7 +745,7 @@ def _turns_from_model_calls(
         invocation_id = invocation_by_call_id.get(call.model_call_id or "") or invocation_by_response_id.get(
             metadata.response_id or ""
         )
-        if invocation_id is None or (invocation_id, id(call)) in compaction_calls:
+        if invocation_id is None or id(call) in compaction_calls:
             continue
         question, answer, reasoning, tool_calls = _turn_content(call.request, call.response)
         turn_counts[invocation_id] += 1
