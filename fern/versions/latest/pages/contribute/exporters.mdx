@@ -170,7 +170,10 @@ class AcmeExporter(IsolatedExporter):
 
         staged_dir = workdir / "run"
         staged_dir.mkdir()
-        shutil.copy2(artifacts.aggregate_metrics_json_fpath, staged_dir)
+        try:
+            shutil.copy2(artifacts.aggregate_metrics_json_fpath, staged_dir)
+        except OSError as exc:
+            raise ExportPreparationError(f"Could not stage the aggregate metrics: {exc}") from exc
         return {"project": self.config.project, "staged_dir": str(staged_dir)}
 ```
 
@@ -192,7 +195,7 @@ def run(payload: dict) -> dict:
 
 How it fits together:
 
-- **`build_payload(artifacts, workdir)`** runs in the main process. It returns a JSON-serializable dict for the worker, and anything it stages goes under `workdir`, which is removed afterwards. Raise `ExportPreparationError` when the run cannot be exported; it becomes a `failed` result, before any environment is built.
+- **`build_payload(artifacts, workdir)`** runs in the main process. It returns a JSON-serializable dict for the worker, and anything it stages goes under `workdir`, which is removed afterwards. Raise `ExportPreparationError` when the run cannot be exported, and catch the `OSError` of a failed copy to do so: an `OSError` that escapes `build_payload` is not turned into a result for you. It becomes a `failed` result, before any environment is built.
 - **The environment** is built on first use from `required_packages()` (or a `requirements` class attribute), under `<uv_venv_dir>/exporters/<name>/`, and reused afterwards. A changed requirement list gets a fresh one. Where the SDK is installed from is the user's uv configuration, so do not hard-code a package index.
 - **The worker** defines `run(payload) -> dict` and must not import `nemo_gym`: its environment does not have it. It returns `state` (`succeeded` by default, `skipped` or `failed`), and optionally `error`, `exit_code` and `detail`. An exception it raises becomes a `failed` result.
 - **The payload** reaches the worker as JSON on stdin and the result comes back in a file, so credentials stay out of the process list and anything the SDK prints cannot corrupt the result.
