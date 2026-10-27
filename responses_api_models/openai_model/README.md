@@ -24,6 +24,16 @@ separately. Internal Gym clients retain their existing unbounded extension for
 rate-limit statuses; 404 and 408 never trigger that extension.
 
 
+## Provider reasoning content
+
+Responses-compatible providers sometimes use `output_text` for a reasoning
+item's content. Before validating provider responses, this server changes that
+part's discriminator to `reasoning_text` only when it contains a string `text`
+and no other fields except optional empty `annotations: []`. Text, encrypted
+content, item order and other response fields are preserved without modifying
+the provider's response object. Unknown or malformed shapes still go through
+native validation unchanged. Requests and continuation replay are unchanged.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A
