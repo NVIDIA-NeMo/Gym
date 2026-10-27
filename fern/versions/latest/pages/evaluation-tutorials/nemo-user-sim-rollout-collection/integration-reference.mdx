@@ -9,7 +9,7 @@ This page describes the integration behind the
 
 ## Component ownership
 
-- **Preparation** materializes one validation row per first-party probe before collection.
+- **Preparation** materializes one validation row per built-in probe before collection.
 - The **rollout collector** loads a task and dispatches an episode request to the Environment Server.
 - The **Environment Server** seeds sessions, owns the conversation runtime and tool loop, invokes participants
   and support models, requests verification, and returns the episode response.
@@ -17,7 +17,7 @@ This page describes the integration behind the
 - The **Assistant Agent** produces the evaluated Assistant messages and function calls through `policy_model`.
   To evaluate a different agent, point `assistant_agent` at an Agent Server that implements agent sessions and
   returns function calls without executing them; NeMo User Sim executes the tools.
-- The **Resources Server** validates the materialized row, stores its session snapshot, evaluates the completed
+- The **Resources Server** validates the resolved row, stores its session snapshot, evaluates the completed
   episode, and returns Gym's reward contract.
 - The **support model** handles structured judge, summary, tool-simulation, evaluator, and probe-scorer requests.
   The Environment Server invokes support roles used during the conversation; the Resources Server invokes final
@@ -25,9 +25,11 @@ This page describes the integration behind the
 
 The Resources Server does not create a second conversation runtime and does not expose probe-tool routes.
 
-## Materialized task contract
+## Prepared task contract
 
-Preparation provides stable string `task_id` values and complete `resolved_row` objects. The following row is a
+Preparation provides stable string `task_id` values and complete `resolved_row` objects. NeMo User Sim calls this
+resolved row a materialized row; in Gym, a materialized row is the collector's `task_id` plus `task_input` record
+in `rollouts_materialized_inputs.jsonl`. The following row is a
 schematic with nested values elided; see `resources_servers/nemo_user_sim/data/example.jsonl` for complete rows:
 
 ```json
@@ -53,15 +55,16 @@ are applied on top.
 
 At `/seed_session`, the Resources Server validates required fields, the configured NeMo User Sim revision, and
 the Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded
-health rows. It then stores the row and a canonical SHA-256 digest. At `/verify`, it rejects mismatched episode
-identity, task identity, row content, or trajectory identity.
+health rows. It then stores the resolved row and its canonical SHA-256 digest. At `/verify`, it rejects mismatched
+episode identity, task identity, resolved-row content, or trajectory identity.
 
-The digest establishes immutability between seeding and verification. It is not a comparison with a separately
-stored preparation artifact.
+The digest covers only `resolved_row`; task and episode identity are compared separately. It establishes that the
+resolved row did not change between seeding and verification. It is not a comparison with a separately stored
+preparation artifact.
 
 ## Episode execution
 
-The Environment Server constructs one `ProbeEpisodeRuntime.from_resolved_row(...)` from the materialized row.
+The Environment Server constructs one `ProbeEpisodeRuntime.from_resolved_row(...)` from the resolved row.
 The runtime owns conversation state, probe state, tool validation and execution, semantic call indices, and
 episode evidence.
 
@@ -69,8 +72,9 @@ For `tool_calling`, `safety_agentic`, and `financial_services`, the Assistant Ag
 without executing them. NeMo User Sim validates and executes accepted calls, appends tool messages, and requests
 another Assistant activation when needed. Internal API-response synthesis uses `tool_simulation_model`.
 
-Unexpected runtime exceptions become failures-sidecar records with an `agent` stage. Only failures that NeMo User
-Sim handles and returns appear under `usersim_result.simulation_outcome`.
+Unexpected runtime exceptions become failures-sidecar records with an `agent` stage. Failures that NeMo User Sim
+reports, and Assistant activation errors that the Environment Server classifies as Assistant mistakes
+(`failure_class: assistant_activation_error`), appear under `usersim_result.simulation_outcome`.
 
 ## Model requirements and routing
 
@@ -127,7 +131,8 @@ onto the top-level persisted rollout. The nested `verification` object retains t
 ## Saved rollout fields
 
 - `usersim_result.conversation_messages`: ordered User, Assistant, function-call, and tool-result messages.
-- `usersim_result.simulation_outcome`: NeMo User Sim-reported simulation status, attribution, detail, and warnings.
+- `usersim_result.simulation_outcome`: simulation status, attribution, detail, and warnings, reported by NeMo User
+  Sim or, for Assistant activation errors, by the Environment Server.
 - `invocations`: ordered participant and support activations made by the Environment Server.
 - `verification.verifier_data.normalized_axis_scores`: full normalized NeMo User Sim quality map.
 - `reward_components`: Gym's flat projection of quality metrics plus completion/scoring flags.

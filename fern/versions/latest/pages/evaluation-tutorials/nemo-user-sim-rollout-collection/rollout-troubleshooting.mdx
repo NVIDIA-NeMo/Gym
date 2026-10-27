@@ -8,7 +8,9 @@ Start with the output files:
 
 - `results/nemo_user_sim/rollouts.jsonl` contains completed episode responses, including measured failures.
 - `results/nemo_user_sim/rollouts_failures.jsonl` contains attempts that failed before Gym could save a completed episode.
-- `results/nemo_user_sim/quality_summary.json` summarizes rollout health when health checks are enabled.
+- `results/nemo_user_sim/quality_summary.json` summarizes rollout health.
+
+For the full validation run, use the same files under `results/nemo_user_sim/all-probes/`.
 
 A zero reward does not by itself mean that the Assistant performed poorly. Check the failure stage and
 `mask_sample` before interpreting it.
@@ -36,9 +38,10 @@ execution failures, not measured Assistant-quality results.
 Guarded health rows are rejected when the Resources Server seeds the session, so they appear here with
 `_ng_failure_stage: "seed"`.
 
-## NeMo User Sim-reported simulation failures
+## Simulation failures recorded in the episode
 
-Failures that NeMo User Sim handles internally can still produce a completed episode response. Inspect:
+Failures that NeMo User Sim handles internally, and Assistant activation errors that the Environment Server
+classifies as Assistant mistakes, still produce a completed episode response. Inspect:
 
 ```bash
 jq '{
@@ -57,11 +60,12 @@ Interpret attribution carefully:
 - A simulation failure attributed elsewhere is not evidence about the Assistant: `reward` is `0.0` and
   `mask_sample` is `true`.
 
-`failure_kind` is `usersim:<failure_class>`, for example `usersim:assistant_activation_error`, unless that class is
-already a registered Gym failure kind.
+`failure_kind` is derived from `failure_class`. A class that is already a registered Gym failure kind or already
+contains a namespace is kept as is. Any other class is lowercased, characters other than letters, digits, and
+underscores become underscores, and `usersim:` is prepended, for example `usersim:assistant_activation_error`.
 
 Assistant-caused invalid responses and non-retryable Assistant 4xx responses follow the measured-failure path.
-Timeouts, provider/transport failures, retryable status codes, and session-plumbing failures remain failures
+Participant timeouts, provider/transport failures, retryable status codes, and session-plumbing failures remain failures
 outside the scored episode.
 
 ## Grading failures
@@ -120,10 +124,10 @@ Use these sources instead:
 
 At seed time, the Resources Server validates required fields, the pinned NeMo User Sim revision, and the
 Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded health
-rows. It stores a canonical digest of the materialized row. At verification, a changed row or mismatched task, episode, or trajectory identity
-is rejected.
+rows. It stores a canonical digest of the resolved row (`resolved_row`). At verification, a changed resolved row or
+mismatched task, episode, or trajectory identity is rejected.
 
-The digest proves that the row remained unchanged during the episode; it does not independently prove that the
+The digest proves that the resolved row remained unchanged during the episode; it does not independently prove that the
 row equals an earlier preparation artifact. Regenerate the validation rows with:
 
 ```bash

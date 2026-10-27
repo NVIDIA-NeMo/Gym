@@ -1,5 +1,5 @@
 ---
-title: "Run Multi-turn User Simulation with NeMo User Sim"
+title: "Run Multi-Turn User Simulation with NeMo User Sim"
 description: "Generate NeMo User Sim validation tasks, evaluate an assistant, and inspect one rollout."
 position: 6
 ---
@@ -12,6 +12,10 @@ to evaluate, and confirm that the rollout contains a conversation and score.
 [NeMo User Sim](https://github.com/NVIDIA-NeMo/UserSim) supplies simulated users and conversation scenarios.
 NeMo Gym runs each scenario through your configured assistant and uses NeMo User Sim's evaluation components
 inside the Resources Server to score the assistant's responses and tool choices.
+
+Each task exercises one NeMo User Sim [probe](https://github.com/NVIDIA-NeMo/UserSim/blob/a5f676bf6dc5a73914c8a0860f97c10dd2c214ee/docs/probes.md):
+a scenario family, such as `tool_calling` or `financial_services`, that decides what the simulated User does and
+how the Assistant is scored. The task's `probe_type` names its probe.
 
 The rollout has two participants:
 
@@ -31,9 +35,9 @@ sequenceDiagram
     participant A as Assistant Agent
     participant S as Support model
 
-    P-->>C: Materialized task row
+    P-->>C: Prepared task row
     C->>E: Dispatch episode request
-    E->>R: Seed session with materialized row
+    E->>R: Seed session with resolved row
     R-->>E: Validated row
     loop Multi-turn conversation
         E->>U: Request next user message
@@ -60,8 +64,17 @@ source .venv/bin/activate
 ```
 
 NeMo User Sim samples personas from Nemotron-Personas version 0.0.2 on NGC. Preparation reads `en_US.parquet` from
-`~/.data-designer/managed-assets/datasets/` and rejects any file whose SHA-256 differs from the pinned version. If
-the pinned file is not already there, export an NGC API key:
+Data Designer's managed-assets directory and rejects any file whose SHA-256 differs from the pinned version. The
+default directory, `~/.data-designer/managed-assets/`, is also where `data-designer download personas` stores its
+own release, so point preparation at a dedicated directory:
+
+```bash
+export DATA_DESIGNER_MANAGED_ASSETS_PATH="$HOME/.cache/nemo-user-sim/managed-assets"
+```
+
+Preparation then reads `${DATA_DESIGNER_MANAGED_ASSETS_PATH}/datasets/en_US.parquet`. Setting `DATA_DESIGNER_HOME`
+instead also works; the file then goes in `<path>/managed-assets/datasets/en_US.parquet`. If the pinned file is not
+there yet, export an NGC API key:
 
 ```bash
 export NGC_CLI_API_KEY="<your-ngc-key>"
@@ -72,21 +85,20 @@ Preparation then installs the NGC CLI, downloads the pinned persona resource, ve
 [API key guide](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#ngc-api-keys) to create a key. If
 organization discovery fails, also export `NGC_CLI_ORG`.
 
-To use another cache directory, set `DATA_DESIGNER_MANAGED_ASSETS_PATH` (the file goes in
-`<path>/datasets/en_US.parquet`) or `DATA_DESIGNER_HOME` (the file goes in
-`<path>/managed-assets/datasets/en_US.parquet`). To download the file yourself, install the
+To download the file yourself, install the
 [NGC CLI](https://docs.nvidia.com/ngc/latest/ngc-catalog-user-guide.html#installing-ngc-catalog-cli), then run:
 
 ```bash
 ngc registry resource download-version \
-  "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2" --dest /tmp/nemotron-personas
-mkdir -p ~/.data-designer/managed-assets/datasets
-find /tmp/nemotron-personas -name en_US.parquet \
-  -exec cp {} ~/.data-designer/managed-assets/datasets/en_US.parquet \;
+  "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2" --dest /tmp/nemotron-personas-0.0.2
+mkdir -p "${DATA_DESIGNER_MANAGED_ASSETS_PATH}/datasets"
+find /tmp/nemotron-personas-0.0.2 -name en_US.parquet \
+  -exec cp {} "${DATA_DESIGNER_MANAGED_ASSETS_PATH}/datasets/en_US.parquet" \;
 ```
 
 A persona file from another release, such as the latest `data-designer download personas` download, fails the
-checksum.
+checksum. Preparation does not download over a mismatched file. Set `DATA_DESIGNER_MANAGED_ASSETS_PATH` to a
+directory without that file and rerun preparation.
 
 Create or update `env.yaml` in the repository root:
 
@@ -137,7 +149,7 @@ gym eval prepare --config environments/nemo_user_sim/config.yaml
 
 The script runs the pinned NeMo User Sim materializer in an isolated dependency environment and writes
 `environments/nemo_user_sim/data/nemo_user_sim.jsonl`. Its 14 deterministic rows contain one task for each
-first-party probe. NeMo User Sim resolves the persona, scenario, tools, seed, trajectory identity, and provenance
+built-in probe. NeMo User Sim resolves the persona, scenario, tools, seed, trajectory identity, and provenance
 before rollout collection begins.
 
 Confirm that all probe tasks were generated and inspect them:
@@ -151,8 +163,8 @@ jq '.resolved_row | {
 
 When it seeds a session, the Resources Server validates required fields, the pinned NeMo User Sim revision, and
 the Nemotron-Personas version (`"0.0.2"`, or `"synthetic"` for the committed example rows), and rejects guarded
-health rows. It stores a digest and compares it during verification, proving that the materialized row did not
-change during the episode.
+health rows. It stores a digest of the resolved row (`resolved_row`) and compares it during verification, proving
+that the resolved row did not change during the episode.
 
 ## Collect one rollout
 
@@ -214,25 +226,32 @@ jq '.invocations[]
   results/nemo_user_sim/rollouts.jsonl
 ```
 
-The smoke run is complete when the rollout alternates User and Assistant messages,
+The smoke run is complete when the rollout contains both User and Assistant messages,
 `verification.verifier_data.assistant_eval` has no `error`, and `mask_sample` is `false`.
 
 ## Run all validation tasks
 
-After the smoke rollout succeeds, remove `--limit 1` to run all 14 generated probe tasks:
+After the smoke rollout succeeds, remove `--limit 1` to run all 14 generated probe tasks. Give the full run its
+own directory: capture files are keyed by task and repeat, and the health report is written next to the output
+file, so a shared directory would replace the smoke run's captures and `quality_summary.json`.
 
 ```bash
+mkdir -p results/nemo_user_sim/all-probes/model-calls
+
 gym eval run \
   --environment nemo_user_sim \
   --split validation \
-  --output results/nemo_user_sim/all-probes.jsonl \
+  --output results/nemo_user_sim/all-probes/rollouts.jsonl \
   --num-repeats 1 \
   +user_model_uses_reasoning_parser=false \
   +policy_uses_reasoning_parser=false \
   +support_model_uses_reasoning_parser=false \
   ++observability_enabled=true \
-  ++model_call_capture_dir="${capture_dir}"
+  ++model_call_capture_dir="$(pwd)/results/nemo_user_sim/all-probes/model-calls"
 ```
+
+To inspect or troubleshoot the full run with the guides below, replace `results/nemo_user_sim/` with
+`results/nemo_user_sim/all-probes/` in their paths.
 
 ## Next steps
 

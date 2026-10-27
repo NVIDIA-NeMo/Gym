@@ -5,7 +5,7 @@ position: 1
 ---
 
 Use this guide after completing
-[Run Multi-turn User Simulation with NeMo User Sim](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection).
+[Run Multi-Turn User Simulation with NeMo User Sim](/tutorials/evaluation-tutorials/nemo-user-sim-rollout-collection).
 The examples assume:
 
 ```bash
@@ -15,6 +15,10 @@ rollouts=results/nemo_user_sim/rollouts.jsonl
 inputs=results/nemo_user_sim/rollouts_materialized_inputs.jsonl
 capture_dir="$(pwd)/results/nemo_user_sim/model-calls"
 ```
+
+To inspect the full validation run, point `rollouts`, `inputs`, and `capture_dir` at the same files under
+`results/nemo_user_sim/all-probes/`. Keep all three on the same run: capture files are named by task and repeat
+index, so a rollout from one run would otherwise open another run's capture.
 
 ## Inspect the scenario and persona
 

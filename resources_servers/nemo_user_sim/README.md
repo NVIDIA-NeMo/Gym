@@ -1,14 +1,14 @@
 # NeMo User Sim Resources Server
 
-This server validates materialized NeMo User Sim task rows, snapshots them for
+This server validates resolved NeMo User Sim task rows, snapshots them for
 the episode, and scores completed episode requests. The paired Environment
 Server in `environment_servers/nemo_user_sim` owns the conversation runtime and
 tool loop.
 
 ## Task and session contract
 
-Each request contains a stable string `task_id` and a complete materialized
-row. The following row is a schematic with nested values elided; see
+Each request contains a stable string `task_id` and a complete resolved row
+(`resolved_row`). The following row is a schematic with nested values elided; see
 `data/example.jsonl` for complete rows:
 
 ```json
@@ -32,8 +32,9 @@ rows. It then stores the row and its canonical SHA-256 digest. At `/verify`, it
 rejects mismatched episode identity, task identity, row content, or trajectory
 identity.
 
-The digest proves that the materialized row did not change between seeding and
-verification. It does not independently compare the row with an earlier
+The digest covers only `resolved_row` and proves that it did not change between
+seeding and verification; task and episode identity are compared separately. It
+does not independently compare the row with an earlier
 preparation artifact.
 
 ## Runtime ownership

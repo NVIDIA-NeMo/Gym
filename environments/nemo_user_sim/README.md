@@ -2,7 +2,10 @@
 
 This environment runs population-grounded, multi-turn user simulation with
 NeMo User Sim. Its generated validation set includes one task for each
-first-party NeMo User Sim probe.
+built-in NeMo User Sim
+[probe](https://github.com/NVIDIA-NeMo/UserSim/blob/a5f676bf6dc5a73914c8a0860f97c10dd2c214ee/docs/probes.md):
+a scenario family, such as `tool_calling` or `financial_services`, that decides
+what the simulated User does and how the Assistant is scored.
 
 ## Generate validation tasks
 
@@ -42,7 +45,7 @@ executes those calls inside the Environment Server, adds tool results, and
 requests another Assistant activation when necessary. Internal
 `api_response_model` calls route through `tool_simulation_model`.
 
-The Resources Server validates the materialized row, stores its episode
+The Resources Server validates the resolved row, stores its episode
 identity and digest, and verifies the episode result with NeMo User Sim's
 trajectory evaluator and registered probe scorer. It owns no second runtime
 and exposes no probe tool endpoints.
@@ -81,6 +84,6 @@ gym eval run \
   ++model_call_capture_dir=/absolute/path/to/model-calls
 ```
 
-For participant-specific SFT or custom collation, filter
+To build participant-specific supervised fine-tuning data, filter
 top-level `invocations` by the `assistant` or `user` role and use each selected
 invocation's exact `request` and `response`.
