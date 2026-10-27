@@ -95,6 +95,31 @@ def test_process_names_are_never_evaluated(tmp_path: Path) -> None:
 
 
 @linux_only
+def test_process_names_that_look_like_fields_are_parsed_after_the_last_parenthesis() -> None:
+    bystander = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import ctypes,time; ctypes.CDLL(None).prctl(15, b'x) R 1 1 1 1', 0, 0, 0); time.sleep(30)",
+        ]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while Path(f"/proc/{bystander.pid}/comm").read_text().strip() != "x) R 1 1 1 1":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        fields = Path(f"/proc/{bystander.pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        script = 'source "$1"; stat_fields "$2" && echo "${fields[1]} ${fields[2]} ${fields[19]}"'
+        result = subprocess.run(
+            ["bash", "-c", script, "_", SUPERVISOR, str(bystander.pid)], capture_output=True, text=True, timeout=10
+        )
+        assert result.stdout == f"{fields[1]} {fields[2]} {fields[19]}\n", result.stderr
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+@linux_only
 @pytest.mark.parametrize("command, return_code", [("exit 0", 0), ("exit 7", 7), ("kill -KILL $$", 137)])
 def test_natural_exit_reports_the_harness_status(tmp_path: Path, command: str, return_code: int) -> None:
     result = _supervise(tmp_path, "bash", "-c", command)
