@@ -9,7 +9,6 @@ codex_version=$2
 node_version=22.19.0
 [[ "$codex_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'An exact Codex version is required' >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo 'Codex in the task sandbox requires Linux' >&2; exit 1; }
-python3 -c 'import sys; assert sys.version_info >= (3, 8), "Codex in the task sandbox requires Python >=3.8"'
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
   aarch64) arch=arm64 ;;
@@ -65,7 +64,9 @@ if [ ! -f "$runtime/ready" ]; then
   if [ "$missing" = 1 ]; then
     install_packages curl ca-certificates tar gzip coreutils gawk
   fi
-  if [ "$platform" = linux-x64-musl ] && ! python3 -c 'import ctypes; ctypes.CDLL("libstdc++.so.6")' 2>/dev/null; then
+  # musl searches /lib, /usr/local/lib and /usr/lib by default.
+  if [ "$platform" = linux-x64-musl ] && [ ! -e /lib/libstdc++.so.6 ] && [ ! -e /usr/local/lib/libstdc++.so.6 ] \
+    && [ ! -e /usr/lib/libstdc++.so.6 ]; then
     install_packages libstdc++
   fi
 

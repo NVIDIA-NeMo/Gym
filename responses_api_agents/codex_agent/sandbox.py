@@ -10,7 +10,12 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_RUNNER_FILE,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -18,6 +23,8 @@ from nemo_gym.sandbox.utils import read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)
+# Uploaded beside the runner; runs Codex behind the 429 forwarder on the runtime's Node.
+LAUNCHER_FILE = "sandbox_launcher.mjs"
 
 
 class HarnessProcessInfo(BaseModel):
@@ -26,7 +33,6 @@ class HarnessProcessInfo(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
     pid: int
-    python: str | None = None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -89,17 +95,22 @@ class CodexSandboxSession(AgentSessionState):
         )
 
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
-        """Stage the invocation and return the Codex worker command."""
+        """Stage the invocation and return the runner command that starts the Codex launcher."""
+        directory = self.session.session_dir
         await self.upload_json("input.json", payload)
-        return SandboxCommand(
-            argv=[
-                "python3",
-                "-I",
-                f"{self.session.session_dir}/{RUNNER_FILE}",
-                f"{self.session.session_dir}/input.json",
-            ],
-            stdlib_runner=True,
-        )
+        await self.upload_text("prompt.txt", payload["prompt"])
+        params = {
+            "cwd": self.session.workdir,
+            "command": [f"{self.runtime}/node/bin/node", f"{directory}/{LAUNCHER_FILE}", f"{directory}/input.json"],
+            # The launcher passes Codex an allowlisted environment; task Node options must not reach the launcher.
+            "unset_env": ["NODE_OPTIONS"],
+            "stdin": f"{directory}/prompt.txt",
+            "stdout": f"{directory}/stdout.log",
+            "stderr": f"{directory}/stderr.log",
+            "events": f"{directory}/events.jsonl",
+        }
+        await self.upload_text("params.sh", shell_assignments(params))
+        return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
     async def collect_artifacts(self) -> str:
         """Keep partial events even when worker metadata is unavailable."""
@@ -119,8 +130,15 @@ class CodexSandboxSession(AgentSessionState):
         self.runtime_info = parse_runtime_info(runtime_payload)
         try:
             snapshot = await self.session.sandbox.exec(
-                f"python3 -I {shlex.quote(f'{self.session.session_dir}/{RUNNER_FILE}')} "
-                f"--snapshot {shlex.quote(self.session.session_dir)}",
+                "NODE_OPTIONS= "
+                + shlex.join(
+                    [
+                        f"{self.runtime}/node/bin/node",
+                        f"{self.session.session_dir}/{LAUNCHER_FILE}",
+                        "--snapshot",
+                        self.session.session_dir,
+                    ]
+                ),
                 timeout_s=10,
             )
             if snapshot.return_code != 0 or snapshot.error_type:

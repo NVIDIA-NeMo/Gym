@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -29,6 +30,7 @@ from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -139,7 +141,7 @@ class Sandbox:
         payload = json.loads(self.files[payload_path])
         assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
+        assert "/harness_runner.sh " in kwargs["command"] and "/params.sh" in kwargs["command"]
         self.directory = payload["directory"]
         self.started.set()
         if not self.blocked:
@@ -195,9 +197,12 @@ def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
             assert f"{directory}/process_supervisor.sh" not in sandbox.files
             installer = f"{directory}/install_codex_runtime.sh"
             assert installer in sandbox.files
-            staged = {"sandbox_runner": "sandbox_runner.py", "sandbox_transport.py": "sandbox_transport.py"}
+            staged = {
+                "harness_runner.sh": HARNESS_RUNNER_SCRIPT,
+                LAUNCHER_FILE: Path(__file__).parents[1] / LAUNCHER_FILE,
+            }
             for name, source in staged.items():
-                assert sandbox.files[f"{directory}/{name}"] == (Path(__file__).parents[1] / source).read_text()
+                assert sandbox.files[f"{directory}/{name}"] == source.read_text()
             assert agent.config.resources_server is None
             assert not sandbox.launch.called
             assert not any(path.startswith("/app/") for path in sandbox.files)
@@ -1403,7 +1408,7 @@ def test_sandbox_prepare_rejects_symlink_overlap_before_writing(tmp_path, alias)
         runtime.symlink_to(repository, target_is_directory=True)
     directory = sessions / "session-1"
     result = subprocess.run(
-        ["bash", "-c", _sandbox_prepare_command(str(workdir), str(directory), str(runtime))],
+        ["sh", "-c", _sandbox_prepare_command(str(workdir), str(directory), str(runtime))],
         capture_output=True,
         text=True,
         errors="replace",
@@ -1414,6 +1419,24 @@ def test_sandbox_prepare_rejects_symlink_overlap_before_writing(tmp_path, alias)
     assert not directory.exists()
 
 
+@pytest.mark.parametrize("workdir", ["/", "missing"])
+def test_sandbox_prepare_rejects_a_root_or_missing_workdir(tmp_path, workdir):
+    from responses_api_agents.codex_agent.app import _sandbox_prepare_command
+
+    directory = tmp_path / "sessions/session-1"
+    path = "/" if workdir == "/" else str(tmp_path / "missing")
+    result = subprocess.run(
+        ["sh", "-c", _sandbox_prepare_command(path, str(directory), str(tmp_path / "runtime"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert ("must be disjoint" if workdir == "/" else "must be an existing directory") in result.stderr
+    assert not directory.exists()
+
+
 def test_sandbox_prepare_accepts_disjoint_quoted_paths(tmp_path):
     from responses_api_agents.codex_agent.app import _sandbox_prepare_command
 
@@ -1421,7 +1444,7 @@ def test_sandbox_prepare_accepts_disjoint_quoted_paths(tmp_path):
     repository.mkdir()
     directory = tmp_path / "session with 'quote"
     result = subprocess.run(
-        ["bash", "-c", _sandbox_prepare_command(str(repository), str(directory), str(tmp_path / "runtime"))],
+        ["sh", "-c", _sandbox_prepare_command(str(repository), str(directory), str(tmp_path / "runtime"))],
         capture_output=True,
         text=True,
         errors="replace",
@@ -1734,9 +1757,12 @@ async def local_session(setup, tmp_path):
     directory = tmp_path / "session"
     directory.mkdir()
     state.session.session_dir = str(directory)
-    from responses_api_agents.codex_agent import sandbox_runner
-
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
+    shutil.copyfile(Path(__file__).parents[1] / LAUNCHER_FILE, directory / LAUNCHER_FILE)
+    if shutil.which("node") is not None:
+        (tmp_path / "runtime/node/bin").mkdir(parents=True)
+        (tmp_path / "runtime/node/bin/node").symlink_to(shutil.which("node"))
+    state.runtime = str(tmp_path / "runtime")
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
 
@@ -1784,7 +1810,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
         return await execute(command, **kwargs)
 
     state.session.sandbox.exec.side_effect = queued_exec
-    state.task = asyncio.create_task(state.execute({}, timeout=5, close_timeout=2))
+    state.task = asyncio.create_task(state.execute({"prompt": ""}, timeout=5, close_timeout=2))
     await asyncio.wait_for(waiting.wait(), 2)
     if failure == "cancel":
         state.task.cancel()
@@ -1814,7 +1840,7 @@ async def test_launch_claim_without_receipt_blocks_close(local_session):
     assert state.session.cleanup is None
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("node") is None, reason="Linux sandbox contract, Node")
 async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_session):
     state, _ = local_session
     payload = {
@@ -1834,7 +1860,7 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     state.session.sandbox.stop.assert_not_awaited()
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("node") is None, reason="Linux sandbox contract, Node")
 async def test_close_confirms_cleanup_before_provider_cancellation(local_session):
     state, _ = local_session
     processes_path = Path(state.session.session_dir).parent / "children.json"

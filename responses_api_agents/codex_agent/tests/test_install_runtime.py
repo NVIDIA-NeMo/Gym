@@ -15,6 +15,12 @@ from responses_api_agents.codex_agent.app import _sandbox_prepare_command
 
 INSTALLER = Path(__file__).parents[1] / "install_codex_runtime.sh"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Codex in the task sandbox requires Linux")
+# On musl the installer looks for the task's C++ library where musl's loader does; this host may lack it there.
+MUSL_LIBSTDCXX = (
+    []
+    if any(Path(d, "libstdc++.so.6").exists() for d in ("/lib", "/usr/local/lib", "/usr/lib"))
+    else ["add --no-cache libstdc++"]
+)
 
 
 @pytest.fixture
@@ -41,7 +47,6 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         if executable is None:
             pytest.skip(f"Installer test requires {name}")
         (bindir / name).symlink_to(executable)
-    (bindir / "python3").symlink_to(sys.executable)
     scripts = {
         "id": '#!/bin/bash\necho "${TEST_UID:-0}"\n',
         "apt-get": """#!/bin/bash
@@ -223,18 +228,17 @@ def _use_musl_platform(root: Path, *, architecture: str = "x86_64") -> None:
     _replace_command(root, "getconf", "exit 1\n")
     _replace_command(root, "ldd", "echo 'musl libc' >&2\nexit 1\n")
     _replace_command(root, "uname", f'case "$1" in -s) echo Linux;; -m) echo {architecture};; esac\n')
-    # The task image has its existing C++ library, but our private Node may need
-    # a newer version. Other Python calls still exercise the real interpreter.
-    _replace_command(
-        root,
-        "python3",
-        'if [[ "$*" == *ctypes.CDLL* ]]; then exit 0; fi\n' + f'exec "{sys.executable}" "$@"\n',
-    )
     _replace_command(
         root,
         "apk",
-        'echo "$*" >> "$TEST_ROOT/packages.log"\ncp "$TEST_ROOT/curl" "$TEST_ROOT/bin/curl"\n',
+        'echo "$*" >> "$TEST_ROOT/packages.log"\n'
+        + 'if [[ "$*" == *curl* ]]; then cp "$TEST_ROOT/curl" "$TEST_ROOT/bin/curl"; fi\n',
     )
+
+
+def _packages(root: Path) -> list[str]:
+    log = root / "packages.log"
+    return log.read_text().splitlines() if log.exists() else []
 
 
 @pytest.mark.parametrize("bootstrap", [False, True])
@@ -249,12 +253,8 @@ def test_musl_uses_pinned_x64_archive_and_apk(sandbox: tuple[Path, dict[str, str
         "https://unofficial-builds.nodejs.org/download/release/v22.19.0/node-v22.19.0-linux-x64-musl.tar.gz"
         in (root / "download.log").read_text()
     )
-    if bootstrap:
-        assert (root / "packages.log").read_text().splitlines() == [
-            "add --no-cache curl ca-certificates tar gzip coreutils gawk"
-        ]
-    else:
-        assert not (root / "packages.log").exists()
+    tools = ["add --no-cache curl ca-certificates tar gzip coreutils gawk"] if bootstrap else []
+    assert _packages(root) == tools + MUSL_LIBSTDCXX
     assert not (root / "runtime/ready").exists()
 
 
@@ -320,56 +320,7 @@ esac
     assert "-xzf libstdc++.apk -C libstdcpp usr/lib" in (root / "extract.log").read_text()
     assert (root / "npm.log").read_text().splitlines() == ["install"]
     assert (root / "runtime/ready").exists()
-    assert not (root / "packages.log").exists()
-
-
-@pytest.mark.parametrize("package_manager", ["apt-get", "apk"])
-def test_missing_python_is_installed_before_runtime_setup(
-    sandbox: tuple[Path, dict[str, str]], package_manager: str
-) -> None:
-    root, env = sandbox
-    (root / "bin/python3").unlink()
-    _replace_command(
-        root,
-        package_manager,
-        'echo "$*" >> "$TEST_ROOT/packages.log"\n'
-        + 'if [[ "$*" == *python3* ]]; then\n'
-        + f'  ln -s "{sys.executable}" "$TEST_ROOT/bin/python3"\n'
-        + "fi\n",
-    )
-    shutil.copy(root / "curl", root / "bin/curl")
-    result = run_prepare(root, env)
-    assert result.returncode == 0, result.stderr
-    expected = (
-        ["add --no-cache python3"]
-        if package_manager == "apk"
-        else ["update", "install -y --no-install-recommends python3"]
-    )
-    assert (root / "packages.log").read_text().splitlines() == expected
-    assert (root / "session/home/.codex").is_dir()
-    assert not (root / "download.log").exists()
-    assert not (root / "runtime/ready").exists()
-
-
-@pytest.mark.parametrize("missing", ["root", "apt-get", "install_failure"])
-def test_python_bootstrap_failure_stops_before_runtime_setup(
-    sandbox: tuple[Path, dict[str, str]], missing: str
-) -> None:
-    root, env = sandbox
-    (root / "bin/python3").unlink()
-    if missing == "root":
-        env["TEST_UID"] = "1000"
-    elif missing == "apt-get":
-        (root / "bin/apt-get").unlink()
-    else:
-        env["TEST_INSTALL_FAIL"] = "1"
-    result = run_prepare(root, env)
-    assert result.returncode == (100 if missing == "install_failure" else 1)
-    assert not (root / "download.log").exists()
-    assert not (root / "runtime").exists()
-    if missing != "install_failure":
-        assert "preinstall" in result.stderr
-        assert not (root / "packages.log").exists()
+    assert _packages(root) == MUSL_LIBSTDCXX
 
 
 def run_prepare(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -389,11 +340,10 @@ def run_prepare(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[
     )
 
 
-def test_existing_python_prepares_without_installing_packages(sandbox: tuple[Path, dict[str, str]]) -> None:
+def test_preparation_needs_no_python_or_packages(sandbox: tuple[Path, dict[str, str]]) -> None:
     root, env = sandbox
-    original_python = (root / "bin/python3").resolve()
+    assert not (root / "bin/python3").exists()
     result = run_prepare(root, env | {"TEST_UID": "1000"})
     assert result.returncode == 0, result.stderr
     assert (root / "session/home/.codex").is_dir()
-    assert (root / "bin/python3").resolve() == original_python
     assert not (root / "packages.log").exists()
