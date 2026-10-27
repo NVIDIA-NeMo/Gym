@@ -208,6 +208,27 @@ class TestExport:
         assert artifacts.exporter_run_id_fpath("recording").read_text() == "backend-run-7"
 
 
+class ForgetfulBackend(RecordingBackend):
+    name: ClassVar[str] = "forgetful"
+
+    def setup(self) -> None:
+        self.events.append("setup")
+
+
+class TestBackendThatReportsNoRunId:
+    def test_the_export_fails_and_writes_no_marker(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        backend = ForgetfulBackend(OmegaConf.create({"rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath)}))
+
+        result = backend.export(artifacts)
+
+        assert result.state is ExportState.FAILED
+        assert "did not report a run id" in result.error
+        assert "_record_run_id()" in result.error
+        assert not artifacts.exporter_run_id_fpath("forgetful").exists()
+        assert backend.events == ["setup", "teardown"]
+
+
 class TestRunMustBeExportable:
     def test_missing_aggregate_metrics(self, tmp_path: Path) -> None:
         artifacts = _make_run(tmp_path)

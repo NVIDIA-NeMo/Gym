@@ -336,7 +336,14 @@ class BaseExporter(Exporter):
                 self._log_metrics(metrics)
                 if rollouts is not None:
                     self._log_rollouts(rollouts)
-            run_id = self._pending_run_id or ""
+            run_id = self._pending_run_id
+            if not run_id:
+                # The marker's content is what a later live run resumes from, so an empty or made-up id would break
+                # that. A backend that never reports one is a bug in the exporter, and it shows on the first export.
+                raise RuntimeError(
+                    f"The {self.name} exporter did not report a run id: its setup() must call _record_run_id(). "
+                    "The export is not marked as done."
+                )
             _write_marker_atomically(marker, run_id)
         except Exception as exc:
             logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)
