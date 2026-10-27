@@ -21,6 +21,7 @@ from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.genrm_compare.tests.support import request_with_session
+from resources_servers.genrm_compare.tests.test_cohort_storage import assert_cohort_indices_match
 
 
 def comparison_result(score_1=4.0, score_2=2.0, ranking=1.0):
@@ -264,6 +265,74 @@ async def test_a_restored_cohort_pruned_before_its_retire_lets_the_group_re_form
     rewards = await asyncio.wait_for(
         asyncio.gather(
             *(verify_as(restored, f"fresh-{index}", member(index, answer=f"new-{index}")) for index in range(2))
+        ),
+        timeout=0.5,
+    )
+    assert all(reward.reward == 3.0 for reward in rewards)
+    await restored.aclose()
+
+
+async def test_a_restored_attempt_record_evicted_before_its_cohort_takes_its_restore_mark(config, monkeypatch):
+    """Attempt records and results have separate retention orders, so a restored group's record can go first."""
+    config = config.model_copy(
+        update={"max_terminal_cohorts": 1, "cohort_result_ttl_s": 10.0, "cohort_collection_timeout_s": 0.01}
+    )
+    server, participant = seeded(config)
+    await finish_cohort(server)
+    records = await participant.export(None)
+    await server.aclose()
+
+    now = [100.0]
+    monkeypatch.setattr(genrm, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    restored, restored_participant = await restore(config, records)
+    assert restored._restored_watermarks == {"group"}
+    # A failed cohort without a group ID adds a second result but no attempt record.
+    now[0] = 101.0
+    with pytest.raises(genrm.HTTPException, match="did not collect"):
+        await verify_as(restored, "no-group", member(0, group=None))
+    now[0] = 102.0
+    # Over the result limit: the restored result is kept for its open session and its retention restarts.
+    restored._prune_terminal_cohorts()
+    restored_participant.ended(SESSIONS[1])
+    now[0] = 111.0
+    restored._prune_terminal_cohorts()
+    assert "group" not in restored._latest_group_attempts
+    assert "group_id::group::group_attempt::0" in restored._verify_cohorts
+    assert_cohort_indices_match(restored)
+    now[0] = 113.0
+    restored._prune_terminal_cohorts()
+    assert restored._verify_cohorts == {} and restored._restored_watermarks == set()
+    await restored.aclose()
+
+
+async def test_retiring_a_restored_attempt_lets_it_re_form_while_an_older_attempt_is_still_restored(config):
+    """A result whose attempt record was evicted stays replayable, so a checkpoint can hold two attempts of a group.
+    Retiring the newer one must drop the record that names it, or its restarted rollouts are refused."""
+
+    async def finished_states(attempt: int) -> dict:
+        server, participant = participant_server(config)
+        sessions = [f"attempt-{attempt}-{index}" for index in range(2)]
+        for index, session_id in enumerate(sessions):
+            participant.seeded(session_id, EpisodeId(rollout_id=f"{session_id}_g{index}"))
+        await asyncio.gather(
+            *(verify_as(server, session_id, member(i, attempt=attempt)) for i, session_id in enumerate(sessions))
+        )
+        states = await server.export_session_states(sessions)
+        await server.aclose()
+        return states
+
+    restored, _ = participant_server(config)
+    await restored.restore_session_states(await finished_states(0) | await finished_states(1))
+    for index in range(2):
+        await restored.retire_session_state(f"attempt-1-{index}")
+    assert restored._latest_group_attempts == {} and restored._restored_watermarks == set()
+    assert_cohort_indices_match(restored)
+    rewards = await asyncio.wait_for(
+        asyncio.gather(
+            *(
+                verify_as(restored, f"fresh-{index}", member(index, attempt=1, answer=f"new-{index}"))
+                for index in range(2)
+            )
         ),
         timeout=0.5,
     )

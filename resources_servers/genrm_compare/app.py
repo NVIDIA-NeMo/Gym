@@ -1118,15 +1118,19 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 self._held_groups[group_id] = None
                 self._held_groups.move_to_end(group_id)
                 continue
-            self._held_groups.pop(group_id, None)
-            self._idle_groups.popitem(last=False)
             # Results have their own retention order and remain replayable while retained.
-            self._latest_group_attempts.pop(group_id)
+            self._drop_watermark(group_id)
 
     def _group_needed_by_open_session(self, group_id: str) -> bool:
         """Whether an open member session may still need the cohort of the group's latest attempt."""
         latest = self._verify_cohorts.get(self._latest_group_attempts[group_id].cohort_key)
         return latest is not None and self._needed_by_open_session(latest)
+
+    def _drop_watermark(self, group_id: str) -> None:
+        """Forget a group's attempt record with its place in the idle order and its restore mark."""
+        del self._latest_group_attempts[group_id]
+        self._restored_watermarks.discard(group_id)
+        self._end_idle_group(group_id)
 
     def _end_idle_group(self, group_id: str) -> None:
         """Take a group out of the idle order, as when its latest attempt starts a cohort or loses its watermark."""
@@ -1134,18 +1138,17 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         self._held_groups.pop(group_id, None)
 
     def _forget_unused_restored_watermark(self, cohort: _CohortState) -> None:
-        """Drop the watermark a restore installed for a pruned cohort when no verification has used it.
+        """Drop the watermark a restore installed for a removed cohort when no verification has used it.
 
-        A retire marks its sessions closed before it frees them, so pruning can drop a restored cohort first, and
-        retire_session_state then finds no member to clean up. Its rollouts start over under the same attempt;
-        a watermark left behind would refuse them as a finished attempt whose result was evicted.
+        A retire removes a restored cohort nothing continued from, or pruning drops it first, since a retire marks
+        its sessions closed before it frees them. Its rollouts start over under the same attempt; a watermark left
+        behind would refuse them as a finished attempt whose result was evicted. Only the watermark naming this
+        cohort goes: a restore can install two attempts of one group, and an older one must not keep the newer one's.
         """
         group_id = cohort.group_id
         watermark = self._latest_group_attempts.get(group_id)
         if group_id in self._restored_watermarks and watermark is not None and watermark.cohort_key == cohort.key:
-            self._restored_watermarks.discard(group_id)
-            del self._latest_group_attempts[group_id]
-            self._end_idle_group(group_id)
+            self._drop_watermark(group_id)
 
     def _drop_cohort(self, key: str) -> None:
         """Remove a cohort, its retention entry, and the member records that name it."""
@@ -1291,13 +1294,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if cohort.members:
             return
         self._drop_cohort(cohort_key)
-        group_id = cohort.group_id
-        if group_id in self._restored_watermarks and not any(
-            other.group_id == group_id for other in self._verify_cohorts.values()
-        ):
-            self._restored_watermarks.discard(group_id)
-            self._latest_group_attempts.pop(group_id, None)
-            self._end_idle_group(group_id)
+        self._forget_unused_restored_watermark(cohort)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
