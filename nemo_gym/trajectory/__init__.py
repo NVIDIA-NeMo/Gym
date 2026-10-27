@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from nemo_gym.trajectory.atif_export import AtifExportError, encode_atif_trajectory, transcript_to_atif
     from nemo_gym.trajectory.trajectory_record import (
         NG_AGENT_OBSERVATIONS_KEY,
+        NG_AGENT_SANDBOX_OBSERVATION_KEY,
         NG_TRAJECTORY_KEY,
         NG_VERIFIER_INVOCATIONS_KEY,
         AgentEpisode,
@@ -57,6 +58,7 @@ _PUBLIC_API = {
     "ContextCompactionObservation": "trajectory_record",
     "ModelCallRef": "trajectory_record",
     "NG_AGENT_OBSERVATIONS_KEY": "trajectory_record",
+    "NG_AGENT_SANDBOX_OBSERVATION_KEY": "trajectory_record",
     "NG_TRAJECTORY_KEY": "trajectory_record",
     "NG_VERIFIER_INVOCATIONS_KEY": "trajectory_record",
     "ObservationGap": "trajectory_record",

@@ -26,6 +26,7 @@ from nemo_gym.agents.utils.supervisor_client import (
     supervised_launch_command,
     supervision_timeouts,
 )
+from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
@@ -149,6 +150,7 @@ class SandboxSession[Artifacts]:
     capture_error: Exception | None = field(default=None, init=False)
     termination_error: NgFailureEvent | None = field(default=None, init=False)
     sandbox_stopped: bool = field(default=False, init=False)
+    execution_oom: NgFailureEvent | None = field(default=None, init=False)
     _session_root: str | None = field(default=None, init=False)
     _stage_task: asyncio.Future[SandboxCommand] | None = field(default=None, init=False)
     _exec_task: asyncio.Task[SandboxExecResult] | None = field(default=None, init=False)
@@ -259,7 +261,14 @@ class SandboxSession[Artifacts]:
                     timeout_s=provider_timeout,
                 )
             )
-            result = await asyncio.shield(self._exec_task)
+            try:
+                result = await asyncio.shield(self._exec_task)
+            except NgFailureEvent as error:
+                # The provider confirmed that the whole sandbox died during the
+                # supervised harness command. In-sandbox cleanup is no longer possible.
+                if error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED:
+                    self.execution_oom = error
+                raise
             if result.error_type == "timeout":
                 raise TimeoutError(f"{self.harness} sandbox supervisor exceeded its execution deadline")
             if result.error_type:
@@ -376,7 +385,12 @@ class SandboxSession[Artifacts]:
 
     async def stop_harness(self, *, timeout: float) -> None:
         """Confirm harness termination before capture and transport release."""
-        if self.sandbox_stopped or not self.launch_started or self.cleanup is not None:
+        if (
+            self.sandbox_stopped
+            or self.execution_oom is not None
+            or not self.launch_started
+            or self.cleanup is not None
+        ):
             return
         if self.termination_error is not None:
             raise self.termination_error
@@ -420,7 +434,7 @@ class SandboxSession[Artifacts]:
         await self.stop_harness(timeout=timeout)
         await self._confirm_unacknowledged_expiry(timeout=timeout)
         if self.launch_started and not self._capture_attempted and self._collect is not None:
-            if self.sandbox_stopped:
+            if self.sandbox_stopped or self.execution_oom is not None:
                 self.capture_error = RuntimeError(f"{self.harness} sandbox stopped before artifact capture")
             else:
                 try:
@@ -468,7 +482,10 @@ class SandboxSession[Artifacts]:
 
     async def _release_exec(self, *, timeout: float) -> None:
         if (
-            self.cleanup is not None or self.termination_error is not None or self.sandbox_stopped
+            self.cleanup is not None
+            or self.termination_error is not None
+            or self.sandbox_stopped
+            or self.execution_oom is not None
         ) and self._exec_task is not None:
             await self._cancel_and_wait(self._exec_task, timeout=timeout)
 
@@ -503,11 +520,12 @@ class SandboxSession[Artifacts]:
         else:
             await self._release_exec(timeout=timeout)
             async with asyncio.timeout(timeout):
-                await remove_session_directory(
-                    self.sandbox,
-                    session_dir=self._session_root or self.session_dir,
-                    workdir=self.workdir,
-                    timeout=timeout,
-                    harness=self.harness,
-                )
+                if self.execution_oom is None:
+                    await remove_session_directory(
+                        self.sandbox,
+                        session_dir=self._session_root or self.session_dir,
+                        workdir=self.workdir,
+                        timeout=timeout,
+                        harness=self.harness,
+                    )
                 await self.sandbox.disconnect()
