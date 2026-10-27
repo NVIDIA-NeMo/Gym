@@ -192,7 +192,8 @@ async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session)
     first.assert_awaited_once()
     second.assert_awaited_once()
     uploads = [c.args[1] for c in session.sandbox.upload.await_args_list]
-    assert uploads == ["/session/activation-1/process_supervisor.py", "/session/activation-2/process_supervisor.py"]
+    supervisor = supervisor_client.SUPERVISOR_FILE
+    assert uploads == [f"/session/activation-1/{supervisor}", f"/session/activation-2/{supervisor}"]
     await session.close(timeout=1)
     assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     with pytest.raises(RuntimeError, match="closing"):

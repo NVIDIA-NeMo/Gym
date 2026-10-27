@@ -59,7 +59,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import Match
@@ -69,6 +69,7 @@ from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from nemo_gym import WORKING_DIR
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.config_types import (
+    DEFAULT_UVICORN_BACKLOG,
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
     TRACE_CONTEXT_PATH_SEGMENT,
@@ -88,6 +89,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
+    maybe_get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
@@ -367,17 +369,27 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> ClientSession:  # pragma: no cover
+) -> ClientSession:
     global _GLOBAL_AIOHTTP_CLIENT
 
     if _GLOBAL_AIOHTTP_CLIENT is not None:
         return _GLOBAL_AIOHTTP_CLIENT
 
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=global_config_dict_parser_config,
-        global_config_dict_parser_cls=global_config_dict_parser_cls,
-    )
-    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
+    # Read only a config this process already has, cached or injected through NEMO_GYM_CONFIG_DICT; never parse
+    # its argv here, which in a Ray task worker exits the process. A process with neither gets the default client
+    # limits: env.yaml and +global_aiohttp_* do not reach it. An explicit parser config or class still parses.
+    global_config_dict = maybe_get_global_config_dict()
+    if global_config_dict is None and (
+        global_config_dict_parser_config is not None or global_config_dict_parser_cls is not GlobalConfigDictParser
+    ):
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=global_config_dict_parser_config,
+            global_config_dict_parser_cls=global_config_dict_parser_cls,
+        )
+    if global_config_dict is None:
+        cfg = GlobalAIOHTTPAsyncClientConfig()
+    else:
+        cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
 
     return set_global_aiohttp_client(cfg)
 
@@ -956,6 +968,7 @@ class ServerClient(BaseModel):
         method: str,
         *,
         _control: bool = False,
+        _resend_after_disconnect: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """Call another server. ``_control`` sends the call over the reserved control pool."""
@@ -1009,7 +1022,8 @@ class ServerClient(BaseModel):
             # Sending it again would run the attempt a second time,
             # and the first run's sessions on other servers would never be freed: the second run replies,
             # so the controller never retires the attempt.
-            _resend_after_disconnect=not (self.checkpoint_enabled() and url_path == "/run"),
+            _resend_after_disconnect=_resend_after_disconnect
+            and not (self.checkpoint_enabled() and url_path == "/run"),
             **kwargs,
         )
 
@@ -1134,6 +1148,12 @@ class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
 class UvicornLoggingConfig(BaseModel):
     # Default to False for regular use cases.
     uvicorn_logging_show_200_ok: bool = False
+
+
+class UvicornBacklogConfig(BaseModel):
+    # Connections the kernel queues for a server before it accepts them.
+    # The kernel caps it at net.core.somaxconn.
+    uvicorn_backlog: PositiveInt = DEFAULT_UVICORN_BACKLOG
 
 
 # Every IPv4 address as it appears on a dual-stack socket.
@@ -1647,6 +1667,15 @@ def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
     return entrypoint_class_flag(entrypoint_fpath, "ray_enabled")
 
 
+def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
+    """Raise when the server asks for several workers but cannot run with them."""
+    if not server.config.num_workers or server.config.num_workers <= 1:
+        return
+    reason = server.multiple_workers_unsupported_reason()
+    if reason is not None:
+        raise ValueError(f"{server.config.name} needs num_workers=1: {reason}")
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
     # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
@@ -1667,6 +1696,17 @@ class SimpleServer(BaseServer):
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        """Why this server cannot run with `num_workers > 1`, or None when it can.
+
+        With several workers, uvicorn imports the entrypoint in each worker and serves its module-level `app`.
+        A server whose state or resources several workers cannot share overrides this and returns the reason,
+        and `run_webserver` refuses `num_workers > 1` with it before uvicorn starts.
+        The reason reads as the end of the sentence "<server> needs num_workers=1: <reason>".
+        It is a method rather than a class attribute so that a server can decide from its config.
+        """
+        return None
 
     def setup_checkpoint_participant(self, app: FastAPI) -> None:
         """Take part in partial-rollout checkpoints on the app ``setup_webserver`` built, if it does not yet.
@@ -1742,7 +1782,12 @@ class SimpleServer(BaseServer):
             minted = SESSION_ID_KEY not in session
             session[SESSION_ID_KEY] = session.get(SESSION_ID_KEY, new_session_id)
             if claim is None:
-                return await call_next(request)
+                response = await call_next(request)
+                if minted and response.status_code >= 400:
+                    # A failed request keeps nothing under a new session, so its reply names none: a seed refused
+                    # for another episode's resources_session_id must not hand this client that session's cookie.
+                    del session[SESSION_ID_KEY]
+                return response
 
             # With several workers, a session nobody claims, new or named by a cookie whose claim ended,
             # is claimed only if the handler uses it, before the reply leaves this worker,
@@ -1759,8 +1804,9 @@ class SimpleServer(BaseServer):
             if used and not claim():
                 # Another worker claimed the same ID meanwhile; serving the request here would split the session.
                 return JSONResponse({"detail": "This session's ID is already claimed. Retry it."}, status_code=409)
-            if not used and minted:
-                # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session.
+            if minted and (not used or response.status_code >= 400):
+                # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session,
+                # and a failed request hands out no cookie, as with one worker.
                 del session[SESSION_ID_KEY]
             return response
 
@@ -1899,6 +1945,8 @@ repr(e): {repr(e)}"""
         )
         server = cls(config=server_config, server_client=server_client)
         startup.mark("init_server")
+        # Before the dry-run return, so a dry run reports the misconfiguration too.
+        refuse_unsupported_num_workers(server)
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
@@ -1937,6 +1985,7 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
+        backlog = UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog
         # A worker of a multi-worker server serves a private socket in this directory and claims sessions in it.
         # The main process of a multi-worker server never serves the app.
         session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV) if not is_main_fastapi_proc else None
@@ -1950,6 +1999,7 @@ repr(e): {repr(e)}"""
                 socket_dir=session_socket_dir,
                 session_cookie=session_cookie,
                 secret_key=session_cookie,
+                backlog=backlog,
                 **mcp_token_routing,
                 **server.claimed_session_routing(),
             )
@@ -1990,6 +2040,7 @@ repr(e): {repr(e)}"""
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
+            backlog=backlog,
             # Parse HTTP with httptools instead of pure-Python h11, and enable TCP keepalive on every accepted
             # connection. Explicit selection prevents Uvicorn from silently falling back to h11; a missing or
             # incompatible httptools wheel fails at import.
@@ -2096,7 +2147,8 @@ class HeadServer(BaseServer):
     def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
-        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(get_global_config_dict())
+        global_config_dict = get_global_config_dict()
+        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
 
         app = server.setup_webserver()
         # The head server runs on its own thread and event loop inside the supervisor process.
@@ -2108,6 +2160,7 @@ class HeadServer(BaseServer):
             port=server.config.port,
             proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
             forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
+            backlog=UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog,
         )
         uvicorn_server = uvicorn.Server(config=config)
 

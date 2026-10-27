@@ -36,3 +36,8 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     (e.g. `gym eval compare`) derive the same path the writers produced.
     """
     return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+
+
+def aggregation_sources_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_sources.json`: the shards `gym eval aggregate` merged into it."""
+    return output_fpath.with_stem(output_fpath.stem + "_sources").with_suffix(".json")
