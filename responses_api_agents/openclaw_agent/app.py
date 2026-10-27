@@ -35,6 +35,7 @@ import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -48,6 +49,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -465,6 +467,15 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read the pinned OpenClaw 2026.6.11 assistant's terminal model error."""
+        if native_result.get("stopReason") == "error":
+            message = str(native_result.get("errorMessage") or "")
+            match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
+            if match:
+                return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
+        return AgentOutcome(failure_kind="unknown")
+
     config: OpenClawAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
@@ -664,6 +675,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
         session_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
+        session_id = state.session.session_dir.rsplit("/", 1)[-1]
+        # Capture rejected attempts too: they have no responseId in the transcript.
+        session_config["models"]["providers"]["nemo"]["headers"] = {"x-session-id": session_id}
         # OpenClaw conservatively disables stream usage for custom origins. Gym
         # supports it; request the final usage chunk instead of retaining zero counters.
         session_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
@@ -698,7 +712,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "--agent",
             "main",
             "--session-id",
-            state.session.session_dir.rsplit("/", 1)[-1],
+            session_id,
             "--thinking",
             self.config.thinking,
             "--model",
@@ -732,14 +746,17 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # Cancellation/cleanup failure still leaves useful transcript evidence
             # for the subsequent close. Never convert uncertain cleanup to success.
             try:
-                await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
+                await self._collect_sandbox_response(
+                    state, body, prompt=prompt, system=system, capture_correlated=True
+                )
             except Exception:
                 LOG.exception("Could not salvage interrupted OpenClaw observations")
             raise
-        response = await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
-        if response.error is not None:
-            # Preserve the transcript in session observations, but let the environment
-            # classify runtime/provider failures before it invokes the verifier.
+        response = await self._collect_sandbox_response(
+            state, body, prompt=prompt, system=system, capture_correlated=True
+        )
+        if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
+            # Runtime and cleanup failures must not become gradable model outcomes.
             raise HTTPException(502, response.error.message)
         response.metadata = {**(response.metadata or {}), AGENT_TIMEOUT_METADATA_KEY: str(timeout)}
         return response
@@ -751,6 +768,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        capture_correlated: bool = False,
     ) -> NeMoGymResponse:
         gaps = []
         artifacts = state.session.artifacts or {}
@@ -906,6 +924,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 openclaw_session_conversation(events, input_items=input_items, fallback_output=output),
                 events,
                 transcript_available=bool(events),
+                prefer_openclaw_session_id=False,
+                capture_correlated=capture_correlated,
                 model_ref=self.config.model_server,
             )
             # Sandbox sessions enable only local file/process tools, so there is
@@ -921,6 +941,24 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
             )
+        if (
+            result
+            and (
+                result["return_code"] == 0
+                or (
+                    result["return_code"] == 1
+                    and artifacts.get("stderr.log", "").strip().rsplit("\n", 1)[-1].startswith("FailoverError: ")
+                )
+            )
+            and not result["timed_out"]
+            and not result["error"]
+            and last.get("stopReason") == "error"
+        ):
+            # 2026.6.11 can surface model errors by throwing FailoverError and
+            # exiting 1. Require its terminal diagnostic as well as the assistant
+            # error; an unrelated worker exit must still raise. The environment
+            # owns verify/retry/fail policy for the preserved model response.
+            return self.report_outcome(response, last)
         return response
 
     def model_post_init(self, __context: Any) -> None:

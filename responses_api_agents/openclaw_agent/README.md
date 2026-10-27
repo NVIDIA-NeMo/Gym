@@ -222,8 +222,14 @@ Sandbox request support is deliberately explicit:
   same configured-system, request-instructions, input-system order.
 
 Successful and limit-truncated Responses retain reasoning, tool calls/results, and final or partial text.
-Runtime, provider, and upstream model failures raise an error before verification, with transcript
-evidence and failed status retained in the observations returned by close.
+Sandbox sessions forward their invocation ID as `x-session-id`, separately from the rollout URL,
+so capture can attach rejected model attempts without a response ID to the correct invocation.
+
+A terminal assistant model error returns a failed response with its original message, partial
+output, usage, and `ng_agent_outcome`. HTTP errors retain their upstream status as
+`model_request_error`; unrecognized causes remain `unknown`. The environment decides whether
+to verify, retry, or fail using its outcome policy. Runtime, cancellation, and cleanup failures
+still raise errors, with transcript evidence retained by close.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
 messages carrying cumulative usage do not count again or override the model's terminal status.
@@ -233,8 +239,8 @@ Auxiliary model calls, such as compaction, are absent from the transcript. A cov
 reported because interrupted compaction need not leave an event. Totals therefore need not equal
 all backend calls. Missing per-call usage and
 unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
-An explicit wall or model-output limit returns partial output as `incomplete`; upstream/model errors
-raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
+An explicit wall or model-output limit returns partial output as `incomplete`.
+Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
 The supervisor stops live harness-group processes and reaps its children. On timeout
