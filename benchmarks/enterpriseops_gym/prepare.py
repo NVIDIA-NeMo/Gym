@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prepare the EnterpriseOps-Gym benchmark JSONL: the public oracle-mode tasks of all eight domains.
+"""Prepare the EnterpriseOps-Gym benchmark JSONL: all 1,117 oracle-mode tasks of the eight domains.
 
-Downloads ServiceNow's task set and the gym servers' tool schemas, both pinned, and writes one row per task. The row's
-``responses_create_params`` holds the task's system and user prompts and its oracle tools; the other fields are what
-the ``enterpriseops_gym`` resources server reads: the gym servers to start, each with its database dump and context
-headers, the gym server of each tool, and the SQL verifiers.
+Downloads the full task set (a private NVIDIA dataset, so ``hf_token`` needs access to it) and the gym servers' tool
+schemas, both pinned, and writes one row per task. The row's ``responses_create_params`` holds the task's system and
+user prompts and its oracle tools; the other fields are what the ``enterpriseops_gym`` resources server reads: the gym
+servers to start, each with its database dump and context headers, the gym server of each tool, and the SQL verifiers.
 """
 
 from __future__ import annotations
@@ -20,10 +20,11 @@ from typing import Any
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "enterpriseops_gym_benchmark.jsonl"
 
-DATASET = "ServiceNow-AI/EnterpriseOps-Gym"
-DATASET_REVISION = "c8e538eae8a6205294f0a86675fefdc1fac408f6"  # pragma: allowlist secret
+# The full set Artificial Analysis evaluates: ServiceNow's public 649 tasks, unchanged, and 468 more.
+DATASET = "nvidia/EnterpriseOps-Gym-Full"
+DATASET_REVISION = "14e2a7e141a763bdf329bea5fc363f302af163a6"  # pragma: allowlist secret
 DOMAINS = ("calendar", "csm", "drive", "email", "hr", "hybrid", "itsm", "teams")
-EXPECTED_TASK_COUNT = 649
+EXPECTED_TASK_COUNT = 1117
 # tools/list of each gym server image, captured from the images the resources server config pins.
 TOOLS_REPO = "nvidia/NeMo-Gym-EnterpriseOps-Assets"
 TOOLS_REVISION = "8918dc64b8575d5ff476e62e1cc3687523ab59c2"  # pragma: allowlist secret
@@ -73,13 +74,16 @@ def convert_task(
 ) -> tuple[dict[str, Any], list[str]]:
     """One benchmark row, and the selected tools that no gym server of the task serves."""
     gym_configs = json.loads(row["gym_servers_config"])
-    allowed = set(row["selected_tools"]) - set(row["restricted_tools"] or [])
+    selected = set(row["selected_tools"] or [])
+    restricted = set(row["restricted_tools"] or [])
     # Upstream offers the selected tools in the gym servers' order, each from the first gym server that serves it.
+    # A task that selects none gets every tool of its gym servers, as upstream filters only by a non-empty selection.
     tool_servers: dict[str, str] = {}
     tools: list[dict[str, Any]] = []
     for gym in gym_configs:
         for tool in tools_by_gym[gym["mcp_server_name"]]:
-            if tool["name"] in allowed and tool["name"] not in tool_servers:
+            offered = (not selected or tool["name"] in selected) and tool["name"] not in restricted
+            if offered and tool["name"] not in tool_servers:
                 tool_servers[tool["name"]] = gym["mcp_server_name"]
                 tools.append(
                     {
@@ -90,7 +94,7 @@ def convert_task(
                         "strict": False,
                     }
                 )
-    missing = sorted(allowed - set(tool_servers))
+    missing = sorted(selected - restricted - set(tool_servers))
     record = {
         "task_id": row["task_id"],
         "domain": row["domain"],

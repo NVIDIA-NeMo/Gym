@@ -122,6 +122,17 @@ def test_restricted_tools_are_left_out():
     assert "create_event" not in record["tool_servers"]
 
 
+def test_a_task_that_selects_no_tools_gets_every_tool_of_its_gym_servers_as_upstream():
+    record, missing = convert_task(_row(selected_tools=[], restricted_tools=["delete_event"]), TOOLS_BY_GYM)
+
+    assert record["tool_servers"] == {
+        "list_users": "gym-calendar",
+        "create_event": "gym-calendar",
+        "create_case": "sn-csm-server",
+    }
+    assert missing == []
+
+
 def test_prepare_writes_one_row_per_task_of_every_domain(tmp_path, monkeypatch):
     output = tmp_path / "data" / "benchmark.jsonl"
     splits = {domain: [_row(task_id=f"{domain}_task")] for domain in prepare_module.DOMAINS}
@@ -154,6 +165,6 @@ def test_prepare_refuses_a_task_set_of_another_size(tmp_path, monkeypatch):
     monkeypatch.setattr(datasets, "load_dataset", lambda *args, **kwargs: {d: [] for d in prepare_module.DOMAINS})
     monkeypatch.setattr("nemo_gym.global_config.get_hf_token", lambda: None)
 
-    with pytest.raises(ValueError, match="Expected 649 tasks, got 0"):
+    with pytest.raises(ValueError, match="Expected 1117 tasks, got 0"):
         prepare_module.prepare()
     assert not (tmp_path / "benchmark.jsonl").exists()

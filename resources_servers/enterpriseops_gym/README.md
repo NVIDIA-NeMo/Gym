@@ -11,8 +11,8 @@ server with the Stirrup agent; see its README for the benchmark and its results.
 1. **`/seed_session`** starts one sandbox per gym server of the task, from the image `gym_images` pins for it, with the
    gym's HTTP server as the sandbox entrypoint and its port declared. Once `/health` answers through
    `sandbox.endpoint(port)`, it seeds a fresh database from the task's SQL dump (`/api/seed-database`). The dumps come
-   from the upstream `gym_dbs.zip`, downloaded once and checked against `seed_archive_sha256`. The first sandbox is
-   lent to the agent (`sandbox_access`), which runs its harness there.
+   from the Hugging Face dataset `seed_dataset`, downloaded once at the pinned `seed_dataset_revision`. The first
+   sandbox is lent to the agent (`sandbox_access`), which runs its harness there.
 2. **`POST /{tool_name}`** serves the task's tools (the oracle tools of the row's `tool_servers`, nothing else). Each
    call goes to the gym that owns the tool as an MCP `tools/call`, with the task database's `x-database-id` and the
    task's context headers (the acting user's token). The gym's text answer is returned. A tool error is a 400 whose
@@ -54,9 +54,9 @@ verifier fixture (`VERIFIER_FIXTURE`, `tests/verifier_cases.jsonl`) scores the s
 built in SQLite, so it needs no gym servers. Two differences from the upstream harness, both deliberate:
 
 - **Every verifier counts.** Upstream keys results by verifier name, so the last of several same-named verifiers
-  overwrites the others (34 public tasks have same-named verifiers with different checks). Here a task passes only when
+  overwrites the others (69 tasks have same-named verifiers with different checks). Here a task passes only when
   all of its verifiers pass, as Artificial Analysis grades EnterpriseOps-Gym-AA.
-- **Numbers equal their numeric strings** in `equals`, `greater_than` and `less_than`. 20 public oracle tasks expect
+- **Numbers equal their numeric strings** in `equals`, `greater_than` and `less_than`. 42 oracle tasks expect
   `"1"` from a `COUNT(*)`, which upstream's strict equality never matches; the same tasks in the dataset's
   distractor-tool configs (`plus_5_tools`, `plus_10_tools`, `plus_15_tools`) expect `1`.
 
@@ -68,7 +68,7 @@ built in SQLite, so it needs no gym servers. Two differences from the upstream h
 | `sandbox_config` | `ttl_s`, `resources`, `env`, `metadata` and `provider_options` of every gym sandbox. |
 | `gym_images` | Per gym server name: `image`, `command` (the entrypoint that starts its HTTP server) and `port`. The defaults pin the upstream images by digest. |
 | `agent_workdir` | Working directory of the sandbox lent to the agent. |
-| `seed_archive_url`, `seed_archive_sha256` | The upstream task database dumps; cached under `seed_archive_dir`, by default `<cache_dir>/enterpriseops_gym`. |
+| `seed_dataset`, `seed_dataset_revision` | The Hugging Face dataset of task database dumps, at a pinned commit, read with the global `hf_token`. Downloaded into the Hugging Face cache at `seed_dataset_dir`, by default `<cache_dir>/enterpriseops_gym`. |
 | `gym_ready_timeout_s`, `gym_request_timeout_s` | Bound on a gym becoming healthy, and on each request to it. |
 | `verify_endpoint_tls` | Verify the TLS certificate of sandbox endpoints; off by default like the OpenSandbox provider's `tls_verify`. |
 
@@ -81,5 +81,6 @@ The server keeps sessions in its process, so it requires `num_workers: 1`.
 ## Licensing
 
 - Code: Apache 2.0.
-- EnterpriseOps-Gym (task data, gym server images, database dumps): Apache 2.0, by ServiceNow.
+- EnterpriseOps-Gym by ServiceNow: the gym server images and the public tasks and database dumps are Apache 2.0; the
+  full task set (`nvidia/EnterpriseOps-Gym-Full`) is CC BY-NC 4.0. The example rows in `data/` are public tasks.
 - Dependencies: `nemo_gym` (Apache 2.0).

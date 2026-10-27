@@ -4,11 +4,11 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: agent
-description: ServiceNow EnterpriseOps-Gym oracle-mode tasks across eight enterprise
-  domains, run with the Stirrup agent against live MCP gym servers in per-task sandboxes
-  and scored by SQL checks on the final database state.
+description: ServiceNow EnterpriseOps-Gym, all 1,117 oracle-mode tasks across eight
+  enterprise domains, run with the Stirrup agent against live MCP gym servers in per-task
+  sandboxes and scored by SQL checks on the final database state.
 modality: text
-licensing: Apache-2.0
+licensing: Apache-2.0 AND CC-BY-NC-4.0
 authors:
 - Khushi Bhardwaj
 reward:

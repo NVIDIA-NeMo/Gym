@@ -18,9 +18,10 @@ enterpriseops_gym_resources_server:
           # execd otherwise waits 1 s after every command.
           EXECD_API_GRACE_SHUTDOWN: 50ms
         resources: {cpu: 2, memory_mib: 4096}
-      # Task database dumps from ServiceNow/EnterpriseOps-Gym (Apache-2.0), unchanged since its first commit.
-      seed_archive_url: https://raw.githubusercontent.com/ServiceNow/EnterpriseOps-Gym/271f2c357f763376997dfd16807fcde2474ae41b/gym_dbs.zip
-      seed_archive_sha256: d947543d4fba1aabc4aade73d3df955114187b7a94da7ac825c4c31169ddab47  # pragma: allowlist secret
+      # The task database dumps of all 1,117 tasks (a private NVIDIA dataset: it needs an hf_token with access).
+      # Its dumps of the public tasks are byte-identical to upstream's gym_dbs.zip.
+      seed_dataset: nvidia/EnterpriseOps-Gym-DBs
+      seed_dataset_revision: 8742ff2fd5517df82397c9c992a67cfc9927995a  # pragma: allowlist secret
       # The upstream gym server images (amd64), pinned by digest. A deployment that mirrors them maps the names with
       # the sandbox provider's image rewrites.
       gym_images:

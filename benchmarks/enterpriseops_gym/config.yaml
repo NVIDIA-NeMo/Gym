@@ -26,7 +26,7 @@ enterpriseops_gym_resources_server:
           prepare_script: benchmarks/enterpriseops_gym/prepare.py
           taskset: enterpriseops_gym
           num_repeats: 3
-          license: Apache 2.0
+          license: Creative Commons Attribution-NonCommercial 4.0 International
         - name: example
           type: example
           jsonl_fpath: resources_servers/enterpriseops_gym/data/example.jsonl

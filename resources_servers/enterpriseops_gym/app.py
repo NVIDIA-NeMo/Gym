@@ -13,19 +13,15 @@ only when every verifier passes, and ``verifier_pass_rate`` is the share that pa
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-import os
-import tempfile
-import urllib.request
-import zipfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, Request
+from huggingface_hub import snapshot_download
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym import CACHE_DIR
@@ -46,7 +42,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import VERIFIER_ERROR
-from nemo_gym.global_config import CACHE_DIR_KEY_NAME, get_global_config_dict
+from nemo_gym.global_config import CACHE_DIR_KEY_NAME, HF_TOKEN_KEY_NAME, get_global_config_dict
 from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
@@ -90,11 +86,12 @@ class EnterpriseOpsGymResourcesServerConfig(BaseResourcesServerConfig):
     gym_images: Dict[str, GymImageConfig]
     # Working directory of the sandbox lent to the agent.
     agent_workdir: str = "/tmp"
-    # The upstream `gym_dbs.zip` of task database dumps, pinned by checksum.
-    seed_archive_url: str
-    seed_archive_sha256: str
-    # Defaults to `<cache_dir>/enterpriseops_gym`.
-    seed_archive_dir: Optional[str] = None
+    # The Hugging Face dataset of task database dumps, laid out like upstream's `gym_dbs.zip` and pinned to a commit.
+    # Downloaded with the global `hf_token`.
+    seed_dataset: str
+    seed_dataset_revision: str
+    # Hugging Face cache for the download; defaults to `<cache_dir>/enterpriseops_gym`.
+    seed_dataset_dir: Optional[str] = None
     gym_ready_timeout_s: float = Field(default=300, gt=0)
     gym_request_timeout_s: float = Field(default=120, gt=0)
     # Sandbox endpoints of a provider whose proxy certificate cannot be verified need this off.
@@ -135,46 +132,19 @@ class _TaskSession:
     verifier_results: Optional[List[VerifierResult]] = None
 
 
-class SeedArchive:
-    """The upstream archive of task database dumps, read by each dump's path inside it."""
+class SeedDumps:
+    """The task database dumps of a downloaded seed dataset, read by each dump's path inside it."""
 
-    def __init__(self, path: Path) -> None:
-        self._zip = zipfile.ZipFile(path)
-        self._names = frozenset(self._zip.namelist())
+    def __init__(self, root: Path) -> None:
+        self._root = root
 
     def read(self, name: str) -> str:
-        if name not in self._names:
-            raise ValueError(f"The seed archive has no database dump {name!r}")
-        return self._zip.read(name).decode("utf-8")
-
-
-def ensure_seed_archive(url: str, sha256: str, directory: Path) -> Path:
-    """Download the seed archive into ``directory`` once and check its checksum."""
-    path = directory / f"gym_dbs-{sha256[:16]}.zip"
-    if path.is_file() and _sha256(path) == sha256:
-        return path
-    directory.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=directory, suffix=".partial", delete=False) as partial:
-        try:
-            with urllib.request.urlopen(url, timeout=300) as response:
-                while chunk := response.read(1 << 20):
-                    partial.write(chunk)
-            partial.close()
-            actual = _sha256(Path(partial.name))
-            if actual != sha256:
-                raise ValueError(f"Seed archive {url} has sha256 {actual}, expected {sha256}")
-            os.replace(partial.name, path)
-        finally:
-            Path(partial.name).unlink(missing_ok=True)
-    return path
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1 << 20):
-            digest.update(chunk)
-    return digest.hexdigest()
+        # Checked on the name, not the resolved path: a Hugging Face snapshot's files are symlinks into its blob store.
+        relative = PurePosixPath(name)
+        path = self._root / relative
+        if relative.is_absolute() or ".." in relative.parts or not path.is_file():
+            raise ValueError(f"The seed dataset has no database dump {name!r}")
+        return path.read_text(encoding="utf-8")
 
 
 class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
@@ -183,8 +153,8 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
     _sessions: Dict[str, _TaskSession] = PrivateAttr(default_factory=dict)
     _fence: ResourcesSessionFence = PrivateAttr()
-    _seed_archive: Optional[SeedArchive] = PrivateAttr(default=None)
-    _seed_archive_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+    _seed_dumps: Optional[SeedDumps] = PrivateAttr(default=None)
+    _seed_dumps_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -209,18 +179,25 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         app.post("/{tool_name}")(self.call_tool)
         return app
 
-    async def _archive(self) -> SeedArchive:
-        """The seed archive, downloaded by the first seed that needs it."""
-        async with self._seed_archive_lock:
-            if self._seed_archive is None:
-                directory = self.config.seed_archive_dir or Path(
-                    get_global_config_dict().get(CACHE_DIR_KEY_NAME) or CACHE_DIR, "enterpriseops_gym"
+    async def _dumps(self) -> SeedDumps:
+        """The seed dataset's SQL dumps at the pinned revision, downloaded by the first seed that needs them."""
+        async with self._seed_dumps_lock:
+            if self._seed_dumps is None:
+                global_config_dict = get_global_config_dict()
+                cache_dir = self.config.seed_dataset_dir or Path(
+                    global_config_dict.get(CACHE_DIR_KEY_NAME) or CACHE_DIR, "enterpriseops_gym"
                 )
-                path = await asyncio.to_thread(
-                    ensure_seed_archive, self.config.seed_archive_url, self.config.seed_archive_sha256, Path(directory)
+                snapshot = await asyncio.to_thread(
+                    snapshot_download,
+                    self.config.seed_dataset,
+                    repo_type="dataset",
+                    revision=self.config.seed_dataset_revision,
+                    allow_patterns=["*.sql"],
+                    cache_dir=str(cache_dir),
+                    token=global_config_dict.get(HF_TOKEN_KEY_NAME),
                 )
-                self._seed_archive = SeedArchive(path)
-        return self._seed_archive
+                self._seed_dumps = SeedDumps(Path(snapshot))
+        return self._seed_dumps
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         session_id = body.resources_session_id
@@ -258,7 +235,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
     async def _start_gyms(self, session: _TaskSession) -> None:
         """Start every gym of the task, wait for it and seed its database, all at once."""
-        archive = await self._archive()
+        dumps = await self._dumps()
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         # Every sandbox is tracked before it starts, so a failure anywhere stops the ones that did. The task's order
@@ -270,7 +247,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             image = self.config.gym_images[gym_task.name]
             gym = session.gyms[gym_task.name]
             try:
-                sql = await asyncio.to_thread(archive.read, gym_task.seed_database_file)
+                sql = await asyncio.to_thread(dumps.read, gym_task.seed_database_file)
             except ValueError as error:
                 raise ResourcesSeedRejectedError(str(error)) from error
             spec = self.config.sandbox_config.spec(

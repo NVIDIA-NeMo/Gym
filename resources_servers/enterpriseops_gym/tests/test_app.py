@@ -2,10 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The resources server's session lifecycle, tool routes and verification, against in-process fake gym servers."""
 
-import hashlib
 import sqlite3
-import zipfile
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -22,7 +19,6 @@ from resources_servers.enterpriseops_gym import app as app_module
 from resources_servers.enterpriseops_gym.app import (
     EnterpriseOpsGymResourcesServer,
     EnterpriseOpsGymResourcesServerConfig,
-    ensure_seed_archive,
 )
 from resources_servers.enterpriseops_gym.gym_client import GymRequestError, GymUnavailableError, ToolCallResult
 
@@ -128,15 +124,29 @@ def sandboxes(monkeypatch) -> dict[str, list]:
 
 
 @pytest.fixture
-def archive(tmp_path) -> Path:
-    path = tmp_path / "gym_dbs.zip"
-    with zipfile.ZipFile(path, "w") as zip_file:
-        for name, sql in DUMPS.items():
-            zip_file.writestr(name, sql)
-    return path
+def seed_dataset(tmp_path, monkeypatch) -> dict[str, Any]:
+    """A local stand-in for the seed dataset on Hugging Face, with the downloads requested from it.
+
+    Laid out like the Hugging Face cache: the snapshot's files are symlinks into a blob store beside it.
+    """
+    snapshot, blobs = tmp_path / "snapshot", tmp_path / "blobs"
+    blobs.mkdir()
+    for index, (name, sql) in enumerate(DUMPS.items()):
+        (blobs / str(index)).write_text(sql)
+        (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
+        (snapshot / name).symlink_to(blobs / str(index))
+    (tmp_path / "outside.sql").write_text("CREATE TABLE secret(x);")
+    downloads: list[dict[str, Any]] = []
+
+    def snapshot_download(repo_id: str, **kwargs) -> str:
+        downloads.append({"repo_id": repo_id, **kwargs})
+        return str(snapshot)
+
+    monkeypatch.setattr(app_module, "snapshot_download", snapshot_download)
+    return {"cache_dir": tmp_path / "cache", "downloads": downloads}
 
 
-def _server(archive: Path, **overrides) -> EnterpriseOpsGymResourcesServer:
+def _server(seed_dataset: dict[str, Any], **overrides) -> EnterpriseOpsGymResourcesServer:
     config = EnterpriseOpsGymResourcesServerConfig(
         **{
             "host": "0.0.0.0",
@@ -146,9 +156,9 @@ def _server(archive: Path, **overrides) -> EnterpriseOpsGymResourcesServer:
             "sandbox_provider": "sandbox",
             "sandbox_config": {"ttl_s": 600, "metadata": {"team": "gym"}},
             "gym_images": GYM_IMAGES,
-            "seed_archive_url": archive.as_uri(),
-            "seed_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
-            "seed_archive_dir": str(archive.parent / "cache"),
+            "seed_dataset": "org/task-dbs",
+            "seed_dataset_revision": "0123abcd",
+            "seed_dataset_dir": str(seed_dataset["cache_dir"]),
         }
         | overrides
     )
@@ -156,8 +166,8 @@ def _server(archive: Path, **overrides) -> EnterpriseOpsGymResourcesServer:
 
 
 @pytest.fixture
-def client(archive, gyms, sandboxes):
-    with TestClient(_server(archive).setup_webserver()) as client:
+def client(seed_dataset, gyms, sandboxes):
+    with TestClient(_server(seed_dataset).setup_webserver()) as client:
         yield client
 
 
@@ -386,7 +396,7 @@ def test_a_task_the_server_cannot_run_is_a_terminal_422(client, sandboxes, overr
     assert sandboxes["started"] == []
 
 
-def test_a_gym_without_an_image_or_a_dump_outside_the_archive_is_a_terminal_422(client, sandboxes):
+def test_a_gym_without_an_image_or_a_dump_outside_the_dataset_is_a_terminal_422(client, sandboxes):
     verifier = _task()["verifiers"][0]
     no_image = {
         "gym_servers": [{"name": "gym-c", "seed_database_file": "dbs/a.sql"}],
@@ -394,7 +404,7 @@ def test_a_gym_without_an_image_or_a_dump_outside_the_archive_is_a_terminal_422(
         "verifiers": [verifier | {"gym_name": "gym-c"}],
     }
     missing_dump = {
-        "gym_servers": [{"name": "gym-a", "seed_database_file": "../a.sql"}],
+        "gym_servers": [{"name": "gym-a", "seed_database_file": "../outside.sql"}],
         "tool_servers": {"insert_notes": "gym-a"},
         "verifiers": [verifier],
     }
@@ -403,7 +413,8 @@ def test_a_gym_without_an_image_or_a_dump_outside_the_archive_is_a_terminal_422(
     outside = _post_seed(client, _seed("s2", **missing_dump))
 
     assert (unknown.status_code, unknown.json()["detail"]) == (422, "No gym_images entry for gym servers ['gym-c']")
-    assert (outside.status_code, outside.json()["detail"]) == (422, "The seed archive has no database dump '../a.sql'")
+    assert outside.status_code == 422
+    assert outside.json()["detail"] == "The seed dataset has no database dump '../outside.sql'"
     assert sandboxes["started"] == []
 
 
@@ -428,9 +439,11 @@ def test_a_refused_database_dump_is_a_terminal_422(client, gyms, sandboxes):
     assert sorted(sandboxes["stopped"]) == sorted(spec.metadata["gym_server"] for spec in sandboxes["started"])
 
 
-def test_a_sandbox_that_cannot_start_fails_the_seed_and_stops_the_others(archive, gyms, sandboxes):
+def test_a_sandbox_that_cannot_start_fails_the_seed_and_stops_the_others(seed_dataset, gyms, sandboxes):
     images = GYM_IMAGES | {"unstartable": GYM_IMAGES["gym-b"]}
-    with TestClient(_server(archive, gym_images=images).setup_webserver(), raise_server_exceptions=False) as client:
+    with TestClient(
+        _server(seed_dataset, gym_images=images).setup_webserver(), raise_server_exceptions=False
+    ) as client:
         servers = [_task()["gym_servers"][0], {"name": "unstartable", "seed_database_file": "dbs/b.sql"}]
         verifiers = _task()["verifiers"][:1]
         response = _post_seed(
@@ -442,8 +455,8 @@ def test_a_sandbox_that_cannot_start_fails_the_seed_and_stops_the_others(archive
     assert sandboxes["stopped"] == [spec.metadata["gym_server"] for spec in sandboxes["started"]]
 
 
-def test_close_stops_the_sandboxes_and_the_session_follows_the_contract(archive, gyms, sandboxes):
-    server = _server(archive)
+def test_close_stops_the_sandboxes_and_the_session_follows_the_contract(seed_dataset, gyms, sandboxes):
+    server = _server(seed_dataset)
     app = server.setup_webserver()
     with TestClient(app) as client:
         seed = _seed()
@@ -464,28 +477,33 @@ def test_close_stops_the_sandboxes_and_the_session_follows_the_contract(archive,
     )
 
 
-def test_shutdown_stops_the_sandboxes_of_open_sessions(archive, gyms, sandboxes):
-    with TestClient(_server(archive).setup_webserver()) as client:
+def test_shutdown_stops_the_sandboxes_of_open_sessions(seed_dataset, gyms, sandboxes):
+    with TestClient(_server(seed_dataset).setup_webserver()) as client:
         _post_seed(client, _seed())
 
     assert sorted(sandboxes["stopped"]) == ["gym-a", "gym-b"]
 
 
-def test_the_seed_archive_is_downloaded_once_and_checked(archive, tmp_path, monkeypatch):
-    sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
-    cache = tmp_path / "cache"
+def test_the_seed_dumps_are_downloaded_once_at_the_pinned_revision(seed_dataset, gyms, sandboxes, monkeypatch):
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {"sandbox": {"local": {}}, "hf_token": "hf-x"})
+    with TestClient(_server(seed_dataset).setup_webserver()) as client:
+        assert _post_seed(client, _seed("s1")).status_code == 200
+        assert _post_seed(client, _seed("s2")).status_code == 200
 
-    path = ensure_seed_archive(archive.as_uri(), sha256, cache)
-    archive.unlink()
+    assert seed_dataset["downloads"] == [
+        {
+            "repo_id": "org/task-dbs",
+            "repo_type": "dataset",
+            "revision": "0123abcd",
+            "allow_patterns": ["*.sql"],
+            "cache_dir": str(seed_dataset["cache_dir"]),
+            "token": "hf-x",
+        }
+    ]
 
-    assert ensure_seed_archive(archive.as_uri(), sha256, cache) == path
-    with pytest.raises(ValueError, match="expected 0000"):
-        ensure_seed_archive(path.as_uri(), "0000", tmp_path / "other")
-    assert list((tmp_path / "other").iterdir()) == []
 
-
-def test_metrics_report_success_and_verifier_pass_rate_overall_and_per_domain(archive):
-    server = _server(archive)
+def test_metrics_report_success_and_verifier_pass_rate_overall_and_per_domain(seed_dataset):
+    server = _server(seed_dataset)
     tasks = [
         [
             {"reward": 1.0, "verifier_pass_rate": 1.0, "domain": "email"},
@@ -511,8 +529,8 @@ def test_metrics_report_success_and_verifier_pass_rate_overall_and_per_domain(ar
     }
 
 
-def test_a_seed_or_close_for_another_episode_or_task_is_refused(archive, gyms, sandboxes):
-    with TestClient(_server(archive).setup_webserver(), raise_server_exceptions=False) as client:
+def test_a_seed_or_close_for_another_episode_or_task_is_refused(seed_dataset, gyms, sandboxes):
+    with TestClient(_server(seed_dataset).setup_webserver(), raise_server_exceptions=False) as client:
         seed = _seed()
         _post_seed(client, seed)
         other_episode = seed.model_copy(update={"episode_id": EpisodeId(rollout_id="other-0")})
@@ -555,8 +573,8 @@ def test_a_sandbox_that_fails_to_stop_after_verify_is_stopped_again_at_close(cli
     assert sandboxes["stopped"] == ["gym-a", "gym-b"]
 
 
-def test_shutdown_logs_a_sandbox_it_cannot_stop(archive, gyms, sandboxes, caplog):
-    with TestClient(_server(archive).setup_webserver()) as client:
+def test_shutdown_logs_a_sandbox_it_cannot_stop(seed_dataset, gyms, sandboxes, caplog):
+    with TestClient(_server(seed_dataset).setup_webserver()) as client:
         _post_seed(client, _seed())
         sandboxes["failing_stops"].append("gym-a")
 
@@ -564,6 +582,6 @@ def test_shutdown_logs_a_sandbox_it_cannot_stop(archive, gyms, sandboxes, caplog
     assert "Failed to stop the sandboxes of EnterpriseOps-Gym session session" in caplog.text
 
 
-def test_sessions_live_in_one_worker(archive):
+def test_sessions_live_in_one_worker(seed_dataset):
     with pytest.raises(ValueError, match="num_workers=1"):
-        _server(archive, num_workers=2)
+        _server(seed_dataset, num_workers=2)
