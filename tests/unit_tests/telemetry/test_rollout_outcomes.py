@@ -374,7 +374,7 @@ async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
     import asyncio
 
     from nemo_gym.episode_types import EpisodeFailure, EpisodeId
-    from nemo_gym.rollout_outcomes import RolloutFailure
+    from nemo_gym.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollout_records import logical_rollout_id
     from nemo_gym.rollout_store import RolloutStore
 
@@ -388,7 +388,7 @@ async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
             for row in examples:
                 result = {"reward": 1.0, "response": {}}
                 if row["_ng_task_index"] == 0:
-                    result = RolloutFailure(
+                    result = RolloutFailureRecord(
                         episode_id=EpisodeId(rollout_id=logical_rollout_id(row), attempt=row["_ng_attempt_index"]),
                         run_id=row["_ng_run_id"],
                         source="environment",
@@ -404,7 +404,7 @@ async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
                         row=row,
                         result=result,
                         rollout_latency_ms=None,
-                        diagnostics=diagnostics if isinstance(result, RolloutFailure) else None,
+                        diagnostics=diagnostics if isinstance(result, RolloutFailureRecord) else None,
                     )
                 )
                 futures.append(future)

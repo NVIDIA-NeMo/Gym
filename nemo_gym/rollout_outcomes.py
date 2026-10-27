@@ -12,7 +12,7 @@ from nemo_gym.episode_types import EpisodeFailure, EpisodeId
 from nemo_gym.failure_kinds import AGENT_REQUEST_FAILED, ENVIRONMENT_SERVER_FAILED
 
 
-class RolloutFailure(BaseModel):
+class RolloutFailureRecord(BaseModel):
     """Associate one observed failure with a run and an episode attempt.
 
     ``source`` identifies who reported the failure. ``delivery`` describes the
@@ -59,6 +59,10 @@ class RolloutFailure(BaseModel):
         if self.source == "environment" and self.delivery != "delivered":
             raise ValueError("An environment-reported failure requires delivery='delivered'")
         return self
+
+
+# The name before the failure-boundary design called this the persistence envelope; kept for existing imports.
+RolloutFailure = RolloutFailureRecord
 
 
 class InvalidRolloutResult(ValueError):

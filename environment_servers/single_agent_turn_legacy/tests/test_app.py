@@ -379,7 +379,7 @@ async def test_protocol_failure_metadata_survives_collection(
 
     import nemo_gym.rollout_collection as collection
     from nemo_gym.episode_types import EpisodeFailure
-    from nemo_gym.rollout_outcomes import RolloutFailure
+    from nemo_gym.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollout_records import logical_rollout_id
     from nemo_gym.rollout_store import RolloutStore
     from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResponse
@@ -464,7 +464,7 @@ async def test_protocol_failure_metadata_survives_collection(
     assert saved["_ng_failure_class"] == expected_kind
     assert saved.get("_ng_failure_terminal", False) is terminal
     assert "reward" not in saved and "response" not in saved
-    record = RolloutFailure.model_validate(saved["_ng_failure_record"])
+    record = RolloutFailureRecord.model_validate(saved["_ng_failure_record"])
     assert record.run_id == store.manifest.run_id
     assert record.episode_id.rollout_id == logical_rollout_id(saved)
     assert (record.source, record.delivery) == ("environment", "delivered")
@@ -473,7 +473,7 @@ async def test_protocol_failure_metadata_survives_collection(
     assert record.failure.failure_reason == "Judge unavailable"
     assert record.failure.stage == "verification" and record.failure.terminal is terminal
     assert "partial_response" not in record.model_dump()["failure"]
-    assert RolloutFailure.model_validate_json(record.model_dump_json()) == record
+    assert RolloutFailureRecord.model_validate_json(record.model_dump_json()) == record
     if answer is None:
         assert "_ng_failure_partial_response" not in saved
     else:

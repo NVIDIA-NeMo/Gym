@@ -250,7 +250,7 @@ conflict detection for manifest-backed records.
 
 `RolloutCollectionHelper.run_outcomes()` is an opt-in interface for callers that need failure information as data.
 Each future returns `(input_row, outcome)`, where `outcome` is either the existing completed-result dictionary or a
-`RolloutFailure`. It associates an `EpisodeId` (logical rollout and attempt) with a required run ID,
+`RolloutFailureRecord`. It associates an `EpisodeId` (logical rollout and attempt) with a required run ID,
 who observed the failure (`environment` or `collector`), delivery evidence, and the shared `EpisodeFailure`.
 The nested failure carries `failure_reason`, the terminal flag, an optional failure kind, and an optional execution stage
 (`admission`, `seed`, `agent`, `verification`, or `cleanup`). Unknown stages remain unset. Delivery evidence does not authorize
@@ -266,7 +266,7 @@ The returned rows are copies; caller-owned input rows are not modified.
 
 ```python
 from nemo_gym.rollout_collection import RolloutCollectionHelper
-from nemo_gym.rollout_outcomes import RolloutFailure
+from nemo_gym.rollout_outcomes import RolloutFailureRecord
 
 
 async def collect_outcomes(input_rows):
@@ -274,7 +274,7 @@ async def collect_outcomes(input_rows):
     rows = helper.preprocess_examples(input_rows)
     for future in helper.run_outcomes(rows):
         row, outcome = await future
-        if isinstance(outcome, RolloutFailure):
+        if isinstance(outcome, RolloutFailureRecord):
             print(outcome.episode_id.capture_key, outcome.failure.failure_kind, outcome.failure.failure_reason)
         else:
             print(outcome.get("reward", "Completed without a score"))
@@ -292,7 +292,7 @@ still propagate. A malformed completed result must not be interpreted as a rewar
 not copied into the failure record. Completed masked results remain completed dictionaries.
 
 The evaluation runner validates HTTP result shape and native task/attempt identity regardless of failure routing.
-Agents cannot return a full collector-owned `RolloutFailure` record or choose its source/delivery observations.
+Agents cannot return a full collector-owned `RolloutFailureRecord` or choose its source/delivery observations.
 They report failures through the episode contract, HTTP errors, or supported legacy markers. Its sidecar retains the existing
 `_ng_failure_*` routing aliases for row-oriented consumers and stores the canonical record under `_ng_failure_record`.
 `_ng_failure_class` follows the canonical failure kind. If a legacy producer supplied a different routing class, the

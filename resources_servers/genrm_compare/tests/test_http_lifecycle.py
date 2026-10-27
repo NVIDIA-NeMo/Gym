@@ -37,7 +37,7 @@ from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, L
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.reward_profile import RewardProfiler
-from nemo_gym.rollout_outcomes import RolloutFailure
+from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
@@ -213,7 +213,7 @@ def assert_judge_failure(status, body, reason, *, persisted=False):
     if persisted:
         # Collection removes the producer's placeholder reward while retaining
         # the answer and failure evidence outside the canonical failure record.
-        validated = RolloutFailure.model_validate(body["_ng_failure_record"])
+        validated = RolloutFailureRecord.model_validate(body["_ng_failure_record"])
         assert validated.failure.failure_kind == "judge_failed"
         assert validated.failure.failure_reason == body["failure_reason"]
         assert "reward" not in body

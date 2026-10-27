@@ -21,7 +21,7 @@ from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId
 from nemo_gym.path_utils import failures_path_for
-from nemo_gym.rollout_outcomes import RolloutFailure
+from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_records import (
     coverage_path_for,
     journal_path_for,
@@ -158,7 +158,7 @@ def test_only_delivered_nonterminal_failures_spend_budget(prepared_run, monkeypa
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         row = store.pending()[0]
         store.allocate_attempt(row)
-        failure = RolloutFailure(
+        failure = RolloutFailureRecord(
             episode_id=EpisodeId(rollout_id="0-0"),
             run_id=store.manifest.run_id,
             source="collector",

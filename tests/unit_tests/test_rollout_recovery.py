@@ -28,7 +28,7 @@ import nemo_gym.rollout_collection as collection
 from nemo_gym.config_types import ConfigError
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
-from nemo_gym.rollout_outcomes import RolloutFailure
+from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_records import (
     RolloutRecords,
     coverage_path_for,
@@ -48,7 +48,7 @@ def echo_failure(connection, failure):
 
 
 def test_failure_survives_spawned_process():
-    failure = RolloutFailure(
+    failure = RolloutFailureRecord(
         episode_id=EpisodeId(rollout_id="task-42", attempt=0),
         run_id="test-run",
         source="environment",
@@ -92,7 +92,7 @@ async def test_malformed_results_become_associated_failures(payload, monkeypatch
     row = failing_row()
     original, outcome = await next(RolloutCollectionHelper().run_outcomes([row]))
     assert original == row | {"_ng_run_id": outcome.run_id}
-    assert isinstance(outcome, RolloutFailure)
+    assert isinstance(outcome, RolloutFailureRecord)
     assert outcome.failure.stage is None
     assert outcome.exception_type == "InvalidRolloutResult"
     assert outcome.episode_id.rollout_id
@@ -117,7 +117,7 @@ async def test_valid_zero_and_masked_completed_results_remain_results(monkeypatc
 @pytest.mark.parametrize("wrong_identity", [None, "rollout_id", "attempt_index", "run_id"])
 async def test_agent_cannot_supply_collector_owned_failure_records(monkeypatch, wrong_identity):
     row = failing_row() | {"_ng_rollout_id": "stable-task", "_ng_attempt_index": 2, "_ng_run_id": "test-run"}
-    failure = RolloutFailure(
+    failure = RolloutFailureRecord(
         episode_id=EpisodeId(rollout_id="stable-task", attempt=2),
         run_id="test-run",
         source="environment",
@@ -154,7 +154,7 @@ async def test_legacy_judge_placeholder_is_converted_only_for_typed_callers(monk
     _, raw = await next(RolloutCollectionHelper().run_examples([failing_row()]))
     assert raw is legacy
     _, outcome = await next(RolloutCollectionHelper().run_outcomes([failing_row()]))
-    assert isinstance(outcome, RolloutFailure)
+    assert isinstance(outcome, RolloutFailureRecord)
     assert outcome.failure.failure_kind == failure_class
     assert "response" not in outcome.model_dump()
 
@@ -169,7 +169,7 @@ async def test_expected_failure_does_not_stop_independent_work(monkeypatch):
 
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     outcomes = [await future for future in RolloutCollectionHelper().run_outcomes(rows)]
-    assert sum(isinstance(result, RolloutFailure) for _, result in outcomes) == 1
+    assert sum(isinstance(result, RolloutFailureRecord) for _, result in outcomes) == 1
     assert [result["reward"] for _, result in outcomes if isinstance(result, dict)] == [0.0]
 
 
@@ -529,7 +529,7 @@ async def test_native_typed_outcomes_reject_foreign_identity_without_stopping_ot
         row["_ng_task_index"]: result
         for row, result in await asyncio.gather(*RolloutCollectionHelper().run_outcomes(rows))
     }
-    assert isinstance(outcomes[0], RolloutFailure) and outcomes[0].failure.stage is None
+    assert isinstance(outcomes[0], RolloutFailureRecord) and outcomes[0].failure.stage is None
     assert outcomes[0].episode_id.rollout_id == "0-0" and outcomes[0].episode_id.attempt == 0
     assert outcomes[0].delivery == "delivered"
     assert outcomes[0].failure.terminal is (mismatch != "attempt")
@@ -1030,7 +1030,7 @@ async def test_progress_masking_matches_persisted_outcomes(runner_config, monkey
         if row["task"] < 2:
             return FakeResponse(200, {"reward": 0.5, "response": {}, "mask_sample": row["task"] == 1})
         if failure_type == "typed":
-            result = RolloutFailure(
+            result = RolloutFailureRecord(
                 episode_id=EpisodeId(rollout_id=logical_rollout_id(row), attempt=0),
                 run_id=row["_ng_run_id"],
                 source="environment",
@@ -1916,7 +1916,7 @@ async def test_run_outcomes_early_close_cancels_requests_and_can_drain_typed_res
                 by_task = {row["_ng_task_index"]: result for row, result in [first, *remaining]}
                 assert set(by_task) == {0, 1}
                 assert by_task[0] == {"reward": 1.0, "response": {}}
-                assert isinstance(by_task[1], RolloutFailure)
+                assert isinstance(by_task[1], RolloutFailureRecord)
                 assert by_task[1].failure.failure_kind == "judge_failed"
                 assert await outcomes.aclose_and_drain() == []
             else:

@@ -126,7 +126,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.rollout_outcomes import InvalidRolloutResult, RolloutFailure, StaleRolloutResult
+from nemo_gym.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
 from nemo_gym.rollout_records import (
     RUN_ID_KEY,
     coverage_path_for,
@@ -675,9 +675,9 @@ class _CompletedRollout:
     """A finished ``/run`` dispatch, with timing carried alongside (not inside) the raw result."""
 
     row: Dict[str, Any]
-    result: Dict[str, Any] | RolloutFailure
+    result: Dict[str, Any] | RolloutFailureRecord
     rollout_latency_ms: Optional[float]
-    # Actual generation retained for judge-only recovery, outside RolloutFailure.
+    # Actual generation retained for judge-only recovery, outside RolloutFailureRecord.
     verification_response: Optional[Dict[str, Any]] = None
     diagnostics: Optional[Dict[str, Any]] = None
     environment_server: Optional[str] = None
@@ -2329,7 +2329,7 @@ def _truncated_body(body: Optional[bytes]) -> Optional[str]:
     return text[:_MAX_FAILURE_BODY_CHARS] + ("…" if len(body) > _MAX_FAILURE_BODY_CHARS else "")
 
 
-def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailure:
+def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailureRecord:
     observed_response = stage in {"agent", "verifier"}
     # Transport phases are not episode execution stages. A timeout does not
     # establish whether an earlier transport attempt reached the server.
@@ -2339,7 +2339,7 @@ def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailure:
     message = str(
         failure.get("failure_reason") or failure.get("_ng_failure_message") or "Agent reported a no-result failure"
     )
-    return RolloutFailure(
+    return RolloutFailureRecord(
         episode_id=EpisodeId(rollout_id=logical_rollout_id(row), attempt=row.get(ATTEMPT_INDEX_KEY_NAME, 0)),
         run_id=row[RUN_ID_KEY],
         source="environment" if observed_response else "collector",
@@ -2369,7 +2369,7 @@ def _failure_outcome(row: Dict, failure: Dict, stage: str) -> RolloutFailure:
     )
 
 
-def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailure:
+def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailureRecord:
     if not isinstance(result, dict):
         raise InvalidRolloutResult("Agent /run must return a JSON object.")
     native = _materialized_taskset(row) is not None
@@ -2378,7 +2378,7 @@ def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailure:
     try:
         if "failure" in result and "episode_id" in result and not native:
             raise InvalidRolloutResult(
-                "Agents cannot return collector-owned RolloutFailure records; use the shared failure markers."
+                "Agents cannot return a collector-owned RolloutFailureRecord; use the shared failure markers."
             )
         if result.get(NG_FAILURE_CLASS_KEY) is not None:
             return _failure_outcome(row, result, "agent")
@@ -2438,7 +2438,7 @@ def _failure_diagnostics(result: Any) -> Dict:
     return diagnostics
 
 
-def _failure_compatibility_row(failure: RolloutFailure, verification_response: Optional[Dict] = None) -> Dict:
+def _failure_compatibility_row(failure: RolloutFailureRecord, verification_response: Optional[Dict] = None) -> Dict:
     """Keep existing sidecar routing keys and diagnostics alongside the canonical failure.
 
     Remove these aliases when row-oriented consumers and #3180 producers migrate.
@@ -2953,7 +2953,7 @@ class _RowResultIterator:
         return self._without_metadata(next(self._completions))
 
     @staticmethod
-    async def _without_metadata(future: Future) -> Tuple[Dict, Dict | RolloutFailure]:
+    async def _without_metadata(future: Future) -> Tuple[Dict, Dict | RolloutFailureRecord]:
         completed = await future
         return completed.row, completed.result
 
@@ -2975,7 +2975,7 @@ class _RowResultIterator:
         self._closed = True
         await self._completions.aclose()
 
-    async def aclose_and_drain(self) -> list[Future[Tuple[Dict, Dict | RolloutFailure]]]:
+    async def aclose_and_drain(self) -> list[Future[Tuple[Dict, Dict | RolloutFailureRecord]]]:
         """Stop admission, cancel unfinished client tasks, and preserve completed outcomes.
 
         Before its first suspension, this operation stops admitting rollouts and snapshots
@@ -3964,7 +3964,7 @@ class RolloutCollectionHelper(BaseModel):
                 verification_response = completed.verification_response
                 diagnostics = completed.diagnostics or _failure_diagnostics(result)
                 metric_result = diagnostics
-                if isinstance(result, RolloutFailure) and metric_result.get(NG_FAILURE_CLASS_KEY) is None:
+                if isinstance(result, RolloutFailureRecord) and metric_result.get(NG_FAILURE_CLASS_KEY) is None:
                     # Custom typed dispatchers may provide diagnostics without
                     # legacy routing labels; use the typed failure for those.
                     metric_result = {
@@ -3985,7 +3985,7 @@ class RolloutCollectionHelper(BaseModel):
                         result = _normalize_rollout_outcome(row, result)
                     elif result.get(NG_FAILURE_CLASS_KEY) is not None:
                         result = _failure_outcome(row, result, "agent")
-                structured_failure = isinstance(result, RolloutFailure)
+                structured_failure = isinstance(result, RolloutFailureRecord)
                 if structured_failure:
                     compatibility = _failure_compatibility_row(result, verification_response)
                     # The canonical alias must agree with the typed record. Keep a distinct
@@ -5159,7 +5159,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         *,
         run_id: str | None = None,
     ) -> _RowResultIterator:
-        """Yield ``(row, completed_dict | RolloutFailure)`` in completion order.
+        """Yield ``(row, completed_dict | RolloutFailureRecord)`` in completion order.
 
         Expected HTTP, JSON and result-shape failures become bounded records. Programming
         errors and cancellation still propagate. Call ``preprocess_examples`` first, or

@@ -560,14 +560,14 @@ def test_journal_health_waits_for_followup_without_reporting_stale_results(prepa
 def test_nested_failure_must_agree_with_saved_envelope(prepared_run, mismatch):
     from nemo_gym.episode_types import EpisodeFailure, EpisodeId
     from nemo_gym.rollout_collection import _failure_compatibility_row
-    from nemo_gym.rollout_outcomes import RolloutFailure
+    from nemo_gym.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollout_records import logical_rollout_id
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         row = store.pending(3)[0]
         store.record_dispatch(row)
-        failure = RolloutFailure(
+        failure = RolloutFailureRecord(
             episode_id=EpisodeId(rollout_id=logical_rollout_id(row)),
             run_id=store.manifest.run_id,
             source="environment",

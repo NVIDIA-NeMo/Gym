@@ -35,7 +35,7 @@ from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.path_utils import failures_path_for, resubmit_offset_path_for
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_outcomes import RolloutFailure
+from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_recovery import (
     RunManifest,
     _digest,
@@ -295,7 +295,7 @@ class RolloutRecords:
         self.check_run_identity(row, legacy=legacy)
         if "_ng_failure_record" in row:
             try:
-                failure = RolloutFailure.model_validate(row["_ng_failure_record"])
+                failure = RolloutFailureRecord.model_validate(row["_ng_failure_record"])
             except ValidationError as error:
                 raise ConfigError(
                     f"Invalid saved failure record for rollout attempt {key!r}: {error}. "
