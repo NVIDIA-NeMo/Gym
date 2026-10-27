@@ -1523,6 +1523,30 @@ async def test_incomplete_context_limit_verifies_partial_work(action: str) -> No
     assert verify["json"]["response"] == response
 
 
+@pytest.mark.parametrize("action", ["fail", "retry"])
+async def test_a_stopped_run_is_verified_and_its_result_keeps_the_stop_marker(action: str) -> None:
+    from nemo_gym.base_responses_api_agent import ROLLOUT_STOP_METADATA_KEY
+
+    environment, client = _environment_server()
+    environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(default_action=action)
+    stopped = _agent_response().model_dump(mode="json")
+    stopped.update(status="incomplete", metadata={ROLLOUT_STOP_METADATA_KEY: '{"reason":"budget"}'})
+    client.responses[2] = _Response(stopped)
+    verification = orjson.loads(client.responses[4].body)
+    verification.update(response=stopped)
+    client.responses[4] = _Response(verification)
+
+    result = await environment.run_request(_request())
+
+    # A stop is not a failure: no failure policy applies, and the graded result carries the marker.
+    assert result.failure is None
+    assert result.result.reward == 1.0
+    verify = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
+    assert verify["json"]["response"] == stopped
+    assert result.result.response.status == "incomplete"
+    assert result.result.response.metadata == {ROLLOUT_STOP_METADATA_KEY: '{"reason":"budget"}'}
+
+
 @pytest.mark.parametrize("raw", ["not valid JSON", '{"failure_kind":"unregistered_error"}'])
 async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) -> None:
     from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY

@@ -596,8 +596,9 @@ async def test_expire_while_running_requests_the_timeout_path_once(session, rece
     session.sandbox.exec.side_effect = exec_
     activation = asyncio.create_task(execute(session))
     await launched.wait()
-    assert await session.expire(timeout=1) is True
-    assert await session.expire(timeout=1) is False
+    assert await session.expire(timeout=1, reason="budget") is True
+    assert await session.expire(timeout=1, reason="operator") is False
+    assert session.expire_reason == "budget"
     commands = [call.args[0] for call in session.sandbox.exec.await_args_list]
     assert commands[-1] == "[ -d /session ] && touch /session/expire.request"
     assert not session.expired
@@ -650,7 +651,8 @@ async def test_failed_expire_request_can_be_retried(session):
     activation = asyncio.create_task(execute(session))
     await launched.wait()
     with pytest.raises(RuntimeError, match="Could not request test expiry: no dir"):
-        await session.expire(timeout=1)
+        await session.expire(timeout=1, reason="budget")
+    assert session.expire_reason is None
     assert await session.expire(timeout=1) is True
     finish.set()
     await activation

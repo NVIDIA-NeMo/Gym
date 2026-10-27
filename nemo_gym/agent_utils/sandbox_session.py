@@ -112,6 +112,8 @@ class SandboxSession[Artifacts]:
     _collect: Callable[[], Awaitable[Artifacts]] | None = field(default=None, init=False)
     _capture_attempted: bool = field(default=False, init=False)
     _expire_requested: bool = field(default=False, init=False)
+    # The caller's reason for the expiry ``expire`` requested, if it gave one.
+    expire_reason: str | None = field(default=None, init=False)
 
     @property
     def closing(self) -> bool:
@@ -252,6 +254,7 @@ class SandboxSession[Artifacts]:
                 raise RuntimeError(f"{self.harness} previous activation cleanup is unconfirmed")
             # An expiry applies to the activation it was requested for; one requested before the first launch stays.
             self._expire_requested = False
+            self.expire_reason = None
         if self._session_root is None:
             self._session_root = self.session_dir
         self.session_dir = session_dir
@@ -265,7 +268,7 @@ class SandboxSession[Artifacts]:
         self._collect = None
         self._capture_attempted = False
 
-    async def expire(self, *, timeout: float) -> bool:
+    async def expire(self, *, timeout: float, reason: str | None = None) -> bool:
         """End the harness as at its time limit, so its receipt records ``timed_out``.
 
         Unlike ``stop_harness`` (a cancellation), the activation is then graded like a timeout.
@@ -277,11 +280,13 @@ class SandboxSession[Artifacts]:
         if self._exec_task is not None and self._exec_task.done():
             return False
         self._expire_requested = True
+        self.expire_reason = reason
         if self.launch_started:
             try:
                 await self._request_expiry(timeout=timeout)
             except BaseException:
                 self._expire_requested = False
+                self.expire_reason = None
                 raise
         return True
 

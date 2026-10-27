@@ -15,6 +15,7 @@
 import asyncio
 import contextvars
 import ipaddress
+import json
 import logging
 from abc import abstractmethod
 from collections import OrderedDict
@@ -66,7 +67,6 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import AGENT_LIMIT
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -118,6 +118,9 @@ AGENT_SESSIONS = SessionKind(
 AGENT_ACTIVATION_HEADER = "x-ng-agent-activation"
 # Bounds the sandbox command that asks a running harness's supervisor to end it.
 ROLLOUT_STOP_TIMEOUT_SECONDS = 60.0
+# Response metadata that marks a run POST /rollouts/{rollout_id}/stop ended: a JSON object with the caller's
+# reason. It is not a failure: the run keeps a timeout's ``incomplete`` status and is verified like one.
+ROLLOUT_STOP_METADATA_KEY = "ng_rollout_stop"
 LOG = logging.getLogger(__name__)
 
 
@@ -246,7 +249,7 @@ class AgentCloseSessionResponse(BaseModel):
 
 
 class RolloutStopRequest(BaseModel):
-    """Body of ``POST /rollouts/{rollout_id}/stop``; the reason is only logged."""
+    """Body of ``POST /rollouts/{rollout_id}/stop``; the reason is recorded on the stopped run's response."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -356,8 +359,9 @@ class _AgentSessionRecord:
     expires_at: float = float("inf")
     activations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
     close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
-    # A rollout stop that arrived while the session was still seeding.
+    # A rollout stop that arrived while the session was still seeding, and the caller's reason.
     stop_requested: bool = False
+    stop_reason: str | None = None
 
 
 # Sandbox providers whose processes share the host network namespace, so a loopback model URL still resolves
@@ -727,7 +731,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     await self._undo_seed(body.agent_session_id, record)
                     raise
                 if record.stop_requested and (session := self._rollout_sandbox_session(record.state)) is not None:
-                    await session.expire(timeout=ROLLOUT_STOP_TIMEOUT_SECONDS)
+                    await session.expire(timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=record.stop_reason)
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
@@ -960,16 +964,20 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
         if record is None:
             raise HTTPException(404, f"No open agent session runs rollout {rollout_id}")
+        reason = body.reason if body else None
         if record.state is None:
             stopped = not record.stop_requested
-            record.stop_requested = True
+            if stopped:
+                record.stop_requested, record.stop_reason = True, reason
         else:
             session = self._rollout_sandbox_session(record.state)
             try:
-                stopped = session is not None and await session.expire(timeout=ROLLOUT_STOP_TIMEOUT_SECONDS)
+                stopped = session is not None and await session.expire(
+                    timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=reason
+                )
             except RuntimeError as error:
                 raise HTTPException(502, f"Could not stop rollout {rollout_id}: {error}") from error
-        LOG.info("Rollout %s stop (stopped=%s, reason=%s)", rollout_id, stopped, body.reason if body else None)
+        LOG.info("Rollout %s stop (stopped=%s, reason=%s)", rollout_id, stopped, reason)
         return RolloutStopResponse(rollout_id=rollout_id, stopped=stopped)
 
     def _capture_correlation_enabled(self) -> bool:
@@ -1143,13 +1151,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Mark the response of a run that ``POST /rollouts/{rollout_id}/stop`` ended.
 
         The response keeps a timeout's ``incomplete`` status, so it is verified like one, and gains the
-        ``agent_limit`` cause that tells it apart.
+        ``ng_rollout_stop`` marker that tells it apart from a timeout or a cancellation. A stop is not a
+        failure, so the response carries no failure kind.
         """
         if not session.expired or response.status != "incomplete":
             return response
-        outcome = AgentOutcome(failure_kind=AGENT_LIMIT)
-        metadata = {
-            **(response.metadata or {}),
-            AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
-        }
-        return response.model_copy(update={"metadata": metadata})
+        marker = json.dumps({"reason": session.expire_reason}, separators=(",", ":"))
+        return response.model_copy(
+            update={"metadata": {**(response.metadata or {}), ROLLOUT_STOP_METADATA_KEY: marker}}
+        )

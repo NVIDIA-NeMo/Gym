@@ -28,8 +28,7 @@ AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"
 class AgentOutcome(BaseModel):
     """Additional evidence distinguishing causes of a failed agent response.
 
-    Ordinary completion and limits already use response.status; a run that a rollout stop
-    ended also carries ``agent_limit`` on its ``incomplete`` response. HTTP status here
+    Ordinary completion and limits already use response.status. HTTP status here
     belongs to the upstream model request, not the agent endpoint's HTTP 200.
     """
 

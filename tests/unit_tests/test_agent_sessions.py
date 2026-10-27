@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_agent import (
+    ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
@@ -23,6 +24,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
@@ -256,7 +258,7 @@ class _StoppableAgent(_Agent):
 def _stoppable_agent(expired: list[bool]) -> _StoppableAgent:
     agent = _StoppableAgent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
     agent._installed = asyncio.Event()
-    agent._sandbox_session = MagicMock(expire=AsyncMock(side_effect=lambda *, timeout: expired.pop(0)))
+    agent._sandbox_session = MagicMock(expire=AsyncMock(side_effect=lambda *, timeout, reason: expired.pop(0)))
     return agent
 
 
@@ -281,7 +283,7 @@ def test_rollout_stop_expires_the_running_harness_once() -> None:
     agent, first, second = asyncio.run(scenario())
     assert first == RolloutStopResponse(rollout_id="rollout-a2", stopped=True)
     assert second == RolloutStopResponse(rollout_id="rollout-a2", stopped=False)
-    assert agent._sandbox_session.expire.await_count == 2
+    assert [call.kwargs["reason"] for call in agent._sandbox_session.expire.await_args_list] == ["budget", None]
 
 
 def test_rollout_stop_during_install_expires_the_harness_at_launch() -> None:
@@ -289,8 +291,8 @@ def test_rollout_stop_during_install_expires_the_harness_at_launch() -> None:
         agent = _stoppable_agent([True])
         seeding = asyncio.create_task(agent.seed_agent_session(MagicMock(session={}), _seed_request()))
         await asyncio.sleep(0)
-        first = await agent.stop_rollout("rollout-a2")
-        second = await agent.stop_rollout("rollout-a2")
+        first = await agent.stop_rollout("rollout-a2", RolloutStopRequest(reason="budget"))
+        second = await agent.stop_rollout("rollout-a2", RolloutStopRequest(reason="operator"))
         agent._sandbox_session.expire.assert_not_awaited()
         agent._installed.set()
         await seeding
@@ -298,7 +300,9 @@ def test_rollout_stop_during_install_expires_the_harness_at_launch() -> None:
 
     agent, first, second = asyncio.run(scenario())
     assert (first.stopped, second.stopped) == (True, False)
+    # The first stop's reason is the one the harness's launch carries.
     agent._sandbox_session.expire.assert_awaited_once()
+    assert agent._sandbox_session.expire.await_args.kwargs["reason"] == "budget"
 
 
 def test_rollout_stop_after_close_is_unknown() -> None:
@@ -317,3 +321,30 @@ def test_rollout_stop_after_close_is_unknown() -> None:
         return closed.value.status_code
 
     assert asyncio.run(scenario()) == 404
+
+
+@pytest.mark.parametrize(
+    "status, expired, marked",
+    [("incomplete", True, True), ("incomplete", False, False), ("failed", True, False), ("completed", True, False)],
+)
+def test_rollout_stop_marks_only_the_timeout_shaped_response_it_ended(status: str, expired: bool, marked: bool):
+    agent = _Agent.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+    response = NeMoGymResponse(
+        id="response",
+        created_at=0,
+        model="model",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        parallel_tool_calls=True,
+        tools=[],
+        status=status,
+        metadata={"existing": "retained"},
+    )
+    reported = agent.report_rollout_stop(response, MagicMock(expired=expired, expire_reason="budget"))
+    if marked:
+        # A stop is not a failure: the marker replaces any failure kind, and the status stays ``incomplete``.
+        assert reported.metadata == {"existing": "retained", ROLLOUT_STOP_METADATA_KEY: '{"reason":"budget"}'}
+        assert reported.model_dump(exclude={"metadata"}) == response.model_dump(exclude={"metadata"})
+    else:
+        assert reported is response

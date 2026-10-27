@@ -900,9 +900,10 @@ async def test_rollout_stop_ends_codex_as_a_timeout(setup):
     assert (await agent.stop_rollout(rollout_id, RolloutStopRequest(reason="budget"))).stopped is True
     assert (await agent.stop_rollout(rollout_id)).stopped is False
     response = await task
-    # The same response as at the run's own deadline, graded as a timeout, plus the stop's cause.
+    # The same response as at the run's own deadline, verified as a timeout, plus the stop's marker and no failure kind.
     assert response.status == "incomplete" and response.error is None
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_limit"}
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert "ng_agent_outcome" not in response.metadata
     assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output", "message"]
     assert sandbox.signals == []
     assert (await agent.stop_rollout(rollout_id)).stopped is False
@@ -920,7 +921,8 @@ async def test_rollout_stop_before_activation_never_starts_codex(setup):
     assert (await agent.stop_rollout(seed().episode_id.capture_key)).stopped is True
     response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert response.status == "incomplete" and response.error is None and response.output == []
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_limit"}
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": None}
+    assert "ng_agent_outcome" not in response.metadata
     launch = next(call.kwargs["command"] for call in sandbox.launch.await_args_list)
     assert "--expire-file" in launch
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
