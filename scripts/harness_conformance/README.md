@@ -151,6 +151,9 @@ reports a failed response with the model error to EnvServer; it does not re-rais
 the model failure. The runner witnesses that response before grading. EnvServer
 owns verification and masking policy, so this scenario does not prescribe a grade
 or require verification. Retained model-call evidence is still required.
+The `verifier.judge_reference` check is P1: a failure is reported but does not block
+the P0 gate. Existing evidence and health checks retain their individual tiers.
+
 Every applicable individual P0 check must pass;
 TE labels group results and do not determine priority or grant exemptions.
 

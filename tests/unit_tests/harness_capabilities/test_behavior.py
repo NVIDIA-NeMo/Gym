@@ -193,4 +193,5 @@ def test_judge_scenario_requires_witnessed_grade_and_verifier_ownership(missing)
         judge_verifier=True,
     )
     check = next(c for c in result if c["id"] == "verifier.judge_reference")
+    assert check["tier"] == "P1"
     assert check["status"] == ("pass" if missing is None else "fail")

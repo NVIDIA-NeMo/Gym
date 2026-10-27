@@ -348,7 +348,7 @@ def inspect_behavior(
     results.run(
         BehavioralCheck(
             id="verifier.judge_reference",
-            tier="P0",
+            tier="P1",
             evidence=("TE-6", "TE-8"),
             location="$.judgement_id",
             reason="the grade must reference the witnessed judge response with explicit verifier ownership",
