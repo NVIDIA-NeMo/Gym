@@ -77,9 +77,10 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch, english_rows):
             f"{letter}: {text}" for letter, text in zip("ABCD", expected)
         )
         english = expected_english[index]
-        assert {key: row[key] for key in english if key != "uuid"} == {
-            key: value for key, value in english.items() if key != "uuid"
+        assert {key: row[key] for key in english if key not in ("uuid", "task_id")} == {
+            key: value for key, value in english.items() if key not in ("uuid", "task_id")
         }
+        assert row["task_id"] == f"en/{english['task_id']}"
     assert build(records, question_ids=["2"]) == full[2:]
 
     translated = [record(index, "hi") for index in range(3)]
@@ -93,6 +94,8 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch, english_rows):
             {letter: "अनुवाद " + text for letter, text in option.items()} for option in original["options"]
         ]
     assert full[0]["uuid"] != hindi[0]["uuid"]
+    assert [row["task_id"] for row in hindi] == ["hi/record-0", "hi/record-1", "hi/record-2"]
+    assert len({row["task_id"] for row in full + hindi}) == len(full + hindi)
     assert hindi[0]["metadata"]["subset_for_metrics"] == "hi"
     assert hindi[0]["template_metadata"] == {"allow_localized_answer_labels": True}
     assert "template_metadata" not in full[0]

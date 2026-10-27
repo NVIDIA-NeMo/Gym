@@ -42,7 +42,10 @@ def _sandbox_hermes_requirement() -> str:
 
 
 _HERMES_RUNTIME = SandboxPythonRuntime(
-    harness="hermes", requirements=(_sandbox_hermes_requirement(),), import_check="import run_agent, mcp"
+    harness="hermes",
+    # The pinned Hermes client requires the MCP 1 Streamable HTTP API.
+    requirements=(_sandbox_hermes_requirement(), "mcp>=1.28.1,<2"),
+    import_check="import run_agent; from mcp.client.streamable_http import streamablehttp_client",
 )
 _SANDBOX_RUNTIME_DIR = _HERMES_RUNTIME.directory
 _SANDBOX_PYTHON = _HERMES_RUNTIME.python
