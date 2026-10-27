@@ -217,6 +217,10 @@ tool.wait()
 """
 
 
+def _parent(pid: int) -> int:
+    return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+
+
 def _alive(pid: int) -> bool:
     try:
         return Path(f"/proc/{pid}/stat").read_text().split(") ")[-1][0] != "Z"
@@ -247,10 +251,15 @@ async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(s
         supervisor_pid = int((session_dir / SUPERVISOR_PID_FILE).read_text())
         tool_pid = int(tool_pid_file.read_text())
         # The bash supervisor's polling sleeps are children too; the runner is the tool's parent.
-        runner_pid = int(Path(f"/proc/{tool_pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
-        assert str(runner_pid) in Path(f"/proc/{supervisor_pid}/task/{supervisor_pid}/children").read_text().split()
+        runner_pid = _parent(tool_pid)
+        # This launch shell is no process group leader, so the recorded PID started the supervisor
+        # in a new group; either way the runner's parent is the supervisor.
+        harness_supervisor = _parent(runner_pid)
+        assert harness_supervisor == supervisor_pid or str(harness_supervisor) in (
+            Path(f"/proc/{supervisor_pid}/task/{supervisor_pid}/children").read_text().split()
+        )
         # The supervisor is bash; the runner runs through a link to the base interpreter.
-        for pid, name in ((supervisor_pid, "bash"), (runner_pid, "gym-runner")):
+        for pid, name in ((supervisor_pid, "bash"), (harness_supervisor, "bash"), (runner_pid, "gym-runner")):
             assert Path(f"/proc/{pid}/comm").read_text().strip() == name
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
             assert "python" not in cmdline and ".py" not in cmdline, cmdline
@@ -265,8 +274,8 @@ async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(s
             ["-x", "python3"],
         ):
             matched = {int(pid) for pid in subprocess.run(["pgrep", *args], capture_output=True).stdout.split()}
-            assert not matched & {supervisor_pid, runner_pid}, args
-        assert all(map(_alive, (supervisor_pid, runner_pid, tool_pid)))
+            assert not matched & {supervisor_pid, harness_supervisor, runner_pid}, args
+        assert all(map(_alive, (supervisor_pid, harness_supervisor, runner_pid, tool_pid)))
     finally:
         # Gym's own stop goes through the stop file, whatever the processes are called.
         receipt = await stop_and_confirm_cleanup(
@@ -274,7 +283,7 @@ async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(s
         )
         await asyncio.wait_for(launch, timeout=10)
     assert receipt["cleanup_confirmed"] is True and receipt["error"] is None
-    assert not any(map(_alive, (supervisor_pid, runner_pid, tool_pid)))
+    assert not any(map(_alive, (supervisor_pid, harness_supervisor, runner_pid, tool_pid)))
 
 
 @pytest.mark.parametrize("confirmed", [False, "true", 1])
