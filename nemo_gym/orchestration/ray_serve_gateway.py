@@ -52,14 +52,6 @@ MAX_ONGOING_REQUESTS_PER_INSTANCE = 65536
 # aiohttp's default 300 s total timeout would cut off long generations with a 500; vLLM
 # bounds each request itself, so the proxy adds no limit of its own.
 PROXY_TIMEOUT = aiohttp.ClientTimeout(total=None)
-# aiohttp's default connector allows 100 open connections, which caps every instance at 100
-# concurrent requests however large its own batch is; 0 means unlimited.
-PROXY_CONNECTOR_LIMIT = 0
-
-
-def proxy_session() -> aiohttp.ClientSession:
-    """The session a replica uses to proxy requests to its own vLLM subprocess."""
-    return aiohttp.ClientSession(timeout=PROXY_TIMEOUT, connector=aiohttp.TCPConnector(limit=PROXY_CONNECTOR_LIMIT))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -166,7 +158,9 @@ class VLLMInstance:
         # RAY_ADDRESS makes vLLM's own Ray executor join this cluster instead of starting its own.
         env = {**os.environ, "RAY_ADDRESS": ray.get_runtime_context().gcs_address}
         self._proc = subprocess.Popen(cmd, env=env)
-        self._session = proxy_session()
+        # limit=0: aiohttp's default connector allows 100 open connections, which would cap this
+        # instance at 100 concurrent requests however large its own batch is.
+        self._session = aiohttp.ClientSession(timeout=PROXY_TIMEOUT, connector=aiohttp.TCPConnector(limit=0))
         self._wait_until_healthy()
 
     def _wait_until_healthy(self) -> None:
