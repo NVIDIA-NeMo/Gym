@@ -57,7 +57,13 @@ def test_catalog_covers_p0_without_exposing_expectations():
 @pytest.mark.parametrize("use_agent_sessions", [False, True])
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
-    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
+    config = _config(
+        harness,
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+        use_agent_sessions=use_agent_sessions,
+    )
     from omegaconf import OmegaConf
 
     from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
@@ -263,7 +269,12 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
 def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_name):
     from omegaconf import OmegaConf
 
-    config = _config("opencode", tmp_path, [10001, 10002, 10003, 10004], 12)
+    config = _config(
+        "opencode",
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+    )
     server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
     header = server_client.assistant_message_header("policy_model")
     assert header is not None
