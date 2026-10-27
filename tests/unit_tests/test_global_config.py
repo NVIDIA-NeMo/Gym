@@ -1373,7 +1373,7 @@ contested: second_inner
         global_config_dict = DictConfig(
             {
                 "a": {
-                    "b": {
+                    "resources_servers": {
                         "c": {"my_key": "my_value"},
                         "d": None,
                     },
@@ -1381,6 +1381,12 @@ contested: second_inner
                 },
                 "f": None,
             }
+        )
+        assert {"my_key": "my_value"} == get_first_server_config_dict(global_config_dict, "a")
+
+    def test_get_first_server_config_dict_finds_server_type_key_after_other_keys(self) -> None:
+        global_config_dict = DictConfig(
+            {"a": {"note": "extra key placed first", "resources_servers": {"c": {"my_key": "my_value"}}}}
         )
         assert {"my_key": "my_value"} == get_first_server_config_dict(global_config_dict, "a")
 

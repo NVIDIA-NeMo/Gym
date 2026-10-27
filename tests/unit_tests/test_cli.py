@@ -36,6 +36,7 @@ from nemo_gym.cli.env import (
     _GRACEFUL_SHUTDOWN_TIMEOUT_SEC,
     RunConfig,
     RunHelper,
+    _configured_servers,
     _delete_server_venv,
     _resolve_server_dir,
     _select_shard,
@@ -45,6 +46,7 @@ from nemo_gym.cli.env import (
     init_resources_server,
     list_environments,
     pip_list,
+    prefetch,
     run,
     status,
     validate,
@@ -372,6 +374,46 @@ class TestResolveServerDir:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
         assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
+
+
+class TestConfiguredServers:
+    """Server discovery finds an entry's server type key wherever it sits among the entry's keys."""
+
+    _EXTRA_KEY_FIRST = {
+        "my_model": {
+            "note": "extra key placed first",
+            "responses_api_models": {"openai_model": {"entrypoint": "app.py"}},
+        }
+    }
+
+    def test_finds_server_type_key_after_other_keys(self) -> None:
+        servers = list(_configured_servers(OmegaConf.create(self._EXTRA_KEY_FIRST)))
+
+        assert [(server.top_level_path, server.server_type, server.name) for server in servers] == [
+            ("my_model", "responses_api_models", "openai_model")
+        ]
+
+    def test_skips_entries_without_a_server_type_key(self) -> None:
+        config = OmegaConf.create(
+            {"not_a_server": {"note": {"inner": {"entrypoint": "app.py"}}}, **self._EXTRA_KEY_FIRST}
+        )
+
+        assert [server.top_level_path for server in _configured_servers(config)] == ["my_model"]
+
+    def test_prefetch_finds_server_type_key_after_other_keys(self, monkeypatch: MonkeyPatch) -> None:
+        setup_env_command = MagicMock(return_value="setup")
+        run_command = MagicMock()
+        run_command.return_value.wait.return_value = 0
+        config = OmegaConf.create(self._EXTRA_KEY_FIRST)
+        monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=config))
+        monkeypatch.setattr(nemo_gym.cli.env, "GlobalConfigDictParser", MagicMock())
+        monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", setup_env_command)
+        monkeypatch.setattr(nemo_gym.cli.env, "run_command", run_command)
+
+        prefetch()
+
+        assert setup_env_command.call_args.args[0].parts[-2:] == ("responses_api_models", "openai_model")
+        assert run_command.call_args.kwargs["server_name"] == "my_model"
 
 
 class TestRunHelperDryRunSpinup:

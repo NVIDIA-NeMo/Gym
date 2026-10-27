@@ -222,6 +222,11 @@ SERVER_TYPE_KEYS: Tuple[str, ...] = (
 )
 
 
+def server_type_key(server_type_config_dict: DictConfig) -> Optional[str]:
+    """Return the server type key of a top-level config entry, wherever it sits among the entry's keys."""
+    return next((key for key in server_type_config_dict if key in SERVER_TYPE_KEYS), None)
+
+
 def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
     """Return the agent references in one environment server's config.
 
@@ -1895,7 +1900,7 @@ def set_global_config_dict(
 def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path: str) -> DictConfig:
     # Traverse three levels deep total
     server_config_dict = global_config_dict[top_level_path]
-    server_config_dict = list(server_config_dict.values())[0]
+    server_config_dict = server_config_dict[server_type_key(server_config_dict)]
     server_config_dict = list(server_config_dict.values())[0]
 
     return server_config_dict
