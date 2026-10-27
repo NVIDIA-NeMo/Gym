@@ -34,5 +34,5 @@ def votes_for(config: dict, context: str, n_steps: int | None = None) -> int:
 
 def config_hash(config: dict) -> str:
     """Keep the recorded identity of unchanged calibrated prompts and model settings."""
-    body = {key: value for key, value in config.items() if key not in {"version", "changed", "note"}}
+    body = {key: value for key, value in config.items() if key != "version"}
     return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:12]
