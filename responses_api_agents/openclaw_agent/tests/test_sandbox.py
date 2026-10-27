@@ -732,9 +732,11 @@ def test_close_retry_and_stale_activation_do_not_run_host_openclaw(setup):
         assert client.post("/v1/agent_sessions/close", json=bad).status_code == 409
         with patch.object(agent, "_run_openclaw", AsyncMock(side_effect=AssertionError("host OpenClaw must not run"))):
             assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
+        sandbox.disconnect.assert_awaited_once()
         client.cookies.clear()
         assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
-    sandbox.disconnect.assert_awaited_once()
+    assert sandbox.disconnect.await_count == 2
+    assert all(record.state is None for record in agent._session_records.values())
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):

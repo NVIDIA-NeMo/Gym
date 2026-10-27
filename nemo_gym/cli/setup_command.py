@@ -357,6 +357,7 @@ def run_command(
     stdout_target: IO[Any] | None = None,
     stderr_target: IO[Any] | None = None,
     extra_env: Mapping[str, str] | None = None,
+    start_new_session: bool = False,
 ) -> Popen:
     if global_config_dict is None:
         global_config_dict = get_global_config_dict()
@@ -405,7 +406,7 @@ def run_command(
         safe_name = (server_name or working_dir_path.name).replace("/", "_")
         log_path = Path(log_dir) / f"{safe_name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        command = f"set -o pipefail; ({command}) 2>&1 | tee -a {log_path}"
+        command = f"set -o pipefail; ({command}) 2>&1 | tee -i -a {log_path}"
 
     redirect_stdout = stdout if stdout_target is None else stdout_target
     redirect_stderr = stderr if stderr_target is None else stderr_target
@@ -416,4 +417,5 @@ def run_command(
         env=custom_env,
         stdout=redirect_stdout,
         stderr=redirect_stderr,
+        start_new_session=start_new_session,
     )

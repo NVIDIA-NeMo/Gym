@@ -323,6 +323,24 @@ The budget starts when Gym begins polling its servers for readiness, which happe
 
 Raise the value for servers with legitimately long initialization with `++server_spinup_timeout_seconds=<seconds>`, or set it to `0` to preserve an unbounded wait while debugging. The value must be a number of seconds; anything else is reported as a configuration error before any server starts. A deterministic startup exception should be fixed rather than hidden behind a larger timeout.
 
+### Server Shutdown
+
+Managed servers run in separate process sessions. On shutdown, Gym sends each server group one SIGINT and waits within one shared `server_shutdown_timeout_seconds` grace period (default `1`). Set it to finite nonnegative seconds; numeric strings are accepted, and `0` requests immediate escalation. Invalid values fail before any server starts. After the grace expires, Gym sends SIGKILL to the remaining groups and uses one additional bounded reap interval. Descendants remain part of the owned group even if the launching shell exits first. The HTTP sidecar stays alive until the servers stop, with its own shutdown grace; telemetry and head-server teardown also fall outside the managed-server grace.
+
+Agent servers use their lifespan shutdown to close remaining sessions concurrently. One `session_close_timeout_seconds` budget bounds the whole drain, including incomplete setup and cleanup already in progress. This field still bounds individual close phases during normal operation. Its base default is `60` seconds; adapters may keep their own defaults, including `30` for Hermes and Stirrup. A timeout cancels pending cleanup and reports unconfirmed session IDs. Unconfirmed cleanup retains its handle and has no successful close receipt; process exit does not establish that a remote sandbox stopped, so its owner and provider TTL remain responsible after forced termination.
+
+Allow the managed-server grace to exceed the longest agent drain plus Uvicorn request cancellation and process overhead. The default one-second grace does not guarantee a sixty-second agent drain. For example, if request cancellation and shutdown overhead fit within ten seconds:
+
+```yaml
+server_shutdown_timeout_seconds: 70
+my_agent:
+  responses_api_agents:
+    codex_agent:
+      session_close_timeout_seconds: 60
+```
+
+An external supervisor's shutdown deadline must exceed these budgets too, or it can kill Gym before graceful cleanup completes.
+
 ### Model Endpoint Unreachable
 
 ```

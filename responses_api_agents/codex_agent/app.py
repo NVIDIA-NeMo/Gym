@@ -522,7 +522,6 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_context_budget(self) -> "CodexAgentConfig":
