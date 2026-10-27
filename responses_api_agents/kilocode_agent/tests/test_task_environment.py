@@ -173,7 +173,9 @@ def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, 
         assert not receipt.exists()
 
 
-def _plugin_probe(tmp_path: Path, script: str, *, preflight: bool = False) -> dict:
+def _plugin_probe(
+    tmp_path: Path, script: str, *, preflight: bool = False, required: tuple[str, ...] = ("task.tools",)
+) -> dict:
     """Exercise the shipped plugin through its public hooks in a fresh Node process."""
     node = shutil.which("node")
     if node is None:
@@ -183,7 +185,7 @@ def _plugin_probe(tmp_path: Path, script: str, *, preflight: bool = False) -> di
         json.dumps({key: str(tmp_path / "task" / key.lower()) for key in TASK_DIRECTORIES})
     )
     (tmp_path / "input.json").write_text(
-        json.dumps({"required_mcp_servers": ["task.tools"], "mcp_preflight": preflight})
+        json.dumps({"required_mcp_servers": list(required), "mcp_preflight": preflight})
     )
     (tmp_path / "probe.mjs").write_text(
         'import { TaskEnvironment } from "./task_environment.mjs";\n'
@@ -244,29 +246,54 @@ console.log(JSON.stringify({calls, receipt: await receipt()}));
     assert result == {"calls": 1, "receipt": ["task.tools"]}
 
 
-def test_activation_rechecks_required_mcp_and_revokes_stale_receipt(tmp_path: Path) -> None:
+@pytest.mark.parametrize("status", ["connected", "failed"])
+def test_activation_checks_required_mcp_once_before_model_requests(tmp_path: Path, status: str) -> None:
+    """Kilo never refreshes MCP status after connecting, so later requests reuse the first result."""
     result = _plugin_probe(
         tmp_path,
+        f"const status = {json.dumps(status)};\n"
         """
 let calls = 0;
 const client = {mcp: {status: async () => {
   calls++;
-  return {data: {"task.tools": {status: calls === 1 ? "connected" : "failed"}}};
+  return {data: {"task.tools": {status}}};
 }}};
 const hooks = await TaskEnvironment({client});
 await hooks["tool.definition"]();
 const beforeActivation = calls;
-await hooks["chat.params"]();
-const firstReceipt = await receipt();
-let error;
-try { await hooks["chat.params"](); } catch (failure) { error = failure.message; }
-console.log(JSON.stringify({beforeActivation, calls, firstReceipt, error, receipt: await receipt()}));
+const errors = [];
+for (let request = 0; request < 3; request++) {
+  try { await hooks["chat.params"](); } catch (failure) { errors.push(failure.message); }
+}
+console.log(JSON.stringify({beforeActivation, calls, errors, receipt: await receipt()}));
 """,
     )
     assert result["beforeActivation"] == 0
-    assert result["calls"] == 2
-    assert result["firstReceipt"] == ["task.tools"]
-    assert result["receipt"] is None and "required Gym MCP" in result["error"]
+    assert result["calls"] == 1
+    if status == "connected":
+        assert result["receipt"] == ["task.tools"] and result["errors"] == []
+    else:
+        assert result["receipt"] is None
+        assert result["errors"] == ["Kilo could not initialize required Gym MCP servers"] * 3
+
+
+@pytest.mark.parametrize("preflight", [False, True])
+def test_sessions_without_required_mcp_never_query_mcp_or_write_receipt(tmp_path: Path, preflight: bool) -> None:
+    result = _plugin_probe(
+        tmp_path,
+        """
+let calls = 0;
+const client = {mcp: {status: async () => { calls++; throw new Error("unexpected MCP status query"); }}};
+const hooks = await TaskEnvironment({client});
+await hooks["tool.definition"]();
+await hooks["chat.params"]();
+await hooks["chat.params"]();
+console.log(JSON.stringify({calls, receipt: await receipt()}));
+""",
+        preflight=preflight,
+        required=(),
+    )
+    assert result == {"calls": 0, "receipt": None}
 
 
 @contextmanager

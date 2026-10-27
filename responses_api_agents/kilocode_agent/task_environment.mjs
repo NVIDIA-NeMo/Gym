@@ -31,7 +31,12 @@ export const TaskEnvironment = async ({ client } = {}) => {
       throw new Error("Kilo could not initialize required Gym MCP servers");
     }
   };
-  let preflight;
+  // Kilo records MCP status when the CLI connects and never refreshes it, so one
+  // check per process is as strong as a recheck; a failed check stays failed.
+  let check;
+  const requireMcp = async () => {
+    await (check ??= checkRequiredMcp());
+  };
   const hooks = {
     "shell.env": async (_input, output) => {
       Object.assign(output.env, env);
@@ -39,9 +44,9 @@ export const TaskEnvironment = async ({ client } = {}) => {
     // These hooks run after Kilo's instance bootstrap. Calling mcp.status in the
     // plugin factory would wait on that same bootstrap and deadlock.
     "tool.definition": async () => {
-      if (input.mcp_preflight) await (preflight ??= checkRequiredMcp());
+      if (input.mcp_preflight) await requireMcp();
     },
-    "chat.params": checkRequiredMcp,
+    "chat.params": requireMcp,
   };
   // Kilo logs plugin initialization failures and continues without the hook.
   // The adapter requires this receipt before it accepts the episode for grading.

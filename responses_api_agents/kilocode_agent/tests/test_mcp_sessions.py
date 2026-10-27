@@ -5,11 +5,14 @@
 import copy
 import json
 import re
+import shlex
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
 
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionSetupError
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -51,6 +54,15 @@ def test_mcp_config_preserves_static_servers_and_uses_session_credentials() -> N
     assert "/ng-rollout/rollout-1-a2/v1" in config["provider"]["nemo"]["options"]["baseURL"]
     assert agent.config.kilo_config == original
     assert agent.config.tool_accesses[0].connection.headers["Authorization"] == "Bearer old-token"
+
+
+def test_null_static_mcp_is_treated_as_empty_when_grants_are_added() -> None:
+    agent = _make_model_server_agent(kilo_config={"mcp": None})
+    session = state()
+    session.request.tool_accesses = [mcp()]
+    assert agent._mcp_grants(session.request) == session.request.tool_accesses
+    assert set(agent._sandbox_config(session, rollout_id="rollout-1-a2")["mcp"]) == {"task.tools"}
+    assert agent.config.kilo_config == {"mcp": None}
 
 
 @pytest.mark.parametrize("static_name,grant_name", [("tools", "tools"), ("task.tools", "task_tools")])
@@ -152,6 +164,32 @@ async def test_seed_preflights_required_mcp_in_borrowed_or_owned_sandbox(borrowe
         assert agent.config.sandbox_config["metadata"]["gym-agent"] == "wrong"
 
 
+async def test_optional_mcp_grants_skip_preflight_in_owned_sandbox_with_null_metadata() -> None:
+    agent = _make_model_server_agent(
+        kilo_version="7.4.15", sandbox_provider="sandbox", sandbox_config={"image": "test", "metadata": None}
+    )
+    body = seed(borrowed=False)
+    body.tool_accesses = [mcp("optional", required=False)]
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SandboxExecResult(return_code=0, stdout="", stderr="")
+    with (
+        patch(f"{APP}.resolve_provider_config", return_value={}),
+        patch(f"{APP}.resolve_provider_metadata", return_value={}),
+        patch(f"{APP}.get_global_config_dict", return_value={}),
+        patch(f"{APP}.create_provider", return_value=AsyncMock()),
+        patch(f"{APP}.AsyncSandbox", return_value=sandbox),
+        patch.object(KiloSandboxSession, "install_runtime", new_callable=AsyncMock),
+        patch.object(KiloSandboxSession, "prepare_mcp", new_callable=AsyncMock) as prepare,
+    ):
+        session = await agent._seed_agent_session_state(body)
+    # An unreachable optional server must not fail seed, so no readiness preflight runs.
+    prepare.assert_not_awaited()
+    assert session.required_mcp_servers == ()
+    spec = sandbox.start.await_args.args[0]
+    assert spec.ttl_s == agent.config.setup_timeout + agent.config.timeout + 600
+    assert spec.metadata == {"gym-agent": "kilocode", "gym-session": "session-1", "gym-rollout": "rollout-1-a2"}
+
+
 @pytest.mark.parametrize("borrowed", [True, False])
 @pytest.mark.parametrize("cleanup_fails", [True, False])
 async def test_failed_required_mcp_seed_cleans_up_and_retains_state_when_cleanup_fails(
@@ -208,6 +246,43 @@ async def test_completed_model_text_requires_mcp_receipt(ready: bool) -> None:
     else:
         with pytest.raises(RuntimeError, match="required MCP"):
             await agent._sandbox_response(session, body, rollout_id="rollout-1-a2")
+
+
+MISSING_MCP = "required MCP servers before model activation: task.tools unavailable"
+
+
+@pytest.mark.parametrize(
+    "task_environment_ready,timed_out,message,error_type",
+    [
+        (True, False, MISSING_MCP, "required_mcp_unconfirmed"),
+        (True, True, MISSING_MCP, "required_mcp_unconfirmed"),
+        # A plugin that never loaded writes neither receipt; report that cause, not the MCP symptom.
+        (False, False, "task-environment plugin: task.tools unavailable", "task_environment_unconfirmed"),
+    ],
+)
+async def test_unconfirmed_required_mcp_reports_cause_and_failed_observation(
+    task_environment_ready: bool, timed_out: bool, message: str, error_type: str
+) -> None:
+    agent = _make_model_server_agent()
+    session = state()
+    session.required_mcp_servers = ("task.tools",)
+    session.request.tool_accesses = [mcp()]
+    session.session.cleanup = receipt(return_code=None if timed_out else 0, timed_out=timed_out)
+    artifacts = KiloArtifacts(
+        stdout=TEXT,
+        stderr="task.tools unavailable",
+        exit_code=None if timed_out else 0,
+        task_environment_ready=task_environment_ready,
+        required_mcp_ready=False,
+    )
+    session.session.execute = AsyncMock(return_value=artifacts)
+    session.session.artifacts = artifacts
+    with pytest.raises(RuntimeError, match=message):
+        await agent._sandbox_response(
+            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+        )
+    sandbox_record = agent._sandbox_observations(session).records[-1]
+    assert (sandbox_record.outcome, sandbox_record.error_type) == ("failed", error_type)
 
 
 @pytest.mark.parametrize(
@@ -280,6 +355,123 @@ async def test_preflight_runs_without_model_and_rearms_activation_only_after_suc
     assert stage.await_args.kwargs["mcp_preflight"] is True
     assert stage.await_args.kwargs["config"] == '{"mcp": {}}'
     begin.assert_awaited_once_with(session_dir=f"{session.directory}/activation", timeout=5)
+
+
+ROOT = "/tmp/nemo-gym-kilo-sessions/mcp"
+
+
+class FakeSandbox:
+    """Stands in for the supervisor and runner: Kilo writes in ROOT, cleanup receipts in each supervisor dir."""
+
+    def __init__(self, *, mcp_connected: bool = True, exit_code: int | None = 0) -> None:
+        self.mcp_connected = mcp_connected
+        # None: the supervisor's deadline stopped the runner before it recorded an exit.
+        self.exit_code = exit_code
+        self.files: dict[str, str] = {}
+        self.launches: list[dict] = []
+        self.commands: list[str] = []
+        self.exec = AsyncMock(side_effect=self._exec)
+        self.stop = AsyncMock()
+        self.disconnect = AsyncMock()
+
+    async def _exec(self, command: str, **kwargs: object) -> SandboxExecResult:
+        self.commands.append(command)
+        if "rm -f --" in command:
+            for path in shlex.split(command.split("rm -f --", 1)[1]):
+                self.files.pop(path, None)
+        elif "--receipt" in command and "process_supervisor" in command:
+            supervisor = re.search(r"--receipt (\S+)/cleanup\.json", command).group(1)
+            payload = json.loads(self.files[f"{ROOT}/input.json"])
+            self.launches.append({"supervisor": supervisor, **payload})
+            self.files.pop(f"{ROOT}/required-mcp.ready", None)
+            self.files[f"{ROOT}/task-environment.ready"] = "ready\n"
+            if self.mcp_connected:
+                self.files[f"{ROOT}/required-mcp.ready"] = json.dumps(payload["required_mcp_servers"])
+            self.files[f"{ROOT}/stdout.jsonl"] = "" if payload["mcp_preflight"] else TEXT
+            self.files[f"{ROOT}/stderr.log"] = "task.tools connect failed: Bearer task-token"
+            if self.exit_code is not None:
+                self.files[f"{ROOT}/exit.json"] = json.dumps(self.exit_code)
+            timed_out = self.exit_code is None
+            self.files[f"{supervisor}/cleanup.json"] = json.dumps(
+                receipt(return_code=-15 if timed_out else 0, timed_out=timed_out)
+            )
+        elif "--snapshot" in command:
+            return SandboxExecResult(return_code=1, stdout="", stderr="no database")
+        return SandboxExecResult(return_code=0, stdout="", stderr="")
+
+    async def upload(self, source: Path, destination: str) -> None:
+        self.files[destination] = Path(source).read_text()
+
+    async def download(self, source: str, destination: Path) -> None:
+        Path(destination).write_text(self.files[source])
+
+
+def _preflight_state(sandbox: FakeSandbox) -> KiloSandboxSession:
+    return KiloSandboxSession(
+        request=seed(),
+        runtime_dir=ROOT,
+        required_mcp_servers=("task.tools",),
+        mcp_header_values=("Bearer task-token",),
+        provider_name="docker",
+        session=SandboxSession(sandbox=sandbox, session_dir=ROOT, workdir="/repo", harness="KiloCode"),
+    )
+
+
+async def test_preflight_rearms_supervisor_and_activation_never_reads_preflight_outputs() -> None:
+    sandbox = FakeSandbox()
+    session = _preflight_state(sandbox)
+    await session.prepare_mcp(config='{"mcp": {}}', timeout=5, close_timeout=1)
+    assert session.session.session_dir == f"{ROOT}/activation"
+    assert session.directory == ROOT
+    assert sandbox.launches[0]["supervisor"] == ROOT
+    assert sandbox.launches[0]["command"] == [*session.kilo_argv, "debug", "agent", "build"]
+    assert sandbox.launches[0]["mcp_preflight"] is True
+
+    # The activation times out before the runner records an exit; the preflight's exit 0 must not stand in.
+    sandbox.exit_code = None
+    artifacts = await session.session.execute(
+        stage_activation=lambda: session.stage_activation(command=["kilo", "run"], config="{}"),
+        collect=session.collect_artifacts,
+        timeout=5,
+        close_timeout=1,
+    )
+    assert sandbox.launches[1]["supervisor"] == f"{ROOT}/activation"
+    assert sandbox.launches[1]["command"] == ["kilo", "run"] and sandbox.launches[1]["mcp_preflight"] is False
+    assert f"{ROOT}/activation/process_supervisor" in sandbox.files
+    assert sandbox.files[f"{ROOT}/kilo.json"] == "{}"
+    assert artifacts.stdout == TEXT and artifacts.exit_code is None
+    assert artifacts.task_environment_ready and artifacts.required_mcp_ready
+
+    await session.close(timeout=1)
+    # Borrowed close removes the whole runtime tree, not only the activation's supervisor directory.
+    removal = [command for command in sandbox.commands if "rm -rf" in command]
+    assert removal and ROOT in removal[-1] and "/activation" not in removal[-1]
+    sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("mcp_connected,exit_code", [(False, 0), (True, 1), (True, None)])
+async def test_failed_preflight_reports_redacted_cause_without_rearming(
+    mcp_connected: bool, exit_code: int | None
+) -> None:
+    sandbox = FakeSandbox(mcp_connected=mcp_connected, exit_code=exit_code)
+    session = _preflight_state(sandbox)
+    with pytest.raises(RuntimeError) as error:
+        await session.prepare_mcp(config='{"mcp": {}}', timeout=5, close_timeout=1)
+    assert str(error.value) == (
+        "Kilo could not initialize required MCP servers: task.tools; task.tools connect failed: [REDACTED]"
+    )
+    assert session.session.session_dir == ROOT
+    assert len(sandbox.launches) == 1
+
+
+async def test_activation_directory_failure_stops_before_uploading_grant_config() -> None:
+    session = state()
+    session.runtime_dir = "/tmp/nemo-gym-kilo-sessions/test"
+    session.session.session_dir = "/tmp/nemo-gym-kilo-sessions/test/activation"
+    session.session.sandbox.exec.return_value = SandboxExecResult(return_code=1, stdout="", stderr="read-only")
+    with pytest.raises(RuntimeError, match="Cannot create Kilo activation directory"):
+        await session.stage_activation(command=["kilo", "run"], config='{"mcp": {}}')
+    session.session.sandbox.upload.assert_not_awaited()
 
 
 async def test_collected_diagnostics_redact_grant_headers_before_logging(caplog: pytest.LogCaptureFixture) -> None:

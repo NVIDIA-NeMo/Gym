@@ -23,6 +23,15 @@ from responses_api_agents.kilocode_agent.observability import read_kilo_observat
 LOG = logging.getLogger(__name__)
 LOG_TAIL_BYTES = 4096
 TASK_ENVIRONMENT_PLUGIN = "task_environment.mjs"
+# Per-run files the runner and plugin write next to the runtime; a rearmed activation must not read the preflight's.
+RUN_OUTPUTS = (
+    "exit.json",
+    "stdout.jsonl",
+    "stderr.log",
+    "runtime.json",
+    "task-environment.ready",
+    "required-mcp.ready",
+)
 
 
 def _sandbox_prepare_command(workdir: str, directory: str) -> str:
@@ -74,7 +83,8 @@ class KiloArtifacts:
     runner_pid: int | None = None
     # Whether the plugin that gives tool shells the task's HOME and XDG directories initialized.
     task_environment_ready: bool = False
-    required_mcp_ready: bool = False
+    # False only when a required MCP server was not confirmed; both collectors set it from the receipt.
+    required_mcp_ready: bool = True
 
 
 @dataclass
@@ -156,8 +166,9 @@ class KiloSandboxSession(AgentSessionState):
         """Stage the isolated provider config and CLI argv without altering task files."""
         directory = self.directory
         if self.session.session_dir != directory:
+            stale = " ".join(quote(f"{directory}/{name}") for name in RUN_OUTPUTS)
             result = await self.session.sandbox.exec(
-                f"mkdir -p -- {quote(self.session.session_dir)}", cwd="/", timeout_s=30
+                f"mkdir -p -- {quote(self.session.session_dir)} && rm -f -- {stale}", cwd="/", timeout_s=30
             )
             if result.error_type or result.return_code != 0:
                 raise RuntimeError("Cannot create Kilo activation directory")
@@ -182,8 +193,22 @@ class KiloSandboxSession(AgentSessionState):
         """Check Kilo's real MCP clients without inference, under the normal process supervisor."""
 
         async def collect() -> KiloArtifacts:
-            exit_code = json.loads(await read_text(self.session.sandbox, path=f"{self.directory}/exit.json"))
-            return KiloArtifacts(stdout="", stderr="", exit_code=exit_code, required_mcp_ready=await self._mcp_ready())
+            try:
+                raw = json.loads(await read_text(self.session.sandbox, path=f"{self.directory}/exit.json"))
+            except Exception:
+                # A timed-out or killed preflight records no exit; the readiness check below reports it.
+                raw = None
+            try:
+                stderr = await read_text(self.session.sandbox, path=f"{self.directory}/stderr.log")
+            except Exception:
+                stderr = ""
+            return KiloArtifacts(
+                stdout="",
+                stderr=self.redact_diagnostics(stderr),
+                exit_code=raw if type(raw) is int else None,
+                log_tail=await self._read_log_tail(),
+                required_mcp_ready=await self._mcp_ready(),
+            )
 
         artifacts = await self.session.execute(
             stage_activation=lambda: self.stage_activation(
@@ -202,8 +227,12 @@ class KiloSandboxSession(AgentSessionState):
             or self.session.cleanup["error"]
             or self.session.cleanup["timed_out"]
         ):
+            # Seed cleanup then removes the runtime directory, so return Kilo's redacted reason now.
+            diagnostics = artifacts.log_tail or artifacts.stderr[-LOG_TAIL_BYTES:]
             raise RuntimeError(
-                "Kilo could not initialize required MCP servers: " + ", ".join(self.required_mcp_servers)
+                "Kilo could not initialize required MCP servers: "
+                + ", ".join(self.required_mcp_servers)
+                + (f"; {diagnostics}" if diagnostics else "")
             )
         await self.session.begin_activation(session_dir=f"{self.directory}/activation", timeout=close_timeout)
 

@@ -227,6 +227,9 @@ def _runtime_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -
     if not artifacts.task_environment_ready:
         # Kilo continues when a plugin fails to load; its tools then ran with Kilo's private HOME.
         return "Kilo did not confirm its task-environment plugin"
+    if not artifacts.required_mcp_ready:
+        # The plugin confirms required MCP servers before the first model request.
+        return "Kilo did not confirm its required MCP servers before model activation"
     if cleanup["timed_out"]:
         return None
     if cleanup["return_code"] not in (0, None):
@@ -247,6 +250,8 @@ def _run_outcome(
         return "failed", _error_name(error)
     if not artifacts.task_environment_ready:
         return "failed", "task_environment_unconfirmed"
+    if not artifacts.required_mcp_ready:
+        return "failed", "required_mcp_unconfirmed"
     if cleanup is not None and cleanup["timed_out"]:
         return "timeout", "agent_timeout"
     if cancelled:
@@ -438,7 +443,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 settings = self.config.sandbox_config.copy()
                 settings["metadata"] = {
                     **resolve_provider_metadata(provider_ref, global_config),
-                    **settings.get("metadata", {}),
+                    **(settings.get("metadata") or {}),
                     "gym-agent": "kilocode",
                     "gym-session": body.agent_session_id[:63],
                     "gym-rollout": body.episode_id.capture_key[:63],
@@ -495,7 +500,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         config["model"] = self._effective_model()
         grants = self._mcp_grants(state.request)
         if grants:
-            servers = config.setdefault("mcp", {})
+            # As in _mcp_grants, a null kilo_config.mcp means no static servers.
+            servers = config["mcp"] = config.get("mcp") or {}
             for access in grants:
                 servers[access.name] = {
                     "type": "remote",
@@ -860,8 +866,6 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 timeout=self.config.timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
-        if state.required_mcp_servers and not artifacts.required_mcp_ready:
-            raise RuntimeError("Kilo did not confirm its required MCP servers before model activation")
         response, problem = self._response_from_events(
             body,
             artifacts.stdout,
