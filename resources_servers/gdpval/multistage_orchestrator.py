@@ -75,7 +75,7 @@ from nemo_gym.base_responses_api_model import (
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
-from nemo_gym.failure_kinds import AGENT_TIMEOUT
+from nemo_gym.failure_kinds import AGENT_TIMEOUT, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -85,7 +85,12 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.path_utils import failures_path_for, materialized_path_for, resubmit_offset_path_for
+from nemo_gym.path_utils import (
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from nemo_gym.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
@@ -958,6 +963,13 @@ def tag_results(
             tid = row_task_id(row)
             if tid is not None:
                 out["task_id"] = tid
+        if out.get("failure_kind") in (SESSION_LOST, SESSION_EXPIRED) and out.get(NG_FAILURE_CLASS_KEY) is None:
+            # The resources server no longer held the session, so this masked sample holds no measurement. Keep
+            # treating it as the terminal verification failure it used to be, not as a judged success.
+            out[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_SERVER_FAILURE_CLASS
+            out[NG_TERMINAL_KEY] = True
+            out["_ng_failure_stage"] = "verification"
+            out["_ng_failure_message"] = out.get("failure_reason") or out["failure_kind"]
         tagged.append(out)
     return tagged
 
@@ -1879,6 +1891,8 @@ def write_rollouts(all_results: Sequence[Mapping[str, Any]], output_fpath: str |
             os.chmod(temp_path, prior_mode)
         os.replace(temp_path, output_fpath)
         temp_path = None
+        # The rows written here are this run's, not the merged ones an aggregation's shard list names.
+        aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
@@ -2046,6 +2060,9 @@ def _prune_downstream_files(output_fpath: str | Path, restart_stage: int) -> Non
                 out.flush()
                 os.fsync(out.fileno())
         _atomic_filter_jsonl(path, keep)
+        if dropped:
+            # The rows left are not the merged ones an aggregation's shard list names.
+            aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
 
 
 def load_persisted_rows(output_fpath: str | Path) -> Dict[int, List[Dict[str, Any]]]:
@@ -2269,14 +2286,18 @@ def route_stage_rows(output_fpath: str | Path, rows: Sequence[Mapping[str, Any]]
     output_fpath = Path(output_fpath)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
     failures_fpath = failures_path_for(output_fpath)
+    sources_dropped = False
     with output_fpath.open("ab") as main_handle, failures_fpath.open("ab") as fail_handle:
         for row in rows:
             if row.get(NG_NO_PERSIST_KEY):
                 continue
-            if row.get(NG_FAILURE_CLASS_KEY) is not None:
-                fail_handle.write(orjson.dumps(row) + b"\n")
-            else:
-                main_handle.write(orjson.dumps(row) + b"\n")
+            serialized = orjson.dumps(row) + b"\n"
+            if not sources_dropped:
+                # The rows this run writes are not the merged ones an aggregation's shard list names. Dropped only
+                # once both files are open and a row is ready, so a run that cannot write keeps the list.
+                aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
+                sources_dropped = True
+            (fail_handle if row.get(NG_FAILURE_CLASS_KEY) is not None else main_handle).write(serialized)
         main_handle.flush()
         fail_handle.flush()
         os.fsync(main_handle.fileno())
@@ -2736,6 +2757,7 @@ def _prepare_resume(
             resubmit_offset_path_for(output_fpath),
             journal_fpath,
             aggregate_metrics_path_for(output_fpath),
+            aggregation_sources_path_for(output_fpath),
         ):
             if stale.exists():
                 quarantined = stale.with_name(stale.name + stale_suffix)

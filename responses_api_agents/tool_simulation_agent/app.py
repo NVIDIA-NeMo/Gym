@@ -22,7 +22,7 @@ from fastapi import Body, Request
 from pydantic import ConfigDict, JsonValue, PrivateAttr, ValidationError
 
 from nemo_gym._checkpoint.agent import ActivationOutOfOrderError, LegacyRun, RestoredAgentSession, require_rollout
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepMode, seed_restarts, seed_verify_mode
+from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -69,7 +69,7 @@ class _ModelReply:
 
 class ToolSimulationAgent(SimpleResponsesAPIAgent):
     config: ToolSimulationAgentConfig
-    checkpoint_sessions_supported = True
+    checkpoint_mode = "exported"
     # A completed self-dispatch may still be on its way to /run when a checkpoint
     # exports it. Keep its reply until /run records the verification boundary.
     _model_replies: dict[str, _ModelReply] = PrivateAttr(default_factory=dict)
@@ -122,7 +122,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         model_reply = self._model_replies.setdefault(session_key, _ModelReply())
         while True:
             if model_reply.response is not None:
-                participant.replayed(session_key, episode_id)
+                participant.answered_from_saved_reply(session_key, episode_id)
                 return model_reply.response
             if model_reply.completed:
                 raise ActivationOutOfOrderError("tool-simulation model reply was already consumed by /run")
@@ -179,12 +179,12 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         if stage not in {"seed", "model", "verify", "return"}:
             raise ValueError(f"unknown tool-simulation checkpoint stage {stage!r}")
         cookies = continuation.get("cookies", {})
-        verify_mode: StepMode = continuation.get("verify_mode", "wait")
+        resources_verify_step_type: StepType = continuation.get("resources_verify_step_type", "wait")
         model_reply = self._model_replies[legacy_run.key] if legacy_run is not None else None
 
         @asynccontextmanager
-        async def step(mode: StepMode) -> AsyncIterator[None]:
-            async with legacy_run.step(mode) if legacy_run else nullcontext():
+        async def step(step_type: StepType) -> AsyncIterator[None]:
+            async with legacy_run.step(step_type) if legacy_run else nullcontext():
                 try:
                     yield
                 except BaseException:
@@ -212,13 +212,15 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                 )
                 await raise_for_status(seed)
             cookies = _cookies(seed.cookies)
-            verify_mode = seed_verify_mode(seed.headers)
+            resources_verify_step_type = seed_verify_step_type(seed.headers)
             if seed_restarts(seed.headers):
                 await legacy_run.mark_restart()
             stage = "model"
 
         if stage == "model":
-            await boundary({"next": "model", "cookies": cookies, "verify_mode": verify_mode})
+            await boundary(
+                {"next": "model", "cookies": cookies, "resources_verify_step_type": resources_verify_step_type}
+            )
             async with step("replay"):
                 response = await self.server_client.post(
                     server_name=config.name,
@@ -240,7 +242,12 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
             }
         else:
             await boundary(
-                {"next": "verify", "response": response_json, "cookies": cookies, "verify_mode": verify_mode}
+                {
+                    "next": "verify",
+                    "response": response_json,
+                    "cookies": cookies,
+                    "resources_verify_step_type": resources_verify_step_type,
+                }
             )
             verify_request = ToolSimulationAgentVerifyRequest.model_validate(
                 body.model_dump() | {"response": response_json}
@@ -248,12 +255,14 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
             kwargs = (
                 {
                     "cookies": cookies,
-                    "headers": {CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"} if verify_mode == "replay" else {},
+                    "headers": {CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}
+                    if resources_verify_step_type == "replay"
+                    else {},
                 }
                 if legacy_run
                 else {}
             )
-            async with step(verify_mode):
+            async with step(resources_verify_step_type):
                 verify_response = await self.server_client.post(
                     server_name=config.resources_server.name,
                     url_path="/verify",
@@ -269,10 +278,10 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                 "response": response_json,
                 "result": result,
                 "cookies": cookies,
-                "verify_mode": verify_mode,
+                "resources_verify_step_type": resources_verify_step_type,
             }
         )
-        if legacy_run is not None and verify_mode == "replay" and not config.skip_verification:
+        if legacy_run is not None and resources_verify_step_type == "replay" and not config.skip_verification:
             episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
             try:
                 close = await self.server_client.post(

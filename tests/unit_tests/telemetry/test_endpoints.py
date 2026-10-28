@@ -30,6 +30,7 @@ from nemo_gym.telemetry import metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.endpoints import (
     ROLLOUT_ID_ATTRIBUTE,
+    ROLLOUT_REWARD_ATTRIBUTE,
     traced_endpoint,
     traced_rollout_endpoint,
     traced_verify_endpoint,
@@ -297,3 +298,47 @@ async def test_rollout_endpoint_records_nothing_when_disabled(recorded_metrics):
 def test_telemetry_handle_is_not_required(recorded_metrics):
     """The wrappers must be safe on a process that never initialised telemetry."""
     assert telemetry_setup.get_telemetry() is None
+
+
+# --------------------------------------------------------------------------- #
+# Reward on the verify span
+# --------------------------------------------------------------------------- #
+
+
+class _VerifyResponse(BaseModel):
+    reward: float
+    mask_sample: bool = False
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        pytest.param(_VerifyResponse(reward=0.25), 0.25, id="response model"),
+        pytest.param({"reward": 1}, 1.0, id="mapping"),
+        pytest.param(_VerifyResponse(reward=0.0), 0.0, id="a zero is a measured reward"),
+        pytest.param(_VerifyResponse(reward=0.0, mask_sample=True), None, id="masked"),
+        pytest.param({"reward": True}, None, id="boolean"),
+        pytest.param({"reward": float("nan")}, None, id="not finite"),
+        pytest.param({"passed": False}, None, id="no reward"),
+    ],
+)
+async def test_verify_span_carries_a_measured_reward_only(recorded_spans, result, expected):
+    async def verify():
+        return result
+
+    assert await traced_verify_endpoint(verify)() is result
+
+    (span,) = recorded_spans()
+    assert span.attributes.get(ROLLOUT_REWARD_ATTRIBUTE) == expected
+
+
+async def test_verify_span_has_no_reward_for_the_judge_failsafe_response(recorded_spans):
+    from fastapi.responses import JSONResponse
+
+    async def verify():
+        return JSONResponse(content={"reward": 0.0, "mask_sample": True})
+
+    await traced_verify_endpoint(verify)()
+
+    (span,) = recorded_spans()
+    assert ROLLOUT_REWARD_ATTRIBUTE not in span.attributes

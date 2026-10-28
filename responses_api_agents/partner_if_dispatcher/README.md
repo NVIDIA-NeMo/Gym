@@ -2,7 +2,10 @@
 
 Routes each episode of a mixed-harness benchmark to the environment server configured
 for its `verifier_metadata.partner_if.task_id`, then returns that environment's
-receipt unchanged. Sessions, execution and grading stay in the routed environments.
+receipt. Its one change to the receipt adds any tool execution in the reply's
+trajectory that the episode's agent observations lack, since rollout collection
+builds the trajectory's tool calls from those observations. Sessions, execution and
+grading stay in the routed environments.
 All of the benchmark's rows come back through this agent, and its `/aggregate_metrics`
 is proxied to the configured `resources_server`, so one aggregate covers every
 environment.

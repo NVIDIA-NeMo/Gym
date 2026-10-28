@@ -9,7 +9,12 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_RUNNER_FILE,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -19,17 +24,23 @@ from nemo_gym.sandbox.utils import read_text, upload_text
 LOG = logging.getLogger(__name__)
 
 
-# Executed by sandbox Python before uploading any adapter-owned files. Resolve
-# symlinks and '..' on the sandbox filesystem, not on the agent-server host.
+# POSIX sh run with positional parameters WORKDIR SESSION_ROOT RUNTIME_ROOT before uploading
+# any adapter-owned files. Resolve symlinks and '..' on the sandbox filesystem, not on the agent-server
+# host; an owned root that does not exist yet resolves through its nearest existing ancestor.
 _SANDBOX_PATH_CHECK = """
-from pathlib import Path
-import sys
-workdir, session_root, runtime_root = (Path(value).resolve() for value in sys.argv[1:])
-if not workdir.is_dir():
-    raise SystemExit("OpenClaw task workdir is missing or is not a directory: " + str(workdir))
-for owned in (session_root, runtime_root):
-    if workdir == owned or workdir in owned.parents or owned in workdir.parents:
-        raise SystemExit("OpenClaw task workdir overlaps adapter-owned storage: " + str(owned))
+[ -d "$1" ] || { echo "OpenClaw task workdir is missing or is not a directory: $1" >&2; exit 1; }
+workdir=$(cd "$1" && pwd -P) || exit 1
+shift
+for owned in "$@"; do
+    path=$owned rest=
+    until [ -d "${path:-/}" ]; do rest=/${path##*/}$rest path=${path%/*}; done
+    owned=$(cd "${path:-/}" && pwd -P) || exit 1
+    owned=${owned%/}$rest
+    # A path of / ends in its separator already; strip it so / contains every other path.
+    case "${workdir%/}/" in "${owned%/}/"*) overlap=1 ;; *) overlap= ;; esac
+    case "${owned%/}/" in "${workdir%/}/"*) overlap=1 ;; esac
+    [ -z "$overlap" ] || { echo "OpenClaw task workdir overlaps adapter-owned storage: ${owned:-/}" >&2; exit 1; }
+done
 """
 
 
@@ -39,7 +50,6 @@ class HarnessProcessInfo(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
     pid: int
-    python: str | None = None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -100,17 +110,19 @@ class OpenClawSandboxSession(AgentSessionState):
 
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
         """Stage the invocation and return the OpenClaw worker command."""
+        directory = self.session.session_dir
         await self.upload_json("home/.openclaw/openclaw.json", payload["config"])
-        await self.upload_json("input.json", payload)
-        return SandboxCommand(
-            python="python3",
-            argv=[
-                "python3",
-                "-I",
-                f"{self.session.session_dir}/sandbox_runner.py",
-                f"{self.session.session_dir}/input.json",
-            ],
-        )
+        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        params = {
+            "cwd": payload["cwd"],
+            "command": payload["command"],
+            "env": payload["env"],
+            "stdin": "/dev/null",
+            "stdout": f"{directory}/stdout.log",
+            "stderr": f"{directory}/stderr.log",
+        }
+        await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
+        return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
     async def collect_artifacts(self) -> dict[str, str]:
         """Retain transcript and diagnostics before releasing the task sandbox."""
