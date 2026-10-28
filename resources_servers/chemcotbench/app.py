@@ -11,14 +11,14 @@ from typing import Any, ClassVar
 from fastapi import FastAPI
 from pydantic import Field, PrivateAttr
 
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verification.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 from resources_servers.chemcotbench.scoring_pool import ScoringPool, ScoringWorkerError
 from resources_servers.chemcotbench.setup_molopt import ensure_molopt_runtime
 from resources_servers.chemcotbench.setup_upstream import DATA_REVISION, REPO_REVISION, ensure_data, ensure_repository

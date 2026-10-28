@@ -26,16 +26,16 @@ from fastapi import HTTPException
 
 from environment_servers.harbor.entrypoint import EntrypointLaunch, _cancel_entrypoint
 from environment_servers.harbor.users import _is_root
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.data.tasks.harbor import HarborTask
-from nemo_gym.data.tasks.harbor.compose_overlay import merged_mcp_servers
-from nemo_gym.data.tasks.harbor.digest import is_ignored
-from nemo_gym.data.tasks.harbor.models import HarborMCPServer
-from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT
-from nemo_gym.data.tasks.harbor.task import HarborTurn
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.data import ORACLE_AGENT, HarborMCPServer, HarborTask, HarborTurn, is_ignored, merged_mcp_servers
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    AsyncSandboxCompose,
+    DirectSandboxConnection,
+    SandboxAccess,
+    exec_as_root,
+    upload_dir,
+)
 
 
 LOGGER = logging.getLogger(__name__)

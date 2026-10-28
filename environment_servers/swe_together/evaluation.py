@@ -17,19 +17,11 @@ from environment_servers.swe_together.coverage import (
     parse_json,
 )
 from environment_servers.swe_together.model_client import AuxiliaryModel
-from nemo_gym.agents.base_responses_api_agent import (
-    AgentCloseSessionRequest,
-    AgentCloseSessionResponse,
-    AgentSeedSessionRequest,
-)
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import AgentServerRef
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.agents import AgentCloseSessionRequest, AgentCloseSessionResponse, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient, get_response_json, raise_for_status
+from nemo_gym.config import AgentServerRef
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, read_text, upload_text
 
 
 PROMPTS = Path(__file__).with_name("prompts")

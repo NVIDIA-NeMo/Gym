@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from nemo_gym.agents.utils.supervisor_client import CleanupReceipt
+from nemo_gym.agents import CleanupReceipt
 
 
 @dataclass(frozen=True, kw_only=True)

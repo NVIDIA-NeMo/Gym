@@ -24,20 +24,16 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym.client.http_client import get_response_json
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.client import get_response_json
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification.judge import reraise_judge_errors
+from nemo_gym.verification import reraise_judge_errors
 
 
 LOG = logging.getLogger(__name__)
@@ -379,7 +375,7 @@ class ProofWithJudgeResourcesServer(SimpleResourcesServer):
 
     async def _call_judge_internal(self, user_content: str) -> tuple[str, int]:
         """Call judge through Gym's server_client (judge model managed by Gym/Ray)."""
-        from nemo_gym.client.http_client import raise_for_status
+        from nemo_gym.client import raise_for_status
 
         server_name = self.config.judge_model_server.name
         model = self.config.judge_model_name or server_name

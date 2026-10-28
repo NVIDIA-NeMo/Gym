@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -23,7 +23,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.trajectory.trajectory_record import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -34,7 +34,7 @@ from nemo_gym.trajectory.trajectory_record import (
 
 
 if TYPE_CHECKING:
-    from nemo_gym.rollouts.model_calls import ModelCallRecord
+    from nemo_gym.rollouts import ModelCallRecord
 
 
 SOURCE = "claude_code"

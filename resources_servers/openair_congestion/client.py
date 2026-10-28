@@ -47,9 +47,9 @@ import aiohttp
 import uvicorn
 from omegaconf import OmegaConf
 
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseFunctionToolCall
+from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseFunctionToolCall
 from resources_servers.openair_congestion.app import (
     OpenAirCongestionEnv,
     OpenAirCongestionResourcesServerConfig,

@@ -17,9 +17,7 @@ from argparse import ArgumentParser
 
 from tqdm import tqdm
 
-from nemo_gym.core.responses_api_types import (
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 def main(args):

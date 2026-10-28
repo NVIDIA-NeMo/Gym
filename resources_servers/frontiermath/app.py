@@ -13,8 +13,8 @@ from typing import Literal
 
 from pydantic import PositiveFloat, PositiveInt
 
-from nemo_gym.core.failure_kinds import VERIFIER_ERROR
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

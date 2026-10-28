@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import httpx
 
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.openair_congestion.app import (
     OpenAirCongestionEnv,
     OpenAirCongestionResourcesServerConfig,

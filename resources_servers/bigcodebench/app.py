@@ -10,11 +10,8 @@ from typing import Any, Dict, List, Optional
 from code_extraction import preprocess_code_completion
 from setup_bcb_venv import ensure_bcb_venv
 
-from nemo_gym.metrics.reward_profile import (
-    compute_pass_majority_metrics,
-    highest_k_metrics,
-)
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

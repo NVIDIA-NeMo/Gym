@@ -35,9 +35,8 @@ from haystack import component
 from haystack.core.serialization import allow_deserialization_module, default_from_dict, default_to_dict
 from haystack.dataclasses import ChatMessage, ChatRole, TextContent, ToolCall
 
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.client import ServerClient, get_response_json, raise_for_status
+from nemo_gym.core import (
     RESPONSES_TO_TRAIN,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

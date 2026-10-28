@@ -26,7 +26,7 @@ from uuid import uuid4
 
 from pydantic_core import to_json
 
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -36,7 +36,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
     NeMoGymResponseUsage,
 )
-from nemo_gym.trajectory.trajectory_record import (
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,

@@ -51,8 +51,8 @@ from langchain_core.runnables import ensure_config
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
 
 
 def _text(content: Any) -> str:

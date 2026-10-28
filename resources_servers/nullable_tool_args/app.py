@@ -18,13 +18,13 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 
 
 class NullableToolArgsConfig(BaseResourcesServerConfig):

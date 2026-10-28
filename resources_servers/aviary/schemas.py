@@ -20,14 +20,14 @@ from typing import Literal
 from openai.types.responses import FunctionToolParam
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
 )
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,

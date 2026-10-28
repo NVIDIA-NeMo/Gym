@@ -5,7 +5,7 @@
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient
 
 
 if TYPE_CHECKING:

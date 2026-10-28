@@ -23,17 +23,17 @@ from fastapi import FastAPI
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config.global_config import get_global_config_dict
-from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
-from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import get_provider_class, resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification.sandbox_verification import SandboxVerificationError
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator
 from resources_servers.competitive_coding_challenges.sandbox_evaluator import CCCSandboxConfig, evaluate_in_sandbox
 

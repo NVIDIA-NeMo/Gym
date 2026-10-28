@@ -5,8 +5,7 @@
 import asyncio
 from dataclasses import dataclass
 
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient, get_response_json, raise_for_status
 
 
 @dataclass(frozen=True)

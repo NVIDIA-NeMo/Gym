@@ -24,7 +24,7 @@ from typing import Dict, Optional
 
 from pydantic import Field
 
-from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 

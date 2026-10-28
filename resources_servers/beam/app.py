@@ -86,10 +86,10 @@ from typing import Any, Awaitable, ClassVar, Dict, List, Literal, Optional, Tupl
 
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.metrics.reward_profile import compute_subset_metrics
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.metrics import compute_subset_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -97,7 +97,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verification.judge import JudgeError, call_judge
+from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.beam.prompts import (
     BINARY_LLM_JUDGE_BASE_PROMPT,
     EQUIVALENCE_SYSTEM_PROMPT,

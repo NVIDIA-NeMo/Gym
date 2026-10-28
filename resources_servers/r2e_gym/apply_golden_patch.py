@@ -38,8 +38,8 @@ from pathlib import Path
 
 from tqdm.auto import tqdm
 
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.global_config import get_global_config_dict
+from nemo_gym.client import ServerClient
+from nemo_gym.config import get_global_config_dict
 
 
 EMPTY_RESPONSE = {

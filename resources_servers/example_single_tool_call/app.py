@@ -18,8 +18,8 @@ from typing import Any
 from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
 
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -33,8 +33,8 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSessionFence,
     SimpleResourcesServer,
 )
-from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification.verifier_fixture import VerifierFixture
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture
 
 
 class SimpleWeatherResourcesServerConfig(BaseResourcesServerConfig):

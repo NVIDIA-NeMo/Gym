@@ -18,8 +18,7 @@ from typing import Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 from pydantic import BaseModel, Field
 
-from nemo_gym.client.http_client import raise_for_status
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient, raise_for_status
 
 
 @runtime_checkable

@@ -18,18 +18,21 @@ from typing import Any
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.client.server_client import SESSION_ID_KEY
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.config.global_config import get_first_server_config_dict
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, VERIFIER_ERROR, is_namespaced, is_registered
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    SESSION_EXPIRED,
+    VERIFIER_ERROR,
+    EpisodeId,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
+    TaskId,
+    is_namespaced,
+    is_registered,
 )
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,

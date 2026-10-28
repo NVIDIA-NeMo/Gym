@@ -7,8 +7,7 @@ from typing import Any
 
 from haystack.tools import Tool
 
-from nemo_gym.client.http_client import raise_for_status
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient, raise_for_status
 from responses_api_agents.haystack_agent import chat_generator
 
 

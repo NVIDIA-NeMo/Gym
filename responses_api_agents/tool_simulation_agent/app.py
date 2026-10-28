@@ -21,28 +21,23 @@ from dataclasses import dataclass
 from fastapi import Body, Request
 from pydantic import ConfigDict, JsonValue, PrivateAttr, ValidationError
 
-from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_runtime._checkpoint.agent import (
-    ActivationOutOfOrderError,
-    LegacyRun,
-    RestoredAgentSession,
-    require_rollout,
-)
-from nemo_gym.server_runtime._checkpoint.steps import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
-    StepType,
-    seed_restarts,
-    seed_verify_step_type,
-)
-from nemo_gym.server_runtime.base_resources_server import (
+    ActivationOutOfOrderError,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    LegacyRun,
     ResourcesCloseSessionRequest,
+    RestoredAgentSession,
+    StepType,
+    require_rollout,
+    seed_restarts,
+    seed_verify_step_type,
 )
 
 

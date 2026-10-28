@@ -10,69 +10,60 @@ from warnings import warn
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from nemo_gym.agents.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.agents.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
+    OutcomeAction,
+    agent_outcome_policy,
 )
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.client.server_client import rollout_path_prefix
-from nemo_gym.config.config_types import (
+from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.config import (
+    SKIP_VERIFICATION_KEY_NAME,
+    SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_CAPTURE_PATH_SEGMENT,
+    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ResourcesServerRef,
-)
-from nemo_gym.config.global_config import (
-    SKIP_VERIFICATION_KEY_NAME,
-    SKIP_VERIFICATION_REWARD_KEY_NAME,
-    TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_runtime._checkpoint.steps import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.rollouts import NG_TRAJECTORY_KEY
+from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
-    StepType,
-    seed_restarts,
-    seed_verify_step_type,
-)
-from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
+    DirectHTTPToolAccess,
     HandledEpisodeError,
-    dependency_failure,
-)
-from nemo_gym.server_runtime.base_resources_server import (
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
-)
-from nemo_gym.server_runtime.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
-)
-from nemo_gym.server_runtime.tool_access import (
-    DirectHTTPToolAccess,
-    MCPStreamableHTTPConnection,
-    MCPToolAccess,
+    StepType,
     ToolAccess,
+    dependency_failure,
+    seed_restarts,
+    seed_verify_step_type,
 )
-from nemo_gym.trajectory.trajectory_record import (
+from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
-    NG_TRAJECTORY_KEY,
     NG_VERIFIER_INVOCATIONS_KEY,
     AgentObservationBundle,
     TrajectoryRecord,
     VerifierInvocation,
 )
-from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class SessionHandles(BaseModel):

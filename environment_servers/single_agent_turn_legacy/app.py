@@ -11,28 +11,19 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from nemo_gym.config.global_config import (
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.core.episode import (
-    EpisodeId,
-    maybe_rollout_id_from_run_body,
-)
-from nemo_gym.data.task_materialization import materialize_task
-from nemo_gym.server_runtime.single_agent_turn_types import (
-    SingleAgentTurnRequest,
-    SingleAgentTurnResponse,
-)
-from nemo_gym.trajectory.trajectory_record import (
-    NG_AGENT_OBSERVATIONS_KEY,
-    NG_TRAJECTORY_KEY,
-    NG_VERIFIER_INVOCATIONS_KEY,
-)
-from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.core import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.data import materialize_task
+from nemo_gym.rollouts import NG_TRAJECTORY_KEY
+from nemo_gym.server_runtime import SingleAgentTurnRequest, SingleAgentTurnResponse
+from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_VERIFIER_INVOCATIONS_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):

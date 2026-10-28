@@ -15,7 +15,7 @@
 import asyncio
 import json
 
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient
 
 
 server_client = ServerClient.load_from_global_config()

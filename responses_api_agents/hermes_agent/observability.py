@@ -11,8 +11,8 @@ from collections.abc import Callable, Iterable
 from time import monotonic, time
 from typing import Any
 
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -22,7 +22,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.trajectory.trajectory_record import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,

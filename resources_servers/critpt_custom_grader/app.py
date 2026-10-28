@@ -28,23 +28,24 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.config.config_types import (
+from nemo_gym.config import (
     AggregateMetrics,
     AggregateMetricsRequest,
     BenchmarkDatasetConfig,
     DatasetConfig,
+    get_global_config_dict,
 )
-from nemo_gym.config.global_config import (
-    get_global_config_dict,  # same import as resources_servers/swebench_pro/app.py
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, failure_kinds
+from nemo_gym.data import normalize_task_fields
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.sandbox import (
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
-from nemo_gym.core import failure_kinds
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.data.task_data import normalize_task_fields
-from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionResponse,

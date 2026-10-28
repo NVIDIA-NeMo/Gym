@@ -31,7 +31,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 _RoutedExperts = list[list[list[int]]] | str
@@ -290,7 +290,7 @@ class NemoGymLLM(BaseLLM):
         if not responses_create_params:
             return {}
 
-        from nemo_gym.models.chat_completions_converter import VLLMConverter
+        from nemo_gym.models import VLLMConverter
 
         params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
         params_for_conversion["input"] = []

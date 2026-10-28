@@ -13,10 +13,7 @@
 # limitations under the License.
 import json
 
-from nemo_gym.core.responses_api_types import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 
 
 # (user query, expected city argument)

@@ -11,11 +11,10 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents.base_responses_api_agent import AgentSessionState
-from nemo_gym.agents.utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.utils import read_text, upload_text
-from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
+from nemo_gym.agents import RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentObservationBundle
 
 
 LOG = logging.getLogger(__name__)

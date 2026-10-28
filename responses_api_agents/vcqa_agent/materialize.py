@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, Literal, Optional
 from urllib.parse import unquote, urlparse
 
-from nemo_gym.client.http_client import raise_for_status, request
+from nemo_gym.client import raise_for_status, request
 
 
 DatasetKind = Literal["fileset", "githistory"]

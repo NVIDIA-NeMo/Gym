@@ -29,9 +29,9 @@ from openai import DEFAULT_TIMEOUT, AsyncOpenAI, DefaultAsyncHttpxClient, Timeou
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
 
-from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -46,8 +46,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.trajectory.trajectory_record import (
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,

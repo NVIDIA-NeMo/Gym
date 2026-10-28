@@ -30,11 +30,7 @@ from typing import Any
 from pydantic import BaseModel, StrictBool, StrictInt
 
 from nemo_gym.sandbox import SandboxProvider
-from nemo_gym.verification.sandbox_verification import (
-    RUNNER_FILE,
-    SandboxVerificationConfig,
-    run_verification_sandbox,
-)
+from nemo_gym.verification import RUNNER_FILE, SandboxVerificationConfig, run_verification_sandbox
 
 
 _CODE_GEN_DIR = Path(__file__).parent

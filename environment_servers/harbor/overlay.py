@@ -23,8 +23,7 @@ from environment_servers.harbor.users import (
     _is_root,
     _user_group,
 )
-from nemo_gym.data.tasks.harbor import HarborTask
-from nemo_gym.data.tasks.harbor.dockerfile import OverlayRun
+from nemo_gym.data import HarborTask, OverlayRun
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 

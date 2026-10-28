@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from aiohttp import ClientTimeout
 
-from nemo_gym.client.http_client import request
+from nemo_gym.client import request
 
 
 CACHE_DIR = Path(gettempdir()) / "nemo-gym-miniswe-assets"

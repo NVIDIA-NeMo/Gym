@@ -20,7 +20,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from nemo_gym.data.tasks.harbor import HarborTask
+from nemo_gym.data import HarborTask
 from nemo_gym.sandbox import AsyncSandbox
 
 

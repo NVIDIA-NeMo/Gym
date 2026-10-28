@@ -25,15 +25,15 @@ import aiohttp
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
 
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.trajectory.trajectory_record import ModelCallRef, ObservationGap
+from nemo_gym.trajectory import ModelCallRef, ObservationGap
 
 
 class GymModelClient(Protocol):

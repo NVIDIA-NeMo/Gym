@@ -12,9 +12,8 @@ from typing import Any
 
 from tqdm.auto import tqdm
 
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.global_config import get_global_config_dict
+from nemo_gym.client import ServerClient, get_response_json, raise_for_status
+from nemo_gym.config import get_global_config_dict
 
 
 def _empty_response() -> dict[str, Any]:

@@ -34,7 +34,7 @@ Usage:
 import asyncio
 from typing import Dict
 
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient
 
 
 async def seed_session(

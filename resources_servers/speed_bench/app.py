@@ -34,8 +34,8 @@ from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, JsonValue, model_validator
 
-from nemo_gym.client.http_client import request as global_request
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.client import request as global_request
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

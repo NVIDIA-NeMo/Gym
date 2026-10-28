@@ -15,8 +15,8 @@ from typing import ClassVar
 
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

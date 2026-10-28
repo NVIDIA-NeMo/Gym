@@ -27,15 +27,15 @@ from typing import List, Optional
 from openai.types.responses import FunctionToolParam
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
 )
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,

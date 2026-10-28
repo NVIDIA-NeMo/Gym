@@ -13,3 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """General helpers shared across nemo_gym: paths, decorators, text, process information, and import compatibility."""
+
+from typing import TYPE_CHECKING
+
+from nemo_gym._public_api import lazy_exports
+
+
+if TYPE_CHECKING:
+    from nemo_gym.utils.path_utils import (
+        aggregation_sources_path_for,
+        failures_path_for,
+        materialized_path_for,
+        resubmit_offset_path_for,
+    )
+    from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+
+
+# The public API: what code outside the library, such as servers, imports from this package. Each name's
+# submodule loads on first use. Code inside nemo_gym imports the submodules directly.
+_PUBLIC_API = {
+    "aggregation_sources_path_for": "path_utils",
+    "failures_path_for": "path_utils",
+    "is_nemo_gym_fastapi_entrypoint": "server_process",
+    "materialized_path_for": "path_utils",
+    "resubmit_offset_path_for": "path_utils",
+}
+__getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
+__all__ = sorted(_PUBLIC_API)

@@ -24,12 +24,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
-from nemo_gym.config.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.conversational_tool_use_simulation.prompt import (
     agent_system_message,
     responses_api_tools,

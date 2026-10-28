@@ -21,19 +21,21 @@ from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
 from aiohttp import ClientResponseError
 from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.agents import Body
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     ReasoningEffort,
 )
-from nemo_gym.models.base_responses_api_model import (
+from nemo_gym.models import (
+    MAX_NUM_TRIES,
     BaseResponsesAPIModelConfig,
-    Body,
+    NeMoGymAsyncOpenAI,
+    PermanentEndpointError,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.models.openai_utils import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
 
 
 LOG = logging.getLogger(__name__)

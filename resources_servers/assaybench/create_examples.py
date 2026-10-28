@@ -168,7 +168,7 @@ def example_records() -> List[Dict[str, Any]]:
 
 def build_example_rows() -> List[Dict[str, Any]]:
     """The committed fixture: synthetic rows with the paper prompt already rendered into them."""
-    from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config
+    from nemo_gym.data import apply_prompt_to_row, load_prompt_config
 
     prompt_config = load_prompt_config(str(REPO_ROOT / PROMPT_CONFIG_PATH))
     return [apply_prompt_to_row(to_gym_row(record, split="example"), prompt_config) for record in example_records()]
@@ -184,9 +184,9 @@ def write_example_rollouts(example_rows: Sequence[Dict[str, Any]], output_path: 
     import asyncio
     from unittest.mock import MagicMock
 
-    from nemo_gym.client.server_client import ServerClient
-    from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.core.responses_api_types import NeMoGymResponse
+    from nemo_gym.client import ServerClient
+    from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.core import NeMoGymResponse
     from resources_servers.assaybench.app import (
         AssayBenchResourcesServer,
         AssayBenchResourcesServerConfig,

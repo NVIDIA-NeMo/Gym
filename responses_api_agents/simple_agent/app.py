@@ -28,10 +28,11 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter, ValidationError
 
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.agents.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
@@ -39,13 +40,18 @@ from nemo_gym.agents.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.client.http_client import request as http_request
-from nemo_gym.client.server_client import rollout_path_prefix
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.client import request as http_request
+from nemo_gym.config import (
+    ROLLOUT_PATH_PREFIX,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+)
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -56,32 +62,27 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime._checkpoint.agent import (
+from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    SESSION_OWNER_HEADER,
     Activation,
     ActivationOutOfOrderError,
-    LegacyRun,
-    RestoredAgentSession,
-    require_rollout,
-)
-from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
-from nemo_gym.server_runtime._checkpoint.steps import (
-    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
-    StepType,
-    seed_restarts,
-    seed_verify_step_type,
-)
-from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
-from nemo_gym.server_runtime.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    DirectHTTPToolAccess,
+    LegacyRun,
+    MCPToolAccess,
     ResourcesCloseSessionRequest,
+    RestoredAgentSession,
+    RolloutIdRequiredError,
+    StepType,
+    is_retryable_dependency_status,
+    require_rollout,
+    seed_restarts,
+    seed_verify_step_type,
 )
-from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER
-from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPToolAccess
-from nemo_gym.trajectory.trajectory_record import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -90,7 +91,7 @@ from nemo_gym.trajectory.trajectory_record import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)

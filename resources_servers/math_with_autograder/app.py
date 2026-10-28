@@ -50,9 +50,9 @@ from typing import Any, ClassVar, Optional
 
 from pydantic import Field
 
-from nemo_gym.core.responses_api_types import NeMoGymEasyInputMessage, NeMoGymResponse
-from nemo_gym.data.prompt import PromptConfig, fill_prompt, load_prompt_config
-from nemo_gym.verification.judge import call_judge
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.verification import call_judge
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,

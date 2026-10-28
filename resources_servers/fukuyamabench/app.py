@@ -21,8 +21,8 @@ from typing import Any, Optional
 
 from metrics import score_pathway
 
-from nemo_gym.metrics.reward_profile import compute_subset_metrics
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.metrics import compute_subset_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

@@ -10,14 +10,14 @@ import json_repair
 import tiktoken
 from pydantic import BaseModel, Field, PrivateAttr
 
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.genrm_compare.utils import GenRMOutputParseError, parse_genrm_output
 
 

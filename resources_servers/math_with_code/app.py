@@ -27,8 +27,8 @@ import scipy
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, PrivateAttr
 
-from nemo_gym.client.server_client import SESSION_ID_KEY
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

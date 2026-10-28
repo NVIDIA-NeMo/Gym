@@ -16,7 +16,7 @@ import json
 from typing import Any
 from uuid import uuid4
 
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,

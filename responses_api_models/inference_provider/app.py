@@ -27,21 +27,21 @@ from typing import Any, Dict
 from fastapi import Request
 from pydantic import Field
 
-from nemo_gym.core.episode import current_rollout_id
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.agents import Body
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_rollout_id,
 )
-from nemo_gym.models.base_responses_api_model import (
+from nemo_gym.models import (
     BaseResponsesAPIModelConfig,
-    Body,
+    NeMoGymAsyncOpenAI,
+    ResponsesConverter,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.models.chat_completions_converter import ResponsesConverter
-from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class InferenceProviderConfig(BaseResponsesAPIModelConfig):

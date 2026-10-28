@@ -17,3 +17,42 @@
 sandbox_verification grades a submission in a fresh, single-use sandbox. It uses only the
 provider-neutral API; core sandbox APIs and providers live in :mod:`nemo_gym.sandbox`.
 """
+
+from typing import TYPE_CHECKING
+
+from nemo_gym._public_api import lazy_exports
+
+
+if TYPE_CHECKING:
+    from nemo_gym.verification.judge import (
+        JudgeError,
+        call_judge,
+        judge_failsafe,
+        normalize_math_judge_verdict,
+        reraise_judge_errors,
+    )
+    from nemo_gym.verification.sandbox_verification import (
+        RUNNER_FILE,
+        SandboxVerificationConfig,
+        SandboxVerificationError,
+        run_verification_sandbox,
+    )
+    from nemo_gym.verification.verifier_fixture import VerifierFixture
+
+
+# The public API: what code outside the library, such as servers, imports from this package. Each name's
+# submodule loads on first use. Code inside nemo_gym imports the submodules directly.
+_PUBLIC_API = {
+    "JudgeError": "judge",
+    "RUNNER_FILE": "sandbox_verification",
+    "SandboxVerificationConfig": "sandbox_verification",
+    "SandboxVerificationError": "sandbox_verification",
+    "VerifierFixture": "verifier_fixture",
+    "call_judge": "judge",
+    "judge_failsafe": "judge",
+    "normalize_math_judge_verdict": "judge",
+    "reraise_judge_errors": "judge",
+    "run_verification_sandbox": "sandbox_verification",
+}
+__getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
+__all__ = sorted(_PUBLIC_API)

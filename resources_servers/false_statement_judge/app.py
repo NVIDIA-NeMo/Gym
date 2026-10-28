@@ -36,18 +36,18 @@ from typing import List, Optional
 
 from pydantic import ConfigDict, Field
 
-from nemo_gym.client.http_client import get_response_json
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.client import get_response_json
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.data.prompt import PromptConfig, fill_prompt, load_prompt_config
-from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

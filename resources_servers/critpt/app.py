@@ -25,9 +25,9 @@ from typing import Any, Dict, List, Optional, Union
 from fastapi import FastAPI
 from pydantic import Field, field_validator
 
-from nemo_gym.client.http_client import request
-from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.client import request
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

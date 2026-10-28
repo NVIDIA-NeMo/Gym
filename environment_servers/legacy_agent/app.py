@@ -15,15 +15,16 @@ from fastapi import Body, FastAPI, Request, Response
 from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.config.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_runtime.base_environment_server import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
     CleanupContext,
 )
-from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 _UNUSED_LIMITS = frozenset(

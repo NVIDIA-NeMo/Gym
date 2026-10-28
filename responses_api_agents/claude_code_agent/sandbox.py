@@ -15,18 +15,18 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents.base_responses_api_agent import AgentSessionState
-from nemo_gym.agents.skills import stage_skills
-from nemo_gym.agents.utils.sandbox_session import (
+from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
+    AgentSessionState,
     SandboxCommand,
     SandboxSession,
     shell_assignments,
+    stage_skills,
 )
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.utils import read_text, upload_text
-from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, ObservationGap
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 
 

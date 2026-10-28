@@ -70,9 +70,9 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
-from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.config.global_config import (
+from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -80,34 +80,40 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.core.failure_kinds import AGENT_TIMEOUT, SESSION_EXPIRED, SESSION_LOST
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.models.base_responses_api_model import (
-    clear_model_call_captures_for_rollouts,
-    merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
+from nemo_gym.core import (
+    AGENT_TIMEOUT,
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    NeMoGymResponse,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
 )
-from nemo_gym.rollouts.rollout_collection import (
-    _NO_RESULT_FAILURE_CLASSES,
-    _RUN_FAILURE_ERRORS,
+from nemo_gym.rollouts import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
+    DispatchLatencyTracker,
     RolloutCollectionHelper,
-    _environment_server_for_agent,
-    _environment_servers_by_agent,
-    _record_rollout_outcome,
+    clear_model_call_captures_for_rollouts,
     get_max_rollout_attempts,
     is_terminal_failure,
     load_resubmit_offset,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
     observed_elapsed,
     record_resubmit_offset,
 )
-from nemo_gym.rollouts.rollout_perf import DispatchLatencyTracker
+from nemo_gym.rollouts.rollout_collection import (
+    _NO_RESULT_FAILURE_CLASSES,
+    _RUN_FAILURE_ERRORS,
+    _environment_server_for_agent,
+    _environment_servers_by_agent,
+    _record_rollout_outcome,
+)
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
-from nemo_gym.utils.path_utils import (
+from nemo_gym.utils import (
     aggregation_sources_path_for,
     failures_path_for,
     materialized_path_for,
@@ -2471,7 +2477,7 @@ async def run_rollout_collection(
     if (global_config_dict.get("multistage") or {}).get("enabled"):
         return await run_e2e_multistage(rollout_collection_config, global_config_dict)
 
-    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionHelper
 
     await RolloutCollectionHelper().run_from_config(rollout_collection_config)
     return None
@@ -2490,8 +2496,7 @@ async def run_e2e_multistage(
     """
     from contextlib import nullcontext
 
-    from nemo_gym.rollouts.model_calls import observability_enabled_from_config
-    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionHelper, observability_enabled_from_config
     from nemo_gym.rollouts.rollout_perf import _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})

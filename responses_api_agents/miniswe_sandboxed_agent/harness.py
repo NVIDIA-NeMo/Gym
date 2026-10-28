@@ -17,8 +17,8 @@ from uuid import uuid4
 from minisweagent.models.utils.actions_toolcall_response import BASH_TOOL_RESPONSE_API
 from pydantic import BaseModel, Field, TypeAdapter
 
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -26,7 +26,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.trajectory.trajectory_record import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,

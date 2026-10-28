@@ -27,21 +27,16 @@ logger = logging.getLogger(__name__)
 
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.config.global_config import get_first_server_config_dict
-from nemo_gym.core.responses_api_types import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification.judge import call_judge
+from nemo_gym.verification import call_judge
 
 
 class XSTestResourcesServerConfig(BaseResourcesServerConfig):
