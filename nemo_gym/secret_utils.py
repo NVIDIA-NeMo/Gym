@@ -36,6 +36,29 @@ _SECRET_KEY_SUBSTRINGS = (
 )
 
 
+# `scheme://user:PASSWORD@host`. `${...}` stays whole inside the user name, so an interpolation is never cut in two.
+# The password runs to the last `@` of the authority, because passwords are often pasted without percent-encoding.
+_URL_PASSWORD = re.compile(
+    r"(?P<head>[A-Za-z][A-Za-z0-9+.\-]*://(?:\$\{[^}]*\}|[^\s/?#:@$])*):(?P<password>[^\s/?#]*)@(?P<host>[^\s/?#@]*)"
+)
+
+
+def mask_url_passwords(text: str) -> str:
+    """Mask the password in every `scheme://user:password@host` inside `text`, keeping the user name.
+
+    Only a precaution for a credential pasted into a URL: it is the user's job to keep secrets out of the config
+    in the first place (behind `${oc.env:NAME}` or `env.yaml`). A password that is an interpolation is a reference
+    rather than a secret, so it stays as it is.
+    """
+
+    def mask(match: re.Match) -> str:
+        if not match["password"] or "${" in match["password"] or match["password"] == MASKED_VALUE:
+            return match.group(0)
+        return f"{match['head']}:{MASKED_VALUE}@{match['host']}"
+
+    return _URL_PASSWORD.sub(mask, text)
+
+
 def looks_like_secret_key(key: object) -> bool:
     # OmegaConf allows non-string keys (ints, bools, enums), so match on their string form.
     lowered_key = str(key).lower()
@@ -86,12 +109,16 @@ def recursively_hide_secrets(dict_config: DictConfig) -> None:
                 if looks_like_secret_key(k):
                     node[k] = [MASKED_VALUE] * len(v)
                 else:
-                    for inner_v in v:
+                    for index, inner_v in enumerate(v):
                         if isinstance(inner_v, (DictConfig, dict)):
                             hide(inner_v)
+                        elif isinstance(inner_v, str) and mask_url_passwords(inner_v) != inner_v:
+                            v[index] = mask_url_passwords(inner_v)
             else:
                 if looks_like_secret_key(k):
                     node[k] = MASKED_VALUE
+                elif isinstance(v, str) and mask_url_passwords(v) != v:
+                    node[k] = mask_url_passwords(v)
 
     with open_dict(dict_config):
         hide(dict_config)
@@ -118,8 +145,10 @@ def hide_secrets_in_container(data: Any) -> Any:
                     [MASKED_VALUE] * len(value) if looks_like_secret_key(key) else hide_secrets_in_container(value)
                 )
             else:
-                masked[key] = MASKED_VALUE if looks_like_secret_key(key) else value
+                masked[key] = MASKED_VALUE if looks_like_secret_key(key) else hide_secrets_in_container(value)
         return masked
     if isinstance(data, list):
         return [hide_secrets_in_container(item) for item in data]
+    if isinstance(data, str):
+        return mask_url_passwords(data)
     return data

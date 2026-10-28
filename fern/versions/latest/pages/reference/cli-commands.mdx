@@ -900,7 +900,7 @@ Next to `--output` (`<stem>` is its name without `.jsonl`), the run writes:
 | `<stem>_materialized_inputs.jsonl` | The fully expanded input rows. |
 | `<stem>_failures.jsonl` | Failed rollouts routed to the sidecar, when there are any. |
 | `<stem>_aggregate_metrics.json` | Aggregate metrics, unless aggregation is disabled. |
-| `<stem>_resolved_config.yaml` | The run's configuration, written before collection starts and overwritten by each attempt. Secrets are masked and `${...}` interpolations stay unresolved. |
+| `<stem>_resolved_config.yaml` | The run's configuration, written before collection starts and overwritten by each attempt. Secrets are masked and `${...}` interpolations stay unresolved. Masking is a precaution (it also covers the password in a `scheme://user:password@host` URL), not a guarantee: keep secrets out of the config with `${oc.env:NAME}` or `env.yaml`. |
 
 #### Resume interrupted runs
 
