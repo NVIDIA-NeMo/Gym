@@ -352,7 +352,7 @@ effort max row with a self-hosted model: Codex `0.154.0` with no model catalog, 
 the full 8-hour budget. Sampling and output limits belong to the chat-completions server; Codex
 sends none.
 
-Gym's `vllm_model` is the policy model server (#PR6, with #4880's custom-tool bridge). Codex sends
+Gym's `vllm_model` is the policy model server (#5155, with #4880's custom-tool bridge). Codex sends
 its Responses requests to it, and it turns them into chat completions for a server that serves the
 model as `deepseek-flash` (vLLM with DeepSeek's tokenizer, tool and reasoning parsers). The run
 config sets:
