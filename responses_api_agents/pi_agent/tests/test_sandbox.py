@@ -948,10 +948,12 @@ def test_close_retry_and_stale_activation_do_not_run_host_pi(setup):
         with patch.object(agent, "_run_pi", AsyncMock(side_effect=AssertionError("host Pi must not run"))):
             assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 409
+        sandbox.disconnect.assert_awaited_once()
         client.cookies.clear()
         replacement = seed().model_copy(update={"agent_session_id": "replacement-session"})
         assert client.post("/v1/agent_sessions", json=replacement.model_dump(mode="json")).status_code == 200
-    sandbox.disconnect.assert_awaited_once()
+    assert sandbox.disconnect.await_count == 2
+    assert all(record.state is None for record in agent._session_records.values())
 
 
 async def test_concurrent_closes_share_receipt(setup):

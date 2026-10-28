@@ -619,7 +619,6 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "when every tool call of that turn is one of them."
         ),
     )
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:

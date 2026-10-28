@@ -292,6 +292,8 @@ The episode timeout, `default_episode_timeout_seconds`, covers the whole episode
 
 Since [#3902](https://github.com/NVIDIA-NeMo/Gym/pull/3902), `cleanup_timeout_seconds` bounds each cleanup callback, such as agent close or Resources Server close, rather than the whole final cleanup. Agent close bounds each of its sequential steps by `session_close_timeout_seconds`: cancelling staging, stopping the harness, collection, exec release, and session-file removal with disconnect (or the owned-sandbox stop). Keep about five times that value, plus any adapter-side wait, within `cleanup_timeout_seconds`. A close that the Environment Server cancels leaves the sandbox to its owner's teardown or the provider TTL.
 
+During agent-server shutdown, the base lifespan closes that worker's remaining sessions concurrently within one total `session_close_timeout_seconds` budget. It reuses the ordinary close operation, preserving checkpoint coordination and cached observations and cookies. Failed or timed-out cleanup keeps state for retry and is reported as unconfirmed. Configure the launcher's `server_shutdown_timeout_seconds` above this drain plus request-cancellation overhead; see [Server Shutdown](/main/troubleshooting/configuration#server-shutdown) for defaults and an aligned configuration.
+
 To run an adapter on a benchmark with an Environment Server, see [Run an integrated agent on a benchmark](/main/agent-server/integrate-existing-agents#run-an-integrated-agent-on-a-benchmark).
 
 ### Select an execution mode

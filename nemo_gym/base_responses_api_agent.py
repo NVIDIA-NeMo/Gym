@@ -254,6 +254,12 @@ class ModelEndpoint:
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
+    session_close_timeout_seconds: float = Field(
+        default=60,
+        gt=0,
+        allow_inf_nan=False,
+        description="Per-phase session close timeout, and total shutdown session-drain budget.",
+    )
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
@@ -506,6 +512,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 self._failed_seed_records[agent_session_id] = record
                 return
             # The lock's exit drops the record, now that it holds no state.
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
             record.state = None
 
     @staticmethod
@@ -609,7 +617,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return list(accesses.values())
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = FastAPI(lifespan=self._drain_sessions_on_shutdown)
 
         self.setup_session_middleware(app)
         self.setup_agent_checkpoint(app)
@@ -644,6 +652,39 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
 
         return app
+
+    @asynccontextmanager
+    async def _drain_sessions_on_shutdown(self, app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            records = {
+                session_id: record
+                for session_id, record in list(self._session_records.items())
+                if record.episode_id is not None and record.close_response is None
+            }
+            closes = {
+                asyncio.create_task(self._close_agent_session_id(session_id, record.episode_id)): session_id
+                for session_id, record in records.items()
+            }
+            owned = set(closes) | set(self._failed_seed_releases)
+            try:
+                if owned:
+                    await asyncio.wait(owned, timeout=self.config.session_close_timeout_seconds)
+            finally:
+                # Continuation closes are shielded from their callers; cancel those children too.
+                owned.update(self._failed_seed_releases)
+                owned.update(record.close_task for record in records.values() if record.close_task is not None)
+                for task in owned:
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+                    # Consume failures even if an adapter suppresses cancellation and finishes later.
+                    task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+                for task, session_id in closes.items():
+                    if not task.done() or task.cancelled() or task.exception() is not None:
+                        LOG.error("Agent session %s cleanup unconfirmed at shutdown", session_id)
+                # Let cooperative cancellation settle without extending the drain with an unbounded gather.
+                await asyncio.sleep(0)
 
     async def seed_agent_session(
         self,
@@ -729,26 +770,37 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise HTTPException(409, "agent_session_id does not match the session cookie")
-        async with self._locked_agent_session(body.agent_session_id) as record:
-            if record.episode_id is not None and record.episode_id != body.episode_id:
+        result, receipt_created = await self._close_agent_session_id(
+            body.agent_session_id, body.episode_id, current=current
+        )
+        if receipt_created:
+            # A stale /responses request must not fall back to the non-session path.
+            request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
+        return result
+
+    async def _close_agent_session_id(
+        self, session_id: str, episode_id: EpisodeId, *, current: str | None = None
+    ) -> tuple[AgentCloseSessionResponse, bool]:
+        async with self._locked_agent_session(session_id) as record:
+            if record.episode_id is not None and record.episode_id != episode_id:
                 raise HTTPException(409, "episode_id does not match the seeded agent session")
             if record.close_response is not None:
-                return record.close_response.model_copy(deep=True)
+                return record.close_response.model_copy(deep=True), False
             if record.state is None:
                 if current is not None:
                     raise HTTPException(409, "Agent close receipt has expired")
-                result = AgentCloseSessionResponse(agent_session_id=body.agent_session_id)
+                result = AgentCloseSessionResponse(agent_session_id=session_id)
             else:
-                result = await self._close_session_state(body.agent_session_id, record)
+                result = await self._close_session_state(session_id, record)
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
             record.state = None
-            record.episode_id = body.episode_id
+            record.episode_id = episode_id
             record.close_response = result.model_copy(deep=True)
             record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
-            self._failed_seed_records.pop(body.agent_session_id, None)
-            self._closed_session_records[body.agent_session_id] = record
-            # Keep the marker so a stale /responses request cannot fall back to the non-session path.
-            request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
-            return result
+            self._failed_seed_records.pop(session_id, None)
+            self._closed_session_records[session_id] = record
+            return result, True
 
     async def _close_session_state(
         self, agent_session_id: str, record: _AgentSessionRecord

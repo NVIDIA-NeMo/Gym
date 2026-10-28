@@ -19,9 +19,10 @@ import os
 import shlex
 import sys
 from glob import glob
+from math import isfinite
 from pathlib import Path
 from shutil import rmtree
-from signal import SIGINT
+from signal import SIGINT, SIGKILL
 from subprocess import Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -66,6 +67,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
     QUERY_KEY_NAME,
+    SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_TYPE_KEYS,
     GlobalConfigDictParser,
@@ -348,6 +350,37 @@ def _server_spinup_timeout_seconds(global_config_dict: DictConfig) -> float:
         ) from None
 
 
+def _server_shutdown_timeout_seconds(global_config_dict: DictConfig) -> float:
+    """The finite shared grace period for managed server process groups."""
+    value = global_config_dict.get(SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME)
+    if value is None:
+        return float(_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = float("nan")
+    if isinstance(value, bool) or not isfinite(seconds) or seconds < 0:
+        raise ConfigError(
+            f"`{SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME}` must be finite nonnegative seconds, got {value!r}."
+        )
+    return seconds
+
+
+def _signal_server_group(process: Popen, signal_number: int) -> None:
+    try:
+        os.killpg(process.pid, signal_number)
+    except ProcessLookupError:
+        pass
+
+
+def _server_group_exists(process: Popen) -> bool:
+    try:
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _resolve_server_dir(rel_path: Path) -> Path:
     """Resolve a relative server dir (e.g. ``resources_servers/<name>``) to an absolute path.
 
@@ -530,13 +563,14 @@ class RunHelper:  # pragma: no cover
     _h2_ping_sidecar: H2PingSidecarManager | None
     # Created by `_start`, so its clock starts with the startup it measures.
     _startup: Optional[SupervisorStartup] = None
+    _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
 
         Any failure or interrupt before readiness shuts down everything started so far, then re-raises.
         Callers reach their own `shutdown()` only after this returns.
-        The spawned servers have no process group or atexit handler, so nothing else would stop them.
+        Managed servers run in their own sessions, so shutdown owns delivery of their interrupt.
         """
         self._processes = dict()
         self._head_server = None
@@ -558,6 +592,7 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
         self._server_spinup_timeout_seconds = _server_spinup_timeout_seconds(global_config_dict)
+        self._server_shutdown_timeout_seconds = _server_shutdown_timeout_seconds(global_config_dict)
         self._startup.mark("load_config")
 
         # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
@@ -636,6 +671,7 @@ class RunHelper:  # pragma: no cover
                 server_name=top_level_path,
                 project_root=dir_path.parent.parent if (PARENT_DIR / "pyproject.toml").is_file() else None,
                 extra_env=extra_env,
+                start_new_session=True,
             )
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
@@ -851,28 +887,42 @@ Process `{process_name}` stderr:
         record_active_servers(0)
         shutdown_telemetry()
 
+        deadline = monotonic() + self._server_shutdown_timeout_seconds
         print("Sending interrupt signals to servers...")
         for process in self._processes.values():
-            process.send_signal(SIGINT)
+            _signal_server_group(process, SIGINT)
 
         print("Waiting for processes to finish...")
-        killed_process_names: List[str] = []
-        unreaped_process_names: List[str] = []
-        for process_name, process in self._processes.items():
+        remaining = {}
+        for name, process in self._processes.items():
             try:
-                process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+                process.wait(timeout=max(0, deadline - monotonic()))
             except TimeoutExpired:
-                process.kill()
-                killed_process_names.append(process_name)
-                # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
-                try:
-                    process.wait(timeout=_FORCE_KILL_REAP_TIMEOUT_SEC)
-                except TimeoutExpired:
-                    unreaped_process_names.append(process_name)
+                remaining[name] = process
+            else:
+                # A shell can exit before a child that still owns its process group.
+                if _server_group_exists(process):
+                    remaining[name] = process
+        while remaining and monotonic() < deadline:
+            remaining = {name: process for name, process in remaining.items() if _server_group_exists(process)}
+            if remaining:
+                sleep(min(0.01, max(0, deadline - monotonic())))
+
+        killed_process_names = list(remaining)
+        # Escalate every group before waiting for any one child to be reaped.
+        for process in remaining.values():
+            _signal_server_group(process, SIGKILL)
+        reap_deadline = monotonic() + _FORCE_KILL_REAP_TIMEOUT_SEC
+        unreaped_process_names = []
+        for name, process in remaining.items():
+            try:
+                process.wait(timeout=max(0, reap_deadline - monotonic()))
+            except TimeoutExpired:
+                unreaped_process_names.append(name)
 
         if killed_process_names:
             print(
-                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {_GRACEFUL_SHUTDOWN_TIMEOUT_SEC}s timeout, killing instead. You may see messages like:
+                f"""Some processes ({", ".join(killed_process_names)}) didn't shutdown within the {self._server_shutdown_timeout_seconds:g}s timeout, killing instead. You may see messages like:
 ```bash
 rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.
 ```
