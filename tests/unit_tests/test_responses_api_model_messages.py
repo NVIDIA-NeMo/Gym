@@ -23,16 +23,18 @@ from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, CaptureStore, SimpleResponsesAPIModel
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url
 from nemo_gym.server_utils import ServerClient
 
 
@@ -103,6 +105,44 @@ def _client(model_cls) -> TestClient:
 
 
 class TestDefaultMessagesRoute:
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize("harness_limit,expected_limit", [(11, 11), (100, 17)])
+    def test_training_controls_reach_responses_and_capture(self, tmp_path, stream, harness_limit, expected_limit):
+        server = _BodyOnlyModel(
+            config=_config(),
+            server_client=MagicMock(
+                spec=ServerClient,
+                global_config_dict={"observability_enabled": True, "model_call_capture_dir": str(tmp_path)},
+            ),
+        )
+        base_url = model_sampling_base_url(
+            "http://testserver/ng-rollout/claude-training/v1",
+            ModelCallSampling(temperature=0.0, top_p=0.7, max_output_tokens=17),
+        )
+        response = TestClient(server.setup_webserver()).post(
+            f"{base_url}/messages",
+            json={
+                "model": "policy",
+                "messages": [{"role": "user", "content": "hello"}],
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "max_tokens": harness_limit,
+                "stream": stream,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert server.last_params.temperature == 0.0
+        assert server.last_params.top_p == 0.7
+        assert server.last_params.max_output_tokens == expected_limit
+        [captured] = CaptureStore(tmp_path).read("claude-training")
+        assert captured["request"]["temperature"] == 0.0
+        assert captured["request"]["top_p"] == 0.7
+        assert captured["request"]["max_tokens"] == expected_limit
+        if stream:
+            assert "event: message_stop" in response.text
+        else:
+            assert response.json()["content"] == [{"type": "text", "text": "hi from body-only"}]
+
     def test_messages_route_registered_alongside_openai_routes(self) -> None:
         server = _BodyOnlyModel(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         paths = {route.path for route in server.setup_webserver().routes}

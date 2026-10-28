@@ -435,7 +435,7 @@ def test_token_cap_supports_the_largest_exact_javascript_integer():
     assert ModelCallSampling(max_output_tokens=2**53 - 1).max_output_tokens == 2**53 - 1
 
 
-@pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
+@pytest.mark.parametrize("dialect", ["chat/completions", "responses", "messages"])
 @pytest.mark.parametrize("stream", [False, True])
 def test_concurrent_rollouts_capture_their_own_effective_model_requests(tmp_path, dialect, stream):
     app = FastAPI()
@@ -473,6 +473,8 @@ def test_concurrent_rollouts_capture_their_own_effective_model_requests(tmp_path
             "max_tokens": 2048,
             "max_completion_tokens": 4096,
         }
+    elif dialect == "messages":
+        original |= {"messages": [{"role": "user", "content": "task"}], "max_tokens": 2048}
     else:
         original |= {"input": "task", "max_output_tokens": 2048}
     before = deepcopy(original)
@@ -502,6 +504,8 @@ def test_concurrent_rollouts_capture_their_own_effective_model_requests(tmp_path
         if dialect == "chat/completions":
             expected.pop("max_tokens")
             expected["max_completion_tokens"] = controls[index].max_output_tokens
+        elif dialect == "messages":
+            expected["max_tokens"] = controls[index].max_output_tokens
         else:
             expected["max_output_tokens"] = controls[index].max_output_tokens
         if stream:
@@ -514,7 +518,7 @@ def test_concurrent_rollouts_capture_their_own_effective_model_requests(tmp_path
         assert captured["request"] == expected
 
 
-@pytest.mark.parametrize("dialect", ["chat/completions", "responses"])
+@pytest.mark.parametrize("dialect", ["chat/completions", "responses", "messages"])
 def test_omitted_controls_preserve_harness_defaults(dialect):
     app = FastAPI()
 
@@ -546,6 +550,9 @@ def test_omitted_controls_preserve_harness_defaults(dialect):
         ("responses", {}, 73),
         ("responses", {"max_output_tokens": 100}, 73),
         ("responses", {"max_output_tokens": 11}, 11),
+        ("messages", {}, 73),
+        ("messages", {"max_tokens": 100}, 73),
+        ("messages", {"max_tokens": 11}, 11),
     ],
 )
 def test_request_token_cap_never_expands_a_smaller_harness_budget(dialect, harness_limits, expected_limit):
@@ -563,7 +570,11 @@ def test_request_token_cap_never_expands_a_smaller_harness_budget(dialect, harne
     response = TestClient(app).post(f"{base_url}/{dialect}", json={"temperature": 1.0, "top_p": 1.0} | harness_limits)
 
     assert response.status_code == 200, response.text
-    limit_field = "max_completion_tokens" if dialect == "chat/completions" else "max_output_tokens"
+    limit_field = {
+        "chat/completions": "max_completion_tokens",
+        "responses": "max_output_tokens",
+        "messages": "max_tokens",
+    }[dialect]
     assert response.json() == {"temperature": 0.0, "top_p": 0.8, limit_field: expected_limit}
 
 

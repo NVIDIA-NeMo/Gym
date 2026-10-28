@@ -163,7 +163,7 @@ class RolloutContextMiddleware:
 MODEL_SAMPLING_PATH_PREFIX = "ng-sampling"
 _MAX_ENCODED_LENGTH = 1024
 _ENCODED_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
-_GENERATION_PATHS = frozenset({"/v1/chat/completions", "/v1/responses"})
+_GENERATION_PATHS = frozenset({"/v1/chat/completions", "/v1/responses", "/v1/messages"})
 _SAMPLING_PATH = re.compile(
     rf"^(?P<routing>(?:/{ROLLOUT_PATH_PREFIX}/[^/]+(?:/{TOKEN_CAPTURE_PATH_SEGMENT})?)?)"
     rf"/{MODEL_SAMPLING_PATH_PREFIX}(?:/(?P<encoded>[^/]*)(?P<api_path>/.*)?)?$"
@@ -254,11 +254,6 @@ class ModelSamplingMiddleware:
         route_prefix = f"{root_path if mounted else ''}{match['routing']}"
         scope = scope_with_routed_path(scope, f"{route_prefix}{generation_path}")
         controls = sampling.model_dump(exclude_none=True)
-        if scope["method"] == "POST" and generation_path == "/v1/messages" and controls:
-            await JSONResponse({"detail": "Model-call sampling is not supported for /v1/messages"}, status_code=422)(
-                scope, receive, send
-            )
-            return
         if scope["method"] != "POST" or generation_path not in _GENERATION_PATHS or not controls:
             await self.app(scope, receive, send)
             return
@@ -283,11 +278,11 @@ class ModelSamplingMiddleware:
         if "max_output_tokens" in controls:
             # Harnesses can reserve less output near the context limit or for a
             # summary. The caller's cap must never raise those smaller limits.
-            aliases = (
-                ("max_tokens", "max_completion_tokens")
-                if generation_path == "/v1/chat/completions"
-                else ("max_output_tokens",)
-            )
+            aliases = {
+                "/v1/chat/completions": ("max_tokens", "max_completion_tokens"),
+                "/v1/responses": ("max_output_tokens",),
+                "/v1/messages": ("max_tokens",),
+            }[generation_path]
             limit = controls.pop("max_output_tokens")
             for name in aliases:
                 harness_limit = body.pop(name, None)
