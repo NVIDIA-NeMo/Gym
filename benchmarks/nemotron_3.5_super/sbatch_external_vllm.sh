@@ -683,6 +683,11 @@ main_job_id=${main_job_id%%;*}
 if (( should_run_eval )); then
     # @bxyu-nvidia: Don't run cleanup job in reservation
     unset SBATCH_RESERVATION
+    # Run the cleanup with the Gym venv's interpreter when there is one: through its "#!/usr/bin/env python3" shebang
+    # the script got the CPU node's system Python, which is too old for its type hints and lacks aiohttp/yaml, so every
+    # cleanup job failed and sandboxes were never reaped.
+    cleanup_python="$submit_dir/.venv/bin/python"
+    [ -x "$cleanup_python" ] || cleanup_python=python3
     if ! cleanup_job_id=$(
         sbatch \
             --parsable \
@@ -698,11 +703,8 @@ if (( should_run_eval )); then
             --time=00:30:00 \
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
-            "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            "${cleanup_connection[@]}" \
-            --run-id "$main_job_id" \
-            --user "$cleanup_user" \
-            --reap
+            --wrap="$(printf '%q ' "$cleanup_python" "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
+                "${cleanup_connection[@]}" --run-id "$main_job_id" --user "$cleanup_user" --reap)"
     ); then
         echo "Submitted batch job $main_job_id"
         echo "Failed to submit the sandbox-cleanup job for batch job $main_job_id;" \
