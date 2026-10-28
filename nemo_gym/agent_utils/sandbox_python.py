@@ -256,7 +256,7 @@ class SandboxPythonRuntime:
             await sandbox.upload(python_archive, f"{setup}/python.tar.gz")
             await sandbox.upload(site_packages_archive, f"{setup}/site-packages.tar.gz")
             await sandbox.upload(_INSTALLER, f"{setup}/{_INSTALLER.name}")
-            command = shlex.join(["sh", f"{setup}/{_INSTALLER.name}", self.directory, setup, self.import_check])
+            command = shlex.join(["bash", f"{setup}/{_INSTALLER.name}", self.directory, setup, self.import_check])
             result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
         if result.return_code != 0 or result.error_type is not None:
             raise RuntimeError(
