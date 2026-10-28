@@ -31,7 +31,7 @@ from nemo_gym.server_runtime._checkpoint.errors import ControlError, ExportFaile
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.sink import CaptureContext
 from nemo_gym.token_id_capture.staging.records import GenerationCutContinuation
-from tests.unit_tests.test_checkpoint_model import _staged_call, wait_until, watch_admission, watch_delivery
+from tests.unit_tests.models.test_checkpoint_model import _staged_call, wait_until, watch_admission, watch_delivery
 from tests.unit_tests.test_token_capture_ledger import ASSISTANT_1, ASSISTANT_2, USER_1, USER_2, _call_record, _commit
 
 
@@ -265,7 +265,7 @@ async def test_a_call_waiting_at_closed_admission_on_a_worker_stays_refused_afte
 async def test_a_worker_call_that_used_a_restored_cut_never_gives_it_back_to_a_retry_after_a_newer_cut(
     tmp_path: Path,
 ) -> None:
-    from tests.unit_tests.test_checkpoint_model import _cutting_worker
+    from tests.unit_tests.models.test_checkpoint_model import _cutting_worker
 
     request_cut, _ = _cutting_worker()
     async with deployment(1, ledger=FileLineageStore(tmp_path / "ledger")) as (coordinator, _):

@@ -55,8 +55,8 @@ from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, Con
 from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
 from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_participant_state
 from nemo_gym.server_utils import BaseServerConfig
-from tests.unit_tests.test_checkpoint_coordination import InProcessClient
-from tests.unit_tests.test_checkpoint_sequences import GatedWrites
+from tests.unit_tests.server_runtime.test_checkpoint_coordination import InProcessClient
+from tests.unit_tests.server_runtime.test_checkpoint_sequences import GatedWrites
 
 
 SEEDS = int(os.environ.get("NEMO_GYM_CHECKPOINT_MIXED_SEQUENCE_SEEDS", "12"))

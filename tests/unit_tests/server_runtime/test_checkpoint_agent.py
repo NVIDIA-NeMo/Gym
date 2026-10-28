@@ -40,7 +40,7 @@ from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, Con
 from nemo_gym.server_runtime._checkpoint.participant_workers import COORDINATOR_SOCKET_ENV
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.server_utils import BaseServerConfig
-from tests.unit_tests.test_checkpoint_resources import SEED
+from tests.unit_tests.server_runtime.test_checkpoint_resources import SEED
 
 
 class Hooks:
@@ -1344,8 +1344,8 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
     from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
     from nemo_gym.server_runtime.episode_types import MaterializedTask
     from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
-    from tests.unit_tests.test_checkpoint_coordination import InProcessClient, Recorder
-    from tests.unit_tests.test_checkpoint_resources import RestartOnlyServer, make_server, until
+    from tests.unit_tests.server_runtime.test_checkpoint_coordination import InProcessClient, Recorder
+    from tests.unit_tests.server_runtime.test_checkpoint_resources import RestartOnlyServer, make_server, until
 
     resources_server, resources = (
         make_server(RestartOnlyServer) if source == "restart_only_resources_seed" else make_server()

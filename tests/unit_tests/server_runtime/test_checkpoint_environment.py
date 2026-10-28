@@ -247,7 +247,11 @@ async def test_a_restored_episode_not_yet_restarted_survives_the_next_checkpoint
 
 async def test_a_retire_during_final_cleanup_does_not_interrupt_it() -> None:
     from nemo_gym.server_runtime.base_environment_server import CleanupContext
-    from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+    from tests.unit_tests.server_runtime.test_environment_server import (
+        _environment_server,
+        _EnvironmentServer,
+        _request,
+    )
 
     cleanup_started, cleanup_finished = asyncio.Event(), asyncio.Event()
 
@@ -317,7 +321,11 @@ async def test_a_commit_that_no_longer_continues_a_restored_episode_retires_it(t
 
 async def test_a_retire_replies_only_after_the_episode_and_its_cleanup_have_ended() -> None:
     from nemo_gym.server_runtime.base_environment_server import CleanupContext
-    from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+    from tests.unit_tests.server_runtime.test_environment_server import (
+        _environment_server,
+        _EnvironmentServer,
+        _request,
+    )
 
     sessions_closed = asyncio.Event()
     running = asyncio.Event()

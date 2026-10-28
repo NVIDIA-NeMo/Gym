@@ -13,8 +13,8 @@ from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_part
 from nemo_gym.telemetry import gym_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from tests.unit_tests.test_checkpoint_control import FakeParticipant, body, make_client
-from tests.unit_tests.test_checkpoint_resources import AUTH, SEED, control, make_server
+from tests.unit_tests.server_runtime.test_checkpoint_control import FakeParticipant, body, make_client
+from tests.unit_tests.server_runtime.test_checkpoint_resources import AUTH, SEED, control, make_server
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")
@@ -256,7 +256,7 @@ async def test_a_lease_expiry_is_counted_once_and_each_reopen_attempt_with_its_o
 ) -> None:
     import nemo_gym.server_runtime._checkpoint.control as control_module
     from nemo_gym.core.episode import EpisodeId
-    from tests.unit_tests.test_checkpoint_control import _past_deadline, _until
+    from tests.unit_tests.server_runtime.test_checkpoint_control import _past_deadline, _until
 
     monkeypatch.setattr(control_module, "_LEASE_REOPEN_WAIT_SECONDS", 0.05)
     release = asyncio.Event()
@@ -303,7 +303,7 @@ async def test_a_commit_retried_after_its_cleanup_ran_out_of_time_counts_its_rec
     tmp_path: Path, metrics
 ) -> None:
     from nemo_gym.core.episode import EpisodeId
-    from tests.unit_tests.test_checkpoint_control import _past_deadline
+    from tests.unit_tests.server_runtime.test_checkpoint_control import _past_deadline
 
     release = asyncio.Event()
     deleting: list[None] = []

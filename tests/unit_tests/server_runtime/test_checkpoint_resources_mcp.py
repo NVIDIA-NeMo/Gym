@@ -20,7 +20,14 @@ from nemo_gym.server_runtime.base_resources_server import (
     mcp_session_token_serializer,
 )
 from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
-from tests.unit_tests.test_checkpoint_resources import AUTH, SEED, CounterServer, control, signal_waits, until
+from tests.unit_tests.server_runtime.test_checkpoint_resources import (
+    AUTH,
+    SEED,
+    CounterServer,
+    control,
+    signal_waits,
+    until,
+)
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}

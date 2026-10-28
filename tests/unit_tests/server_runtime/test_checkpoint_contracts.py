@@ -25,7 +25,7 @@ from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRecord, JsonPayload
 from nemo_gym.server_runtime._checkpoint.errors import CheckpointStateError
 from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_participant_state, write_participant_state
-from tests.unit_tests.test_checkpoint_control import FakeParticipant, body, make_client
+from tests.unit_tests.server_runtime.test_checkpoint_control import FakeParticipant, body, make_client
 
 
 class PayloadRecord(CheckpointRecord):
