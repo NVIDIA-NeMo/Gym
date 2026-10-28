@@ -210,6 +210,16 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
   transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
+- Token usage covers every model call the CLI made, its subagents' included. Input counts the
+  prompt cache's reads and writes, and `cached_tokens` is the cache reads. A run that ends on its
+  own takes it from the result event's `modelUsage` (its `usage` covers the main conversation
+  only). A run cut off at the timeout has no result event; it counts the calls that finished, from
+  Claude Code's session transcripts. A call cut off in flight is not counted, since its output is
+  reported only when it ends.
+- Usage is Claude Code's own count. Against vLLM it counts a call's prompt twice when the call's
+  final usage reports no uncached input: Claude Code then keeps the prompt total it was sent when
+  the call started and adds the cache reads and writes to it. With DeepSeek V4.1 Flash that is
+  about 1 call in 135, or 0.7% extra input.
 
 ## Sandbox execution
 

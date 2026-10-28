@@ -14,9 +14,12 @@
 # limitations under the License.
 
 import asyncio
+import io
 import json
+import tarfile
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import orjson
@@ -25,6 +28,7 @@ import yaml
 from fastapi import Request
 
 from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -38,6 +42,7 @@ from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.terminal import resolve_terminal
+from responses_api_agents.claude_code_agent import sandbox as adapter
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,
@@ -49,6 +54,7 @@ from responses_api_agents.claude_code_agent.app import (
     parse_stream_json,
 )
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.parsing import transcript_usage_from_dir, transcript_usage_from_tar
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -922,7 +928,7 @@ class TestParseStreamJson:
     def test_empty(self) -> None:
         items, usage = parse_stream_json("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "cached_tokens": 0, "output_tokens": 0}
 
     def test_text_message(self) -> None:
         line = self._assistant([{"type": "text", "text": "hello"}])
@@ -1036,6 +1042,7 @@ class TestParseStreamJson:
         _, usage = parse_stream_json(result)
         assert usage == {
             "input_tokens": 1,
+            "cached_tokens": 0,
             "output_tokens": 1,
             "num_turns": 9,
             "subtype": "success",
@@ -1067,6 +1074,184 @@ class TestParseStreamJson:
             {"invocation_id": "failed-without-opener", "outcome": "failed"},
             {"invocation_id": "open", "outcome": "unknown"},
         ]
+
+
+# Real Claude Code sessions with model text removed, and what the server sent for each call (see "about").
+USAGE_CAPTURES = json.loads((Path(__file__).parent / "claude_code_usage_test_data.json").read_text())
+COMPLETED = ["complete1", "complete2", "parallel", "subagent"]
+KILLED = ["killed-mid", "killed-tool", "killed-sub"]
+
+
+def _capture_stream(capture: dict, *, drop_result: bool = False) -> str:
+    return "\n".join(
+        json.dumps(event) for event in capture["stream"] if not (drop_result and event["type"] == "result")
+    )
+
+
+def _write_transcripts(capture: dict, config_dir: Path) -> None:
+    for name, entries in capture["transcripts"].items():
+        path = config_dir / "projects" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+
+def _server_count(capture: dict, *, as_claude_code_merges: bool = True) -> tuple[int, int, int]:
+    """(input, cached, output) over the calls that finished, from what the server sent.
+
+    vLLM sends the whole prompt as message_start's input_tokens and splits it (uncached, cache writes, cache reads)
+    in the final message_delta, with the output. Claude Code keeps message_start's input_tokens when the final one
+    is 0, so it counts that call's prompt twice; ``as_claude_code_merges`` follows it.
+    """
+    totals = (0, 0, 0)
+    for call in capture["proxy_calls"]:
+        if not call["message_stop"]:
+            continue
+        final = call["last_message_delta_usage"]
+        uncached = final["input_tokens"] or (
+            call["message_start_usage"]["input_tokens"] if as_claude_code_merges else 0
+        )
+        cached = final["cache_read_input_tokens"]
+        totals = (
+            totals[0] + uncached + final["cache_creation_input_tokens"] + cached,
+            totals[1] + cached,
+            totals[2] + final["output_tokens"],
+        )
+    return totals
+
+
+def _counts(usage: dict) -> tuple[int, int, int]:
+    return usage["input_tokens"], usage["cached_tokens"], usage["output_tokens"]
+
+
+def _response_counts(response) -> tuple[int, int, int]:
+    usage = response.usage
+    assert usage.total_tokens == usage.input_tokens + usage.output_tokens
+    return usage.input_tokens, usage.input_tokens_details.cached_tokens, usage.output_tokens
+
+
+class TestCapturedUsage:
+    @pytest.mark.parametrize("name", COMPLETED)
+    def test_completed_session_counts_every_call_with_its_cache(self, name: str) -> None:
+        capture = USAGE_CAPTURES[name]
+        _, usage = parse_stream_json(_capture_stream(capture))
+        assert _counts(usage) == _server_count(capture)
+
+    def test_subagent_calls_count(self) -> None:
+        # The result event's usage covers the main conversation only; its modelUsage covers every call.
+        capture = USAGE_CAPTURES["subagent"]
+        result = next(event for event in capture["stream"] if event["type"] == "result")
+        main_input = sum(
+            result["usage"][key] for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        )
+        _, usage = parse_stream_json(_capture_stream(capture))
+        assert main_input < usage["input_tokens"] == _server_count(capture)[0]
+
+    @pytest.mark.parametrize("name", ["complete1", "killed-tool"])
+    def test_a_call_with_no_uncached_input_counts_as_claude_code_counts_it(self, tmp_path: Path, name: str) -> None:
+        capture = USAGE_CAPTURES[name]
+        [call] = [call for call in capture["proxy_calls"] if call["last_message_delta_usage"]["input_tokens"] == 0]
+        served, merged = _server_count(capture, as_claude_code_merges=False), _server_count(capture)
+        assert merged[0] - served[0] == call["message_start_usage"]["input_tokens"]
+        _write_transcripts(capture, tmp_path)
+        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
+        assert _counts(usage) == merged
+
+    @pytest.mark.parametrize("name", KILLED)
+    def test_killed_session_counts_the_calls_that_finished(self, tmp_path: Path, name: str) -> None:
+        capture = USAGE_CAPTURES[name]
+        assert not any(event["type"] == "result" for event in capture["stream"])
+        _write_transcripts(capture, tmp_path)
+        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
+        assert _counts(usage) == _server_count(capture)
+
+    def test_killed_session_without_transcripts_counts_the_streamed_input(self) -> None:
+        capture = USAGE_CAPTURES["killed-mid"]
+        streamed = {event["message"]["id"] for event in capture["stream"] if event["type"] == "assistant"}
+        started = sum(
+            call["message_start_usage"]["input_tokens"]
+            for call in capture["proxy_calls"]
+            if call["message_id"] in streamed
+        )
+        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: None)
+        assert _counts(usage) == (started, 0, 0)
+
+    @pytest.mark.parametrize("name", KILLED)
+    def test_transcripts_read_the_same_from_the_sandbox_archive(self, tmp_path: Path, name: str) -> None:
+        _write_transcripts(USAGE_CAPTURES[name], tmp_path)
+        archive_bytes = io.BytesIO()
+        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+            archive.add(tmp_path / "projects", arcname="projects")
+        assert transcript_usage_from_tar(archive_bytes.getvalue()) == transcript_usage_from_dir(tmp_path)
+
+    def test_missing_or_unreadable_transcripts_are_none(self, tmp_path: Path) -> None:
+        assert transcript_usage_from_dir(tmp_path) is None
+        assert transcript_usage_from_tar(b"not a tar") is None
+
+    def test_endpoint_without_cache_fields(self, tmp_path: Path) -> None:
+        # No proxy recorded this session; the server's per-call usage is the stream's (one value per message).
+        capture = USAGE_CAPTURES["nocache-glm53"]
+        started = {e["message"]["id"]: e["message"]["usage"] for e in capture["stream"] if e["type"] == "assistant"}
+        assert all(set(usage) == {"input_tokens", "output_tokens"} for usage in started.values())
+        _, usage = parse_stream_json(_capture_stream(capture))
+        assert (usage["input_tokens"], usage["cached_tokens"]) == (sum(u["input_tokens"] for u in started.values()), 0)
+        _write_transcripts(capture, tmp_path)
+        _, killed = parse_stream_json(
+            _capture_stream(capture, drop_result=True), transcript=lambda: transcript_usage_from_dir(tmp_path)
+        )
+        assert _counts(killed) == _counts(usage)
+
+    @pytest.mark.parametrize("name", ["subagent", "killed-sub"])
+    def test_host_run_reports_server_usage(self, tmp_path: Path, name: str) -> None:
+        capture = USAGE_CAPTURES[name]
+        killed = name.startswith("killed")
+        agent = _make_agent(timeout=0 if killed else 1)
+        agent.server_client.global_config_dict = {}
+        proc = MagicMock()
+        proc.returncode = None if killed else 0
+        proc.communicate = AsyncMock(return_value=(_capture_stream(capture).encode(), b""))
+
+        async def run_claude(*command, env, **kwargs):
+            _write_transcripts(capture, Path(env["CLAUDE_CONFIG_DIR"]))
+            return proc
+
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", new=run_claude),
+        ):
+            response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="fix it")))
+        assert _response_counts(response) == _server_count(capture)
+
+    @pytest.mark.parametrize("name", ["subagent", "killed-sub"])
+    def test_sandbox_run_reports_server_usage(self, tmp_path: Path, monkeypatch, name: str) -> None:
+        capture = USAGE_CAPTURES[name]
+        killed = name.startswith("killed")
+        _write_transcripts(capture, tmp_path)
+        archive_bytes = io.BytesIO()
+        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+            archive.add(tmp_path / "projects", arcname="projects")
+        artifacts = adapter.ClaudeCodeArtifacts(_capture_stream(capture), archive_bytes.getvalue())
+        state = adapter.ClaudeCodeSandboxSession(
+            request=AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id={"rollout_id": "rollout"},
+                task_id={"taskset": "fixture", "task_id": "task"},
+            ),
+            runtime="/runtime",
+            session=SimpleNamespace(
+                session_dir="/tmp/session",
+                workdir="/app",
+                artifacts=artifacts,
+                cleanup={"timed_out": killed, "return_code": 137 if killed else 0, "cleanup_confirmed": True},
+            ),
+        )
+        monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
+        agent = _make_agent()
+        response = asyncio.run(
+            agent._sandbox_response(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="fix it"), prompt="fix it", system=None
+            )
+        )
+        assert _response_counts(response) == _server_count(capture)
 
 
 class TestConfigYaml:
