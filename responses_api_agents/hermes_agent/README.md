@@ -184,7 +184,8 @@ to run `hermes_agent` through an Environment Server. For Hermes specifically:
   `/tmp/nemo-gym-hermes-runtime-<key>/venv`, where `<key>` is the first twelve characters of
   the pinned commit rather than the full hash. Network-restricted deployments must preinstall
   exactly that path, and the virtual environment must satisfy
-  `python -c 'import run_agent, mcp'`. The old portable glibc/musl bundles are not a drop-in
+  `python -c 'import run_agent; from mcp.client.streamable_http import streamablehttp_client'`.
+  The old portable glibc/musl bundles are not a drop-in
   replacement; validate each task image's architecture and libc before migrating a batch,
   and note that the removed runtime also bundled a static `ripgrep` for images whose BusyBox
   `grep` lacks the GNU options Hermes falls back on.

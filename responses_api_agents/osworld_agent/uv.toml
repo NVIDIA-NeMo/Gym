@@ -33,7 +33,6 @@ exclude-dependencies = [
     "fasttext-wheel",
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
