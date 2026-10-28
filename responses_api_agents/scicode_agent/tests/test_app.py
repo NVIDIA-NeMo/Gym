@@ -684,7 +684,8 @@ class TestTokenAccounting:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prefilled", [False, True])
 async def test_collector_builds_perf_from_generated_substeps(prefilled):
-    from nemo_gym.rollouts.rollout_collection import _attach_ng_perf, _attach_trajectory_record
+    from nemo_gym.rollouts.rollout_perf import _attach_ng_perf
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 
     agent = _agent(observability_enabled=True)
     calls = []

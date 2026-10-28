@@ -1561,7 +1561,8 @@ async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) ->
 async def test_verifier_evidence_reaches_collector_through_result_or_failure(outcome, tmp_path):
     from fastapi.testclient import TestClient
 
-    from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record, _episode_record
+    from nemo_gym.rollouts.rollout_collection import _episode_record
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
     from nemo_gym.server_runtime.base_resources_server import (
         BaseResourcesServerConfig,
         BaseVerifyResponse,

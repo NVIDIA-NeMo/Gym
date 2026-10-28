@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
-from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import (
     BaseModel,
@@ -20,13 +18,10 @@ from pydantic import (
     model_validator,
 )
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.failure_kinds import validate_failure_kind
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseInputItem
-
-
-if TYPE_CHECKING:
-    from nemo_gym.rollouts.model_calls import ModelCallRecord
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
@@ -193,15 +188,6 @@ class VerifierInvocation(ObservationModel):
     @classmethod
     def validate_failure_kind(cls, value: Optional[str]) -> Optional[str]:
         return validate_failure_kind(value)
-
-
-def exclude_verifier_model_calls(
-    calls: Iterable[ModelCallRecord],
-    verifier_invocations: Iterable[VerifierInvocation],
-) -> list[ModelCallRecord]:
-    """Exclude explicitly verifier-owned attempts from agent and step joins."""
-    verifier_call_ids = {ref.model_call_id for inv in verifier_invocations for ref in inv.model_calls}
-    return [call for call in calls if call.model_call_id not in verifier_call_ids]
 
 
 class ToolCallObservation(ObservationModel):
@@ -379,309 +365,13 @@ class TrajectoryRecord(ObservationModel):
         return self
 
 
-def join_assistant_message_calls(
-    bundle: AgentObservationBundle,
-    trajectory: TrajectoryRecord | None,
-    calls: list["ModelCallRecord"],
-) -> tuple[AgentObservationBundle, TrajectoryRecord | None]:
-    """Join persisted messages to HTTP attempts using session, message and model-server IDs.
-
-    Run after invocation ownership resolution. Summary attempts belong to compactions;
-    calls without a saved message (for example title generation) stay invocation-owned.
-    Producers declare source_message_id(s), source_model_ref and invocation IDs.
-    Source labels are not dispatch keys. No content or timing fallback is used.
-    """
-    result = bundle.model_copy(
-        update={
-            "records": [
-                record.model_copy(update={"model_calls": list(record.model_calls)})
-                if isinstance(record, ContextCompactionObservation)
-                else record
-                for record in bundle.records
-            ],
-            "gaps": [gap for gap in bundle.gaps if not gap.code.startswith("assistant_message_call_")],
-        }
-    )
-    projected = (
-        trajectory.model_copy(
-            update={
-                "turns": [turn.model_copy(update={"model_calls": list(turn.model_calls)}) for turn in trajectory.turns]
-            }
-        )
-        if trajectory is not None
-        else None
-    )
-    targets: dict[tuple[str, str], list[TrajectoryTurn | ContextCompactionObservation]] = defaultdict(list)
-    for turn in projected.turns if projected is not None else []:
-        if turn.source_message_id:
-            targets[(turn.invocation_id, turn.source_message_id)].append(turn)
-    for compaction in result.records:
-        if isinstance(compaction, ContextCompactionObservation):
-            for message_id in set(compaction.source_message_ids):
-                targets[(compaction.invocation_id, message_id)].append(compaction)
-
-    call_counts = Counter(call.model_call_id for call in calls if call.model_call_id)
-    owners: dict[str, set[str]] = defaultdict(set)
-    for invocation in result.records:
-        if isinstance(invocation, AgentInvocation):
-            for ref in invocation.model_calls:
-                if ref.model_call_id:
-                    owners[ref.model_call_id].add(invocation.invocation_id)
-
-    # Recompute these links on repeated finalization, including newly ambiguous evidence.
-    attributed_ids = {call.model_call_id for call in calls if call.client_assistant_message_id and call.model_call_id}
-    for candidates in targets.values():
-        for target in candidates:
-            target.model_calls = [ref for ref in target.model_calls if ref.model_call_id not in attributed_ids]
-
-    for call in calls:
-        if not call.client_assistant_message_id:
-            continue
-        candidates = targets.get((call.client_session_id or "", call.client_assistant_message_id), [])
-        candidates = [target for target in candidates if target.source_model_ref in (None, call.model_ref)]
-        code = None
-        if len(candidates) != 1:
-            code = "ambiguous" if candidates else "unmatched"
-        elif candidates[0].source_model_ref is None or call.model_ref is None:
-            code = "scope_unavailable"
-        elif not call.model_call_id:
-            code = "identity_unavailable"
-        elif call_counts[call.model_call_id] != 1:
-            code = "ambiguous"
-        elif owners[call.model_call_id] != {call.client_session_id}:
-            code = "ownership_conflict"
-        if code is not None:
-            result.gaps.append(
-                ObservationGap(
-                    code=f"assistant_message_call_{code}",
-                    invocation_id=call.client_session_id,
-                    detail=f"{call.client_assistant_message_id}:{call.model_call_id}",
-                )
-            )
-            continue
-        candidates[0].model_calls.append(
-            ModelCallRef(model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id)
-        )
-    result.gaps = list({(gap.code, gap.invocation_id, gap.detail): gap for gap in result.gaps}.values())
-    return result, projected
-
-
-def join_agent_model_calls(
-    bundle: AgentObservationBundle,
-    calls: Iterable[ModelCallRecord],
-) -> AgentObservationBundle:
-    """Join captured calls to agent invocations and their compactions without guessing ownership."""
-
-    result = bundle.model_copy()
-    result.records = [
-        record.model_copy(update={"model_calls": list(record.model_calls)})
-        if isinstance(record, AgentInvocation)
-        else record.model_copy()
-        if isinstance(record, ContextCompactionObservation)
-        else record
-        for record in bundle.records
-    ]
-    invocations = [record for record in result.records if isinstance(record, AgentInvocation)]
-    compactions = [record for record in result.records if isinstance(record, ContextCompactionObservation)]
-    captured = list(calls)
-
-    invocations_by_id = {invocation.invocation_id: invocation for invocation in invocations}
-    reference_keys = {
-        invocation.invocation_id: {
-            (
-                reference.model_call_id,
-                (reference.model_ref.type, reference.model_ref.name) if reference.model_ref is not None else None,
-                reference.response_id,
-            )
-            for reference in invocation.model_calls
-        }
-        for invocation in invocations
-    }
-    for call in captured:
-        if not call.client_session_id or not call.model_call_id:
-            continue
-        invocation = invocations_by_id.get(call.client_session_id)
-        if invocation is None:
-            continue
-        model_ref_key = (call.model_ref.type, call.model_ref.name) if call.model_ref is not None else None
-        matching_keys = {
-            (call.model_call_id, None, None),
-            (call.model_call_id, model_ref_key, None),
-            (call.model_call_id, None, call.response_id),
-            (call.model_call_id, model_ref_key, call.response_id),
-        }
-        if model_ref_key is not None and call.response_id is not None:
-            matching_keys.add((None, model_ref_key, call.response_id))
-        invocation_keys = reference_keys[invocation.invocation_id]
-        if matching_keys & invocation_keys:
-            continue
-        reference = ModelCallRef(
-            model_call_id=call.model_call_id,
-            model_ref=call.model_ref,
-            response_id=call.response_id,
-        )
-        invocation.model_calls.append(reference)
-        invocation_keys.add((reference.model_call_id, model_ref_key, reference.response_id))
-
-    by_call_id: dict[str, list[ModelCallRecord]] = {}
-    by_response: dict[tuple[str, str, str], list[ModelCallRecord]] = {}
-    for call in captured:
-        if call.model_call_id:
-            by_call_id.setdefault(call.model_call_id, []).append(call)
-        if call.model_ref is not None and call.response_id:
-            key = (call.model_ref.type, call.model_ref.name, call.response_id)
-            by_response.setdefault(key, []).append(call)
-
-    def matches(ref: ModelCallRef) -> list[ModelCallRecord]:
-        if ref.model_call_id:
-            candidates = by_call_id.get(ref.model_call_id, [])
-            return [
-                call
-                for call in candidates
-                if (ref.model_ref is None or ref.model_ref == call.model_ref)
-                and (ref.response_id is None or ref.response_id == call.response_id)
-            ]
-        assert ref.model_ref is not None and ref.response_id is not None
-        return by_response.get((ref.model_ref.type, ref.model_ref.name, ref.response_id), [])
-
-    def canonical(call: ModelCallRecord) -> ModelCallRef:
-        return ModelCallRef.model_validate(
-            {
-                "model_call_id": call.model_call_id,
-                "model_ref": call.model_ref,
-                "response_id": call.response_id,
-            }
-        )
-
-    join_codes = {
-        "model_call_reference_ambiguous",
-        "model_call_reference_conflict",
-        "model_call_reference_unmatched",
-    }
-    result.gaps = [
-        gap
-        for gap in bundle.gaps
-        if gap.code not in join_codes
-        and not (
-            gap.code == "model_call_ownership_unavailable"
-            and gap.invocation_id is None
-            and gap.detail is not None
-            and gap.detail.startswith("capture:")
-        )
-    ]
-
-    owner_by_call: dict[int, str] = {}
-    join_gaps: list[ObservationGap] = []
-    for invocation in invocations:
-        resolved: list[ModelCallRef] = []
-        for ref in invocation.model_calls:
-            candidates = matches(ref)
-            detail = ref.model_call_id or ref.response_id
-            if len(candidates) != 1:
-                join_gaps.append(
-                    ObservationGap(
-                        code=("model_call_reference_ambiguous" if candidates else "model_call_reference_unmatched"),
-                        invocation_id=invocation.invocation_id,
-                        detail=detail,
-                    )
-                )
-                resolved.append(ref)
-                continue
-
-            call = candidates[0]
-            identity = id(call)
-            if identity in owner_by_call:
-                join_gaps.append(
-                    ObservationGap(
-                        code="model_call_reference_conflict",
-                        invocation_id=invocation.invocation_id,
-                        detail=call.model_call_id or call.response_id,
-                    )
-                )
-                resolved.append(ref)
-                continue
-            owner_by_call[identity] = invocation.invocation_id
-            resolved.append(canonical(call))
-        invocation.model_calls = resolved
-
-    for compaction in compactions:
-        resolved: list[ModelCallRef] = []
-        for ref in compaction.model_calls:
-            candidates = matches(ref)
-            detail = ref.model_call_id or ref.response_id
-            if len(candidates) != 1:
-                join_gaps.append(
-                    ObservationGap(
-                        code=("model_call_reference_ambiguous" if candidates else "model_call_reference_unmatched"),
-                        invocation_id=compaction.invocation_id,
-                        detail=f"model_calls:{detail}",
-                    )
-                )
-                resolved.append(ref)
-                continue
-
-            call = candidates[0]
-            owner = owner_by_call.get(id(call))
-            if owner != compaction.invocation_id:
-                join_gaps.append(
-                    ObservationGap(
-                        code=(
-                            "model_call_reference_conflict"
-                            if owner is not None
-                            else "model_call_ownership_unavailable"
-                        ),
-                        invocation_id=compaction.invocation_id,
-                        detail=f"model_calls:{call.model_call_id or call.response_id}",
-                    )
-                )
-                resolved.append(ref)
-                continue
-            resolved.append(canonical(call))
-        compaction.model_calls = resolved
-
-        for field_name in ("before_model_call", "after_model_call"):
-            ref = getattr(compaction, field_name)
-            if ref is None:
-                continue
-            candidates = matches(ref)
-            if len(candidates) == 1:
-                call = candidates[0]
-                owner = owner_by_call.get(id(call))
-                if owner is not None and owner != compaction.invocation_id:
-                    join_gaps.append(
-                        ObservationGap(
-                            code="model_call_reference_conflict",
-                            invocation_id=compaction.invocation_id,
-                            detail=f"{field_name}:{call.model_call_id or call.response_id}",
-                        )
-                    )
-                    continue
-                setattr(compaction, field_name, canonical(call))
-            else:
-                join_gaps.append(
-                    ObservationGap(
-                        code=("model_call_reference_ambiguous" if candidates else "model_call_reference_unmatched"),
-                        invocation_id=compaction.invocation_id,
-                        detail=f"{field_name}:{ref.model_call_id or ref.response_id}",
-                    )
-                )
-
-    result.gaps.extend(join_gaps)
-    for call in captured:
-        if id(call) not in owner_by_call:
-            result.gaps.append(
-                ObservationGap(
-                    code="model_call_ownership_unavailable",
-                    detail=f"capture:{call.model_call_id or call.response_id or 'unknown'}:call_index={call.call_index}",
-                )
-            )
-    result.gaps = list({(gap.code, gap.invocation_id, gap.detail): gap for gap in result.gaps}.values())
-    return result
-
-
 @dataclass(frozen=True, slots=True)
 class AgentEpisode:
     """An Agent response and the observations available at its execution boundary."""
 
     response: NeMoGymResponse
     observations: AgentObservationBundle
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

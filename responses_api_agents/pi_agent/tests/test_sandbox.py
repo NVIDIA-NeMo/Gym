@@ -2025,7 +2025,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
         from nemo_gym.rollouts.model_calls import ModelCallRecord
-        from nemo_gym.trajectory.trajectory_record import join_agent_model_calls
+        from nemo_gym.rollouts.trajectory_builder import join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"

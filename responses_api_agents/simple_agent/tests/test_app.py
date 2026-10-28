@@ -55,7 +55,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord
 from nemo_gym.server_runtime._checkpoint.control import (

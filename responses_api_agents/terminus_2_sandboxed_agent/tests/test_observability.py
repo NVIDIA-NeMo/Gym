@@ -16,8 +16,8 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
-from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollouts.rollout_health import run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     Terminus2Agent,

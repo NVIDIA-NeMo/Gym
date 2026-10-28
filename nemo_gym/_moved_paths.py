@@ -478,6 +478,28 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "0.8.0",
             "NG_DISPATCH_DRAINED_KEY NG_FAILURE_CLASS_KEY NG_NO_PERSIST_KEY _rollout_for_export _strip_capture_payloads",
         ),
+        # Split out of rollout_collection.
+        **_names("nemo_gym.rollouts.rollout_perf", "0.8.0", "_build_ng_perf"),
+        **_names(
+            "nemo_gym.rollouts.trajectory_builder",
+            "0.8.0",
+            """
+            _build_trajectory_record _nonnegative_int _trajectory_identity _turn_content _turns_from_model_calls
+            """,
+        ),
+        # Moved, and still imported by rollout_collection for its own use.
+        **_names("nemo_gym.rollouts.rollout_perf", "0.8.0", "DispatchLatencyTracker NG_PERF_KEY _attach_ng_perf"),
+        **_names("nemo_gym.rollouts.trajectory_builder", "0.8.0", "_attach_trajectory_record _has_observation_gap"),
+        # rollout_collection imported these for code that moved out of it.
+        **_names(
+            "nemo_gym.trajectory.trajectory_record",
+            "0.8.0",
+            """
+            AgentInvocation AgentObservationBundle ModelCallRef ObservationGap ToolCallObservation
+            TrajectoryModelCall TrajectoryRecord TrajectoryTokenStats TrajectoryToolCall TrajectoryTurn
+            VerifierInvocation
+            """,
+        ),
     },
     "nemo_gym.health.types": {
         **_names(
@@ -592,6 +614,16 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.sandbox.compose_config", "0.8.0", "deployment_platform"),
         **_names("nemo_gym.sandbox.config", "0.8.0", "SANDBOX_BLOCK_VOLUME_SOURCES_KEY validate_volume_sources"),
         **_names("nemo_gym.utils.path_utils", "0.8.0", "materialized_path_for"),
+    },
+    "nemo_gym.rollout_observability": {
+        # Split out of rollout_observability.
+        **_names(
+            "nemo_gym.rollouts.trajectory_builder",
+            "0.8.0",
+            """
+            exclude_verifier_model_calls join_agent_model_calls join_assistant_message_calls
+            """,
+        ),
     },
 }
 

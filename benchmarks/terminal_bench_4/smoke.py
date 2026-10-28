@@ -28,8 +28,8 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config import global_config
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
-from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollouts.rollout_health import run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
