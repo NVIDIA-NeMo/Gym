@@ -15,24 +15,26 @@ import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from omegaconf import OmegaConf
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
     SingleAgentTurnResult,
-    _is_retryable_dependency_error,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
+from nemo_gym.base_environment_server import is_retryable_dependency_error
 from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
+from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.failure_kinds import MODEL_TRANSPORT_ERROR
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
@@ -131,7 +133,7 @@ class _Client(ServerClient):
             payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/close_session":
             payload["resources_session_id"] = body["resources_session_id"]
-        return _Response(payload, response.headers)
+        return type(response)(payload, response.headers)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -396,9 +398,101 @@ def test_dependency_failure_reasons_are_bounded() -> None:
 
 
 def test_retry_requires_a_transient_dependency_error() -> None:
-    assert _is_retryable_dependency_error(TimeoutError()) is True
-    assert _is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
-    assert _is_retryable_dependency_error(ValueError("invalid response")) is False
+    assert is_retryable_dependency_error(TimeoutError()) is True
+    assert is_retryable_dependency_error(ClientPayloadError("response body interrupted")) is True
+    assert is_retryable_dependency_error(ValueError("invalid response")) is False
+
+
+@pytest.mark.parametrize(("status", "retryable"), [(422, False), (409, False), (429, True), (500, True)])
+def test_an_agent_seed_refusal_is_final_but_a_server_error_is_retried(status: int, retryable: bool) -> None:
+    # An agent refuses a seed it cannot serve with AgentSeedRejectedError, which answers 422.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://agent/v1/agent_sessions"), history=(), status=status
+    )
+
+    assert is_retryable_dependency_error(refusal) is retryable
+
+
+async def test_an_agent_seed_refusal_fails_the_episode_once_with_the_agents_reason() -> None:
+    environment, client = _environment_server()
+    # What raise_for_status raises for an agent's AgentSeedRejectedError.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://agent:8001/v1/agent_sessions"),
+        history=(),
+        status=422,
+        message="Unprocessable Content",
+    )
+    refusal.response_content = b'{"detail":"Simple Agent does not support required MCP tool access: resources"}'
+    responses = client.responses
+    client.responses = [responses[0], refusal, responses[3], responses[5]]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == "agent"
+    assert result.failure.terminal is True
+    assert "Simple Agent does not support required MCP tool access: resources" in result.failure.failure_reason
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+
+
+async def test_a_resources_seed_refusal_fails_the_episode_once_with_the_servers_reason() -> None:
+    environment, client = _environment_server()
+    # What raise_for_status raises for a resources server's ResourcesSessionConflictError.
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url="http://resources:8000/seed_session"),
+        history=(),
+        status=409,
+        message="Conflict",
+    )
+    refusal.response_content = b'{"detail":"resources_session_id is already bound to another episode or task"}'
+    responses = client.responses
+    client.responses = [refusal, responses[5]]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == "seed"
+    assert result.failure.terminal is True
+    assert "already bound to another episode or task" in result.failure.failure_reason
+    # The close registered before the seed still runs, so a seed whose reply was a refusal leaks nothing.
+    assert [path for _, path, _ in client.calls] == ["/seed_session", "/close_session"]
+
+
+@pytest.mark.parametrize(
+    ("stage", "path", "status", "detail"),
+    [
+        ("agent", "/ng-rollout/rollout-a2/v1/responses", 422, "Agent turn refused: unsupported tool_choice"),
+        ("cleanup", "/v1/agent_sessions/close", 409, "Agent close receipt has expired"),
+        ("verification", "/verify", 422, "verify refused: task_data is missing expected_answer"),
+    ],
+)
+async def test_every_dependency_refusal_carries_the_servers_reason(
+    stage: str, path: str, status: int, detail: str
+) -> None:
+    environment, client = _environment_server()
+    refusal = ClientResponseError(
+        request_info=SimpleNamespace(real_url=f"http://dependency:8000{path}"), history=(), status=status
+    )
+    refusal.response_content = orjson.dumps({"detail": detail})
+    responses = client.responses
+    client.responses = {
+        "agent": [responses[0], responses[1], refusal, responses[3], responses[5]],
+        # The final unwind retries the refused agent close once before closing resources.
+        "cleanup": [responses[0], responses[1], responses[2], refusal, responses[3], responses[5]],
+        "verification": [responses[0], responses[1], responses[2], responses[3], refusal, responses[5]],
+    }[stage]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.stage == stage
+    assert result.failure.terminal is True
+    assert detail in result.failure.failure_reason
 
 
 async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
@@ -414,6 +508,118 @@ async def test_verifier_only_episode_does_not_expose_resource_tools() -> None:
     assert result.result.reward == 1.0
     assert client.calls[1][2]["json"]["tool_accesses"] == []
     assert client.calls[1][2]["json"]["sandbox_access"] is not None
+
+
+def _skipping_environment_server(
+    *, environment: dict[str, Any], agent: dict[str, Any]
+) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(agent)
+    environment_server.config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**environment_server.config.model_dump(), **environment}
+    )
+    # No /verify reply is consumed.
+    del client.responses[4]
+    return environment_server, client
+
+
+@pytest.mark.parametrize(
+    ("environment", "agent", "reward"),
+    [
+        ({"skip_verification": True, "skip_verification_reward": 0.5}, {}, 0.5),
+        ({"skip_verification": True}, {}, 0.0),
+        # Unset here, the bound agent's setting applies; Gym copies the global flag into it.
+        ({}, {"skip_verification": True, "skip_verification_reward": -1.5}, -1.5),
+        ({"skip_verification": True}, {"skip_verification_reward": 2.0}, 2.0),
+        ({"skip_verification_reward": 3.0}, {"skip_verification": True, "skip_verification_reward": 0.25}, 3.0),
+        # Strings, as a quoted override or an ${oc.env:...} interpolation leaves them, parse as the agent parses them.
+        ({}, {"skip_verification": "true", "skip_verification_reward": "0.5"}, 0.5),
+    ],
+)
+async def test_skip_verification_returns_the_fixed_reward_and_still_closes_both_sessions(
+    environment: dict[str, Any], agent: dict[str, Any], reward: float
+) -> None:
+    environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
+
+    result = await environment_server.run_request(_request())
+
+    assert result.failure is None
+    assert [path for _, path, _ in client.calls] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/close_session",
+    ]
+    dumped = result.result.model_dump()
+    assert dumped["reward"] == reward
+    assert dumped["verification_skipped"] is True
+    # The same flat shape a verified result has: the verify body plus the reward.
+    assert dumped["instance_id"] == "task"
+    assert dumped["response"]["id"] == "response"
+    assert dumped["responses_create_params"]["input"] == "task"
+
+
+async def test_the_environment_servers_own_setting_overrides_the_agents() -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update({"skip_verification": True})
+    environment_server.config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**environment_server.config.model_dump(), "skip_verification": False}
+    )
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert "verification_skipped" not in result.result.model_dump()
+    assert "/verify" in [path for _, path, _ in client.calls]
+
+
+@pytest.mark.parametrize("agent_skip", [False, "false"])
+async def test_an_agent_that_does_not_skip_keeps_verifying(agent_skip: bool | str) -> None:
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"skip_verification": agent_skip, "skip_verification_reward": 0.5}
+    )
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert "verification_skipped" not in result.result.model_dump()
+    assert "/verify" in [path for _, path, _ in client.calls]
+
+
+async def test_skip_verification_still_applies_the_agent_outcome_policy() -> None:
+    environment_server, client = _skipping_environment_server(environment={"skip_verification": True}, agent={})
+    failed = _agent_response().model_dump(mode="json")
+    failed.update(
+        status="failed",
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR).model_dump_json()},
+    )
+    client.responses[2] = _Response(failed)
+
+    result = await environment_server.run_request(_request())
+
+    # A retryable agent failure stays a retryable failure, not a fixed reward.
+    assert result.result is None
+    assert result.failure.stage == "agent"
+    assert result.failure.terminal is False
+    assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
+@pytest.mark.parametrize(
+    ("environment", "agent"),
+    [({"skip_verification": True}, {}), ({}, {"skip_verification": True})],
+)
+async def test_skip_verification_returns_empty_aggregate_metrics_without_calling_resources(
+    environment: dict[str, Any], agent: dict[str, Any]
+) -> None:
+    environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
+
+    with pytest.warns(RuntimeWarning, match="skip_verification=True"):
+        metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+
+    assert metrics == AggregateMetrics()
+    assert client.calls == []
 
 
 @pytest.mark.parametrize("close_cookies", [{}, None])
@@ -672,16 +878,6 @@ async def test_interrupted_activation_closes_agent_before_resources(
     assert not client.responses
 
 
-def test_checkpointing_refuses_more_than_one_worker() -> None:
-    environment_server, client = _environment_server()
-    client.global_config_dict["checkpoint"] = {"enabled": True, "control_auth_token": "t"}
-    config = environment_server.config.model_copy(update={"num_workers": 2})
-    server = SingleAgentTurnEnvironmentServer(config=config, server_client=client)
-
-    with pytest.raises(ValueError, match="num_workers=1"):
-        server.setup_webserver()
-
-
 @pytest.mark.parametrize("reported, expected", [({"x-ng-checkpoint-verify": "replay"}, "replay"), ({}, "wait")])
 async def test_verify_step_mode_comes_from_the_resources_seed_reply(reported: dict, expected: str) -> None:
     environment_server, client = _environment_server()
@@ -743,7 +939,7 @@ async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_an
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server()
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     client.slow_path = environment_server._agent_responses_path(_request())
@@ -778,7 +974,7 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
     from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _environment_server()
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     request = _request()
     handles = {"resources_session_id": "resources-session", "agent_session_id": "agent-session"}
@@ -803,6 +999,37 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
     assert response.result.reward == 1.0
 
 
+async def test_an_episode_restored_at_verify_with_skip_on_closes_without_verifying() -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+
+    environment_server, client = _skipping_environment_server(
+        environment={"skip_verification": True, "skip_verification_reward": 0.5}, agent={}
+    )
+    participant = EnvironmentParticipant(mode="exported")
+    environment_server._checkpoint = participant
+    request = _request()
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1}),
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary={
+                    "next": "verify",
+                    "handles": {"resources_session_id": "resources-session", "agent_session_id": "agent-session"},
+                    "response": _agent_response().model_dump(mode="json"),
+                },
+            )
+        ]
+    )
+    # Only the final resources close remains.
+    del client.responses[:4]
+    response = await environment_server.run_request(request)
+
+    assert [path for _, path, _ in client.calls] == ["/close_session"]
+    assert response.result.reward == 0.5
+    assert response.result.model_dump()["verification_skipped"] is True
+
+
 class _HoldingClient(_Client):
     """Holds every call until ``released`` is set, and records which calls started before then."""
 
@@ -825,7 +1052,7 @@ async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_
     from nemo_gym._checkpoint.store import write_participant_state
 
     environment_server, client = _environment_server(client_type=_HoldingClient)
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     request = _request()
@@ -916,7 +1143,7 @@ async def test_an_agent_failure_during_a_checkpoint_closes_the_agent_only_after_
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server(client_type=_AgentGateClient)
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment_server._checkpoint = participant
     controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
     observations = {
@@ -1068,7 +1295,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
     client.agent = restored_http
     # Only the verification and the resources close are scripted; the agent answers the rest.
     del client.responses[:4]
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     environment._checkpoint = participant
     participant.restore_records(
         [
@@ -1098,7 +1325,7 @@ async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attem
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
 
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
-    environment_server._checkpoint = EnvironmentParticipant()
+    environment_server._checkpoint = EnvironmentParticipant(mode="exported")
     await environment_server.run_request(_request())
 
     [tool_access] = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"]).tool_accesses
@@ -1115,3 +1342,286 @@ async def test_verify_says_that_the_resources_session_is_closed_afterwards() -> 
     # So the Resources Server keeps the session tracked until the close, which then runs its close handler.
     assert verify_call["headers"] == {"x-ng-checkpoint-close-follows": "1"}
     assert paths.index("/close_session") > paths.index("/verify")
+
+
+@pytest.mark.parametrize(
+    "outcome, verifiable, retryable",
+    [
+        ({"failure_kind": "agent_invalid_output"}, True, False),
+        ({"failure_kind": "agent_limit"}, True, False),
+        ({"failure_kind": "model_request_error", "status_code": 400}, True, False),
+        ({"failure_kind": "model_request_error", "status_code": 413}, True, False),
+        ({"failure_kind": "model_request_error", "status_code": 422}, True, False),
+        ({"failure_kind": "model_request_error", "status_code": 401}, False, False),
+        ({"failure_kind": "model_request_error", "status_code": 403}, False, False),
+        ({"failure_kind": "model_request_error", "status_code": 404}, False, False),
+        ({"failure_kind": "model_request_error", "status_code": 429}, False, True),
+        ({"failure_kind": "model_request_error", "status_code": 500}, False, True),
+        ({"failure_kind": "model_request_error", "status_code": 503}, False, True),
+        ({"failure_kind": "model_transport_error"}, False, True),
+        ({"failure_kind": "unknown"}, False, True),
+        ({"failure_kind": "model_request_error", "status_code": 402}, False, False),
+        ({"failure_kind": "model_request_error", "status_code": 409}, False, False),
+        ({"failure_kind": "agent_run_error"}, False, False),
+    ],
+)
+async def test_classified_agent_failure_policy(outcome: dict, verifiable: bool, retryable: bool) -> None:
+    await _assert_classified_agent_failure_policy(outcome, verifiable, retryable)
+
+
+@pytest.mark.parametrize(
+    "config, outcome, verifiable, retryable",
+    [
+        (
+            {"by_failure_kind": {"model_request_error": "retry", "unknown": "retry"}},
+            {"failure_kind": "model_request_error", "status_code": 401},
+            False,
+            True,
+        ),
+        (
+            {"by_failure_kind": {"model_request_error": "retry", "unknown": "retry"}},
+            {"failure_kind": "unknown"},
+            False,
+            True,
+        ),
+        (
+            {"by_failure_kind": {"model_request_error": "retry"}},
+            {"failure_kind": "model_request_error", "status_code": 400},
+            True,
+            False,
+        ),
+        ({"by_status_code": {400: "retry"}}, {"failure_kind": "model_request_error", "status_code": 400}, False, True),
+        ({"by_status_code": {503: "fail"}}, {"failure_kind": "model_request_error", "status_code": 503}, False, False),
+        ({"by_status_code": {404: "retry"}}, {"failure_kind": "model_request_error", "status_code": 404}, False, True),
+        ({"by_status_code": {404: "retry"}}, {"failure_kind": "model_request_error", "status_code": 429}, False, True),
+        ({"by_status_code": {404: "retry"}}, {"failure_kind": "model_request_error", "status_code": 503}, False, True),
+        ({"by_status_code": {404: "retry"}}, {"failure_kind": "model_request_error", "status_code": 400}, True, False),
+        (
+            {"by_status_code": {"503": "fail"}},
+            {"failure_kind": "model_request_error", "status_code": 503},
+            False,
+            False,
+        ),
+        ({"by_failure_kind": {"unknown": "retry"}}, {"failure_kind": "model_transport_error"}, False, True),
+        ({"by_failure_kind": {"unknown": "retry"}}, {"failure_kind": "agent_invalid_output"}, True, False),
+        ({"by_failure_kind": {"unknown": "verify"}}, {"failure_kind": "unknown"}, True, False),
+        ({"by_failure_kind": {"unknown": "fail"}}, {"failure_kind": "unknown"}, False, False),
+        ({"default_action": "retry"}, {"failure_kind": "agent_run_error"}, False, True),
+        ({"by_failure_kind": {}, "by_status_code": {}}, {"failure_kind": "model_transport_error"}, False, True),
+    ],
+)
+async def test_configured_agent_failure_policy(config: dict, outcome: dict, verifiable: bool, retryable: bool) -> None:
+    await _assert_classified_agent_failure_policy(outcome, verifiable, retryable, config=config)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"by_failure_kind": {"typo": "retry"}},
+        {"by_failure_kind": {"unknown": "typo"}},
+        {"by_status_code": {399: "retry"}},
+        {"by_status_code": {600: "retry"}},
+        {"default_action": "typo"},
+        {"typo": "retry"},
+    ],
+)
+def test_invalid_agent_policy_config_rejected(config: dict) -> None:
+    with pytest.raises(ValidationError):
+        AgentOutcomePolicyConfig.model_validate(config)
+
+
+async def _assert_classified_agent_failure_policy(
+    outcome: dict, verifiable: bool, retryable: bool, *, config: dict | None = None
+) -> None:
+    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+
+    environment, client = _environment_server()
+    if config is not None:
+        environment.config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+            {**environment.config.model_dump(), "agent_outcome_policy": config}
+        )
+    response = _agent_response().model_dump(mode="json")
+    response.update(
+        status="failed",
+        error={"code": "server_error", "message": "Native failure details"},
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome.model_validate(outcome).model_dump_json()},
+    )
+    client.responses[2] = _Response(response)
+    observations = {
+        "source": "agent",
+        "records": [{"kind": "agent_invocation", "invocation_id": "root", "status": "failed"}],
+    }
+    close = orjson.loads(client.responses[3].body)
+    close["agent_observations"] = observations
+    client.responses[3] = _Response(close)
+    if not verifiable:
+        del client.responses[4]
+
+    result = await environment.run_request(_request())
+
+    assert ("/verify" in [path for _, path, _ in client.calls]) is verifiable
+    assert not client.responses
+    if verifiable:
+        assert result.failure is None
+        assert result.result.reward == 1.0
+    else:
+        assert result.result is None
+        assert result.failure.stage == "agent"
+        assert result.failure.terminal is not retryable
+        assert result.failure.failure_reason == "Native failure details"
+        assert result.failure.partial_response.model_dump(mode="json") == response
+        assert result.failure.agent_observations == AgentObservationBundle.model_validate(observations)
+        legacy = SingleAgentTurnLegacyEnvironmentServer(
+            config=environment.config, server_client=client
+        )._legacy_result(result)
+        assert legacy["_ng_failure_terminal"] is not retryable
+        assert legacy["_ng_failure_partial_response"] == response
+        assert legacy["ng_agent_observations"] == result.failure.agent_observations.model_dump(mode="json")
+        assert "reward" not in legacy
+    assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
+@pytest.mark.parametrize("status", ["completed", "incomplete", None])
+async def test_nonfailed_outcomes_still_reach_verification(status: str | None) -> None:
+    environment, client = _environment_server()
+    response = _agent_response().model_copy(update={"status": status})
+    client.responses[2] = _Response(response.model_dump(mode="json"))
+
+    result = await environment.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert result.failure is None
+    verify = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
+    assert verify["json"]["response"]["status"] == status
+
+
+@pytest.mark.parametrize("action", ["fail", "retry"])
+async def test_incomplete_context_limit_verifies_partial_work(action: str) -> None:
+    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+
+    environment, client = _environment_server()
+    environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(default_action=action)
+    response = (
+        _agent_response()
+        .model_copy(
+            update={
+                "status": "incomplete",
+                "metadata": {
+                    AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind="model_context_limit").model_dump_json()
+                },
+            }
+        )
+        .model_dump(mode="json")
+    )
+    client.responses[2] = _Response(response)
+
+    result = await environment.run_request(_request())
+
+    assert result.failure is None
+    assert result.result.reward == 1.0
+    verify = next(kwargs for _, path, kwargs in client.calls if path == "/verify")
+    assert verify["json"]["response"] == response
+
+
+@pytest.mark.parametrize("raw", ["not valid JSON", '{"failure_kind":"unregistered_error"}'])
+async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) -> None:
+    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+
+    environment, client = _environment_server()
+    response = _agent_response().model_dump(mode="json")
+    response.update(status="failed", metadata={AGENT_OUTCOME_METADATA_KEY: raw})
+    client.responses[2] = _Response(response)
+    del client.responses[4]
+
+    result = await environment.run_request(_request())
+
+    assert result.result is None
+    assert result.failure.terminal is True
+    assert result.failure.partial_response.model_dump(mode="json") == response
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
+@pytest.mark.parametrize("outcome", ["completed", "judge_failure", "exception", "timeout"])
+async def test_verifier_evidence_reaches_collector_through_result_or_failure(outcome, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.base_resources_server import BaseResourcesServerConfig, BaseVerifyResponse, SimpleResourcesServer
+    from nemo_gym.judge import JudgeError
+    from nemo_gym.rollout_collection import _attach_trajectory_record, _episode_record
+
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            if outcome == "judge_failure":
+                raise JudgeError("judge unavailable")
+            if outcome == "exception":
+                raise RuntimeError("scoring broke")
+            if outcome == "timeout":
+                raise TimeoutError("grading deadline")
+            return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+
+    environment, client = _environment_server()
+    resources_client = MagicMock(spec=ServerClient)
+    resources_client.global_config_dict = {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(tmp_path),
+    }
+    resources = Resources(
+        config=BaseResourcesServerConfig(name="resources", host="resources", port=8000, entrypoint="app.py"),
+        server_client=resources_client,
+    )
+    http_response = TestClient(resources.setup_webserver()).post(
+        "/ng-rollout/rollout-a2/verify",
+        json={"responses_create_params": {"input": "task"}, "response": _agent_response().model_dump(mode="json")},
+    )
+
+    class VerifyResponse(_Response):
+        ok = http_response.is_success
+        status = http_response.status_code
+        content = SimpleNamespace(read=AsyncMock(return_value=http_response.content))
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise ClientResponseError(
+                    request_info=SimpleNamespace(
+                        url="http://resources/verify", real_url="http://resources/verify", method="POST", headers={}
+                    ),
+                    history=(),
+                    status=self.status,
+                    message="verification failed",
+                )
+
+    client.responses[4] = VerifyResponse(http_response.json())
+    episode = await environment.run_request(_request())
+    assert (episode.failure is not None) == (outcome in {"exception", "timeout"})
+    if episode.result is not None:
+        assert episode.result.reward == 0.0
+        assert episode.result.mask_sample == (outcome == "judge_failure")
+    else:
+        assert episode.failure.stage == "verification"
+        assert episode.failure.terminal is False  # HTTP 500 remains retryable.
+
+    record = _episode_record(episode.model_dump(mode="json"))
+    legacy_record = SingleAgentTurnLegacyEnvironmentServer(
+        config=environment.config, server_client=client
+    )._legacy_result(episode)
+    assert legacy_record["ng_verifier_invocations"] == record["ng_verifier_invocations"]
+    _attach_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    (invocation,) = record["ng_trajectory"]["verifier_invocations"]
+    expected_status = {
+        "completed": "completed",
+        "judge_failure": "failed",
+        "exception": "failed",
+        "timeout": "incomplete",
+    }
+    assert invocation["status"] == expected_status[outcome]
+    expected_kind = {
+        "completed": None,
+        "judge_failure": "judge_failed",
+        "exception": "verifier_error",
+        "timeout": "transport_timeout",
+    }
+    assert invocation["failure_kind"] == expected_kind[outcome]
+    assert invocation["model_calls"] == []
+    assert "ng_verifier_invocations" not in record  # Only the canonical trajectory is persisted.
+    assert list(tmp_path.iterdir()) == []  # Resources never writes verifier sidecars.

@@ -37,6 +37,10 @@ RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
 # Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops.
 RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S = 1.0
 
+# The head node's proxy prefers its local replica until that replica is full, and a gateway replica
+# never fills (MAX_ONGOING_REQUESTS_PER_INSTANCE), so every other instance would sit idle.
+RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING = 0
+
 
 _VLLM_RAY_SYMMETRIC_RUN = (
     """\
@@ -46,6 +50,9 @@ bash -lc '
     + """
     export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S="""
     + str(RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S)
+    + """
+    export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING="""
+    + str(RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING)
     + """
     """
     + ENSURE_RAY_INSTALLED
@@ -206,11 +213,13 @@ def render_driver_entrypoint(
 
     `extras` are optional-dependency groups installed with the checkout; the server
     venvs Gym builds copy their telemetry packages from this process, so the driver
-    is where `telemetry` has to be installed for any server to have it.
+    is where `telemetry` has to be installed for any server to have it. `ray` is
+    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`,
+    and an extra the checkout does not define only makes uv warn.
     """
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
-    install_target = f'".[{",".join(extras)}]"' if extras else "."
+    install_target = f'".[{",".join((*extras, "ray"))}]"'
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv
@@ -220,7 +229,9 @@ def render_driver_entrypoint(
         # so nothing depends on the clone being reachable afterwards.
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            'source "$HOME/.local/bin/env"',
+            # Not `source "$HOME/.local/bin/env"`: the installer skips writing that file when
+            # the directory is already on PATH, and the file only does this export anyway.
+            'export PATH="$HOME/.local/bin:$PATH"',
             'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
             render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on

@@ -998,6 +998,32 @@ class TestParseStreamJson:
         assert usage["input_tokens"] == 100
         assert usage["output_tokens"] == 50
 
+    def test_result_usage_is_the_total(self) -> None:
+        # The result event's usage is cumulative: the assistant messages are not added to it.
+        assistant = _event("assistant", message={"id": "m1", "content": [], "usage": {"input_tokens": 60}})
+        result = _event("result", usage={"input_tokens": 60, "output_tokens": 9})
+        _, usage = parse_stream_json(f"{assistant}\n{result}")
+        assert (usage["input_tokens"], usage["output_tokens"]) == (60, 9)
+
+    def test_message_usage_counted_once_per_message(self) -> None:
+        # Without a result event (the CLI was killed), stream-json's one event per content block
+        # repeats the message's usage; count each message once, with its latest usage.
+        thinking = _event(
+            "assistant",
+            message={"id": "m1", "content": [{"type": "thinking", "thinking": "hmm"}], "usage": {"input_tokens": 40}},
+        )
+        text = _event(
+            "assistant",
+            message={
+                "id": "m1",
+                "content": [{"type": "text", "text": "done"}],
+                "usage": {"input_tokens": 40, "output_tokens": 3},
+            },
+        )
+        second = _event("assistant", message={"id": "m2", "content": [], "usage": {"input_tokens": 50}})
+        _, usage = parse_stream_json(f"{thinking}\n{text}\n{second}")
+        assert (usage["input_tokens"], usage["output_tokens"]) == (90, 3)
+
     def test_result_event_exposes_num_turns(self) -> None:
         result = _event(
             "result",

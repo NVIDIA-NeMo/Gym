@@ -158,7 +158,8 @@ class VLLMInstance:
         # RAY_ADDRESS makes vLLM's own Ray executor join this cluster instead of starting its own.
         env = {**os.environ, "RAY_ADDRESS": ray.get_runtime_context().gcs_address}
         self._proc = subprocess.Popen(cmd, env=env)
-        self._session = aiohttp.ClientSession(timeout=PROXY_TIMEOUT)
+        # limit=0 lifts aiohttp's default 100-connection cap; max_ongoing_requests already bounds in-flight requests.
+        self._session = aiohttp.ClientSession(timeout=PROXY_TIMEOUT, connector=aiohttp.TCPConnector(limit=0))
         self._wait_until_healthy()
 
     def _wait_until_healthy(self) -> None:
@@ -208,6 +209,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # Covers the single-node path; the multi-node path exports this before `ray start` runs.
     os.environ.setdefault("RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S", "1.0")
+    os.environ.setdefault("RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING", "0")
     try:
         ray.init(address="auto")
     except ConnectionError:

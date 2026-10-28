@@ -551,6 +551,14 @@ def test_build_vllm_ray_serve_command_multi_node_raises_queue_length_response_de
     assert cmd.index("export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=") < cmd.index("ray symmetric-run")
 
 
+def test_build_vllm_ray_serve_command_multi_node_spreads_requests_over_all_replicas(vllm_service):
+    # The head node's proxy would otherwise keep every request on its local replica, which never
+    # fills, so it must be switched off before `ray start`/`ray symmetric-run` starts the proxy.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING=0" in cmd
+    assert cmd.index("export RAY_SERVE_PROXY_PREFER_LOCAL_NODE_ROUTING=0") < cmd.index("ray symmetric-run")
+
+
 def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
     # Regression test: the whole write-then-install-then-launch chain must reach `ray symmetric-run`
     # as one opaque token, not get split by the outer bash -lc live-parsing its own && operators.
@@ -724,11 +732,21 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "checkout main" in out
     assert "uv venv --seed .venv" in out
     assert "source .venv/bin/activate" in out
-    assert "uv pip install -e ." in out
+    assert 'uv pip install -e ".[ray]"' in out
     assert "--system" not in out
     assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
+
+
+def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
+    # The uv installer does not write $HOME/.local/bin/env when that directory is
+    # already on PATH, so sourcing it would abort the `set -e` preamble.
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert ".local/bin/env" not in out
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in out
+    assert out.index("astral.sh/uv/install.sh") < out.index('export PATH="$HOME/.local/bin:$PATH"')
+    assert out.index('export PATH="$HOME/.local/bin:$PATH"') < out.index("uv venv --seed .venv")
 
 
 def test_render_driver_entrypoint_installs_git_if_missing():

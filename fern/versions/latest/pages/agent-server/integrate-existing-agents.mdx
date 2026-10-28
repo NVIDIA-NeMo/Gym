@@ -20,7 +20,7 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 | --- | --- | --- | --- | --- | --- |
 | Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared |
 | Pi (`pi_agent`) | Chat Completions | None | Not wired up; evaluation only | Declared | Declared |
-| Codex (`codex_agent`) | Responses (streaming) | None | Not wired up; evaluation only | Declared | Declared |
+| Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared |
 | OpenCode (`opencode_agent`) | Chat Completions | None | Off by default; the session path is evaluation only | Not declared | Declared |
 | OpenClaw (`openclaw_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Declared |
 
@@ -240,6 +240,27 @@ carry only new output, usage and evidence; close supplies the cumulative record.
 termination receipt fails the activation and skips verification; close releases
 the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
 the connection remain retryable.
+
+## NOOA worker checkpoints
+
+The [NOOA sandbox worker](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/nooa_agent/sandbox_entrypoint.py)
+publishes `checkpoint.json` as partial evidence at model-response and completed-tool boundaries.
+It projects and deeply copies the evidence on the rollout event loop, then uses a single background
+writer for JSON serialization, file writes, `fsync`, and atomic replacement. Projection and copying
+still run synchronously and grow with transcript length, including JSON conversion within trajectory
+projection. The writer never reads the live trace.
+
+Only one snapshot is being written and one latest snapshot can be pending. New boundaries replace
+the pending snapshot; writes remain ordered. Normal completion flushes the pending evidence before
+publishing `result.json`. Cancellation waits for writes to finish before shutdown returns. An abrupt
+kill may lose the pending or in-progress update, but leaves the previous published checkpoint valid.
+Checkpoint failures are logged and do not fail an otherwise successful run.
+
+Checkpoints carry `partial: true` and an incomplete response; they do not establish completion or
+authorize grading. A valid final result takes precedence. Missing or malformed final evidence with
+unsuccessful worker termination is an infrastructure failure. Callers must enforce a process deadline,
+including enough shutdown grace for pending writes; the worker has no independent deadline. Artifacts
+use mode `0600` and require the worker UID or privileged access for collection.
 
 ## Tools in Agent vs. Resources Server
 

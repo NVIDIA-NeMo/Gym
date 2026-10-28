@@ -21,8 +21,7 @@ import uvicorn
 from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
+from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_SCRIPT
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation
@@ -87,18 +86,21 @@ def _completion(message: dict) -> dict:
 class _ModelServer:
     """Answer chat completions over HTTP in order and record each request body."""
 
-    def __init__(self, answers: list[dict]) -> None:
+    def __init__(self, answers: list[dict], *, status_codes: list[int] | None = None) -> None:
         self.answers = answers
         self.requests: list[dict] = []
+        self.request_headers: list[dict[str, str]] = []
         server = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 server.requests.append(body)
+                server.request_headers.append(dict(self.headers))
                 answer = server.answers[min(len(server.requests), len(server.answers)) - 1]
                 payload = json.dumps(answer).encode()
-                self.send_response(200)
+                index = min(len(server.requests), len(server.answers)) - 1
+                self.send_response(status_codes[index] if status_codes is not None else 200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -175,6 +177,52 @@ def _payload(model_base_url: str, **overrides) -> dict:
         "user_message": "fix bug",
         **overrides,
     }
+
+
+def test_sandbox_retry_attempts_retain_invocation_headers(tmp_path, restore_process_globals) -> None:
+    rejected = {"error": {"message": "retry this request", "type": "server_error"}}
+    with _ModelServer([rejected, rejected, _completion({"content": "done"})], status_codes=[429, 500, 200]) as server:
+        output = _run(_payload(server.base_url, max_turns=4), tmp_path)
+
+    assert len(server.requests) == 3
+    assert [headers.get("x-session-id") for headers in server.request_headers] == ["root"] * 3
+    assert output["observations"]["invocations"][0]["model_response_ids"] == ["chatcmpl-test"]
+    assert output["result"]["completed"]
+
+
+@pytest.mark.parametrize("has_completed_call", [False, True])
+def test_sandbox_rejection_preserves_runtime_token_totals(
+    tmp_path, restore_process_globals, has_completed_call
+) -> None:
+    answers = [{"error": {"message": "rejected request", "type": "invalid_request_error"}}]
+    statuses = [400]
+    if has_completed_call:
+        response = _completion(
+            {
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": json.dumps({"command": "printf 391"})},
+                    }
+                ],
+            }
+        )
+        response["usage"] = {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}
+        answers.insert(0, response)
+        statuses.insert(0, 200)
+
+    with _ModelServer(answers, status_codes=statuses) as server:
+        output = _run(_payload(server.base_url, max_turns=4), tmp_path)
+
+    result = output["result"]
+    assert result["failed"] and not result["completed"]
+    assert "400" in result["error"]
+    assert result["prompt_tokens"] == (10 if has_completed_call else 0)
+    assert result["completion_tokens"] == (2 if has_completed_call else 0)
+    assert len(server.requests) == (4 if has_completed_call else 3)
+    assert output["observations"]["invocations"][0]["status"] == "failed"
 
 
 @pytest.mark.parametrize("marker", ["present", "absent", "omitted"])
@@ -479,9 +527,8 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
 """
     process = subprocess.Popen(
         [
-            sys.executable,
-            "-I",
-            process_supervisor.__file__,
+            "bash",
+            str(SUPERVISOR_SCRIPT),
             "--timeout",
             "2" if ending == "deadline" else "10",
             "--cleanup-timeout",
@@ -512,8 +559,8 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert (tmp_path / "model.patch").exists()
+            # Production sends no signal; the stop file alone must stop the supervisor.
             stop_request_path.touch()
-            process.terminate()
         _, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr
     finally:
