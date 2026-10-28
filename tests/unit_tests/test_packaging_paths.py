@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 import nemo_gym
-from nemo_gym.h2_ping_sidecar import launcher
+from nemo_gym.orchestration.h2_ping_sidecar import launcher
 
 
 REPO_ROOT = Path(nemo_gym.__file__).resolve().parents[1]
