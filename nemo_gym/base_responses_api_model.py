@@ -38,7 +38,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Literal, NotRequired, Optional, TypedDict
+from typing import Any, ClassVar, Collection, Iterable, Literal, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -936,11 +936,30 @@ class CaptureStore:
         except FileNotFoundError:
             return None
 
-    def delete_if_unchanged(self, rollout_id: str, expected_size: int) -> Optional[str]:
+    def pending_rollout_ids(self) -> set[str]:
+        """The rollouts with a claimed write outstanding, from a single scan of the directory.
+
+        Answers for every rollout what ``has_pending`` answers for one, which globs the whole directory
+        each time; use it when checking many rollouts.
+        """
+        rollout_ids: set[str] = set()
+        with os.scandir(self._root) as entries:
+            for entry in entries:
+                if entry.name.endswith(_PENDING_SUFFIX):
+                    # The token after the last dot has no dots; the rollout id may.
+                    rollout_id = entry.name[: -len(_PENDING_SUFFIX)].rpartition(".")[0]
+                    if rollout_id:
+                        rollout_ids.add(rollout_id)
+        return rollout_ids
+
+    def delete_if_unchanged(
+        self, rollout_id: str, expected_size: int, *, pending_rollout_ids: Optional[Collection[str]] = None
+    ) -> Optional[str]:
         """Delete the rollout's capture file unless it grew or a claimed write is outstanding.
 
         Returns None once deleted, or the reason the file was kept. The append lock is held across the
-        check and the delete, so a writer that has not yet appended waits instead of racing it.
+        check and the delete, so a writer that has not yet appended waits instead of racing it. A caller
+        deleting many files passes ``pending_rollout_ids`` from one scan instead of globbing per file.
         """
         path = self.path_for(rollout_id)
         try:
@@ -950,7 +969,12 @@ class CaptureStore:
         with handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
-                if self.has_pending(rollout_id):
+                has_pending = (
+                    rollout_id in pending_rollout_ids
+                    if pending_rollout_ids is not None
+                    else self.has_pending(rollout_id)
+                )
+                if has_pending:
                     return "write_pending"
                 if os.fstat(handle.fileno()).st_size != expected_size:
                     return "capture_file_changed"

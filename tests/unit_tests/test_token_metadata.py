@@ -125,3 +125,21 @@ def test_a_record_without_a_trajectory_or_observations_is_fine():
     result = {"response": {"output": [_item(**IDS)]}}
 
     assert strip_duplicate_token_metadata(result) == 0
+
+
+class _NotIterated(list):
+    def __iter__(self):
+        raise AssertionError("visited every element of a list of numbers")
+
+
+def test_long_lists_of_numbers_on_a_replayed_copy_are_not_walked():
+    result = _result()
+    replayed = result["ng_trajectory"]["turns"][0]["question"][1]
+    replayed["generation_token_ids"] = _NotIterated(range(100))
+    replayed["generation_log_probs"] = _NotIterated([-0.1] * 100)
+
+    removed = strip_duplicate_token_metadata(result)
+
+    # The replayed item has no canonical twin, so it keeps its metadata and costs nothing to pass over.
+    assert len(replayed["generation_token_ids"]) == 100
+    assert removed == 4 * len(IDS)

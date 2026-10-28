@@ -1062,6 +1062,45 @@ def test_delete_if_unchanged_keeps_a_file_that_may_hold_unread_calls(tmp_path, s
     assert store.path_for("0-0").exists()
 
 
+def test_pending_rollout_ids_lists_every_rollout_with_a_claimed_write(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.record("9-0", {"model_call_id": "not pending"})
+    store.mark_pending("0-0", "call-a")
+    store.mark_pending("0-0", "call-b")
+    store.mark_pending("1-0-a1", "call-c")
+    # A rollout id may contain dots; the claim token after the last dot does not.
+    store.mark_pending("step7.0-0", "call-d")
+
+    assert store.pending_rollout_ids() == {"0-0", "1-0-a1", "step7.0-0"}
+
+    store.clear_pending("0-0", "call-a")
+    assert "0-0" in store.pending_rollout_ids()
+    store.clear_pending("0-0", "call-b")
+    assert "0-0" not in store.pending_rollout_ids()
+
+
+def test_pending_rollout_ids_agrees_with_has_pending_for_rollouts_whose_ids_share_a_prefix(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("1-0-a1", "call")
+
+    pending = store.pending_rollout_ids()
+
+    for rollout_id in ("1-0", "1-0-a1", "1-0-a11", "1", "2-0"):
+        assert (rollout_id in pending) is store.has_pending(rollout_id)
+
+
+def test_delete_if_unchanged_uses_the_pending_ids_it_is_given_instead_of_scanning(tmp_path, monkeypatch):
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "c"})
+    size = store.size("0-0")
+    monkeypatch.setattr(CaptureStore, "has_pending", lambda self, rollout_id: pytest.fail("scanned the directory"))
+
+    assert store.delete_if_unchanged("0-0", size, pending_rollout_ids={"0-0"}) == "write_pending"
+    assert store.path_for("0-0").exists()
+    assert store.delete_if_unchanged("0-0", size, pending_rollout_ids={"1-0"}) is None
+    assert not store.path_for("0-0").exists()
+
+
 def test_delete_if_unchanged_reports_a_missing_file(tmp_path):
     assert CaptureStore(tmp_path).delete_if_unchanged("0-0", 0) == "capture_file_missing"
 
@@ -1162,7 +1201,7 @@ def test_a_capture_file_that_cannot_be_deleted_is_left_in_place_without_failing_
     snapshot = snapshot_model_call_capture("0-0", [tmp_path])
     _merge_and_attach(tmp_path, record)
 
-    def fail(self, rollout_id, expected_size):
+    def fail(self, rollout_id, expected_size, **kwargs):
         raise PermissionError("read-only capture directory")
 
     monkeypatch.setattr(CaptureStore, "delete_if_unchanged", fail)
@@ -1273,6 +1312,54 @@ def test_retirement_batch_does_not_make_anything_durable_when_nothing_is_queued(
     CaptureRetirementBatch().flush(lambda: calls.append("durable"))
 
     assert calls == []
+
+
+def test_retirement_batch_scans_for_pending_writes_once_per_directory_not_once_per_file(tmp_path, monkeypatch):
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    batch = CaptureRetirementBatch()
+    for rollout_id in ("0-0", "1-0", "2-0"):
+        store.record(rollout_id, {"model_call_id": rollout_id})
+        batch.add(rollout_id, _COVERED_ROLLOUT, snapshot_model_call_capture(rollout_id, [tmp_path]))
+    scans = []
+    original = CaptureStore.pending_rollout_ids
+    monkeypatch.setattr(CaptureStore, "pending_rollout_ids", lambda self: scans.append(self._root) or original(self))
+
+    batch.flush(lambda: None)
+
+    assert scans == [tmp_path]
+    assert batch.retired == 3
+
+
+def test_retirement_batch_does_not_scan_when_every_file_is_kept_anyway(tmp_path, monkeypatch):
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "c"})
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", {}, snapshot_model_call_capture("0-0", [tmp_path]))
+    monkeypatch.setattr(CaptureStore, "pending_rollout_ids", lambda self: pytest.fail("scanned for nothing"))
+
+    batch.flush(lambda: None)
+
+    assert dict(batch.kept) == {"no_capture_attachment": 1}
+
+
+def test_retirement_batch_keeps_only_the_file_whose_rollout_has_a_pending_write(tmp_path):
+    from nemo_gym.observability.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    batch = CaptureRetirementBatch()
+    for rollout_id in ("0-0", "1-0", "2-0"):
+        store.record(rollout_id, {"model_call_id": rollout_id})
+        batch.add(rollout_id, _COVERED_ROLLOUT, snapshot_model_call_capture(rollout_id, [tmp_path]))
+    store.mark_pending("1-0", "late-call")
+
+    batch.flush(lambda: None)
+
+    assert [store.path_for(r).exists() for r in ("0-0", "1-0", "2-0")] == [False, True, False]
+    assert (batch.retired, dict(batch.kept)) == (2, {"write_pending": 1})
 
 
 def test_retirement_batch_is_due_when_full_or_old(monkeypatch):

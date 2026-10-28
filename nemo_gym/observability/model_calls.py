@@ -700,10 +700,17 @@ class CaptureRetirementBatch:
         if not self._pending:
             return
         make_rollouts_durable()
+        # One scan per capture directory answers "is a write pending?" for every file in the batch.
+        pending_by_directory: dict[Path, set[str]] = {}
         for rollout_id, snapshot, keep_reasons in self._pending:
             if not keep_reasons:
                 try:
-                    kept = CaptureStore(snapshot.directory).delete_if_unchanged(rollout_id, snapshot.size)
+                    store = CaptureStore(snapshot.directory)
+                    if snapshot.directory not in pending_by_directory:
+                        pending_by_directory[snapshot.directory] = store.pending_rollout_ids()
+                    kept = store.delete_if_unchanged(
+                        rollout_id, snapshot.size, pending_rollout_ids=pending_by_directory[snapshot.directory]
+                    )
                 except OSError:
                     logger.warning("Could not delete the model-call capture of rollout %s.", rollout_id, exc_info=True)
                     kept = "delete_failed"
