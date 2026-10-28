@@ -290,9 +290,9 @@ def build_gym_row(
             # of the content blocks, which the agent rewrites at rollout time.
             "prompt": row["prompt"],
             "document_manifest": document_manifest_relpath,
-            # gdp_pdf_agent reads document_manifest, never this. Kept so fetch_example_media /
-            # write_example can re-derive the original PDF without having to guess a filename
-            # from task_id, and read by the optional python tool.
+            # gdp_pdf_agent reads document_manifest, never this (only the optional python tool does). Kept so
+            # fetch_example_media / write_example can re-derive the original PDF without
+            # having to guess a filename from task_id.
             "source_pdf": source_pdf_relpath,
             "criteria": extract_criteria(row) if criteria is None else criteria,
         },

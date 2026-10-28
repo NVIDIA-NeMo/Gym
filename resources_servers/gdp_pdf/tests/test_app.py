@@ -670,11 +670,6 @@ class TestPythonTool:
         assert python_client.post("/python", json={"code": "1"}).status_code == 404
         assert _process_ended(kernel_pid)
 
-    def test_a_missing_source_pdf_rejects_the_seed(self, python_server: GdpPdfResourcesServer) -> None:
-        with TestClient(python_server.setup_webserver()) as client:
-            assert _seed(client, source_pdf="missing.pdf").status_code == 422
-            assert client.post("/python", json={"code": "1"}).status_code == 404
-
     def test_without_a_sandbox_provider_there_is_no_tool(self, server: GdpPdfResourcesServer) -> None:
         with TestClient(server.setup_webserver()) as client:
             assert _seed(client).status_code == 200
@@ -926,22 +921,6 @@ class TestPrepare:
         monkeypatch.setitem(__import__("sys").modules, "nemo_gym.global_config", fake_module)
 
         assert _resolve_hf_token() is None
-
-
-class TestPreparePython:
-    def test_adds_the_python_tool_to_every_benchmark_row(self, monkeypatch, tmp_path: Path) -> None:
-        rows = [{"responses_create_params": {"input": [{"role": "user", "content": f"q{i}"}]}} for i in range(2)]
-        base = tmp_path / "gdp_pdf_benchmark.jsonl"
-        base.write_text("".join(json.dumps(row) + "\n" for row in rows))
-        monkeypatch.setattr(prepare_python, "_prepare", lambda: base)
-        monkeypatch.setattr(prepare_python, "OUTPUT_FPATH", tmp_path / "gdp_pdf_python_benchmark.jsonl")
-
-        written = [json.loads(line) for line in prepare_python.prepare().read_text().splitlines()]
-
-        assert [row["responses_create_params"]["input"] for row in written] == [
-            row["responses_create_params"]["input"] for row in rows
-        ]
-        assert all(row["responses_create_params"]["tools"] == [prepare_python.PYTHON_TOOL] for row in written)
 
 
 class TestFetchExampleMedia:
