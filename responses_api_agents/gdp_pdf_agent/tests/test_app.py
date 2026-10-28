@@ -88,6 +88,7 @@ def test_python_observations_reach_the_model_without_an_image_cap():
     content = [{"type": "input_image", "image_url": "data:image/png;base64,aA==", "detail": "auto"} for _ in range(6)]
     messages = agent._tool_result_messages(call, json.dumps({"content": content}))
     assert messages[0].call_id == "cell"
+    assert messages[0].model_dump(exclude_unset=True)["type"] == "function_call_output"
     assert sum(part["type"] == "input_image" for part in messages[1].content) == 6
 
 

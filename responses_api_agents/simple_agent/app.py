@@ -316,7 +316,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         self, call: NeMoGymResponseFunctionToolCall, output: str
     ) -> list[NeMoGymFunctionCallOutput | NeMoGymEasyInputMessage]:
         """Convert an environment's tool output to model-visible conversation items."""
-        return [NeMoGymFunctionCallOutput(call_id=call.call_id, output=output)]
+        return [NeMoGymFunctionCallOutput(type="function_call_output", call_id=call.call_id, output=output)]
 
     async def _create_episode(
         self,
