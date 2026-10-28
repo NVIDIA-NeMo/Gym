@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import hashlib
 import json
 import re
@@ -26,10 +27,11 @@ import yaml
 from frontier_finance.metrics import MetricsReport
 from frontier_finance.models import ItemResult, Rubric
 from frontier_finance.prompts import RubricPrompt
+from pydantic import ValidationError
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.failure_kinds import JUDGE_FAILED, VERIFIER_ERROR
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.frontierfinance.app import (
     FrontierFinanceJudgeConfig,
@@ -41,6 +43,7 @@ from resources_servers.frontierfinance.app import (
     frontier_finance_metrics,
     item_result_from_rollout,
 )
+from resources_servers.frontierfinance.task_data import TaskData
 
 
 _SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -83,19 +86,24 @@ def _request(session_id: str = "s1") -> MagicMock:
     return req
 
 
-def _response(answer: str | None) -> NeMoGymResponse:
-    output = []
-    if answer is not None:
-        output.append(
-            {
-                "id": "tc_1",
-                "call_id": "call_1",
-                "name": "submit_final_result",
-                "arguments": json.dumps({"final_result": answer}),
-                "type": "function_call",
-                "status": "completed",
-            }
-        )
+def _call(name: str, arguments: str, i: int = 1) -> dict:
+    return {
+        "id": f"tc_{i}",
+        "call_id": f"call_{i}",
+        "name": name,
+        "arguments": arguments,
+        "type": "function_call",
+        "status": "completed",
+    }
+
+
+def _submit(answer: str, i: int = 1) -> dict:
+    return _call("submit_final_result", json.dumps({"final_result": answer}), i)
+
+
+def _response(answer: str | None, output: List[dict] | None = None, stop_reason: str | None = None) -> NeMoGymResponse:
+    if output is None:
+        output = [_submit(answer)] if answer is not None else []
     return NeMoGymResponse(
         id="resp",
         created_at=0.0,
@@ -105,6 +113,7 @@ def _response(answer: str | None) -> NeMoGymResponse:
         parallel_tool_calls=False,
         tool_choice="auto",
         tools=[],
+        metadata={"stop_reason": stop_reason} if stop_reason else None,
     )
 
 
@@ -367,6 +376,50 @@ class TestVerify:
         assert not result.mask_sample
         assert all(not prompts for prompts in fake.prompts.values())
 
+    async def test_grades_the_first_submission_in_a_turn(self, judges) -> None:
+        fake = judges(claude=_all(True), gemini=_all(True), gpt=_all(True))
+        request = _verify_request(_rubrics(1))
+        request.response = _response(None, [_submit("A", 1), _submit("B", 2)], stop_reason="done_tool")
+        await _make_server().verify(_request(), request)
+        assert "<report>\nA\n</report>" in fake.prompts["claude"][0]
+
+        request.response = _response(None, [_submit("A", 1), _call("submit_final_result", "{bad", 2)])
+        assert (await _make_server().verify(_request(), request)).grading_failure is None
+
+    async def test_malformed_first_submission_is_no_response(self, judges) -> None:
+        fake = judges(claude=_all(True), gemini=_all(True), gpt=_all(True))
+        request = _verify_request(_rubrics(1))
+        request.response = _response(None, [_call("submit_final_result", "{bad", 1), _submit("B", 2)])
+        result = await _make_server().verify(_request(), request)
+        assert (result.reward, result.grading_failure) == (0.0, "no_response")
+        assert all(not prompts for prompts in fake.prompts.values())
+
+    @pytest.mark.parametrize("stop_reason", ["error", "max_output_tokens", "max_time"])
+    async def test_submission_not_executed_is_no_response(self, judges, stop_reason) -> None:
+        fake = judges(claude=_all(True), gemini=_all(True), gpt=_all(True))
+        request = _verify_request(_rubrics(1))
+        output = [_call("web_search", json.dumps({"query": "q"}), 1), _submit("A", 2)]
+        request.response = _response(None, output, stop_reason=stop_reason)
+        result = await _make_server().verify(_request(), request)
+        assert (result.reward, result.grading_failure) == (0.0, "no_response")
+        assert all(not prompts for prompts in fake.prompts.values())
+
+    async def test_judge_timeout_covers_reading_the_body(self) -> None:
+        server = _make_server(judge_call_timeout=0.05)
+
+        class _StalledResponse:
+            async def read(self):
+                await asyncio.sleep(3600)
+
+        async def post(**kwargs):
+            return _StalledResponse()
+
+        server.server_client.post = post
+        judge = server.config.judge_panel[0]
+        params = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(server._judge_call(judge, params), timeout=5)
+
     async def test_no_rubrics_masks_the_sample(self, judges) -> None:
         judges(claude=_all(True), gemini=_all(True), gpt=_all(True))
         result = await _make_server().verify(_request(), _verify_request([]))
@@ -463,3 +516,27 @@ class TestShippedConfig:
             row = json.loads(line)
             request = FrontierFinanceVerifyRequest(**row, response=_response("x"))
             assert request.rubrics and request.as_of_date
+            TaskData.model_validate({k: v for k, v in row.items() if k != "responses_create_params"})
+
+
+class TestTaskData:
+    def test_schema_fields_match_the_verify_request(self) -> None:
+        wire = FrontierFinanceVerifyRequest.model_fields
+        for name, field in TaskData.model_fields.items():
+            assert name in wire
+            assert (
+                wire[name].annotation,
+                wire[name].is_required(),
+                wire[name].get_default(call_default_factory=True),
+            ) == (
+                field.annotation,
+                field.is_required(),
+                field.get_default(call_default_factory=True),
+            ), name
+
+    def test_rejects_malformed_rubric(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskData.model_validate({"rubrics": [{"rubric_id": "not-an-int", "rubric_text": "A"}]})
+
+    def test_accepts_undated_and_unrubricked_rows(self) -> None:
+        TaskData.model_validate({"question": "q"})

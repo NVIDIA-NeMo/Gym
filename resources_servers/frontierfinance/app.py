@@ -52,6 +52,7 @@ from resources_servers.finance_agent_v2.app import (
     FinanceAgentV2RunRequest,
     FinanceAgentV2VerifyRequest,
 )
+from resources_servers.frontierfinance.task_data import FrontierFinanceTaskFields
 
 
 logger = logging.getLogger(__name__)
@@ -108,27 +109,12 @@ class FrontierFinanceResourcesServerConfig(FinanceAgentV2ResourcesServerConfig):
     )
 
 
-class FrontierFinanceRubric(BaseModel):
-    rubric_id: int
-    rubric_text: str
-    must_have: bool = False
-    rubric_type: Optional[str] = None
-    rubric_subtype: Optional[str] = None
-    data_source_type: Optional[str] = None
-    data_source_subtype: Optional[str] = None
-    data_source_detailed: List[str] = Field(default_factory=list)
-
-
 class FrontierFinanceSeedSessionRequest(BaseSeedSessionRequest):
     as_of_date: Optional[str] = None
 
 
-class FrontierFinanceRunRequest(FinanceAgentV2RunRequest):
-    query_id: str = ""
-    as_of_date: Optional[str] = None
-    use_cases: List[str] = Field(default_factory=list)
-    capabilities: List[str] = Field(default_factory=list)
-    rubrics: List[FrontierFinanceRubric] = Field(default_factory=list)
+class FrontierFinanceRunRequest(FrontierFinanceTaskFields, FinanceAgentV2RunRequest):
+    pass
 
 
 class FrontierFinanceVerifyRequest(FrontierFinanceRunRequest, FinanceAgentV2VerifyRequest):
@@ -163,7 +149,15 @@ def cap_tool_dates(args: Dict[str, Any], as_of_date: str) -> Dict[str, Any]:
 
 
 def extract_final_answer(response: NeMoGymResponse) -> str:
-    for output_item in reversed(response.output):
+    """The ``final_result`` of the submission the agent executed, or "" if it stopped without one.
+
+    The agent ends the rollout on the first submission it runs, so later calls in the same turn
+    were never executed and must not be graded.
+    """
+    stop_reason = (response.metadata or {}).get("stop_reason")
+    if stop_reason is not None and stop_reason != "done_tool":
+        return ""
+    for output_item in response.output:
         if getattr(output_item, "type", None) == "function_call" and getattr(output_item, "name", None) == SUBMIT_TOOL:
             try:
                 args = json.loads(getattr(output_item, "arguments", "{}"))
@@ -343,12 +337,14 @@ class FrontierFinanceResourcesServer(FinanceAgentV2ResourcesServer):
     async def _judge_call(
         self, judge: FrontierFinanceJudgeConfig, create_params: NeMoGymResponseCreateParamsNonStreaming
     ) -> str:
-        response = await asyncio.wait_for(
-            self.server_client.post(server_name=judge.model_server.name, url_path="/v1/responses", json=create_params),
-            timeout=self.config.judge_call_timeout,
-        )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-        return self._judge_reply_text(judge_response)
+        async def call() -> str:
+            response = await self.server_client.post(
+                server_name=judge.model_server.name, url_path="/v1/responses", json=create_params
+            )
+            judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
+            return self._judge_reply_text(judge_response)
+
+        return await asyncio.wait_for(call(), timeout=self.config.judge_call_timeout)
 
     async def _grade_with_judge(
         self, judge: FrontierFinanceJudgeConfig, item: EvalItem
