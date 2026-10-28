@@ -93,6 +93,8 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
     sqlite parser: ``text`` -> assistant message, ``tool_use`` -> function_call (+ output),
     ``step_finish`` -> token usage, ``reasoning`` -> buffered <think> block prepended to the next
     assistant message (a trailing reasoning run is surfaced on its own so it is not dropped).
+    ``error`` events are left to ``_scan_run_events`` and never logged here: they can carry MCP grant
+    credentials, which only the session path redacts.
     """
     output_items: list[Any] = []
     input_tokens = 0
@@ -184,9 +186,6 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
                         status="completed",
                     )
                 )
-
-        elif etype == "error":
-            LOG.warning("kilo run reported error event: %s", str(event.get("error"))[:500])
 
     # A run that ends on reasoning (some vLLM reasoning parsers route the final answer through the
     # reasoning channel) is surfaced as a think-tagged message rather than dropped.

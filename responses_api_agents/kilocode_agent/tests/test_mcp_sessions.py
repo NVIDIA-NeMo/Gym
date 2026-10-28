@@ -4,6 +4,7 @@
 
 import copy
 import json
+import logging
 import re
 import shlex
 from pathlib import Path
@@ -517,6 +518,23 @@ async def test_collected_diagnostics_redact_grant_headers_before_logging(caplog:
     assert "task-token" not in artifacts.stderr + artifacts.log_tail + caplog.text
     assert "[REDACTED]" in artifacts.stderr and "[REDACTED]" in artifacts.log_tail
     assert artifacts.required_mcp_ready is True
+
+
+async def test_kilo_error_event_reaches_logs_and_errors_only_redacted(caplog: pytest.LogCaptureFixture) -> None:
+    agent = _make_model_server_agent()
+    session = state()
+    session.mcp_header_values = ("Bearer task-token",)
+    session.request.tool_accesses = [mcp()]
+    error_event = json.dumps({"type": "error", "error": {"message": "Authorization: Bearer task-token"}})
+    session.session.execute = AsyncMock(
+        return_value=KiloArtifacts(stdout=error_event, stderr="", exit_code=0, task_environment_ready=True)
+    )
+    with caplog.at_level(logging.WARNING), pytest.raises(RuntimeError, match="execution error") as error:
+        await agent._sandbox_response(
+            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+        )
+    assert "[REDACTED]" in str(error.value) and "task-token" not in str(error.value)
+    assert "task-token" not in caplog.text
 
 
 def test_diagnostics_redact_json_escaped_credentials() -> None:
