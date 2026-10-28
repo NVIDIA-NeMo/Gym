@@ -314,6 +314,12 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,
+            # An environment that ended the episode because of its own failure (a user simulator or judge
+            # that never answered) reports it on the final step; carry it onto the rollout so the reward
+            # is masked out of quality metrics and training data instead of counted as a policy outcome.
+            mask_sample=step_data.mask_sample,
+            failure_kind=step_data.failure_kind,
+            failure_reason=step_data.failure_reason,
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
