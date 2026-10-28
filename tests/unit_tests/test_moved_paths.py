@@ -22,11 +22,13 @@ import pkgutil
 import sys
 import textwrap
 import types
+import typing
 import warnings
 from pathlib import Path
 from unittest import mock
 
 import pytest
+import typing_extensions
 from packaging.version import Version
 
 import nemo_gym._moved_paths as moved_paths
@@ -249,14 +251,19 @@ def _surface_names(module: types.ModuleType) -> list[str]:
     """Names an importer of `module` can rely on: what it defines and what it re-exports from nemo_gym.
 
     Modules, and classes, functions, and objects imported from other libraries (`Any`, `environ`), are left out.
+    Type aliases the module defines, such as `X = Union[A, B]`, are kept.
     """
     names = []
     for name, value in vars(module).items():
-        if name.startswith("__") or isinstance(value, types.ModuleType):
+        if not name.isidentifier() or name.startswith("__") or isinstance(value, types.ModuleType):
             continue
-        if isinstance(value, type) or callable(value):
+        if isinstance(value, type) or (callable(value) and not _is_type_alias(value)):
             # Classes and functions count only if nemo_gym defines them.
             if not str(getattr(value, "__module__", "")).startswith("nemo_gym"):
+                continue
+        elif _is_type_alias(value):
+            # An alias counts unless it is a name imported from typing itself, such as `Any` or `Optional`.
+            if any(getattr(source, name, None) is value for source in (typing, typing_extensions)):
                 continue
         elif name == "TYPE_CHECKING" or type(value).__module__.split(".")[0] not in _VALUE_MODULES:
             # Values count if they are plain data (strings, numbers, paths, patterns) or nemo_gym objects.
@@ -264,6 +271,10 @@ def _surface_names(module: types.ModuleType) -> list[str]:
                 continue
         names.append(name)
     return sorted(names)
+
+
+def _is_type_alias(value: object) -> bool:
+    return isinstance(value, types.UnionType) or type(value).__module__ in ("typing", "typing_extensions")
 
 
 def build_import_surface(modules: list[str] | None = None) -> dict[str, list[str]]:
@@ -297,6 +308,27 @@ class TestImportSurface:
     @property
     def surface(self) -> dict[str, list[str]]:
         return json.loads(IMPORT_SURFACE_PATH.read_text())
+
+    def test_surface_keeps_type_aliases_and_drops_imported_library_names(self) -> None:
+        module = types.ModuleType("nemo_gym.fake_surface")
+
+        class Defined:
+            pass
+
+        Defined.__module__ = module.__name__
+        module.__dict__.update(
+            {
+                "Defined": Defined,
+                "UnionAlias": typing.Union[Defined, int],
+                "PipeAlias": Defined | None,
+                "LIMIT": 3,
+                "Any": typing.Any,
+                "Optional": typing.Optional,
+                "BaseModel": __import__("pydantic").BaseModel,
+                "Cached[int]": Defined,
+            }
+        )
+        assert _surface_names(module) == ["Defined", "LIMIT", "PipeAlias", "UnionAlias"]
 
     def test_every_recorded_module_still_imports_at_its_old_path(self) -> None:
         missing = []
