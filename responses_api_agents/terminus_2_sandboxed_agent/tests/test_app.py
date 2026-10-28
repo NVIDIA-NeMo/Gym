@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from nemo_gym import server_utils
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -24,7 +25,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.server_utils import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module

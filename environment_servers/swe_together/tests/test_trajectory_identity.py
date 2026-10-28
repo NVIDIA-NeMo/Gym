@@ -13,7 +13,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.rollout_collection import _build_trajectory_record, _episode_record, _episode_request_body
 from nemo_gym.rollout_observability import TrajectoryRecord
 

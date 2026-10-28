@@ -111,8 +111,9 @@ from nemo_gym.config.config_types import (
 )
 from nemo_gym.config.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.core import failure_kinds
+from nemo_gym.core.episode import TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, TaskId
+from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose

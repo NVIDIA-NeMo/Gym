@@ -30,8 +30,8 @@ from typing import Literal
 from aiohttp import ClientResponse
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
+from nemo_gym.core.episode import rollout_context
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.server_utils import (
     GlobalAIOHTTPAsyncClientConfig,

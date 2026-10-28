@@ -45,12 +45,12 @@ from nemo_gym._checkpoint.resources import (
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, validate_failure_kind
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics

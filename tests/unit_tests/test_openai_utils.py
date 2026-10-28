@@ -24,6 +24,7 @@ from aiohttp import ClientResponseError, ClientTimeout
 from pydantic import ValidationError
 
 from nemo_gym import openai_utils as openai_utils_module
+from nemo_gym.core.episode import rollout_context
 from nemo_gym.openai_utils import (
     MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
@@ -31,7 +32,6 @@ from nemo_gym.openai_utils import (
     _error_body_is_permanent_auth,
     _error_body_is_permanent_quota,
 )
-from nemo_gym.rollout_correlation import rollout_context
 
 
 @pytest.fixture(autouse=True)

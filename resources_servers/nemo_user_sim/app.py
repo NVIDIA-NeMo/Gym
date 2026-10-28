@@ -28,13 +28,13 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import get_first_server_config_dict
+from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, VERIFIER_ERROR, is_namespaced, is_registered
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSeedResponse,

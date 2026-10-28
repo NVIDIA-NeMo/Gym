@@ -235,9 +235,13 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId"),
         # rollout_correlation imported these and they stay importable through it.
         **_names("nemo_gym.core.responses_api_types", "0.8.0", "BaseModel"),
+        # Moved, and still imported by rollout_correlation for its own use.
+        **_names("nemo_gym.core.episode", "0.8.0", "ROLLOUT_ID_PATTERN rollout_context"),
     },
     "nemo_gym.episode_types": {
         **_names("nemo_gym.core.episode", "0.8.0", "_CAPTURE_KEY_ATTEMPT"),
+        # Moved, and still imported by episode_types for its own use.
+        **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId TaskId"),
     },
 }
 

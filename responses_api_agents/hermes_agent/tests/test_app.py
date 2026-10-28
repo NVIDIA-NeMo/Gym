@@ -31,6 +31,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     _AgentSessionRecord,
 )
+from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -40,7 +41,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess

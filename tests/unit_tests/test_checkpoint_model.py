@@ -36,8 +36,7 @@ from nemo_gym._checkpoint.model import (
 )
 from nemo_gym.base_responses_api_model import _CaptureMiddleware
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
-from nemo_gym.core.episode import current_rollout_id
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId, current_rollout_id
 from nemo_gym.responses_streaming import synthesize_responses_keepalive_sse
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes

@@ -51,7 +51,7 @@ from nemo_gym._checkpoint.control import (
     dispatch_control,
 )
 from nemo_gym._checkpoint.errors import ControlError
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.runtime_dir import server_runtime_dir
 
 

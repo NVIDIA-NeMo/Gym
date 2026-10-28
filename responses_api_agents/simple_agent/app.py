@@ -58,6 +58,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -70,7 +71,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,

@@ -96,9 +96,10 @@ from nemo_gym.core.episode import (
     current_rollout_id,
     current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
+    rollout_context,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, rollout_context, scope_with_routed_path
+from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, scope_with_routed_path
 from nemo_gym.session_routing import (
     SESSION_CLAIM_SCOPE_KEY,
     SESSION_ID_SCOPE_KEY,

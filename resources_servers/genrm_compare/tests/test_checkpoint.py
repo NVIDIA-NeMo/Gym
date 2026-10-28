@@ -15,8 +15,8 @@ import resources_servers.genrm_compare.app as genrm
 from nemo_gym._checkpoint.control import CheckpointRequest, next_attempt
 from nemo_gym._checkpoint.resources import ResourcesParticipant
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.episode_types import EpisodeId
 from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import ServerClient
 from resources_servers.genrm_compare.tests.support import request_with_session
