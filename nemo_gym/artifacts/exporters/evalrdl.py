@@ -18,10 +18,10 @@ from typing import Any, ClassVar, Optional
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import Field, field_validator
 
+from nemo_gym.artifacts.exporters.base import unexportable_reason
+from nemo_gym.artifacts.exporters.isolated import ExportPreparationError, IsolatedExporter
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import RunExportConfig
-from nemo_gym.exporters.base import unexportable_reason
-from nemo_gym.exporters.isolated import ExportPreparationError, IsolatedExporter
-from nemo_gym.run_artifacts import RunArtifacts
 
 
 # Time the upload itself may take, before the wait for a verdict; past it the worker is killed.

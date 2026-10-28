@@ -12,8 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from nemo_gym.exporters.base import Exporter, ExportResult
-from nemo_gym.run_artifacts import RunArtifacts
+from nemo_gym.artifacts.exporters.base import Exporter, ExportResult
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.trajectory.atif_export import AtifExportError, ExportAtifConfig, export_rollouts_to_atif
 
 

@@ -33,6 +33,7 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -75,7 +76,6 @@ from nemo_gym.eval_plan import (
     eval_plan_json_schema,
     write_eval_plan,
 )
-from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
 
@@ -540,7 +540,7 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
 
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
-    from nemo_gym.resolved_config import write_resolved_config
+    from nemo_gym.artifacts.resolved_config import write_resolved_config
     from nemo_gym.rollout_collection import (
         E2ERolloutCollectionConfig,
         RolloutCollectionConfig,
@@ -742,7 +742,7 @@ def _health_check_collected_rollouts(
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
-    from nemo_gym.resolved_config import write_resolved_config
+    from nemo_gym.artifacts.resolved_config import write_resolved_config
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.telemetry.setup import (
         configure_telemetry_env,
@@ -826,11 +826,11 @@ def health_check_rollouts(
 
 @exit_cleanly_on_config_error
 def export_run() -> None:  # pragma: no cover
+    from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER
+    from nemo_gym.artifacts.exporters import load_run_exporter_class
+    from nemo_gym.artifacts.exporters.base import ExportState
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
     from nemo_gym.config.config_types import RunExportConfig
-    from nemo_gym.exporters import load_run_exporter_class
-    from nemo_gym.exporters.base import ExportState
-    from nemo_gym.run_artifacts import RunArtifacts
-    from nemo_gym.run_exporter_registry import DEFAULT_RUN_EXPORTER
 
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(skip_exporters=True)

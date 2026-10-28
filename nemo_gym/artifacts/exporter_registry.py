@@ -14,15 +14,15 @@
 # limitations under the License.
 """Names of the exporters `gym eval export` can run.
 
-Kept apart from `nemo_gym.exporters` so the CLI can list them in `--help` without importing pydantic
+Kept apart from `nemo_gym.artifacts.exporters` so the CLI can list them in `--help` without importing pydantic
 or any backend.
 """
 
 # Exporter name -> "module:class". Classes load on demand.
 RUN_EXPORTERS: dict[str, str] = {
-    "atif": "nemo_gym.exporters.atif:AtifExporter",
-    "evalrdl": "nemo_gym.exporters.evalrdl:EvalRDLExporter",
-    "mlflow": "nemo_gym.exporters.mlflow:MLflowExporter",
-    "wandb": "nemo_gym.exporters.wandb:WandbExporter",
+    "atif": "nemo_gym.artifacts.exporters.atif:AtifExporter",
+    "evalrdl": "nemo_gym.artifacts.exporters.evalrdl:EvalRDLExporter",
+    "mlflow": "nemo_gym.artifacts.exporters.mlflow:MLflowExporter",
+    "wandb": "nemo_gym.artifacts.exporters.wandb:WandbExporter",
 }
 DEFAULT_RUN_EXPORTER = "atif"

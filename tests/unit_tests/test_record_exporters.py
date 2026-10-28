@@ -24,16 +24,16 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch
 
-import nemo_gym.exporters as exporters_module
-import nemo_gym.exporters.mlflow as mlflow_module
-import nemo_gym.exporters.wandb as wandb_module
+import nemo_gym.artifacts.exporters as exporters_module
+import nemo_gym.artifacts.exporters.mlflow as mlflow_module
+import nemo_gym.artifacts.exporters.wandb as wandb_module
+from nemo_gym.artifacts.exporters import load_run_exporter_class
+from nemo_gym.artifacts.exporters.base import BaseExporter, ExportState, _write_marker_atomically
+from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.artifacts.exporters.mlflow import MLflowExporter
+from nemo_gym.artifacts.exporters.wandb import WandbExporter
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.exporters import load_run_exporter_class
-from nemo_gym.exporters.base import BaseExporter, ExportState, _write_marker_atomically
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.exporters.mlflow import MLflowExporter
-from nemo_gym.exporters.wandb import WandbExporter
-from nemo_gym.run_artifacts import RunArtifacts
 
 
 AGGREGATE_ENTRIES = [

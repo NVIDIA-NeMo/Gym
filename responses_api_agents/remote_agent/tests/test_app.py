@@ -24,10 +24,11 @@ from fastapi import Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
+from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ResourcesServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.telemetry import connection_pool
 from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,

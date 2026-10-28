@@ -47,8 +47,18 @@ from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_valid
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.artifacts.rollout_rows import (
+    NG_DISPATCH_DRAINED_KEY,
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    _rollout_for_export,
+    _strip_capture_payloads,
+)
+from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
+from nemo_gym.batch_status import BatchStatusTracker
 from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
@@ -86,8 +96,6 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.episode_types import is_materialized_task_row
-from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -242,10 +250,6 @@ def _masking_step_metrics(agent_name: str, scored: Counter, dropped: Counter) ->
 #     opts into the retry contract in ``is_terminal_failure``.
 # ---------------------------------------------------------------------------
 
-NG_FAILURE_CLASS_KEY = "_ng_failure_class"
-NG_NO_PERSIST_KEY = "_ng_no_persist"
-# Set only by Gym, on the result it builds for a row the dispatch budget never started.
-NG_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 # Set only on the failures-sidecar row ``record_omitted_rollouts`` writes for a rollout that produced no result.
 # Readers key on it, not on ``_ng_no_persist``, which other sidecar rows (ATIF reverification) carry and count.
 NG_OMITTED_ROLLOUT_KEY = "_ng_omitted_rollout"
@@ -288,7 +292,6 @@ _NO_RESULT_FAILURE_CLASSES = frozenset(
     }
 )
 NG_PERF_KEY = "ng_perf"
-_MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
 
@@ -979,39 +982,6 @@ def _record_policy_model_server(result: dict[str, Any], global_config: Any, agen
     name = model_server.get("name") if hasattr(model_server, "get") else None
     if isinstance(name, str) and name:
         result[NG_POLICY_MODEL_SERVER_KEY] = name
-
-
-def _strip_capture_payloads(result: dict[str, Any]) -> None:
-    result.pop(NG_VERIFIER_INVOCATIONS_KEY, None)
-    capture = result.get("ng_model_call_capture")
-    calls = capture.get("calls") if isinstance(capture, dict) else None
-    if isinstance(capture, dict):
-        capture.pop("verifier_invocations", None)
-    for call in calls if isinstance(calls, list) else []:
-        if isinstance(call, dict):
-            for key in _MODEL_CALL_PAYLOAD_KEYS:
-                call.pop(key, None)
-
-
-def _rollout_for_export(result: dict[str, Any]) -> dict[str, Any]:
-    """Return an exporter view without the complete trajectory or raw capture payloads."""
-    sanitized = dict(result)
-    sanitized.pop(NG_TRAJECTORY_KEY, None)
-    sanitized.pop("ng_model_call_capture", None)
-    capture = result.get("ng_model_call_capture")
-    if isinstance(capture, dict):
-        sanitized_capture = dict(capture)
-        calls = capture.get("calls")
-        if isinstance(calls, list):
-            sanitized_capture["calls"] = [
-                {key: value for key, value in call.items() if key not in _MODEL_CALL_PAYLOAD_KEYS}
-                for call in calls
-                if isinstance(call, dict)
-            ]
-        else:
-            sanitized_capture.pop("calls", None)
-        sanitized["ng_model_call_capture"] = sanitized_capture
-    return sanitized
 
 
 def _attach_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> None:
@@ -5340,13 +5310,23 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
 # Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.eval`.
 # Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
 from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
-__getattr__ = moved_attr_getter(
+_moved_cli_entry_points = moved_attr_getter(
     __name__,
     {
         "collect_rollouts": "nemo_gym.cli.eval",
         "aggregate_rollouts": "nemo_gym.cli.eval",
     },
 )
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+_moved_names = moved_names_getattr(__name__)
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        return _moved_names(name)
+    except AttributeError:
+        return _moved_cli_entry_points(name)

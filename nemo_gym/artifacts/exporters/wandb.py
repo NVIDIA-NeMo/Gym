@@ -22,9 +22,9 @@ import wandb.util
 from omegaconf import DictConfig, OmegaConf
 from wandb import Run, Table
 
+from nemo_gym.artifacts.exporters.base import BaseExporter
 from nemo_gym.config.config_types import WANDBConfig
 from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
-from nemo_gym.exporters.base import BaseExporter
 
 
 # Increase row limit since some of our rollouts are pretty hefty

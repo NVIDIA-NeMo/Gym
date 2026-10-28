@@ -272,7 +272,7 @@ ray = [
     "jinja2>=3.1",
 ]
 
-# MLflow is used both by the rollout exporter (nemo_gym/exporters/mlflow.py) and by the
+# MLflow is used both by the rollout exporter (nemo_gym/artifacts/exporters/mlflow.py) and by the
 # GitLab dataset/model-registry integration (nemo_gym/gitlab_utils.py). Without this extra,
 # both call paths report an actionable error instead of failing on unrelated imports.
 mlflow = [
@@ -880,7 +880,7 @@ layers = [
     # server_runtime/
     "nemo_gym._checkpoint.agent : nemo_gym._checkpoint.control : nemo_gym._checkpoint.coordination : nemo_gym._checkpoint.environment : nemo_gym._checkpoint.errors : nemo_gym._checkpoint.generation_cut : nemo_gym._checkpoint.participant_workers : nemo_gym._checkpoint.resources : nemo_gym._checkpoint.settings : nemo_gym._checkpoint.steps : nemo_gym._checkpoint.store : nemo_gym._checkpoint.telemetry : nemo_gym._checkpoint.workers : nemo_gym.base_environment_server : nemo_gym.base_resources_server : nemo_gym.episode_types : nemo_gym.mcp_auto_exposure : nemo_gym.observability.verifiers : nemo_gym.rollout_correlation : nemo_gym.runtime_dir : nemo_gym.server_status : nemo_gym.server_utils : nemo_gym.session_routing : nemo_gym.single_agent_turn_types : nemo_gym.tool_access",
     # artifacts/
-    "nemo_gym.exporters : nemo_gym.resolved_config : nemo_gym.run_artifacts : nemo_gym.run_exporter_registry",
+    "nemo_gym.artifacts",
     # metrics/
     "nemo_gym.metrics",
     # verification/
@@ -905,19 +905,15 @@ layers = [
 ignore_imports = [
     "nemo_gym.client.server_client -> nemo_gym._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym._checkpoint.settings",
-    "nemo_gym.config.global_config -> nemo_gym.exporters",
+    "nemo_gym.config.global_config -> nemo_gym.artifacts.exporters",
     "nemo_gym.config.global_config -> nemo_gym.h2_ping_sidecar.config",
     "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
-    "nemo_gym.exporters.base -> nemo_gym.batch_status",
-    "nemo_gym.exporters.base -> nemo_gym.rollout_collection",
-    "nemo_gym.exporters.mlflow -> nemo_gym.rollout_collection",
-    "nemo_gym.trajectory.trajectory_record -> nemo_gym.observability.model_calls",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.tasks.harbor.digest",
     "nemo_gym.sandbox.compose_config -> nemo_gym.tasks.harbor.digest",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.main",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.utils",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.rollout_collection",
-    "nemo_gym.tasks.harbor.run_summary -> nemo_gym.health.types",
     "nemo_gym.telemetry.setup -> nemo_gym.sandbox.observability",
+    "nemo_gym.trajectory.trajectory_record -> nemo_gym.observability.model_calls",
 ]
