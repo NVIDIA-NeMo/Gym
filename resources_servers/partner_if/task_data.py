@@ -54,6 +54,10 @@ class GradingContract(StrictModel):
     # Gates use the same verifier registry but never earn points. For example,
     # citation presence must not be confused with full citation coverage.
     prerequisites: list[GradingItem] = Field(default_factory=list)
+    # The judge's copies of what a live agent's harness gives the actor outside the request: its system prompt and
+    # text appended to tool descriptions, by tool ID. The task's own setup delivers them to the harness.
+    actor_system_prompt: Text | None = Field(default=None, exclude_if=lambda value: value is None)
+    tool_description_additions: dict[Text, Text] = Field(default_factory=dict, exclude_if=lambda value: not value)
 
     @property
     def checks(self) -> list[GradingItem]:
@@ -65,6 +69,8 @@ class GradingContract(StrictModel):
         by_id = {r.id: r for r in self.checks}
         if len(by_id) != len(self.checks):
             raise ValueError("Duplicate rubric IDs")
+        if (self.actor_system_prompt or self.tool_description_additions) and self.evidence_mode != "live_agent":
+            raise ValueError("An actor system prompt or tool-description additions describe a live agent's harness")
         if not any(r.dimension == "if" for r in self.rubrics):
             raise ValueError("An IF benchmark task must have an IF dimension")
         visited, visiting = set(), set()

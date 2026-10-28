@@ -3528,26 +3528,36 @@ class TestComposeAndRouting:
         with pytest.raises(ImageConfigError, match="does not match the deployment platform linux/arm64"):
             server._compose_document(declaring("linux/amd64"))
 
-    def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_and_seed_for_the_same_reason(self, tmp_path, monkeypatch):
-        from nemo_gym.sandbox.compose_fields import ComposeFieldError
+    async def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_and_seed_for_the_same_reason(
+        self, tmp_path, monkeypatch
+    ):
         from nemo_gym.tasks.harbor.image_configs import record_compose_images
         from nemo_gym.tasks.harbor.registry import ImageConfigError
 
-        server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
         (task.path / "environment" / "docker-compose.yaml").write_text(
             COMPOSE_YAML + "    extra_hosts: ['licence.example:198.51.100.7']\n"
         )
         task = load_task(task.path)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
         reason = (
-            "service 'kafka' extra_hosts cannot be applied without host injection: the image runs as user 'appuser'"
+            "hello: environment/docker-compose.yaml: service 'kafka' extra_hosts cannot be applied without host "
+            "injection: the image runs as user 'appuser', so the sidecar takes no host entries"
         )
         # Prepare: the recorded configurations say kafka runs as appuser, so the task fails there, naming the service.
-        with pytest.raises(ImageConfigError, match="hello: environment/docker-compose.yaml: " + reason):
+        with pytest.raises(ImageConfigError) as excinfo:
             record_compose_images([task], task.path.parent, sandbox_provider="opensandbox")
-        # Seed: the server decides the host opt-out with the same predicate and refuses the same document.
-        with pytest.raises(ComposeFieldError, match=reason):
+        assert str(excinfo.value) == reason
+        # Seed: the server decides the host opt-out with the same predicate and refuses the same document with the
+        # same words, in its precheck: a terminal 422 before any group, not a failure inside the start retried per
+        # episode (the resolution path raises the same, as the last line).
+        with pytest.raises(ImageConfigError) as excinfo:
             server._compose_document(task)
+        assert str(excinfo.value) == reason
+        response = await run_episode(server, task)
+        assert response.result is None and response.failure.stage == "seed" and response.failure.terminal
+        assert response.failure.failure_reason == f"Compose group of task 'hello': {reason}"
+        assert documents == [] and not compose.stopped and not server._sandboxes
         # A root kafka image takes the entries on both paths.
         configs = {**IMAGE_CONFIGS, "org/kafka:1": {**IMAGE_CONFIGS["org/kafka:1"], "config": {"Cmd": ["kafka"]}}}
         (task.path.parent / "compose-images.json").write_text(json.dumps(configs))
@@ -3876,6 +3886,7 @@ def test_server_config_holds_only_deployment_settings():
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
         "compose_variables",
+        "compose_overlay",
     }
     source = inspect.getsource(HarborEnvironmentServerConfig).lower()
     assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))

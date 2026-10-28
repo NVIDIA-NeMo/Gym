@@ -85,6 +85,8 @@ def run(params: dict) -> int:
                     "XDG_DATA_HOME",
                     "XDG_CACHE_HOME",
                     "XDG_STATE_HOME",
+                    # Lets the supervisor find Codex's tools after they leave its process tree.
+                    "NEMO_GYM_SUPERVISOR",
                 )
                 if key in os.environ
             }

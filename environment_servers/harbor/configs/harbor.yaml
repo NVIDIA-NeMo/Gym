@@ -43,6 +43,19 @@ harbor_environment_server:
       # (tamper-proof grading, as training runs want). Tasks without artifacts keep their declared mode.
       separate_verifier_for_artifacts: false
 
+      # Job-level Compose overlay, what Harbor's `extra_docker_compose`, `agents[].mcp_servers` and
+      # `prompt_template_path` do together (see the README): `files` are Compose files merged, in order, onto every
+      # task's Compose group (a task with only an image first becomes the one-service group `main`); `mcp_servers`
+      # are merged by name with the task's `[[environment.mcp_servers]]`, the overlay's winning, and reach the
+      # harness in the same task context and grant list; `prompt_template` is a Jinja file with `{{ instruction }}`,
+      # rendered around the instruction of the episode's first turn. Prepare reads the same block (the overlay's
+      # images are recorded with the tasks'), so set it in the configuration the command names, not only at serve.
+      #   compose_overlay:
+      #     files: [/path/memory-docker-compose.yaml, /path/memory-docker-compose.harbor.yaml]
+      #     mcp_servers: [{name: redis-memory, transport: sse, url: "http://mcp:9000/sse"}]
+      #     prompt_template: /path/memory_prompt.md.j2
+      compose_overlay: null
+
       # taskset name -> {folder, tasks: {task_id: digest}, paths: {task_id: relative path, for tasks found
       # below the first level of the folder}}; written by the loader.
       tasksets: {}
