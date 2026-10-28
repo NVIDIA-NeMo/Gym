@@ -210,8 +210,9 @@ passes the probe's `--timeout` as the agent's `timeout` only to the harnesses in
 `("opencode", "pi")` tuple; add a harness whose adapter has a `timeout` field, so that
 the harness uses the probe timeout instead of the adapter's default. `ci.install_runtime`
 installs the adapter's `requirements.txt` and then returns early only for the harnesses
-in its `("hermes", "stirrup")` tuple, whose runtime comes from those requirements or
-installs in the task sandbox during session setup. For any other harness it installs a
+in its `("hermes", "stirrup", "simple")` tuple: Hermes comes from those requirements,
+Stirrup installs in the task sandbox during session setup, and Simple Agent is built in.
+For any other harness it installs a
 pinned npm package through `responses_api_agents/<harness>_agent/setup_<harness>.py`,
 so add a harness that installs its runtime in the task sandbox to that tuple. A
 data-driven registry entry could carry these per-harness settings and remove the
