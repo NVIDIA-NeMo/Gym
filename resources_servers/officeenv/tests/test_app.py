@@ -5,11 +5,13 @@ Servers drive it.
 
 What an episode does (apps, faults, checks, reward) is OfficeEnv's and tested there; these tests
 cover the routes, statuses, session cookies, the Environment Server session contract, the MCP
-exposure and Gym's response fields, and that the committed example rows still match the pinned
-OfficeEnv release."""
+exposure, artifact stores and Gym's response fields, and that the committed example rows still
+match the pinned OfficeEnv release."""
 
 import asyncio
+import base64
 import json
+import shutil
 from http.cookiejar import CookieJar
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -18,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from officeenv import __version__ as officeenv_version
 from officeenv.apps import available
+from officeenv.artifacts import externalize
 from officeenv.emit import gym_row
 from pydantic import ValidationError
 
@@ -353,6 +356,109 @@ def test_retiring_a_session_frees_its_world(client: TestClient, server: OfficeEn
     asyncio.run(server.retire_session_state(session_id))
     assert len(server.service.store) == 0
     assert client.post("/slack_list_channels", json={}, cookies=cookies).status_code == 404
+
+
+# Artifacts beside the rows: large TaskSpec strings named by SHA-256, read back at seed.
+
+
+BOOK = bytes(range(256)) * 40  # 10 KB that are no UTF-8 text, as a workbook's are not
+BOOK_B64 = base64.b64encode(BOOK).decode()
+LEDGER = "invoice_id,vendor,amount\n" + "".join(f"INV-{n},Vendor {n % 7},{n}.25\n" for n in range(300))
+DRIVE_SPEC = {
+    "task_id": "artifacts",
+    "actor": {"email": ME},
+    "apps": {
+        "gdrive": {
+            "data": {
+                "users": [{"emailAddress": ME, "displayName": "Alex Morgan"}],
+                "files": [
+                    {"id": "F_BOOK", "name": "ledger.xlsx", "owner": ME, "contentBase64": BOOK_B64},
+                    {"id": "F_CSV", "name": "ledger.csv", "owner": ME, "content": LEDGER},
+                ],
+            }
+        },
+        "user": {},
+    },
+    "exposure": {"mode": "tools"},
+}
+
+
+def corpus_row(store: Path) -> dict:
+    """The Drive task's row with its TaskSpec's large strings moved into ``store`` as artifacts."""
+    row = gym_row(DRIVE_SPEC, "Total the ledger.")
+    return row | {"officeenv": externalize(row["officeenv"], store, min_bytes=1024)}
+
+
+def typed_seed(row: dict) -> dict:
+    """The seed an Environment Server sends for ``row``."""
+    return ResourcesSeedSessionRequest(
+        resources_session_id="rs-1",
+        episode_id=EpisodeId(rollout_id="r1"),
+        task_id=TaskId(taskset="officeenv", task_id=row["task_id"]),
+        task_data={key: value for key, value in row.items() if key != "responses_create_params"},
+    ).model_dump(mode="json")
+
+
+def drive_files(client: TestClient, cookies: object) -> tuple[str, str]:
+    book = client.post("/gdrive_download_file", json={"file_id": "F_BOOK"}, cookies=cookies).json()
+    csv = client.post("/gdrive_download_file", json={"file_id": "F_CSV"}, cookies=cookies).json()
+    return book["contentBase64"], csv["content"]
+
+
+def test_both_seeds_read_a_moved_corpus_back_from_the_store_beside_its_rows(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "rows.jsonl").write_text(json.dumps(corpus_row(corpus / "artifacts")) + "\n")
+    assert len(list((corpus / "artifacts").iterdir())) == 2  # the workbook's bytes and the ledger's text
+    moved = shutil.copytree(corpus, tmp_path / "elsewhere" / "corpus")
+    shutil.rmtree(corpus)
+    row = json.loads((moved / "rows.jsonl").read_text())
+
+    server = make_server(artifacts_dirs=[str(tmp_path / "empty"), str(moved / "artifacts")])
+    client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=row)
+    assert seeded.status_code == 200, seeded.text
+    assert drive_files(client, seeded.cookies) == (BOOK_B64, LEDGER)
+
+    typed = client.post("/seed_session", json=typed_seed(row))
+    assert typed.status_code == 200, typed.text
+    assert drive_files(client, typed.cookies) == (BOOK_B64, LEDGER)
+
+
+def test_stores_are_searched_in_order_and_artifacts_dir_last(tmp_path: Path) -> None:
+    good, bad = tmp_path / "good", tmp_path / "bad"
+    row = corpus_row(good)
+    bad.mkdir()
+    for artifact in good.iterdir():  # the same names holding other bytes
+        (bad / artifact.name).write_bytes(b"tampered")
+
+    def seed(**stores: object) -> object:
+        return TestClient(make_server(**stores).setup_webserver()).post("/seed_session", json=row)
+
+    refused = seed(artifacts_dirs=[str(bad), str(good)])
+    assert refused.status_code == 400 and refused.json()["detail"]["error"]["code"] == "artifact_mismatch"
+    assert seed(artifacts_dirs=[str(good)], artifacts_dir=str(bad)).status_code == 200
+    assert seed(artifacts_dirs=[str(tmp_path / "empty")], artifacts_dir=str(good)).status_code == 200
+
+
+def test_a_row_whose_artifacts_cannot_be_read_is_refused_and_seeds_nothing(tmp_path: Path) -> None:
+    row = corpus_row(tmp_path / "artifacts")
+    for stores in ({}, {"artifacts_dirs": [str(tmp_path / "elsewhere")]}):
+        server = make_server(**stores)
+        client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+        refused = client.post("/seed_session", json=row)
+        assert refused.status_code == 400, refused.text
+        assert refused.json()["detail"]["error"]["code"] == "missing_artifact"
+        typed = client.post("/seed_session", json=typed_seed(row))
+        assert typed.status_code == 400 and typed.json()["detail"]["error"]["code"] == "missing_artifact"
+        assert len(server.service.store) == 0 and server._episodes == {}
+        assert client.post("/seed_session", json=gym_row(DRIVE_SPEC, "x")).status_code == 200  # no references
+
+
+@pytest.mark.parametrize("stores", [{"artifacts_dirs": ["data/corpus/artifacts"]}, {"artifacts_dir": "artifacts"}])
+def test_artifact_stores_must_be_absolute_paths(stores: dict) -> None:
+    with pytest.raises(ValidationError, match="absolute"):  # the server runs in its own directory
+        OfficeEnvResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="officeenv", **stores)
 
 
 # The MCP exposure.
