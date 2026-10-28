@@ -28,7 +28,7 @@ from nemo_gym.config.global_config import (
     UV_VENV_DIR_KEY_NAME,
 )
 from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV
-from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalConfig
+from tests.unit_tests.config.test_global_config import TestGlobalConfig as _TestGlobalConfig
 
 
 class TestServerLaunchCommand:

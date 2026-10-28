@@ -2594,7 +2594,7 @@ class TestConfigLoadErrors:
     def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
         agent_name = f"{resources_server}_langchain_deepagents_agent_model_server"
         config_path = (
-            Path(__file__).resolve().parents[2]
+            Path(__file__).resolve().parents[3]
             / "resources_servers"
             / resources_server
             / "configs"
@@ -2721,7 +2721,7 @@ class TestConfigLoadErrors:
         # but a plain PyYAML parse silently allows them (last-writer-wins). A repeated key like a
         # second `datasets:` block can land unnoticed and only surface at runtime. Sweep every real
         # config in the repo so this fails fast in CI instead.
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = Path(__file__).resolve().parents[3]
         config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
         config_paths = _discover_repo_configs(repo_root, config_dirs)
         assert config_paths, "no config files discovered -- sweep dirs may have moved"
