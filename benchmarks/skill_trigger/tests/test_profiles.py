@@ -59,6 +59,10 @@ def test_configs_use_existing_bridge_and_native_harbor_agents(profile):
     assert cls.capabilities.atif and cls.capabilities.skills
     if profile.startswith("hermes"):
         assert agent.kwargs["version"] == "v0.22.2"
+    if profile.startswith("codex"):
+        native = agent.kwargs["config"]
+        assert native["model_provider"] == "benchmark"
+        assert native["model_providers"]["benchmark"]["supports_websockets"] is False
     assert job.retry.max_retries == 0
     assert cfg["datasets"][0]["num_repeats"] == 1
     assert not parsed.count_failure_classes_as_zero and not parsed.count_missing_rollouts_as_zero
@@ -115,4 +119,6 @@ async def test_native_hermes_installer_uses_supported_version_probe(tmp_path):
     command = execute.call_args.kwargs["command"]
     assert "--branch v0.22.2" in command
     assert command.endswith("&& hermes --version")
+    assert execute.call_args.kwargs["env"]["HERMES_HOME"] == "/tmp/hermes"
+    assert "/d923a5eb487a17c0a68801bba9ef0f56c81040a8/scripts/install.sh" in command
     assert agent.get_version_command().endswith("hermes --version")

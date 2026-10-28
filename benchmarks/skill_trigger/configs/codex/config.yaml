@@ -18,3 +18,11 @@ harbor_agent_general:
           kwargs:
             version: 0.156.1
             web_search: disabled
+            config:
+              model_provider: benchmark
+              model_providers:
+                benchmark:
+                  name: Benchmark endpoint
+                  wire_api: responses
+                  env_key: OPENAI_API_KEY
+                  supports_websockets: false

@@ -21,4 +21,11 @@ harbor_agent_general:
             model_catalog_sha256: ${skill_trigger_settings.model_catalog_sha256}
             config:
               model_catalog_json: /tmp/skill-trigger-models.json
+              model_provider: benchmark
+              model_providers:
+                benchmark:
+                  name: Benchmark endpoint
+                  wire_api: responses
+                  env_key: OPENAI_API_KEY
+                  supports_websockets: false
           import_path: benchmarks.skill_trigger.profiles:CodexGuidance

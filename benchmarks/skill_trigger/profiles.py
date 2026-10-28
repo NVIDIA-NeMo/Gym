@@ -15,7 +15,7 @@
 """Small compatibility and guidance extensions to Harbor's existing installed agents.
 
 Harbor owns installation, execution, skills, timeouts, and trace conversion.
-These subclasses supply missing guidance settings and correct the pinned Hermes version probe.
+These subclasses supply missing guidance settings and correct pinned Hermes installation paths/probes.
 """
 
 import hashlib
@@ -59,10 +59,10 @@ class CodexGuidance(Codex):
 
 
 class HermesCompat(Hermes):
-    """Keep Harbor execution, using the version flag supported by Hermes v0.22.2."""
+    """Keep Harbor execution with a consistent Hermes install/runtime home."""
 
     def get_version_command(self) -> str:
-        return 'export PATH="$HOME/.local/bin:$PATH"; hermes --version'
+        return 'export PATH="$HOME/.local/bin:$PATH"; HERMES_HOME=/tmp/hermes hermes --version'
 
     async def exec_as_agent(
         self,
@@ -75,6 +75,12 @@ class HermesCompat(Hermes):
         # Harbor 0.25.0's install command uses a nonexistent `version` subcommand.
         if command.endswith("&& hermes version"):
             command = command.removesuffix("hermes version") + "hermes --version"
+            # Install where Harbor runs Hermes, rather than the installer's ~/.hermes default.
+            env = {**(env or {}), "HERMES_HOME": "/tmp/hermes"}
+            command = command.replace(
+                "/hermes-agent/main/scripts/install.sh",
+                "/hermes-agent/d923a5eb487a17c0a68801bba9ef0f56c81040a8/scripts/install.sh",
+            )
         return await super().exec_as_agent(environment, command=command, env=env, cwd=cwd, timeout_sec=timeout_sec)
 
 
