@@ -17,7 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.base_responses_api_model import CaptureStore, read_model_call_records
+from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.observability.model_calls import read_model_call_records
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.inference_provider.app import (
@@ -102,6 +103,10 @@ class TestSanity:
         assert server.config.uses_reasoning_parser is True
         assert server.config.extra_body == {"frequency_penalty": 0.5}
 
+    async def test_correlate_via_user_field_defaults_to_false(self) -> None:
+        server = _make_server()
+        assert server.config.correlate_via_user_field is False
+
 
 class TestInferenceProvider:
     async def test_basic_chat_completion(self, monkeypatch: MonkeyPatch) -> None:
@@ -124,6 +129,37 @@ class TestInferenceProvider:
         assert response.status_code == 200
         data = response.json()
         assert data["choices"][0]["message"]["content"] == "Hello! How can I help?"
+
+    async def test_embeddings(self) -> None:
+        server = _make_server(model="my-embed-model")
+        client = TestClient(server.setup_webserver())
+
+        # A minimal OpenAI-compatible reply: base64 vectors, no usage or object fields.
+        provider_json = {"data": [{"embedding": "AACAPwAAAEA=", "index": 0}], "model": "my-embed-model"}
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(return_value=provider_json)
+
+        response = client.post("/v1/embeddings", json={"input": "hi", "model": "ignored", "encoding_format": "base64"})
+
+        assert response.status_code == 200
+        assert response.json() == provider_json
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hi", model="my-embed-model", encoding_format="base64"
+        )
+
+    async def test_embeddings_extra_body_merge(self) -> None:
+        server = _make_server(model="my-embed-model", extra_body={"dimensions": 256, "user": "config-user"})
+        client = TestClient(server.setup_webserver())
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_embeddings = AsyncMock(return_value={"data": []})
+
+        response = client.post("/v1/embeddings", json={"input": "hi", "user": "request-user"})
+
+        assert response.status_code == 200
+        server._client.create_embeddings.assert_awaited_once_with(
+            input="hi", user="request-user", dimensions=256, model="my-embed-model"
+        )
+        assert server.config.extra_body == {"dimensions": 256, "user": "config-user"}
 
     async def test_model_default_from_config(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(model="my-configured-model")
@@ -215,6 +251,94 @@ class TestInferenceProvider:
             },
         )
         assert called_kwargs["temperature"] == 0.9
+
+    async def test_correlate_via_user_field_disabled_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server()
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        client.post(
+            "/ng-rollout/task0-rollout1/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "test"}]},
+        )
+        assert "user" not in called_kwargs
+
+    async def test_correlate_via_user_field_sets_user_from_rollout_id(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(correlate_via_user_field=True)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        response = client.post(
+            "/ng-rollout/task0-rollout1/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "test"}]},
+        )
+        assert response.status_code == 200
+        assert called_kwargs["user"] == "task0-rollout1"
+
+    async def test_correlate_via_user_field_without_rollout_prefix_omits_user(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(correlate_via_user_field=True)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "test"}]},
+        )
+        assert "user" not in called_kwargs
+
+    async def test_correlate_via_user_field_does_not_override_explicit_user(self, monkeypatch: MonkeyPatch) -> None:
+        server = _make_server(correlate_via_user_field=True)
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        called_kwargs = {}
+
+        async def mock_create_chat(**kwargs):
+            nonlocal called_kwargs
+            called_kwargs = kwargs
+            return _mock_chat_response()
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
+
+        client.post(
+            "/ng-rollout/task0-rollout1/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "test"}],
+                "user": "caller-supplied-user",
+            },
+        )
+        assert called_kwargs["user"] == "caller-supplied-user"
 
     async def test_reasoning_parser_strips_think_tags_from_input(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(uses_reasoning_parser=True)

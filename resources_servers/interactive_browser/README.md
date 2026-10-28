@@ -95,9 +95,16 @@ A browser is released when the rollout is scored (`verify`), when the same
 `session_id` is re-seeded, or when an Environment Server closes the session
 through `/close_session`. An Environment Server assigns the session id and
 registers that close before it seeds, so an episode that ends before `verify`
-still gets its browser released, and a seed that arrives after its close opens
-nothing (`tests/test_resources_sessions.py`). The server keeps browsers in
-process, so it requires `num_workers: 1`.
+still gets its browser released. A seed that arrives after its close is refused
+with 409 and opens nothing, but only while the server still remembers the close:
+for `session_close_retry_window_seconds` (300 seconds by default) and not across a restart
+(`tests/test_resources_sessions.py`). The server keeps browsers in process, so
+it requires `num_workers: 1`.
+
+A rollout whose browser is gone (never seeded, already verified, closed, or lost
+to a restart) is not scored as a zero. A tool call gets HTTP 404 with
+`failure_kind: session_lost`, and `verify` returns a masked sample
+(`mask_sample: true`, `failure_kind: session_lost`).
 
 There is no independent episode TTL and no client-side cap on concurrent
 sessions, so:
@@ -111,6 +118,11 @@ sessions, so:
 Every acquired provider session is released exactly once — including when the
 CDP connect fails after the session was created, and however often `close()` is
 called (`tests/test_registry_and_sessions.py`).
+
+A session seeded by an Environment Server carries its episode (`rollout_id`,
+`attempt`) to the provider as session metadata, and `remote_cdp` logs the
+provider's session id next to it when the session is acquired. That log line is
+the join between a provider-side session and the rollout record that held it.
 
 ## Run
 

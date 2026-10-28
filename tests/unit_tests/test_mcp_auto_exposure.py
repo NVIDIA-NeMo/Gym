@@ -26,7 +26,8 @@ import json
 import logging
 import subprocess
 import sys
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import MagicMock
@@ -36,6 +37,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from omegaconf import DictConfig
 from pydantic import BaseModel
 from starlette.routing import Mount
 
@@ -48,6 +50,7 @@ from nemo_gym.base_resources_server import (  # noqa: E402
     BaseVerifyResponse,
     ResourcesSeedSessionResponse,
     SimpleResourcesServer,
+    mcp_session_token_serializer,
     normalize_tool_name,
 )
 from nemo_gym.mcp_auto_exposure import (  # noqa: E402
@@ -543,6 +546,35 @@ def test_session_hook_error_fails_seed_request_not_silent_unrestricted():
         assert TOKEN_HEADER not in resp.text
 
 
+def _token_payload(server: SimpleResourcesServer, token: str) -> dict:
+    return mcp_session_token_serializer(server.get_session_middleware_key()).loads(token)
+
+
+def test_a_token_minted_without_checkpointing_names_only_its_session_and_tools():
+    server = _server()
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        token = _seed(client)
+    payload = _token_payload(server, token)
+
+    assert payload == {"sid": payload["sid"], "tools": None}
+    # Byte for byte the token every harness got before checkpointing existed.
+    assert token == mcp_session_token_serializer(server.get_session_middleware_key()).dumps(payload)
+
+
+def test_a_token_minted_with_checkpointing_names_the_attempt_that_seeded_it():
+    server = _server()
+    server.server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        seeded = client.post("/ng-rollout/rollout-1-a2/seed_session", json={})
+    payload = _token_payload(server, seeded.json()["mcp"]["headers"][TOKEN_HEADER])
+
+    assert payload == {"sid": payload["sid"], "tools": None, "episode": "rollout-1-a2"}
+
+
 # ==================================================================================================
 # Refusal: shapes/servers direct dispatch cannot reproduce raise loudly at startup
 # ==================================================================================================
@@ -673,7 +705,7 @@ def test_undispatchable_route_keeps_typed_schema_in_harvested_list():
             return app
 
         def mcp_tools(self, harvested, catchall):
-            harvested_schemas.update({t.name: t.tool.inputSchema for t in harvested})
+            harvested_schemas.update({t.name: t.tool.model_dump(by_alias=True)["inputSchema"] for t in harvested})
             return [t for t in harvested if t.name not in ("end_session", "gated")]
 
     server = _server(DroppedTyped, "excl")
@@ -925,3 +957,161 @@ def test_normalize_tool_name_without_server_name_strips_first_namespace():
     # with a server name, only that server's prefix is stripped
     assert normalize_tool_name("mcp__store__append", "store") == "append"
     assert normalize_tool_name("mcp__other__append", "store") == "mcp__other__append"
+
+
+@pytest.mark.parametrize("payload", [{"answer": 42}, [1, 2], "hello", 7, None])
+def test_result_content_and_structured_content(payload):
+    class Results(Store):
+        def setup_webserver(self):
+            app = super().setup_webserver()
+
+            @app.post("/result")
+            async def result():
+                return payload
+
+            return app
+
+    with _mcp(Results) as (client, token):
+        result = _call(client, "result", {}, token)
+        assert result.get("isError") is not True
+        text = result["content"][0]["text"]
+        assert (text if isinstance(payload, str) else json.loads(text)) == payload
+        assert result.get("structuredContent") == (payload if isinstance(payload, dict) else None)
+
+
+@pytest.mark.parametrize("payload", [{"answer": 42}, {"answer": "wrong"}, "not an object"])
+def test_output_schema_validation_is_preserved(payload):
+    class OutputSchema(Store):
+        def setup_webserver(self):
+            app = super().setup_webserver()
+
+            @app.post("/result")
+            async def result():
+                return payload
+
+            return app
+
+        def mcp_tools(self, harvested, catchall):
+            tools = super().mcp_tools(harvested, catchall)
+            for tool in tools:
+                if tool.name == "result":
+                    data = tool.tool.model_dump(by_alias=True)
+                    data["outputSchema"] = {
+                        "type": "object",
+                        "properties": {"answer": {"type": "integer"}},
+                        "required": ["answer"],
+                    }
+                    tool.tool = type(tool.tool).model_validate(data)
+            return tools
+
+    with _mcp(OutputSchema) as (client, token):
+        result = _call(client, "result", {}, token)
+        if payload == {"answer": 42}:
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == payload
+        else:
+            assert result["isError"] is True
+            assert "Output validation error:" in result["content"][0]["text"]
+
+
+def test_omitted_arguments_and_pydantic_coercion():
+    class Coercing(Store):
+        def setup_webserver(self):
+            app = super().setup_webserver()
+
+            @app.post("/coerce")
+            async def coerce(body: CountBody):
+                return {"count": body.count}
+
+            return app
+
+    with _mcp(Coercing) as (client, token):
+        result = _rpc(client, "tools/call", {"name": "raw_step"}, token)["result"]
+        assert result["structuredContent"] == {"echo": {}}
+        # Gym delegates input validation/coercion to Pydantic, not SDK JSON Schema validation.
+        result = _call(client, "coerce", {"count": "42"}, token)
+        assert result["structuredContent"] == {"count": 42}
+
+
+class CountBody(BaseModel):
+    count: int
+
+
+def test_concurrent_calls_use_each_requests_signed_session():
+    with _mcp(SessionScoped) as (client, _):
+        tokens = [
+            client.post("/seed_session", json={"allowed_tools": names}).json()["mcp"]["headers"][TOKEN_HEADER]
+            for names in (["append"], ["raw_step"])
+        ]
+
+        def run(index):
+            token = tokens[index % 2]
+            expected = "append" if index % 2 == 0 else "raw_step"
+            assert [tool["name"] for tool in _list(client, token)] == [expected]
+            allowed = _call(client, expected, {"value": str(index)}, token)
+            assert allowed.get("isError") is not True
+            denied = _call(client, "raw_step" if expected == "append" else "append", {}, token)
+            assert denied["isError"] is True
+            assert "not allowed" in denied["content"][0]["text"]
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(run, range(12)))
+
+
+def test_original_lifespan_state_and_shutdown_are_preserved():
+    events = []
+    server = _server()
+    app = server.setup_webserver()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        events.append("start")
+        try:
+            yield {"marker": "original lifespan"}
+        finally:
+            events.append("stop")
+
+    app.router.lifespan_context = lifespan
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        assert client.app_state["marker"] == "original lifespan"
+        assert events == ["start"]
+        token = _seed(client)
+        _handshake(client)
+        assert _call(client, "raw_step", {}, token)["structuredContent"] == {"echo": {}}
+    assert events == ["start", "stop"]
+
+
+async def test_sdk_client_discovers_and_calls_over_streamable_http():
+    from importlib.metadata import version
+
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    # Exercise each SDK's real HTTP transport against the ASGI app without a network listener.
+    # MCP 2 uses httpx2; MCP 1 uses httpx. These clients are test-only.
+    if version("mcp").startswith("2."):
+        import httpx2 as http_client_module
+    else:
+        import httpx as http_client_module
+
+    server = _server(SessionScoped)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    async with app.router.lifespan_context(app):
+        async with http_client_module.AsyncClient(
+            transport=http_client_module.ASGITransport(app=app), base_url="http://testserver"
+        ) as http_client:
+            seeded = await http_client.post("/seed_session", json={"allowed_tools": ["append"]})
+            http_client.headers[TOKEN_HEADER] = seeded.json()["mcp"]["headers"][TOKEN_HEADER]
+            async with streamable_http_client("http://testserver/mcp", http_client=http_client) as streams:
+                async with ClientSession(streams[0], streams[1]) as session:
+                    await session.initialize()
+                    listed = await session.list_tools()
+                    assert [tool.name for tool in listed.tools] == ["append"]
+                    result = (await session.call_tool("append", {"value": "sdk"})).model_dump(by_alias=True)
+                    assert result["structuredContent"] == {"values": ["sdk"]}
+                    assert result["isError"] is False
+                    denied = (await session.call_tool("raw_step", {})).model_dump(by_alias=True)
+                    assert denied["isError"] is True
+                    assert "not allowed" in denied["content"][0]["text"]

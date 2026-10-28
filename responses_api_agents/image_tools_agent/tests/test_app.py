@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from PIL import Image
+from starlette.responses import Response
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
@@ -104,8 +105,20 @@ def test_image_tool_markup_validation_rejects_nested_or_extra_tags() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["run", "responses"])
+@pytest.mark.parametrize(
+    ("capture_mode", "model_url_path"),
+    [
+        ("off", "/v1/responses"),
+        ("evaluation", "/ng-rollout/test-rollout/v1/responses"),
+        ("training", "/ng-rollout/test-rollout/training-token-capture/v1/responses"),
+    ],
+)
 async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     tmp_path: Path,
+    entrypoint: str,
+    capture_mode: str,
+    model_url_path: str,
 ) -> None:
     image_path = tmp_path / "source.png"
     Image.new("RGB", (256, 192), color=(120, 80, 40)).save(image_path)
@@ -145,9 +158,11 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
         if url_path == "/seed_session":
             assert server_name == "string_match"
             return _FakeClientResponse({})
-        if server_name == "policy_model" and url_path == "/v1/responses":
-            call_index = server_client_post.await_count
-            if call_index == 2:
+        if server_name == "policy_model" and url_path == model_url_path:
+            model_calls = [
+                call for call in server_client_post.await_args_list if call.kwargs["server_name"] == "policy_model"
+            ]
+            if len(model_calls) == 1:
                 request = kwargs["json"]
                 extra_body = json.loads(request.metadata["extra_body"])
                 assert extra_body["stop"] == ["</tool_call>"]
@@ -182,10 +197,15 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     server_client_post.side_effect = _post_side_effect
     server_client = MagicMock(spec=ServerClient)
     server_client.post = server_client_post
+    server_client.global_config_dict = {
+        "token_id_capture": {"enabled": capture_mode == "training", "all_agents": True},
+        "observability_enabled": capture_mode == "evaluation",
+    }
 
     agent = ImageToolsAgent(config=config, server_client=server_client)
     body = ImageToolsAgentRunRequest.model_validate(
         {
+            "_ng_rollout_id": "test-rollout",
             "image_tools_base_agent_ref": {
                 "type": "responses_api_agents",
                 "name": "string_match_simple_agent",
@@ -211,6 +231,17 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
             },
         }
     )
+    if entrypoint == "responses":
+        request = SimpleNamespace(
+            cookies={},
+            path_params={"rollout_id": "test-rollout"} if capture_mode != "off" else {},
+            url=SimpleNamespace(path=model_url_path),
+        )
+        result = await agent.responses(request=request, response=Response(), body=body.responses_create_params)
+        assert len(result.output) == 3
+        assert server_client_post.await_count == 2
+        return
+
     result = await agent.run(SimpleNamespace(cookies={}), body)
     payload = result.model_dump(mode="json")
     assert payload["base_reward"] == 1.0
@@ -231,3 +262,88 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     assert output[1]["role"] == "user"
     assert output[2]["role"] == "assistant"
     assert server_client_post.await_count == 4
+
+
+def _usage(input_tokens: int, cached: int | None, output_tokens: int, reasoning: int | None) -> dict[str, Any]:
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": cached},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": reasoning},
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("second_usage", "expected"),
+    [
+        (_usage(200, 80, 20, 6), _usage(300, 120, 30, 10)),
+        # A call whose provider reported no details makes the summed details unknown, not 0.
+        (_usage(200, None, 20, None), _usage(300, None, 30, None)),
+    ],
+)
+async def test_image_tools_agent_sums_usage_and_details_across_calls(
+    tmp_path: Path, second_usage: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    image_path = tmp_path / "source.png"
+    Image.new("RGB", (256, 192), color=(120, 80, 40)).save(image_path)
+    config = ImageToolsAgentConfig(
+        host="localhost",
+        port=10001,
+        entrypoint="app.py",
+        name="image_tools_simple_agent",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        resource_servers_by_agent={
+            "string_match_simple_agent": ResourcesServerRef(type="resources_servers", name="string_match")
+        },
+        crop_dir=str(tmp_path / "crops"),
+        crop_format="jpeg",
+        crop_min_pixels=262144,
+        crop_max_pixels=1048576,
+    )
+    tool_text = (
+        "<tool_call><function=image_zoom_in_tool>"
+        "<parameter=bbox_2d>[0, 0, 500, 500]</parameter>"
+        "<parameter=label>upper left</parameter>"
+        "<parameter=img_idx>0</parameter>"
+        "</function></tool_call>"
+    )
+    turns = iter(
+        [
+            _assistant_response(response_id="tool", text=tool_text, prompt_token_ids=[1], generation_token_ids=[2])
+            | {"usage": _usage(100, 40, 10, 4)},
+            _assistant_response(
+                response_id="final", text="The answer is car.", prompt_token_ids=[3], generation_token_ids=[4]
+            )
+            | {"usage": second_usage},
+        ]
+    )
+    server_client = MagicMock(spec=ServerClient)
+    server_client.post = AsyncMock(side_effect=lambda **kwargs: _FakeClientResponse(next(turns)))
+    server_client.global_config_dict = {
+        "token_id_capture": {"enabled": False, "all_agents": True},
+        "observability_enabled": False,
+    }
+    agent = ImageToolsAgent(config=config, server_client=server_client)
+    body = ImageToolsAgentRunRequest.model_validate(
+        {
+            "responses_create_params": {
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "What object is shown?"},
+                            {"type": "input_image", "image_url": str(image_path), "detail": "auto"},
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+    request = SimpleNamespace(cookies={}, path_params={}, url=SimpleNamespace(path="/v1/responses"))
+
+    result = await agent.responses(request=request, response=Response(), body=body.responses_create_params)
+
+    assert server_client.post.await_count == 2
+    assert result.usage.model_dump(mode="json") == expected

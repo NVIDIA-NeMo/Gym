@@ -12,6 +12,7 @@ from typing import Any, Callable
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.environment import Environment
 from resources_servers.terminal_bench_4.models import AgentTermination
+from resources_servers.terminal_bench_4.resource_limits import sandbox_resource_limit
 from resources_servers.terminal_bench_4.shared_logs import SharedLogs
 from resources_servers.terminal_bench_4.transfers import download_dir
 from resources_servers.terminal_bench_4.verifier import restore, run_verifier
@@ -107,6 +108,10 @@ async def prepare_session(session, loader):
     await session.slots.acquire()
     session.owns_slot = True
     session.task = await loader.load(session.request.task_name, session.request.task_ref)
+    # Before any sandbox starts or the agent runs: this task's settings could not produce a valid verification.
+    session.config.environment.require_exec_limit_covers(
+        session.task.name, session.config.environment.verifier_timeout_sec(session.task)
+    )
     session.environment = Environment(session.task, session.config.environment, session.session_id, session.directory)
     # Construct and validate the verifier configuration before allocating
     # either environment, but allocate its resources only after collection.
@@ -157,11 +162,25 @@ async def prepare_session(session, loader):
     await session.environment.healthcheck()
 
 
+def _grade_resource_limit(session: Session, detail: str | None) -> bool:
+    limit = sandbox_resource_limit(detail)
+    if limit is None:
+        return False
+    session.result["sandbox_resource_limit"] = limit.model_dump()
+    session.result["verifier_result"] = {"rewards": {"reward": 0.0}, "source": "sandbox_resource_limit"}
+    session.diagnostics.append({"operation": "sandbox_resource_limit", **limit.model_dump()})
+    return True
+
+
 async def finalize_session(session, *, grade):
     try:
         if not grade:
             if session.environment and session.environment.main and not session.environment.closed:
                 await session.environment.quiesce_agent(session.session_id)
+            return
+        if session.termination.reason == "infrastructure_error" and _grade_resource_limit(
+            session, session.termination.detail
+        ):
             return
         session.subphase = "quiesce"
         session.persist()
@@ -177,11 +196,20 @@ async def finalize_session(session, *, grade):
             await download_dir(session.environment.main, "/logs/agent", session.directory / "agent")
         except Exception as exc:
             session.diagnostics.append({"operation": "agent_logs", "error": str(exc)})
+            if _grade_resource_limit(session, str(exc)):
+                return
+        collection_start = len(session.diagnostics)
         await collect(session.environment, session.directory / "artifacts", session.diagnostics)
+        # Collection retains provider failures as diagnostics rather than raising.
+        for diagnostic in session.diagnostics[collection_start:]:
+            if _grade_resource_limit(session, diagnostic.get("error")):
+                return
         try:
             await session.environment.stop()
         except Exception as exc:
             exception(session, exc)
+            if _grade_resource_limit(session, str(exc)):
+                return
         if session.shared_logs and session.environment.closed:
             try:
                 await session.shared_logs.prepare_verifier()
@@ -214,10 +242,20 @@ async def finalize_session(session, *, grade):
             await restore(session.verifier_environment, session.directory / "artifacts")
             session.subphase = "verifier_execution"
             session.persist()
+            timeout_sec = session.config.environment.verifier_timeout_sec(session.task)
+            if timeout_sec != session.task.config.verifier.timeout_sec:
+                session.diagnostics.append(
+                    {
+                        "operation": "verifier_timeout_override",
+                        "package_timeout_sec": session.task.config.verifier.timeout_sec,
+                        "timeout_sec": timeout_sec,
+                    }
+                )
             session.result["verifier_result"] = await run_verifier(
                 session.verifier_environment,
                 session.directory,
                 session.diagnostics,
+                timeout_sec=timeout_sec,
             )
         finally:
             session.result["verifier"]["finished_at"] = now()
@@ -225,6 +263,8 @@ async def finalize_session(session, *, grade):
         exception(session, "Resources shutdown interrupted evaluation", "CancelledError")
     except Exception as exc:
         exception(session, exc)
+        if grade and session.subphase in ("quiesce", "collect"):
+            _grade_resource_limit(session, str(exc))
     finally:
         await cleanup(session)
 

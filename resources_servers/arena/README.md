@@ -1,6 +1,6 @@
 # Arena Resources Server
 
-Evaluate a model's chat capabilities on diverse conversational prompts. An LLM judge compares each response with a saved baseline in both answer orderings to reduce positional bias.
+Evaluate a model's chat capabilities on diverse conversational prompts. An LLM judge compares each response with a saved baseline in both answer orderings to reduce positional bias. Only the policy's final answer is sent to the judge.
 
 ## Choose a benchmark
 
@@ -8,6 +8,7 @@ Evaluate a model's chat capabilities on diverse conversational prompts. An LLM j
 |---|---:|---|
 | `lmarena_v3` | 3,713 | Recommended. Exact human-battle opponents, equal verdict weights, `both bad` as a tie, reference-length style control. |
 | `lmarena_v2` | 1,475 | Legacy/deprecated. Synthetic baselines, strong verdict weight 3, `both bad` excluded, Bradley-Terry style control. |
+| `vision_arena_v1` | 486 | Fixed subset of 500 upstream prompts; 14 lack usable baseline answers. Multimodal judge, no style control. |
 
 ## Setup
 
@@ -78,22 +79,24 @@ Each JSONL row contains:
 
 | Metric | Meaning |
 |---|---|
-| `mean/reward` | Arithmetic mean of rewards returned by Arena verification; empty responses and failed judge games receive zero. `[[BB]]` is assigned a 0.5 reward. No bootstrap is applied. |
+| `mean/reward` | Arithmetic mean of rewards returned by Arena verification; empty responses receive zero; a failed judge call returns a masked `judge_failed` response containing the existing answer, rather than a zero-valued game. `[[BB]]` is assigned a 0.5 reward. No bootstrap is applied. |
 | `win_rate_no_SC` | Raw judge score computed from valid judgments, excluding failures. |
 | `win_rate` | Style-controlled win rate. |
 | `*_ci95_lower`, `*_ci95_upper` | Bootstrap 95% confidence interval, resampling individual judge games. |
 | `verbosity_acceptance_rate` | Fraction of valid lmarena_v3 responses accepted by reference-length style control. |
 | `max_token_reached_rate` | Fraction of lmarena_v3 responses that generated to the policy output limit. They receive score 0 and do not count as rollout failures. |
 | `context_window_exceeded_rate` | Fraction of lmarena_v3 policy requests where prompt tokens plus requested output exceeded the model context window. They receive score 0 and do not count as rollout failures. |
-| `rollout_failure_rate` | Fraction excluded because judgments were missing or unparseable. |
+| `rollout_failure_rate` | Fraction of main-output rows excluded because judgments were missing or unparseable. Scoring fails when it exceeds `max_rollout_failure_rate` (1% for LMArena, 5% for Vision Arena). Judge call outages are not counted here: they go to the failures sidecar, not the main metrics. |
 | `response_tokens/*`, `reasoning_tokens/*` | Response and reasoning length statistics. |
 | `arena/*`, `taxonomy-language/*`, `taxonomy-task-type/*` | Prompt count and ON/OFF scores for slices with at least 50 prompts. |
+
+Each benchmark config also sets `health_check_max_not_final_failure_fraction` to the same limit. When judge outages exceed that share of expected rollouts, the run health check reports the run as unhealthy, but the score is still published. Withholding the score of an unhealthy run is a separate shared-health follow-up; these limits do not yet replace Arena's aggregation-time protection.
 
 `lmarena_v3` keeps the judge score when `0.5 < response length / reference length < 1.75`; otherwise it assigns zero. The reference length is the median length from reference models. For short references (at most 100 tokens), responses from 0 to 175 tokens are accepted.
 
 `lmarena_v2` instead uses fixed Bradley-Terry style coefficients and excludes `[[BB]]` from its `win_rate*` metrics.
 
-## Generate responses only
+## Generate and judge separately
 
 Generate responses without calling the judge:
 
@@ -111,7 +114,46 @@ gym eval run \
     ++lmarena_v3_benchmark_resources_server.resources_servers.arena.generation_only=true
 ```
 
-No judge calls are made during generation-only runs.
+No judge calls are made during generation-only runs; only `response_tokens/*` and `reasoning_tokens/*` metrics are reported.
+
+Judge the saved responses without calling the policy model:
+
+```bash
+gym eval reverify \
+    --config benchmarks/lmarena_v3/config.yaml \
+    --inputs results/lmarena_v3/my-model/responses_materialized_inputs.jsonl \
+    --rollouts results/lmarena_v3/my-model/responses.jsonl \
+    --output results/lmarena_v3/my-model/judged.jsonl \
+    --concurrency 64
+```
+
+Both files are produced by the generation-only run. Reverification sends each saved response directly to the Arena verifier.
+
+## Rejudge existing responses
+
+Arena supports Gym's native stateless reverification, so saved responses can be rejudged without calling the policy model.
+
+Use the rollout and materialized-input files from the original run:
+
+```bash
+gym eval reverify \
+    --config benchmarks/lmarena_v3/config.yaml \
+    --inputs results/old-run/rollouts_materialized_inputs.jsonl \
+    --rollouts results/old-run/rollouts.jsonl \
+    --output results/old-run/rejudged.jsonl \
+    --concurrency 64
+```
+
+To recover only judge failures from a run's failure sidecar:
+
+```bash
+gym eval reverify --judge-failed-only \
+    --config benchmarks/lmarena_v3/config.yaml \
+    --inputs results/old-run/rollouts_materialized_inputs.jsonl \
+    --rollouts results/old-run/rollouts.jsonl \
+    --output results/old-run/recovered.jsonl \
+    --concurrency 64
+```
 
 ## Recompute scores
 

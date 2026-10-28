@@ -36,27 +36,104 @@ An intent with no matching entry at freeze must mask the rollout.
 That closes the window where the final call's entry is lost without a trace.
 ``begin_call`` runs before generation, so the caller may fail the model call at zero compute cost.
 
+A sink may additionally implement
+``record_engine_refusal(rollout_id, *, model_call_id, code, parent_call_id=None, parent_resolution=None)``.
+It is an optional extension beside ``begin_call`` and likewise not part of ``TokenSink``.
+``record_engine_refusal`` durably records that the engine refused the call before it generated anything,
+together with the request-time lineage decision (the recorded call the refused request continued
+and that decision's status), which the builder reads to place the refusal on one branch.
+Such a call can never produce an entry, so the refusal resolves its pre-dispatch intent
+instead of leaving it dangling, and the frozen snapshot reports it in ``engine_refusals``.
+After the rollout is frozen it must either fail with ``TokenCaptureFrozenError`` or leave the
+frozen snapshot unchanged, its version and its ``engine_refusals`` included: a late refusal
+cannot change the sample that was already delivered, so it must not stale the retirement of the
+consumed snapshot. After the rollout is retired it must fail with ``TokenCaptureRetiredError``,
+like every other write.
+
 ``nemo_gym.token_id_capture.conformance`` checks an external implementation against these contracts.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, TypedDict, runtime_checkable
 
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
+from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+
+
+# Internal worker acknowledgement: this call was refused before generation or staging.
+CAPTURE_REFUSAL_HEADER = "x-ng-capture-refused"
+ParentResolutionMode = Literal["fingerprint", "source_history"]
+
+
+class RolloutRemovalPayload(TypedDict):
+    """The result of retiring or deleting rollouts, as plain wire data.
+
+    It validates as ``staging.records.RolloutRemoval``.
+    """
+
+    # Rollouts whose captured data existed and was removed.
+    removed: list[str]
+    # Rollouts with no captured data: already removed, or never recorded a call.
+    absent: list[str]
+
+
+class RolloutRetiredError(LookupError):
+    """Reject reading the ledger of a rollout that was retired.
+
+    A retired rollout's ledger is gone, so an empty manifest would look like a rollout that made no calls.
+    Reading it is a framework error, such as fetching a manifest after retiring the rollout.
+    Deleting the rollout removes its fence, after which the ID reads as unused again.
+    """
+
+
+class TokenCaptureFrozenError(RuntimeError):
+    """Reject a write that arrived after its rollout's capture was frozen.
+
+    Freezing seals a rollout's capture verdict.
+    A model call can still be in flight at that point.
+    Its harness may have been killed at a timeout backstop.
+    The sink fails the late write so no successful write follows a freeze.
+    The caller drops the late record and must not mark the rollout incomplete.
+    The freeze already judged completeness from the durable intent ledger.
+    A post-freeze mark would mutate the consumed snapshot and break its retirement.
+    """
+
+
+class CaptureAdmissionError(ValueError):
+    """Refuse a request whose capture state cannot safely admit generation."""
+
+
+class CaptureInputError(ValueError):
+    """Reject request history that capture cannot represent."""
+
+
+class TokenCaptureRetiredError(TokenCaptureFrozenError):
+    """Reject a write that arrived after its rollout's capture was retired.
+
+    A retired rollout stays fenced until it is deleted, and every later writer sees it as frozen,
+    so callers handle this exactly like ``TokenCaptureFrozenError``: drop the late record and do
+    not mark the rollout incomplete. Typical sources are an abandoned attempt that keeps running
+    and a duplicate execution of a finished rollout.
+    """
 
 
 @dataclass(frozen=True)
 class TokenCaptureSnapshot:
-    """An immutable view of one rollout's frozen capture records."""
+    """An immutable view of one rollout's frozen capture records.
+
+    ``engine_refusals`` holds the calls the engine refused, in the order they were recorded; a sink
+    without the ``record_engine_refusal`` extension leaves it empty.
+    """
 
     rollout_id: str
     entries: tuple[TokenEntry, ...]
     incomplete: bool
     snapshot_id: str
     version: int
+    engine_refusals: tuple[EngineRefusalRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -133,7 +210,18 @@ class CaptureLedger(LineageResolver, Protocol):
     ``record`` publishes a successfully staged call for parent resolution.
     ``record_failure`` records a call that did not commit.
     ``manifest`` returns both kinds of rows without including token arrays.
+    ``retire`` and ``delete`` remove the rows of rollouts the framework no longer needs.
     Records must be visible to every serving worker before ``record`` returns.
+
+    Framework-owned capture additionally requires ``begin_call(rollout_id,
+    model_call_id)`` and ``close_admissions(rollout_id)``. They share one atomic
+    admission boundary: close returns a manifest and rejects new calls, while
+    existing intents may still commit. These extensions do not freeze writes.
+
+    ``refuse_call(rollout_id, model_call_id)`` optionally settles an intent after
+    the worker acknowledges a refusal before generation or staging. Such calls
+    remain in the audit ledger but are excluded from the training manifest.
+    An error status or message alone is not this acknowledgement.
     """
 
     async def record(self, commit: CaptureLedgerCommit) -> None:
@@ -160,11 +248,40 @@ class CaptureLedger(LineageResolver, Protocol):
         committed rows under ``records`` (each a ``CallRecord`` payload) and
         poison rows under ``failures``.
         Cumulative token IDs never appear in the manifest.
+        A retired rollout raises ``RolloutRetiredError`` instead of returning an empty manifest.
         """
         ...
 
     async def has_rows(self, rollout_id: str) -> bool:
-        """Return whether any ledger row (committed or failed) exists."""
+        """Return whether any ledger row (committed or failed) exists.
+
+        A retired rollout raises ``RolloutRetiredError``, so admission can refuse to capture its late calls.
+        """
+        ...
+
+    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        """Remove the ledgers of rollouts the framework is done with, and fence them.
+
+        Retire a finished rollout once its manifest has been read and the receipt built from it,
+        and an abandoned rollout as soon as the framework gives up on it. Like
+        ``TokenSource.drop`` on the complete-record store, retiring keeps a fence: later ``record`` and
+        ``record_failure`` calls for the rollout are discarded instead of starting a new ledger. Even a
+        finished rollout can still write: a client retry can run it twice, and the second execution
+        writes after the first one returned.
+        Retiring again is a no-op, so retrying a batch is safe.
+        Staged token data is untouched: the framework that staged it also removes it.
+        """
+        ...
+
+    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        """Remove the ledgers and fences of rollouts, as ``TokenCaptureStore.delete`` does.
+
+        Delete retired rollouts once nothing of those attempts can still write, for example after every
+        Gym server has restarted or at the end of the run, which removes their fences. Delete a rollout
+        ID before reusing it, so the new execution starts from an empty ledger. Deleting again is a
+        no-op.
+        Staged token data is untouched: the framework that staged it also removes it.
+        """
         ...
 
 
@@ -184,7 +301,8 @@ class TokenSink(Protocol):
         Reusing a call id with a different payload must fail.
         A transport without compare-and-swap may delegate that conflict to the reader.
         A resolver must then treat conflicting committed payloads for one call id as zero candidates.
-        Writing after freeze must fail or bump the frozen version; see ``TokenSource.freeze``.
+        Writing after the rollout is frozen must fail with ``TokenCaptureFrozenError``;
+        see ``TokenSource.freeze``.
 
         This method may raise.
         The caller marks the rollout incomplete.
@@ -241,6 +359,24 @@ class TokenSource(Protocol):
 
         Return ``False`` if state changed after the snapshot.
         Transports without delete return ``True`` and own retention.
+        """
+        ...
+
+    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        """Remove rollouts' records and keep a fence, whatever their state.
+
+        This is ``drop`` without the snapshot check, for rollouts the consumer is done with but won't
+        drop as a consumed snapshot, such as masked or failed captures and abandoned attempts. Later
+        writes for a retired rollout must fail with ``TokenCaptureRetiredError``. Retiring again is a
+        no-op.
+        """
+        ...
+
+    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+        """Remove rollouts' records and fences.
+
+        Delete retired rollouts once nothing of those attempts can still write, or a rollout ID before
+        reusing it. Deleting again is a no-op.
         """
         ...
 

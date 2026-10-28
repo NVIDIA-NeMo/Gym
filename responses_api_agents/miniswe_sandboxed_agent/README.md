@@ -14,6 +14,35 @@ config and model routing, harness setup, and execution. It neither provisions no
 grades. Retried responses share setup and execution for the same message.
 Retried `/run` calls share one execution and forward the seeded resource cookies.
 
+## Harbor episodes
+
+Harbor tasks run this agent on an episode session instead of `/run`:
+
+```bash
+gym eval run <task folder | harbor:org/name@tag> --agent miniswe_sandboxed_agent --sandbox <provider> ...
+```
+
+The command binds the unbound template in
+[`configs/miniswe_sandboxed_agent.yaml`](configs/miniswe_sandboxed_agent.yaml) to the
+run's model and sandbox provider, and the Harbor environment server drives the session:
+
+1. `/v1/agent_sessions` seeds the session with `sandbox_access` (the sandbox the
+   environment server provisioned and its working directory). The agent connects to it
+   and provisions nothing itself.
+2. `/v1/responses` receives the task instruction as the input. The in-sandbox tool
+   grants (`mcp_servers`, `skills_dir`) come from the `task.json` the environment server
+   left in the sandbox, and are read before the turn is bound, so an overlapping retry
+   of the first request waits for the binding and replays it.
+3. `/v1/agent_sessions/close` releases the transport; the environment server verifies
+   and stops the sandbox.
+
+`resources_server` is optional on this path and is only used by the legacy `/run`
+route, which seeds and verifies against a TB4-style resources server. Two kinds of
+timeout are told apart: a setup failure or a setup timeout (the harness never started,
+the sandbox is untouched) is a `503`, so the environment server masks the episode and
+it is retried, while an execution timeout is the agent's own result, returned with
+`miniswe_termination = "timeout"` and verified like any other answer.
+
 ## Setup and model access
 
 Task images need `bash`, `uname`, `tar`, and `setsid`; preinstalled Python, pip,
@@ -24,7 +53,11 @@ task user. Both archives are downloaded by Gym and cached under
 initial setup requests share the downloads, and Python archives are checksum
 verified. Downloads are pinned separately for x86-64/ARM64 and glibc/musl.
 The sandbox never downloads these assets from GitHub; PyPI access is still needed
-for the isolated mini-SWE environment. LiteLLM uses its bundled model-cost map.
+for the isolated mini-SWE environment. `runtime/requirements.txt` pins mini-SWE
+2.4.6, LiteLLM 1.106.0 with its MCP extra, and MCP 2.2.0. This environment must
+not inherit Gym's MCP v1 SDK: LiteLLM's Responses adapter imports MCP v2 types
+even for ordinary function tools. Task MCP clients remain in their separate
+MCP v1 environment. LiteLLM uses its bundled model-cost map.
 
 The native agent calls Gym's rollout-prefixed `/v1/responses` endpoint directly.
 Gym's model wrapper retains model-call and training-token capture; every request
@@ -66,7 +99,11 @@ Removing the custom wrapper has these limits:
   durations. Gym emits `tool_timing_unavailable` gaps rather than estimating them.
 - Submission exits before a final tool observation is saved. The decision and
   native submission text remain available; that tool's execution observation is
-  incomplete.
+  incomplete, with no output or error evidence. This known mini-SWE gap fails
+  TE-5 (`tool.terminal` and `tool.outcome`) and the `gym-p0/v1` conformance gate,
+  even when the task succeeds. mini-SWE needs to persist a terminal tool result
+  correlated with the submit call before exiting; Gym's projection must then
+  retain that evidence. The observability test asserts this gap until it is fixed.
 - Native trajectories are saved after each step. A forced kill during a model
   request or command can lose the active step, or leave a partially written
   trajectory. Gym model-server capture remains independent of that file.

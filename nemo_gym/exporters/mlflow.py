@@ -12,11 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
+import json
 import logging
 import re
+import tempfile
 from itertools import batched
 from os import environ
-from time import time
+from pathlib import Path
+from time import gmtime, strftime, time
 from typing import Any, ClassVar, Iterator, Optional
 
 import orjson
@@ -33,6 +37,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.config_types import MLFlowConfig
 from nemo_gym.exporters.base import BaseExporter
+from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
 logger = logging.getLogger(__name__)
@@ -114,14 +119,20 @@ class MLflowExporter(BaseExporter):
     name: ClassVar[str] = "mlflow"
 
     CONFIG_ARTIFACT_FILE: ClassVar[str] = "global_config.json"
+    # Where a reopened run records each later segment's config; the first segment's stays in CONFIG_ARTIFACT_FILE.
+    SEGMENT_CONFIG_ARTIFACT_DIR: ClassVar[str] = "config"
     # Can't write .jsonl: `log_table` accepts only .json/.parquet, and writes one table document.
     ROLLOUTS_ARTIFACT_FILE: ClassVar[str] = "rollouts.json"
+    RESUME_COUNT_TAG: ClassVar[str] = "gym_resume_count"
 
     def __init__(self, global_config_dict: DictConfig) -> None:
         super().__init__(global_config_dict)
         self.config = MLFlowConfig.model_validate(global_config_dict)
         self.client: Optional[MlflowClient] = None
         self.run_id: Optional[str] = None
+        # The reopened run's status and resume count before this job reopened it, restored by `start_over`.
+        self._prior_status: Optional[str] = None
+        self._prior_resumes: Optional[str] = None
 
     def setup(self) -> None:
         # The MLflow SDK reads the bearer token from the environment, not from client kwargs.
@@ -130,13 +141,54 @@ class MLflowExporter(BaseExporter):
             environ["MLFLOW_TRACKING_TOKEN"] = self.config.mlflow_tracking_token
         self.client = MlflowClient(tracking_uri=self.config.mlflow_tracking_uri)
         experiment_id = self._experiment_id(self.config.mlflow_experiment_name)
-        self.run_id = self.client.create_run(experiment_id, run_name=self.config.mlflow_run_name).info.run_id
+        # create_run takes tags as a dict; mlflow.note.content is the key MLflow renders as the run description.
+        tags = dict(self.config.mlflow_run_tags)
+        if self.config.mlflow_run_description:
+            tags["mlflow.note.content"] = self.config.mlflow_run_description
+        # A resumed or resubmitted run reopens the MLflow run recorded next to its output, unless that run is gone.
+        recorded = self._recorded_run_id()
+        if recorded is not None and self._is_active(recorded):
+            self.run_id = recorded
+            run = self.client.get_run(self.run_id)
+            self._prior_status = run.info.status
+            self._prior_resumes = run.data.tags.get(self.RESUME_COUNT_TAG)
+            self.client.update_run(self.run_id, status="RUNNING")
+            # Counts the times this run was reopened, so a reader knows its metrics span several jobs.
+            self.client.set_tag(self.run_id, self.RESUME_COUNT_TAG, str(int(self._prior_resumes or 0) + 1))
+            self.reopened = True
+            return
+        self.run_id = self.client.create_run(
+            experiment_id, run_name=self.config.mlflow_run_name, tags=tags or None
+        ).info.run_id
+        self._record_run_id(self.run_id)
 
     def teardown(self) -> None:
+        self._flush_pending_config()
         if self.client is not None and self.run_id is not None:
             self.client.set_terminated(self.run_id, status="FINISHED")
         self.client = None
         self.run_id = None
+        self.reopened = False
+
+    def _close_reopened(self) -> None:
+        # Leave the reopened run as the earlier job left it: no rollout or metric of this job reached it. Let go of
+        # it first, so the new output never logs to it, even when this fails.
+        client, run_id = self._active()
+        self.client, self.run_id, self.reopened = None, None, False
+        client.update_run(run_id, status=self._prior_status)
+        if self._prior_resumes is None:
+            client.delete_tag(run_id, self.RESUME_COUNT_TAG)
+        else:
+            client.set_tag(run_id, self.RESUME_COUNT_TAG, self._prior_resumes)
+
+    def _is_active(self, run_id: str) -> bool:
+        """Whether the recorded run still exists and is not deleted; a new run takes the place of one that is not."""
+        try:
+            return self.client.get_run(run_id).info.lifecycle_stage == "active"
+        except MlflowException as e:
+            if e.error_code == "RESOURCE_DOES_NOT_EXIST":
+                return False
+            raise
 
     def _experiment_id(self, name: str) -> str:
         experiment = self.client.get_experiment_by_name(name)
@@ -157,15 +209,28 @@ class MLflowExporter(BaseExporter):
         client, run_id = self._active()
         container = OmegaConf.to_container(config_dict)
 
-        # Log the whole config first: params are lossy (flat, truncated, length-capped), so the
-        # artifact is the record of what actually ran.
-        client.log_dict(run_id, container, self.CONFIG_ARTIFACT_FILE)
-
         params = [
             Param(name, str(value)[:MAX_PARAM_VAL_LENGTH])
             for key, value in _flatten_config(container)
             if (name := _sanitize_key(key)) is not None
         ]
+
+        if self.reopened:
+            # A later segment's config differs (e.g. the policy server's host and port), and MLflow refuses to
+            # change a logged param. So the first segment's params and config artifact stay as they are, only new
+            # keys become params, and the full config goes to a file of its own. Its name needs no read of the
+            # run's artifacts: the start time orders segments, and the content digest keeps two segments that
+            # start in the same second from overwriting each other.
+            logged = client.get_run(run_id).data.params
+            params = [param for param in params if param.key not in logged]
+            digest = hashlib.sha256(json.dumps(container, sort_keys=True, default=str).encode()).hexdigest()[:12]
+            started = strftime("%Y%m%dT%H%M%SZ", gmtime())
+            client.log_dict(run_id, container, f"{self.SEGMENT_CONFIG_ARTIFACT_DIR}/segment_{started}_{digest}.json")
+        else:
+            # Log the whole config first: params are lossy (flat, truncated, length-capped), so the
+            # artifact is the record of what actually ran.
+            client.log_dict(run_id, container, self.CONFIG_ARTIFACT_FILE)
+
         for batch in batched(params, MAX_PARAMS_TAGS_PER_BATCH):
             client.log_batch(run_id, params=batch)
 
@@ -193,7 +258,41 @@ class MLflowExporter(BaseExporter):
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         client, run_id = self._active()
+        if self.reopened:
+            # A resumed run is handed every rollout that landed in its output, and `log_table` appends to the table
+            # an earlier job logged: skip the landed rollouts that table holds. A failed or no-persist attempt in the
+            # table does not count, so a rollout that lands on resume is logged next to it.
+            landed = self._landed_rollout_keys(client, run_id)
+            rollouts = [rollout for rollout in rollouts if not (_landed(rollout) and _rollout_key(rollout) in landed)]
+            if not rollouts:
+                return
         # One JSON blob per row, matching the W&B rollouts table: rollouts have no stable column
         # set across environments. `log_table` appends when the artifact already exists.
         rows = [orjson.dumps(rollout).decode() for rollout in rollouts]
         client.log_table(run_id, data={"Rollout": rows}, artifact_file=self.ROLLOUTS_ARTIFACT_FILE)
+
+    def _landed_rollout_keys(self, client: MlflowClient, run_id: str) -> set[tuple[Any, Any]]:
+        # Read from this run, as `log_table` does when it appends: `load_table` searches the fluent API's global
+        # tracking URI, not this client's.
+        if self.ROLLOUTS_ARTIFACT_FILE not in {artifact.path for artifact in client.list_artifacts(run_id)}:
+            return set()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            table = json.loads(
+                Path(client.download_artifacts(run_id, self.ROLLOUTS_ARTIFACT_FILE, tmpdir)).read_text()
+            )
+        column = table["columns"].index("Rollout")
+        rollouts = (orjson.loads(row[column]) for row in table["data"])
+        return {_rollout_key(rollout) for rollout in rollouts if _landed(rollout)}
+
+
+def _rollout_key(rollout: dict[str, Any]) -> tuple[Any, Any]:
+    return rollout.get(TASK_INDEX_KEY_NAME), rollout.get(ROLLOUT_INDEX_KEY_NAME)
+
+
+def _landed(rollout: dict[str, Any]) -> bool:
+    """Whether the rollout landed in the output: a failed attempt carries its failure class, and a no-persist one is
+    written nowhere."""
+    # Imported here: rollout collection imports the exporters.
+    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+
+    return rollout.get(NG_FAILURE_CLASS_KEY) is None and not rollout.get(NG_NO_PERSIST_KEY)

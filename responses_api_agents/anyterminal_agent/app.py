@@ -847,9 +847,13 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             config_overrides["tb_sandbox_ttl"] = required_ttl
 
         server_config = self._server.model_dump()
-        if not self.config.sandbox_model_base_url and rollout_id and server_config["model_server_url"]:
+        # A sandbox_model_base_url relays to the same model server, so it keeps the rollout path that attributes calls.
+        # The rollout path goes before /v1, which the in-box runner adds back, so a relay URL given with /v1 drops it.
+        if self.config.model_server is not None and server_config["model_server_url"]:
             server_config["model_server_url"] = apply_rollout_prefix(
-                server_config["model_server_url"], rollout_id, token_capture=self._token_id_capture_enabled()
+                server_config["model_server_url"].rstrip("/").removesuffix("/v1"),
+                rollout_id,
+                token_capture=self._token_id_capture_enabled(),
             )
 
         params = AnyTerminalInstanceConfig(
@@ -904,7 +908,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         update_metrics(params.metrics_fpath, {"mask_sample": mask_sample})
 
         response_path = params.persistent_dir / "response.json"
-        output_items, tools = [], []
+        output_items, tools, usage = [], [], None
         if response_path.exists():
             try:
                 data = json.loads(response_path.read_text())
@@ -912,6 +916,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 saved = NeMoGymResponse.model_validate(data)
                 output_items = saved.output
                 tools = saved.tools or []
+                usage = saved.usage
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"[{params.task_name}] response.json unreadable ({e}), treating as empty response", flush=True)
 
@@ -924,6 +929,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=params.body.parallel_tool_calls,
             tool_choice=params.body.tool_choice,
             tools=tools,
+            usage=usage,
             metadata={
                 "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
                 "metrics": params.metrics_fpath.read_text(),

@@ -242,3 +242,14 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 
 # Generated Terminal-Bench 4 dataset
 /benchmarks/terminal_bench_4/data/
+
+# The default pulled datasets folder before environments/harbor/ (see below); kept ignored for checkouts that
+# still hold datasets there (environment_servers/harbor/README.md, "Configuration and artifacts", says how to move them).
+datasets/
+
+# Pulled Harbor datasets (nemo_gym/tasks/harbor/hub.py) land in environments/harbor/<dataset>/ next to the
+# committed per-dataset entries, which keep only their README and YAML files.
+environments/harbor/*/*
+!environments/harbor/*/README.md
+!environments/harbor/*/*.yaml
+environments/harbor/.harbor/

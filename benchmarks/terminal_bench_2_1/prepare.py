@@ -12,6 +12,7 @@ from subprocess import run
 
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_PATH = BENCHMARK_DIR / "data" / "benchmark.jsonl"
+NUM_TASKS = 89
 
 
 def prepare() -> Path:
@@ -25,8 +26,9 @@ def prepare() -> Path:
         )
 
     num_samples = 0
+    task_ids = set()
     f_out = open(OUTPUT_PATH, "w")
-    for task_dir in glob(f"{repo_path}/tasks/*"):
+    for task_dir in sorted(glob(f"{repo_path}/tasks/*")):
         task_dir = repo_path / "tasks" / task_dir
         if not task_dir.is_dir():
             continue
@@ -38,6 +40,7 @@ def prepare() -> Path:
             "responses_create_params": {
                 "input": [{"role": "user", "content": (task_dir / "instruction.md").read_text()}]
             },
+            "task_id": task_dir.name,
             "task_name": task_toml["task"]["name"],
             "docker_image": task_toml["environment"]["docker_image"],
             "task_folder": str(task_dir.relative_to(BENCHMARK_DIR.parent.parent)),
@@ -45,9 +48,11 @@ def prepare() -> Path:
 
         f_out.write(json.dumps(sample) + "\n")
         num_samples += 1
+        task_ids.add(sample["task_id"])
     f_out.close()
 
-    assert num_samples == 89, num_samples
+    assert num_samples == NUM_TASKS, num_samples
+    assert len(task_ids) == NUM_TASKS, f"task ids are not unique: {len(task_ids)} unique of {num_samples}"
 
     return OUTPUT_PATH
 

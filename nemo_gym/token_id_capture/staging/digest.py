@@ -35,7 +35,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-STAGING_SCHEMA_VERSION = 2
+STAGING_SCHEMA_VERSION = 3
 STAGING_DIGEST_VERSION = 2
 EXTRAS_DIGEST_VERSION = 1
 
@@ -86,10 +86,17 @@ def _encode_present_digest(value: str, *, field: str) -> bytes:
 
 def encode_token_ids(token_ids: Sequence[int]) -> bytes:
     """Encode token IDs as a length followed by unsigned big-endian values."""
-    encoded = bytearray(_encode_uint(len(token_ids), field="token_ids length"))
+    length = _encode_uint(len(token_ids), field="token_ids length")
     for token_id in token_ids:
-        encoded.extend(_encode_uint(token_id, field="token_id"))
-    return bytes(encoded)
+        if type(token_id) is not int or not 0 <= token_id <= (2**64 - 1):
+            raise ValueError(f"token_id must be an unsigned 64-bit integer, got {token_id!r}")
+    # Pack the column in C rather than allocating and extending once per token.
+    # Explicit big-endian widths preserve the v2 wire bytes on every host.
+    try:
+        packed = struct.pack(f">{len(token_ids)}Q", *token_ids)
+    except (OverflowError, struct.error) as error:
+        raise ValueError("token_ids cannot be encoded as unsigned 64-bit integers") from error
+    return length + packed
 
 
 def hash_token_ids(token_ids: Sequence[int]) -> str:
@@ -123,18 +130,19 @@ def compute_chain_hash(parent_chain_hash: str | None, token_ids_delta: Sequence[
 
 
 def _encode_float32_values(values: Sequence[float], *, field: str) -> bytes:
-    encoded = bytearray(_encode_uint(len(values), field=f"{field} length"))
+    length = _encode_uint(len(values), field=f"{field} length")
     for value in values:
         if type(value) is not float or not math.isfinite(value):
             raise ValueError(f"{field} values must be finite Python floats, got {value!r}")
-        try:
-            packed = struct.pack(">f", value)
-        except (OverflowError, struct.error) as error:
-            raise ValueError(f"{field} value cannot be represented as float32: {value!r}") from error
-        if not math.isfinite(struct.unpack(">f", packed)[0]):
-            raise ValueError(f"{field} value overflows float32: {value!r}")
-        encoded.extend(packed)
-    return bytes(encoded)
+    format_string = f">{len(values)}f"
+    try:
+        packed = struct.pack(format_string, *values)
+    except (OverflowError, struct.error) as error:
+        raise ValueError(f"{field} value cannot be represented as float32") from error
+    # Some runtimes round a finite float64 to float32 infinity instead of raising.
+    if not all(map(math.isfinite, struct.unpack(format_string, packed))):
+        raise ValueError(f"{field} value overflows float32")
+    return length + packed
 
 
 def _encode_extra(value: Any) -> bytes:
@@ -197,7 +205,7 @@ def compute_staging_digest(
     schema_version: int,
     digest_version: int,
     extras_digest_version: int,
-    rollout_id: str,
+    capture_key: str,
     model_call_id: str,
     parent_call_id: str | None,
     mode: str,
@@ -219,8 +227,8 @@ def compute_staging_digest(
         raise ValueError(f"unsupported staging digest version {digest_version}")
     if type(extras_digest_version) is not int or extras_digest_version != EXTRAS_DIGEST_VERSION:
         raise ValueError(f"unsupported extras digest version {extras_digest_version}")
-    if not rollout_id or not model_call_id:
-        raise ValueError("rollout_id and model_call_id must be non-empty")
+    if not capture_key or not model_call_id:
+        raise ValueError("capture_key and model_call_id must be non-empty")
     if parent_call_id == "":
         raise ValueError("parent_call_id must be non-empty when present")
     if mode not in ("text", "token_in"):
@@ -244,7 +252,7 @@ def compute_staging_digest(
     _validate_digest(extras_digest, field="extras_digest")
 
     payload = bytearray(struct.pack(">BBB", schema_version, digest_version, extras_digest_version))
-    payload.extend(_encode_text(rollout_id))
+    payload.extend(_encode_text(capture_key))
     payload.extend(_encode_text(model_call_id))
     payload.extend(_encode_optional_text(parent_call_id))
     payload.extend(_encode_text(mode))
