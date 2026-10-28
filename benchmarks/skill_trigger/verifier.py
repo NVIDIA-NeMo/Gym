@@ -64,4 +64,10 @@ class SkillOpeningVerifier(BaseVerifier):
         # Harbor collects the agent's trajectory before invoking the host verifier.
         trajectory = Trajectory.model_validate_json((self.trial_paths.agent_dir / "trajectory.json").read_bytes())
         reward = score_trajectory(trajectory, sources=self.sources, target=self.case["skill"], harness=self.harness)
+        if (
+            self.harness.startswith("codex")
+            and reward == 0
+            and (trajectory.agent.extra or {}).get("uncollected_subagents")
+        ):
+            raise EvidenceError("Delegated Codex outcome has no main-session opening evidence")
         return VerifierResult(rewards={"reward": reward})

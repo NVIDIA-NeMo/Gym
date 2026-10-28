@@ -13,7 +13,7 @@ harbor_agent_general:
         num_repeats: 1
       job:
         agents:
-        - name: codex
+        - import_path: benchmarks.skill_trigger.profiles:CodexCompat
           model_name: ${policy_model_name}
           kwargs:
             version: 0.156.1

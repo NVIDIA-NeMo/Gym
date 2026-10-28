@@ -16,7 +16,7 @@ The frozen selection contains 110 positive prompts: 35 BioNeMo, 50 selected Skil
 | `hermes` | Hermes | `v0.22.2` | Native defaults |
 | `hermes_guidance` | Hermes | `v0.22.2` | Tool-use enforcement enabled |
 
-[profiles.py](profiles.py) contains the only execution extensions: uploading the Codex guidance catalog, setting Hermes' guidance option, and correcting Harbor's Hermes install home and version probe. The Hermes installer is pinned to its release commit and installs into `/tmp/hermes`, where Harbor runs it. The guidance settings are not exposed through Harbor 0.25.0's standard options. These extensions retain Harbor's installation, execution, skill discovery, and trace conversion. There is no custom runner, inference proxy, container controller, or trace converter.
+[profiles.py](profiles.py) supplies the guidance settings and two compatibility fixes. Hermes installs into `/tmp/hermes` from its pinned release commit and uses the supported version probe. Codex selects the main session identified by its CLI output and retains child-session traces; Harbor 0.25.0 can otherwise select a later child log as the main trajectory. Harbor still owns installation, model execution, skill discovery, timeouts, and conversion of each individual session. There is no custom runner or inference proxy.
 
 Both Codex configurations use a standard custom provider with `supports_websockets=false`. This keeps transport consistent across models and avoids a WebSocket routing failure observed at the NVIDIA endpoint; the same native request succeeded over HTTP. Harbor supplies the endpoint and credentials. This transport setting does not add skill-use instructions.
 

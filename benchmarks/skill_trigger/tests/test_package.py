@@ -72,6 +72,11 @@ async def test_verifier_uses_host_trajectory_and_rejects_missing_evidence(packag
     value.steps[1].observation.results[0].content = "Not the instructions"
     (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
     assert (await verifier.verify()).rewards == {"reward": 0}
+    verifier.harness = "codex"
+    value.agent.extra = {"uncollected_subagents": True}
+    (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
+    with pytest.raises(EvidenceError, match="Delegated Codex"):
+        await verifier.verify()
 
 
 def test_release_changes_and_blockers_fail_before_packaging(packaged, tmp_path):

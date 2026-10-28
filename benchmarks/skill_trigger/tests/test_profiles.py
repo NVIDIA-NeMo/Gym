@@ -30,7 +30,8 @@ from harbor.models.job.config import JobConfig
 from harbor.models.model_api_format import ModelApiFormat
 from omegaconf import OmegaConf
 
-from benchmarks.skill_trigger.profiles import CodexGuidance, HermesCompat, HermesGuidance
+from benchmarks.skill_trigger.profiles import CodexCompat, CodexGuidance, HermesCompat, HermesGuidance
+from benchmarks.skill_trigger.scoring import EvidenceError, score_trajectory
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.harbor_agent_general.app import HarborAgentConfig
 
@@ -62,6 +63,7 @@ def test_configs_use_existing_bridge_and_native_harbor_agents(profile):
     if profile.startswith("hermes"):
         assert agent.kwargs["version"] == "v0.22.2"
     if profile.startswith("codex"):
+        assert issubclass(cls, CodexCompat)
         native = agent.kwargs["config"]
         assert native["model_provider"] == "benchmark"
         assert native["model_providers"]["benchmark"]["supports_websockets"] is False
@@ -134,3 +136,118 @@ async def test_native_hermes_installer_uses_supported_version_probe(tmp_path):
     assert execute.call_args.kwargs["env"]["HERMES_HOME"] == "/tmp/hermes"
     assert "/d923a5eb487a17c0a68801bba9ef0f56c81040a8/scripts/install.sh" in command
     assert agent.get_version_command().endswith("hermes --version")
+
+
+SKILL_TEXT = (
+    "Use this unique fixture skill to inspect molecules, compare evidence, and report reproducible findings. " * 3
+)
+
+
+def write_codex_session(folder, session_id, *, parent=None, reads=False, spawn=False):
+    metadata = {"id": session_id, "cli_version": "0.156.1", "source": "exec"}
+    if parent:
+        metadata["source"] = {"subagent": {"thread_spawn": {"parent_thread_id": parent}}}
+    items = [
+        {"type": "session_meta", "payload": metadata},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Inspect the molecule."}],
+            },
+        },
+    ]
+    if reads:
+        items.extend(
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "call_id": "read-call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "cat /tmp/skills/fixture/SKILL.md"}),
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {"type": "function_call_output", "call_id": "read-call", "output": SKILL_TEXT},
+                },
+            ]
+        )
+    if spawn:
+        items.extend(
+            [
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "call_id": "spawn-call",
+                        "name": "spawn_agent",
+                        "arguments": json.dumps({"task": "inspect"}),
+                    },
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "spawn-call",
+                        "output": json.dumps({"agent_id": "child-session"}),
+                    },
+                },
+            ]
+        )
+    items.append(
+        {
+            "type": "response_item",
+            "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]},
+        }
+    )
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / (session_id + ".jsonl")).write_text("".join(json.dumps(e) + "\n" for e in items))
+
+
+@pytest.mark.parametrize("root_reads", [True, False])
+def test_codex_selects_cli_root_and_keeps_child_evidence(tmp_path, root_reads):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "codex.txt").write_text(json.dumps({"type": "thread.started", "thread_id": "root-session"}))
+    write_codex_session(logs / "sessions/day1", "root-session", reads=root_reads, spawn=True)
+    write_codex_session(logs / "sessions/day2", "child-session", parent="root-session", reads=True)
+    agent = CodexCompat(logs_dir=tmp_path / "parser", model_name="openai/fixture", version="0.156.1")
+    trajectory = agent.convert_trajectory(logs)
+    assert trajectory.session_id == "root-session"
+    assert trajectory.subagent_trajectories[0].session_id == "child-session"
+    refs = [r.subagent_trajectory_ref for s in trajectory.steps if s.observation for r in s.observation.results]
+    assert any(refs)
+    if root_reads:
+        assert score_trajectory(trajectory, sources={"fixture": SKILL_TEXT}, target="fixture", harness="codex") == 1
+    else:
+        with pytest.raises(EvidenceError, match="delegat|Delegat"):
+            score_trajectory(trajectory, sources={"fixture": SKILL_TEXT}, target="fixture", harness="codex")
+
+
+def test_codex_single_session_control_and_missing_child(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "codex.txt").write_text(json.dumps({"type": "thread.started", "thread_id": "root-session"}))
+    write_codex_session(logs / "sessions", "root-session", reads=True)
+    agent = CodexCompat(logs_dir=tmp_path / "parser", model_name="openai/fixture", version="0.156.1")
+    trajectory = agent.convert_trajectory(logs)
+    assert not trajectory.subagent_trajectories
+    assert score_trajectory(trajectory, sources={"fixture": SKILL_TEXT}, target="fixture", harness="codex") == 1
+    write_codex_session(logs / "sessions", "root-session", spawn=True)
+    trajectory = agent.convert_trajectory(logs)
+    assert trajectory.agent.extra["uncollected_subagents"] is True
+
+
+@pytest.mark.parametrize("ids", [[], ["root-session", "other-session"], ["missing-session"]])
+def test_codex_rejects_missing_or_ambiguous_root(tmp_path, ids):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "codex.txt").write_text("\n".join(json.dumps({"type": "thread.started", "thread_id": i}) for i in ids))
+    write_codex_session(logs / "sessions", "root-session", reads=True)
+    agent = CodexCompat(logs_dir=tmp_path / "parser", model_name="openai/fixture", version="0.156.1")
+    with pytest.raises(EvidenceError, match="main.session"):
+        agent.convert_trajectory(logs)
