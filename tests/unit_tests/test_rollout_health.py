@@ -1511,6 +1511,40 @@ def test_a_rollout_ending_on_a_failed_attempt_is_unhealthy_for_that_reason_only(
     assert {finding.check for finding in digest.findings} == {"rollout_ended_on_failed_model_call"}
 
 
+def test_a_call_cancelled_after_a_complete_answer_is_a_successful_call(tmp_path):
+    """Recovered from the captured body, the answer was delivered; the late disconnect is not a failure."""
+    delivered = _call(model_call_id="delivered", status_code=200, error_category="cancelled", finish_reason="stop")
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(delivered), [delivered])])
+
+    result = run_health_checks(rollout_path, workers=1)
+    [digest] = result.rollouts
+
+    assert digest.verdict == "healthy"
+    assert not digest.findings
+    assert digest.model_call_errors == 0
+    assert result.summary["run"]["stats"]["model_call_errors"]["usage_unknown"] == 0
+
+
+def test_a_call_cancelled_before_a_complete_answer_stays_failed_even_with_a_2xx_status(tmp_path):
+    """A 200 status only means the stream began; without a finish reason the answer was never completed."""
+    cut = _call(
+        model_call_id="cut",
+        status_code=200,
+        error_category="cancelled",
+        response_status=None,
+        finish_reason=None,
+        tokens_in=None,
+        tokens_out=None,
+        response=None,
+    )
+    rollout_path = _write_fixture(tmp_path, [(_owned_attempts(cut), [cut])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert digest.verdict == "unhealthy"
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
 # The two shapes a context-length overflow takes in the capture.
 CONTEXT_OVERFLOWS = {
     # vLLM answers locally with an empty "length" completion when overflow errors are not propagated.

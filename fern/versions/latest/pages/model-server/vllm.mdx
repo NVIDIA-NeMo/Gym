@@ -239,7 +239,7 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `base_url` | `str` or `list[str]` | — | **Required.** vLLM server endpoint(s). Supports list for load balancing. |
 | `api_key` | `str` | — | **Required.** API key matching vLLM's `--api-key` flag. |
 | `model` | `str` | — | **Required.** Model name as registered in vLLM. |
-| `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. |
+| `return_token_id_information` | `bool` | — | **Required.** Set `true` for training (token IDs + log probs), `false` for inference only. When rollouts are stored, see [Keep token metadata once in a rollout](/main/model-server/model-call-capture#keep-token-metadata-once-in-a-rollout). |
 | `uses_reasoning_parser` | `bool` | — | **Required.** Set `true` for reasoning models (extracts `<think>` tags), `false` otherwise. |
 | `reasoning_field` | `str` | `both` | Which key(s) carry the `<think>` reasoning that vllm_model extracts from replayed assistant messages (`uses_reasoning_parser: true`, `uses_interleaved_reasoning: true`, `preserve_reasoning_in_assistant_content: false`): `both`, `reasoning`, or `reasoning_content`. Use a single key for servers that reject a message carrying both. When unset, falls back to the `NEMO_GYM_REASONING_FIELD` environment variable, then `both`. |
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |

@@ -258,6 +258,19 @@ The attachment is additive: it does not replace or rewrite the existing response
 `NeMoGymResponse`, token-id, or log-prob fields. Aggregate-metrics requests exclude it, and W&B
 rollout tables omit `ng_trajectory` and model-call request and response payloads.
 
+### Cancelled calls
+
+A call is recorded as `cancelled` when the server saw the client disconnect. The capture holds
+the body only as raw text, and what collection does with it depends on how far the call got:
+
+| Cancelled | Capture holds | Collection | Health |
+| --- | --- | --- | --- |
+| After a complete answer (2xx status; one JSON object, or a streamed body that ended with its terminal event) | Raw text | Parses it, so the call carries its `response_id`, token counts, finish reason, and parsed response, and the raw text is dropped. `error_category` stays `cancelled`. | A successful call |
+| Before a complete answer | Raw text, if any | Keeps it as is, with null token counts and no `response_id`. | A failed call that [reported no usage](/main/evaluation/rollout-health) |
+
+A retry after a dropped connection can leave both kinds in one rollout. Only the second kind needs a
+later successful call for the rollout to be healthy.
+
 ### Raw `CaptureStore` record
 
 Each rollout has an append-only file named `<rollout_id>.capture.jsonl`. Each line contains one raw
@@ -331,6 +344,8 @@ The CLI workflow above sets these top-level fields in Gym's [global config](/mai
 |---|---|---|---|
 | `observability_enabled` | `bool` | `false` | Enables model-call capture for the run. |
 | `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
+| `retire_covered_model_call_captures` | `bool` | `false` | Deletes a rollout's capture file once the persisted rollout covers it. Requires `observability_enabled`. See [Delete covered capture files](#delete-covered-capture-files). |
+| `strip_duplicate_token_metadata` | `bool` | `false` | Keeps each call's token IDs, log-probs, and routed experts only on `response.output`. See [Keep token metadata once in a rollout](#keep-token-metadata-once-in-a-rollout). |
 
 You can put the same settings in a YAML config instead:
 
@@ -351,6 +366,41 @@ locking.
 
 Rollout ids contain task, rollout, and retry-attempt indices, but not an evaluation-run id. Use a
 separate capture directory for concurrent collection jobs whose indices can overlap.
+
+## Delete covered capture files
+
+A capture file duplicates the model calls that its rollout already holds, including their payloads in
+`ng_trajectory.model_calls`. Set `retire_covered_model_call_captures: true` to delete a rollout
+attempt's capture file once the persisted rollout covers it.
+
+Collection records the file's size before it reads the file. After a successful rollout is written,
+its rollouts file is made durable with one sync per batch (up to 100 rollouts or 5 seconds), and the
+capture file is deleted only if all of these hold:
+
+- The rollout has no capture gap (`model_call_capture_pending` included) and carries an `ng_trajectory`.
+- Every call in `ng_model_call_capture.calls` has its request and response in `ng_trajectory.model_calls`.
+  A rollout with a `multimodal_history_redacted` or `trajectory_projection_failed` gap does not qualify.
+- The file has not grown since collection read it, and no model call of the rollout still has a pending write.
+- No other dispatched row maps to the same capture key (rollout id).
+
+Capture files of failed rollouts, of earlier attempts of a retried rollout, and of any rollout that
+does not meet these conditions stay in place, so the files left in a capture directory after a run are
+the exceptions. A file that cannot be deleted is left in place and counted, and a run that aborts
+deletes nothing still waiting in its batch. The collection output reports how many capture files were
+deleted and why others were kept.
+
+## Keep token metadata once in a rollout
+
+With `return_token_id_information` on, the items in `response.output` carry `prompt_token_ids`,
+`generation_token_ids`, and `generation_log_probs`, and `routed_experts` for MoE backends. The same
+items are copied into `ng_trajectory` (conversations, turns, and the captured requests and responses
+of later calls) and into `ng_agent_observations`, so one call's token metadata can appear several
+times in a rollout record.
+
+Set `strip_duplicate_token_metadata: true` to keep it only on `response.output`. A copy is stripped
+only when `response.output` holds an item with the same `id` that carries the same field, so metadata
+is never removed without a canonical copy. Item ids stay, so a copy still joins to its canonical item.
+A raw response string that could not be parsed keeps whatever it contains.
 
 ## If you build a custom agent
 
