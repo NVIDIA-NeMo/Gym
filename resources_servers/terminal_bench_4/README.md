@@ -118,7 +118,9 @@ shared resources-session protocol instead of the contract above, as
   `response.status`: `completed`, `incomplete` (`timeout`, or `nonzero_exit` for
   `max_output_tokens`), and `nonzero_exit` for any other status, such as the `failed`
   response of an agent that died while its sandbox still runs (codex_agent's
-  `verify_after_agent_error`). Identical retries replay the verdict.
+  `verify_after_agent_error`). Identical retries replay the verdict. A verify for a
+  closed or unknown session returns a masked sample (`mask_sample: true`, reward 0) with
+  `failure_kind: session_lost`, or `session_expired` past the seeded-session deadline.
 - `/close_session` fences the session first, so a seed still provisioning releases its
   sandboxes instead of lending them (HTTP 409), even if the close's caller stops waiting.
   It then waits for in-flight provisioning or grading, stops anything still running

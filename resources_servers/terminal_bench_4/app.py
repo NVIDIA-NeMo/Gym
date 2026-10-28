@@ -16,6 +16,7 @@ from typing import ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
 
 from nemo_gym.base_resources_server import (
@@ -26,9 +27,10 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.failure_kinds import VERIFIER_ERROR
+from nemo_gym.failure_kinds import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.rollout_correlation import rollout_context
@@ -471,10 +473,13 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         session.persist()
         session.finalization = asyncio.create_task(lifecycle.finalize_session(session, grade=False))
 
-    def _check_expiry(self, session: Session) -> None:
+    def _expired(self, session: Session) -> bool:
         if session.agent_deadline is not None and asyncio.get_running_loop().time() >= session.agent_deadline:
             self._expire_seed(session)
-        if "agent_expired_at" in session.deadlines:
+        return "agent_expired_at" in session.deadlines
+
+    def _check_expiry(self, session: Session) -> None:
+        if self._expired(session):
             raise HTTPException(410, "Seeded session deadline expired")
 
     async def _watch_agent_deadline(self, session: Session) -> None:
@@ -627,22 +632,27 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
 
     async def _verify_resources_session(
         self, request: Request, body: ResourcesSessionVerifyRequest
-    ) -> SandboxedVerifyResponse:
+    ) -> SandboxedVerifyResponse | JSONResponse:
         """Grade an Environment Server episode once; identical retries replay the verdict.
 
         The Environment Server closes the agent first, so the task sandbox is quiet. Grading uses
         the same finalizer as TB4's own verify path: collect artifacts, stop the task sandbox, then run
-        the official tests in the separate offline verifier.
+        the official tests in the separate offline verifier. A closed, unknown or expired session has
+        nothing left to grade and answers with a masked sample.
         """
         key = request.session.get(_RESOURCES_SESSION_KEY)
-        if key in self._closed_resources:
-            raise HTTPException(409, "Resources session is already closed")
         session = self._sessions.get(self._resources_sessions.get(key, ""))
+        if key in self._closed_resources:
+            expired = session is not None and "agent_expired_at" in session.deadlines
+            return _lost_session(
+                body, "Resources session is already closed", SESSION_EXPIRED if expired else SESSION_LOST
+            )
         if session is None:
-            raise HTTPException(409, "No resources session is bound to this cookie")
+            return _lost_session(body, "No resources session is bound to this cookie", SESSION_LOST)
         if session.execution is not None:
             await asyncio.shield(session.execution)
-        self._check_expiry(session)
+        if self._expired(session):
+            return _lost_session(body, "Seeded session deadline expired", SESSION_EXPIRED)
         if session.resources_verify_body is not None and session.resources_verify_body != body:
             raise HTTPException(409, "Session is already bound to another verification request")
         if session.verified_response is not None:
@@ -720,6 +730,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 )
             await lifecycle.cleanup(session)
         self._remember_close(key, session)
+
+
+def _lost_session(body: ResourcesSessionVerifyRequest, reason: str, failure_kind: str) -> JSONResponse:
+    # The task row and the agent's response, as a graded result carries them, without TB4's grading fields.
+    return JSONResponse(body.model_dump(mode="json") | lost_session_verification(reason, failure_kind=failure_kind))
 
 
 def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:

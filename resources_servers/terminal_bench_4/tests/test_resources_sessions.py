@@ -159,6 +159,12 @@ def close_body(seed: ResourcesSeedSessionRequest) -> dict:
     ).model_dump(mode="json")
 
 
+def masked(result) -> tuple:
+    """The lost-session fields of a verify result, from HTTP JSON or a direct call's response."""
+    payload = result if isinstance(result, dict) else json.loads(result.body)
+    return payload["reward"], payload["mask_sample"], payload["failure_kind"]
+
+
 def test_lends_the_task_sandbox_grades_once_and_releases_on_close(harness) -> None:
     seed = harness.seed()
     with TestClient(harness.server.setup_webserver()) as client:
@@ -196,14 +202,19 @@ def test_lends_the_task_sandbox_grades_once_and_releases_on_close(harness) -> No
         assert client.post("/close_session", json=close_body(seed)).status_code == 200
         assert client.post("/close_session", json=close_body(seed)).status_code == 200
         assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
-        assert client.post("/verify", json=harness.verify_body()).status_code == 409
+        lost = client.post("/verify", json=harness.verify_body())
+        assert lost.status_code == 200, lost.text
+        assert masked(lost.json()) == (0.0, True, "session_lost")
+        assert lost.json()["response"]["model"] == "test-model"
     assert all(environment.closed for environment in harness.environments)
     record = json.loads(next((Path("jobs")).glob("*.json")).read_text())
     assert record["resources_session_id"] == "resources-session"
 
 
 def test_shared_resources_session_contract(harness) -> None:
-    check_resources_session_contract(harness.server.setup_webserver(), harness.seed(), keeps_state=True)
+    check_resources_session_contract(
+        harness.server.setup_webserver(), harness.seed(), keeps_state=True, verify_body=harness.verify_body()
+    )
     assert harness.graded == []
     assert all(environment.closed for environment in harness.environments)
 
@@ -378,8 +389,8 @@ async def test_failed_close_keeps_its_fence_past_the_retry_window(harness, monke
     assert seed.resources_session_id not in harness.server._close_expiry
     with pytest.raises(HTTPException, match="already closed"):
         await harness.server.seed_session(request, seed)
-    with pytest.raises(HTTPException, match="already closed"):
-        await harness.server.verify(request, harness.verify_request(harness.verify_body()))
+    lost = await harness.server.verify(request, harness.verify_request(harness.verify_body()))
+    assert masked(lost) == (0.0, True, "session_lost")
     harness.environments[0].stop_error = None
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
     assert harness.server._close_expiry[seed.resources_session_id] == 1300
@@ -426,8 +437,9 @@ async def test_completed_close_records_expire_without_retry_renewal(harness, mon
     assert key not in harness.server._resources_sessions
     assert key not in harness.server._resources_locks
     assert not harness.server._sessions and not harness.server._by_identity
-    with pytest.raises(HTTPException, match="No resources session"):
-        await harness.server.verify(request, harness.verify_request(harness.verify_body()))
+    lost = await harness.server.verify(request, harness.verify_request(harness.verify_body()))
+    assert masked(lost) == (0.0, True, "session_lost")
+    assert "No resources session" in json.loads(lost.body)["failure_reason"]
     assert harness.prepared == 1
     assert harness.graded == []
 
@@ -509,6 +521,21 @@ async def test_termination_follows_the_agent_response_and_grading_still_runs(har
     assert verified.termination.reason == reason
     assert verified.evaluation_completed
     assert harness.graded == [True]
+
+
+async def test_verify_of_an_expired_session_is_masked_and_not_graded(harness) -> None:
+    request = SimpleNamespace(session={})
+    seed = harness.seed()
+    await harness.server.seed_session(request, seed)
+    session = next(iter(harness.server._sessions.values()))
+    session.agent_deadline = asyncio.get_running_loop().time()
+    expired = await harness.server.verify(request, harness.verify_request(harness.verify_body()))
+    assert masked(expired) == (0.0, True, "session_expired")
+    await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
+    expired = await harness.server.verify(request, harness.verify_request(harness.verify_body()))
+    assert masked(expired) == (0.0, True, "session_expired")
+    assert harness.graded == [False]
+    assert all(environment.closed for environment in harness.environments)
 
 
 async def test_verify_rejects_another_task_without_consuming_the_session(harness) -> None:
