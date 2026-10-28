@@ -668,6 +668,20 @@ async def test_finalize_session_runs_the_verifier_with_the_profile_timeout(
     [
         ({"tbsci_verifier_timeout_overrides": {"finite-free-stamp": 1800}}, "verifier_timeout_overrides"),
         ({"tbsci_task_images": {"symbolic-regresion": {"agent": "registry.invalid/sr"}}}, "task_images.by_task"),
+        (
+            {
+                "terminal_bench_science": {
+                    "resources_servers": {
+                        "terminal_bench_4": {
+                            "environment": {
+                                "compose_service_overrides": {"protein-active-learnin": {"submission": {"user": None}}}
+                            }
+                        }
+                    }
+                }
+            },
+            "compose_service_overrides",
+        ),
     ],
 )
 def test_per_task_settings_must_name_manifest_tasks(tmp_path, monkeypatch, override, setting):

@@ -80,10 +80,14 @@ def _unpack(
     names: tuple[str, ...] | None = None,
     skip_unsafe: bool = False,
     links: str = "data",
+    protect: tuple[str, ...] = (),
 ) -> None:
     """Extract ``archive`` into ``target``.
 
-    ``links="data"`` applies :func:`tarfile.data_filter`, which refuses links that point outside the
+    ``protect`` names top-level entries of ``target`` that belong to this host (a transcript copy, a
+    staging folder with its manifest): a member at or under one of them is left out of the extraction,
+    with a warning, so what the sandbox holds under the same name (an agent-planted file in a folder the
+    agent could write) never replaces the host's record. ``links="data"`` applies :func:`tarfile.data_filter`, which refuses links that point outside the
     extraction root: right for verifier output that is read on this host. ``links="keep"`` applies
     :func:`tarfile.tar_filter` instead, which keeps symbolic links as links wherever they point (an
     agent's virtualenv links to ``/usr/bin/python3``): right for artifacts that only pass through
@@ -98,6 +102,9 @@ def _unpack(
 
     def safe_member(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
         if names is not None and member.name.removeprefix("./") not in names:
+            return None
+        if protect and member.name.removeprefix("./").split("/", 1)[0] in protect:
+            LOGGER.warning("Skipping archive member %r: the host owns that name under %s", member.name, target)
             return None
         strict = links == "data" or member.islnk()
         try:
@@ -144,13 +151,43 @@ async def exec_as_root(sandbox: AsyncSandbox, command: str, *, timeout_s: float)
     return result
 
 
-def tar_extract_command(remote: str, target: str) -> str:
-    """The shell line that unpacks the uploaded archive ``remote`` into ``target`` with GNU or BusyBox tar."""
+def tar_extract_command(remote: str, target: str, *, replace_links: bool = False) -> str:
+    """The shell line that unpacks the uploaded archive ``remote`` into ``target`` with GNU or BusyBox tar.
+
+    With ``replace_links``, a symbolic link found at the path of any member of the archive is removed first, in the
+    same shell line, before the extraction: the tars differ on what a link in the way means. GNU tar replaces a
+    link at a directory member's path with the directory; BusyBox tar (Alpine and other minimal images) keeps the
+    link and writes the member's children through it, wherever it points, so an archive merged as root into a tree
+    another user has written to (a step's ``workdir/`` into the agent's working directory) would land where that
+    user's link says. Harbor's ``docker cp`` removes the entry in the way (moby's ``archive.Unpack``), as GNU tar
+    does; the pre-clearing gives both tars that outcome. The members are read as ``tar -t`` prints them, so a
+    member whose name holds a newline (GNU tar escapes it in the listing) is not matched; a link at the target
+    itself is followed by either tar, as ``docker cp`` resolves its destination.
+
+    The clearing and the extraction are two commands, not one operation: a process still running in the target's
+    tree (one a previous turn's agent left behind in the working directory it owns) can plant a link again at a
+    member's path after the loop removed it and before ``tar -x`` reaches it, and BusyBox tar then writes that
+    member through it as root. The pre-clearing gives BusyBox tar GNU tar's outcome against a link already in place,
+    not against one re-planted during the extraction; GNU tar and ``docker cp`` remove a link in the way right before
+    they create each member and carry a window of the same shape, so Harbor's merge shares it. Unpacking into a
+    root-owned staging folder and moving the entries over would not close it: a directory member merges into a
+    directory the previous agents may already have at that name, so the move is a recursive copy through the same
+    user-owned tree, with the same window at every level, and a link at the destination that points at a directory
+    sends ``mv`` into that directory. What such a process gains is where the archive's own members land, not their
+    content. The window is noted here rather than closed.
+    """
     quoted = shlex.quote(target)
-    return (
-        "opts=''; tar --no-overwrite-dir --help >/dev/null 2>&1 && opts=--no-overwrite-dir; "
-        f"mkdir -p {quoted} && tar -xzf {remote} --no-same-owner $opts -C {quoted}"
+    probe = "opts=''; tar --no-overwrite-dir --help >/dev/null 2>&1 && opts=--no-overwrite-dir; "
+    extract = f"tar -xzf {remote} --no-same-owner $opts -C {quoted}"
+    if not replace_links:
+        return f"{probe}mkdir -p {quoted} && {extract}"
+    # Directory members are listed before their children and with a trailing slash; a link removed at a parent
+    # leaves nothing at the children's paths to test. The group's status is the extraction's.
+    clear = (
+        f"tar -tzf {remote} | while IFS= read -r m; do m=${{m%/}}; "
+        f'if [ -L {quoted}/"$m" ]; then rm -- {quoted}/"$m"; fi; done; '
     )
+    return f"{probe}mkdir -p {quoted} && {{ {clear}{extract}; }}"
 
 
 async def upload_dir(
@@ -161,6 +198,7 @@ async def upload_dir(
     timeout_s: float = 600,
     make_readable: bool = False,
     ignore: Callable[[str], bool] | None = None,
+    replace_links: bool = False,
 ) -> None:
     """Copy the contents of ``source`` into ``target`` inside the sandbox.
 
@@ -170,7 +208,9 @@ async def upload_dir(
     out, its subtree with it. The environment server passes the task digest's rule
     (:func:`nemo_gym.tasks.harbor.digest.is_ignored`) for a task's own folders, so a ``tests/helper.pyc`` or an
     ``environment/__pycache__`` that the digest skips never reaches the sandbox; artifacts restored by
-    :func:`upload_path` travel whole.
+    :func:`upload_path` travel whole. ``replace_links`` is for a merge into a tree another user has written to:
+    a symbolic link at any member's path is removed, as root, before the extraction, so the member lands where its
+    name says on BusyBox tar as it does on GNU tar (:func:`tar_extract_command`).
     """
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "upload.tar.gz"
@@ -178,11 +218,20 @@ async def upload_dir(
         await asyncio.to_thread(_pack, source, archive, ignore=ignore)
         # The readability fix-up is best effort, as the extraction's handling of the target folder is.
         fixup = f"chmod -R a+rX {shlex.quote(target)} 2>/dev/null || true; " if make_readable else ""
-        await _upload_and_extract(sandbox, archive, target, timeout_s=timeout_s, fixup=fixup, what=source)
+        await _upload_and_extract(
+            sandbox, archive, target, timeout_s=timeout_s, fixup=fixup, what=source, replace_links=replace_links
+        )
 
 
 async def _upload_and_extract(
-    sandbox: AsyncSandbox, archive: Path, target: str, *, timeout_s: float, fixup: str = "", what: object = None
+    sandbox: AsyncSandbox,
+    archive: Path,
+    target: str,
+    *,
+    timeout_s: float,
+    fixup: str = "",
+    what: object = None,
+    replace_links: bool = False,
 ) -> None:
     """Upload ``archive`` and extract it as root into ``target`` inside the sandbox, then remove the upload."""
     remote = f"/tmp/.nemo-gym-upload-{uuid4().hex}.tar.gz"
@@ -192,9 +241,10 @@ async def _upload_and_extract(
     # (Alpine images) rejects options it does not know, so it is passed only where `tar --help`
     # accepts it. `_pack` leaves the `.` entry out of the archive, so without the option only an
     # explicit entry could touch the target's own metadata.
+    extract = tar_extract_command(remote, target, replace_links=replace_links)
     result = await exec_as_root(
         sandbox,
-        f"{tar_extract_command(remote, target)}; status=$?; {fixup}rm -f {remote}; exit $status",
+        f"{extract}; status=$?; {fixup}rm -f {remote}; exit $status",
         timeout_s=timeout_s,
     )
     if result.return_code:
@@ -214,11 +264,13 @@ async def download_dir(
     links: str = "data",
     exclude: tuple[str, ...] = (),
     archive_copy: Path | None = None,
+    protect: tuple[str, ...] = (),
 ) -> None:
     """Copy the contents of ``source`` inside the sandbox into the local ``target`` folder.
 
     ``links`` is passed to :func:`_unpack`: ``"keep"`` for artifacts that are restored into another
-    sandbox, ``"data"`` (the default) for files read on this host. ``exclude`` holds an artifact's
+    sandbox, ``"data"`` (the default) for files read on this host, as is ``protect``: top-level names
+    under ``target`` this host owns, which no member of the archive may write (see there). ``exclude`` holds an artifact's
     ``exclude`` rules, passed to ``tar --exclude`` exactly as Harbor passes them, unanchored: so
     ``node_modules`` leaves out every directory of that name at any depth, while ``./cache`` matches
     only the top-level one because member names start with ``./``. ``archive_copy`` keeps the archive
@@ -258,7 +310,9 @@ async def download_dir(
                 archive = archive_copy
             try:
                 await sandbox.download(remote, archive)
-                await asyncio.to_thread(_unpack, archive, target, names=names, skip_unsafe=skip_unsafe, links=links)
+                await asyncio.to_thread(
+                    _unpack, archive, target, names=names, skip_unsafe=skip_unsafe, links=links, protect=protect
+                )
             except BaseException:
                 if archive_copy is not None:
                     archive_copy.unlink(missing_ok=True)
