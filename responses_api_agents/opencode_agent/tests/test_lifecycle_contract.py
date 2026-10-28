@@ -17,12 +17,12 @@ async def session(setup):
     body = seed()
     await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     state = agent._session_records[body.agent_session_id].state
+    private = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
     payload = {
-        "directory": state.session.session_dir,
         "cwd": state.session.workdir,
         "prompt": "task",
         "command": [],
-        "env": {},
+        "env": {key: f"{state.session.session_dir}/{key}" for key in private},
     }
     return state, sandbox, payload
 
@@ -84,7 +84,7 @@ async def test_output_failure_does_not_erase_cleanup_confirmation(setup):
     execute = sandbox.exec.side_effect
 
     async def fail_output(command, **kwargs):
-        if "--snapshot" in command:
+        if "opencode.db-wal" in command:
             assert state.session.cleanup["cleanup_confirmed"] is True
             return SimpleNamespace(return_code=1, error_type=None, stderr="database unreadable")
         return await execute(command, **kwargs)
@@ -106,7 +106,7 @@ async def test_cancel_captures_partial_output_only_after_cleanup_and_keeps_origi
     snapshots = []
 
     async def capture(command, **kwargs):
-        if "--snapshot" in command:
+        if "opencode.db-wal" in command:
             assert state.session.cleanup["cleanup_confirmed"] is True
             snapshots.append(command)
             if capture_fails:
@@ -129,12 +129,12 @@ async def test_cancel_captures_partial_output_only_after_cleanup_and_keeps_origi
 @pytest.mark.parametrize(
     "receipt", [None, {"cleanup_confirmed": False, "return_code": 0, "error": None, "timed_out": False}]
 )
-async def test_snapshot_requires_positive_cleanup_before_any_io(setup, receipt):
+async def test_snapshot_requires_positive_cleanup_before_any_io(setup, tmp_path, receipt):
     state, sandbox, _ = await session(setup)
     state.session.cleanup = receipt
     sandbox.exec.reset_mock()
     with pytest.raises(RuntimeError, match="requires confirmed cleanup"):
-        await state.snapshot(1)
+        await state.snapshot(tmp_path, 1)
     sandbox.exec.assert_not_awaited()
     await state.close(1)
 

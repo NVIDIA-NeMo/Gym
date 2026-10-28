@@ -61,6 +61,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -2936,6 +2937,22 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    """Collect rollouts by sending tasks to a running Gym deployment.
+
+    Each rollout batch fetches the deployment's configuration from the head server.
+    A caller that runs many batches against one deployment can set ``reuse_server_client=True``.
+    The helper then fetches the configuration once.
+    Build a new helper after that deployment's configuration changes.
+    """
+
+    reuse_server_client: bool = Field(
+        default=False,
+        description="Reuse one resolved client and configuration per helper. "
+        "Build a new helper after the deployment's configuration changes.",
+    )
+    _cached_server_client: Optional[ServerClient] = PrivateAttr(default=None)
+    _cached_head_server_config: Optional[BaseServerConfig] = PrivateAttr(default=None)
+
     # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
     # so a run stopped by SIGTERM can be accounted for without re-reading that file.
     _landed_keys: set = PrivateAttr(default_factory=set)
@@ -3440,6 +3457,9 @@ class RolloutCollectionHelper(BaseModel):
                     print(
                         f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
                     )
+                # The exporters reopened the run recorded next to this output, which starts anew: so does that run.
+                for exporter in get_exporters():
+                    exporter.start_over()
             else:
                 print("Clearing output fpath since `resume_from_cache=False`!")
 
@@ -4337,24 +4357,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics.sort(key=lambda entry: entry[AGENT_REF_KEY_NAME]["name"])
 
-        primitive_types = (bool, int, float, str, type(None))
-        metrics_to_log = dict()
-        for agent_entry in all_agent_metrics:
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-            metrics_to_log.update(
-                {
-                    f"{agent_name}/{k}": v
-                    for k, v in agent_entry["agent_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
-            metrics_to_log.update(
-                {
-                    f"key_metrics/{agent_name}/{k}": v
-                    for k, v in agent_entry["key_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
+        metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
 
         export_metrics(metrics_to_log)
 
@@ -4904,10 +4907,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             )
         )
 
-    def setup_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None
-    ) -> ServerClient:  # pragma: no cover
-        return setup_server_client_utils(head_server_config)
+    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
+        """Return a client for the head server, reusing the cached one when the helper opted in.
+
+        Without opt-in, every call fetches the configuration from the head server again.
+        An opted-in helper keeps one client and fetches again only when the head config differs from the cached one.
+        Build a new helper after the configuration behind the same head changes.
+        """
+        if not self.reuse_server_client:
+            return setup_server_client_utils(head_server_config)
+        if self._cached_server_client is None or head_server_config != self._cached_head_server_config:
+            client = setup_server_client_utils(head_server_config)
+            head_snapshot = head_server_config.model_copy(deep=True) if head_server_config is not None else None
+            self._cached_server_client = client
+            self._cached_head_server_config = head_snapshot
+        return self._cached_server_client
 
 
 class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):

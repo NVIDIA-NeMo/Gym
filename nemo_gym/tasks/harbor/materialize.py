@@ -41,7 +41,8 @@ class HarborTurnInput(BaseModel):
 class HarborTaskInput(BaseModel):
     """A Harbor row's input: one ``responses_create_params`` for a single-turn task, or one per turn.
 
-    ``task_data`` carries the folder digest; the server reads everything else from the pinned folder.
+    ``task_data`` carries the folder digest and the task's own fields; the server reads everything else
+    from the pinned folder.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -112,16 +113,24 @@ def environment_server_instance(taskset: str) -> str:
 def materialize_task(
     task: HarborTask, taskset: str, *, dataset_digest: str | None = None
 ) -> MaterializedTask[HarborTaskInput]:
-    """One row: the instruction as a user message, the folder digest in ``task_data``.
+    """One row: the instruction as a user message, the folder digest and the task's fields in ``task_data``.
 
     A multi-step task gets one turn per step, each with that step's instruction and agent budget. The
     top-level ``instruction.md`` is never sent for such a task.
+
+    ``task_data`` holds the task's own field values (``task_data.json`` in its folder, validated against
+    the dataset's ``task_data.py`` before any row is written) under the reserved ``_ng_*`` keys. The values
+    are the file's as written, not the validated model's dump: the model validates strictly, as JSON, so an
+    accepted value already has its field's type (:meth:`~nemo_gym.tasks.harbor.task_data.TaskDataSchema.validate`),
+    and the same fields are what the seed compares with the folder's file and what the in-sandbox verifier
+    reads as ``task_data.json``. A dump would drift from both (defaults filled in, aliases and ``AliasPath``
+    shapes rewritten) without changing what any verifier sees.
 
     With ``dataset_digest``, the row also carries the dataset's digest (``manifest.toml``'s
     ``[dataset].digest``). Rollout collection copies the ``_ng_*`` keys of ``task_data`` onto every
     results row it writes, so each row then says which task folder and which dataset it ran.
     """
-    task_data: dict[str, JsonValue] = {DIGEST_KEY: task.digest}
+    task_data: dict[str, JsonValue] = {**task.task_data, DIGEST_KEY: task.digest}
     if dataset_digest is not None:
         task_data[DATASET_DIGEST_KEY] = dataset_digest
     if task.turns:
@@ -170,6 +179,11 @@ def write_rows(
     a trainer read, and nothing the collector routes by: a materialized row reaches its environment server
     by its taskset, ``agent_map`` and ``fan_out`` do not apply to it, and a per-dataset ``num_repeats`` dict
     keys on the taskset.
+
+    The metrics sidecars the data processor leaves beside the rows (:func:`rows_metrics_sidecars`) go with the
+    rows they described: they are derived from one selection of the task folder, and the processor would refuse
+    a changed selection against them ("Found conflicting aggregate metrics"), a check meant for a committed
+    source dataset, not for rows regenerated on every command. Removed here, they are rewritten by the run.
     """
     _validate_task_ids(tasks)
     label = task_source or taskset
@@ -182,7 +196,16 @@ def write_rows(
     with path.open("w") as stream:
         for row in rows:
             stream.write(json.dumps(row) + "\n")
+    for sidecar in rows_metrics_sidecars(path):
+        sidecar.unlink(missing_ok=True)
     return rows
+
+
+def rows_metrics_sidecars(rows_path: Path) -> tuple[Path, Path]:
+    """The data processor's per-dataset metrics beside the rows and the conflict file it writes on a mismatch:
+    ``<rows stem>_metrics.json`` and ``<rows stem>_metrics_conflict.json`` (``nemo_gym.train_data_utils``)."""
+    metrics = rows_path.with_name(f"{rows_path.stem}_metrics.json")
+    return metrics, metrics.with_name(f"{metrics.stem}_conflict.json")
 
 
 def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:

@@ -3,19 +3,25 @@
 """OpenCode artifacts and request state over the shared sandbox lifecycle."""
 
 import asyncio
-import functools
 import json
 import logging
+import re
 import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from time import monotonic
-from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_RUNNER_FAILED,
+    HARNESS_RUNNER_FILE,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -24,12 +30,7 @@ from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
-
-
-# The runner is a script the adapter uploads into the sandbox. Its export-status helpers are imported only where an
-# export result is read, so importing the adapter does not import the runner.
-if TYPE_CHECKING:
-    from responses_api_agents.opencode_agent.sandbox_runner import ExportStatus
+from responses_api_agents.opencode_agent.snapshot import snapshot, stored_sessions
 
 
 LOG = logging.getLogger(__name__)
@@ -55,7 +56,6 @@ class HarnessProcessInfo(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
     pid: int
-    python: str | None = None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -67,46 +67,87 @@ def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
         return None
 
 
-@functools.cache
-def _export_status_adapter() -> TypeAdapter:
-    from responses_api_agents.opencode_agent.sandbox_runner import ExportStatus
+_TASK_DIRECTORY_KEYS = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+# Record the task's home and XDG directories, before OpenCode's overrides, for the
+# task_environment.mjs shell.env hook. Defaults follow the XDG specification.
+_TASK_ENV_SETUP = r"""json() {
+    local value=${1//\\/\\\\} code octal character escaped
+    value=${value//\"/\\\"}
+    # JSON forbids raw control characters; a bash string cannot hold NUL.
+    for ((code = 1; code < 32; code++)); do
+        printf -v octal '%03o' "$code"
+        printf -v character "\\$octal"
+        printf -v escaped '\\u%04x' "$code"
+        value=${value//"$character"/"$escaped"}
+    done
+    printf '"%s"' "$value"
+}
+home=${HOME:-~}
+printf '{"HOME": %s, "XDG_DATA_HOME": %s, "XDG_CONFIG_HOME": %s, "XDG_CACHE_HOME": %s, "XDG_STATE_HOME": %s}' \
+    "$(json "$home")" \
+    "$(json "${XDG_DATA_HOME:-${home%/}/.local/share}")" \
+    "$(json "${XDG_CONFIG_HOME:-${home%/}/.config}")" \
+    "$(json "${XDG_CACHE_HOME:-${home%/}/.cache}")" \
+    "$(json "${XDG_STATE_HOME:-${home%/}/.local/state}")" >"$task_env" || exit 1
+"""
 
-    return TypeAdapter(ExportStatus)
+
+def runner_setup(directory: str, private_directories: list[str]) -> str:
+    """Bash run in the sandbox before the CLI: fresh receipt, task directories, private directories."""
+    return (
+        # Never accept an initialization receipt left by an earlier invocation.
+        f"rm -f -- {quote(f'{directory}/task-environment.ready')} || exit 1\n"
+        f"task_env={quote(f'{directory}/task-env.json')}\n"
+        + _TASK_ENV_SETUP
+        + f"mkdir -p -- {' '.join(quote(path) for path in private_directories)}\n"
+    )
 
 
-def _export_status(result: SandboxExecResult) -> "ExportStatus | None":
-    """The runner's one-line export status, from stdout or wherever the provider put the command's output."""
-    for stream in (result.stdout, result.stderr):
-        for line in reversed((stream or "").splitlines()):
-            if line.startswith("{"):
-                try:
-                    return _export_status_adapter().validate_json(line)
-                except ValidationError:
-                    continue
-    return None
+def cli_environment(*, workdir: str, env: Mapping[str, str], path_prefix: Sequence[str]) -> str:
+    """POSIX sh that gives the commands after it the environment of OpenCode's ``import`` and ``export``.
 
-
-def _export_failure(result: SandboxExecResult, *, budget: float) -> str:
-    """Why ``--export`` failed: the runner's status first, then what the provider kept of its output.
-
-    OpenSandbox's background exec, for one, returns stderr merged into stdout and only the exit status as stderr.
+    Like the run, they start in the task workdir with ``PWD`` naming it, since OpenCode binds a session to that
+    directory, and find the configured tools first on ``PATH``. ``env`` holds the session's private directories and
+    isolation settings. The run's configuration is dropped, so no plugin loads again. A failure here exits
+    ``HARNESS_RUNNER_FAILED``, as the harness runner's own does.
     """
-    from responses_api_agents.opencode_agent.sandbox_runner import export_failures
+    lines = [f"cd {quote(workdir)} || exit {HARNESS_RUNNER_FAILED}", "unset OPENCODE_CONFIG_CONTENT"]
+    if path_prefix:
+        lines.append(f"PATH={quote(':'.join(path_prefix))}:$PATH")
+    lines.append("export " + " ".join(f"{key}={quote(value)}" for key, value in {**env, "PWD": workdir}.items()))
+    return "".join(f"{line}\n" for line in lines)
 
-    parts = [f"exit={result.return_code}, error={result.error_type}, exec budget {budget:.1f} s"]
-    status = _export_status(result)
-    if status is None:
-        parts.append(f"no export status; stdout: {(result.stdout or '')[-1000:]}")
-    else:
-        exported = sum(outcome == "ok" for outcome in status["sessions"].values())
-        parts.append(
-            f"{exported} of {len(status['sessions'])} sessions exported in {status['elapsed_seconds']} of "
-            f"{status['budget_seconds']} s{', deadline exhausted' if status['deadline_exhausted'] else ''}"
-        )
-        parts.extend(export_failures(status))
-    if result.stderr:
-        parts.append(f"stderr: {result.stderr[-1000:]}")
-    return "; ".join(parts)
+
+# OpenCode session IDs become file names in the owner's export directory.
+_SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
+# Replaces "$2" with a copy of "$1" made beside it, so the owner never reads a partial file.
+_PUBLISH = """partial="${2%/*}/.${2##*/}.$$.tmp"
+cp -- "$1" "$partial" && mv -f -- "$partial" "$2" || { rm -f -- "$partial"; exit 1; }
+"""
+# The event log step's exit status when the run left no event log.
+_NO_EVENT_LOG = 2
+_PUBLISH_EVENT_LOG = f'[ -f "$1" ] || exit {_NO_EVENT_LOG}\n' + _PUBLISH
+# Writes the ``opencode export`` of session "$3", made by the CLI "$1", to "$2/$3.json", or prints why not and exits 1.
+# The CLI writes "$4.json" and "$4.stderr" in the session directory, so an export stopped at the deadline leaves nothing
+# in the owner's. OpenCode (Bun) can exit before a pipe drains, which cut exports to their first 8 KB; it writes a
+# regular file synchronously.
+_EXPORT_SESSION = (
+    """rm -f -- "$2/$3.json" || exit 1
+"$1" export "$3" </dev/null >"$4.json" 2>"$4.stderr"
+status=$?
+if [ "$status" -ne 0 ]; then
+    printf 'exit %s: %s' "$status" "$(tail -c 1000 -- "$4.stderr")"
+    exit 1
+fi
+if [ "$(head -c 1 -- "$4.json")" != "{" ]; then
+    printf 'export (%s bytes) is not a JSON object' "$(wc -c <"$4.json" | tr -d ' ')"
+    exit 1
+fi
+set -- "$4.json" "$2/$3.json"
+"""
+    + _PUBLISH
+    + 'rm -f -- "$1"\n'
+)
 
 
 @dataclass
@@ -122,7 +163,6 @@ class OpenCodeSandboxSession(AgentSessionState):
     session: SandboxSession[str]
     runtime: str
     sandbox_id: str | None = None
-    python_executable: str = "python3"
     model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
@@ -139,6 +179,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     activation_trajectory: TrajectoryRecord | None = None
     activation_id: int | None = None
     export_dir: str | None = None
+    # POSIX sh that gives OpenCode's import and export their environment (see ``cli_environment``).
+    opencode_environment: str = ""
     _export_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
@@ -231,10 +273,6 @@ class OpenCodeSandboxSession(AgentSessionState):
                 },
             )
 
-    async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Stage adapter input using the shared text-transfer utility."""
-        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
-
     async def read_text(self, name: str) -> str:
         """Read adapter output using file transfer."""
         return await read_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}")
@@ -287,16 +325,24 @@ class OpenCodeSandboxSession(AgentSessionState):
             await self.session.sandbox.upload(
                 Path(__file__).with_name("task_environment.mjs"), f"{self.session.session_dir}/task_environment.mjs"
             )
-        await self.upload_json("input.json", payload)
+        directory = self.session.session_dir
+        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        env = payload["env"]
+        params = {
+            "cwd": payload["cwd"],
+            "command": payload["command"],
+            "env": env,
+            "stdin": f"{directory}/prompt.txt",
+            "stdout": f"{directory}/stdout.jsonl",
+            "stderr": f"{directory}/stderr.log",
+            "setup": runner_setup(directory, [env[key] for key in _TASK_DIRECTORY_KEYS]),
+        }
+        if payload.get("path_prefix"):
+            # Preinstalled runtime tools come first; the task's own PATH still follows.
+            params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"
+        await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(
-            python=self.python_executable,
-            argv=[
-                self.python_executable,
-                "-I",
-                f"{self.persistent_directory}/{RUNNER_FILE}",
-                f"{self.session.session_dir}/input.json",
-            ],
-            stdlib_runner=True,
+            argv=["bash", f"{self.persistent_directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"]
         )
 
     def take_export_gaps(self) -> list[ObservationGap]:
@@ -311,61 +357,153 @@ class OpenCodeSandboxSession(AgentSessionState):
         succeeded, and inside this step's budget, so exporting can neither fail the capture nor delay
         release. A failed export becomes an observation gap.
         """
-        if self.export_dir is None:
-            return await self._capture_artifacts(timeout=timeout)
         # Leave a tenth of the budget so the capture result returns before the step's own timeout.
         export_deadline = monotonic() + timeout * 0.9
-        try:
-            return await self._capture_artifacts(timeout=timeout)
-        finally:
-            await self.write_exports(deadline=export_deadline)
+        with tempfile.TemporaryDirectory(prefix="opencode-snapshot-") as directory:
+            try:
+                return await self._collect_artifacts(Path(directory), timeout=timeout)
+            finally:
+                if self.export_dir is not None:
+                    await self.write_exports(Path(directory), deadline=export_deadline)
 
-    async def write_exports(self, *, deadline: float) -> None:
-        """Write every OpenCode session's ``opencode export`` and the event log to ``export_dir``.
+    async def write_exports(self, directory: Path, *, deadline: float) -> None:
+        """Write every OpenCode session's ``opencode export`` and this run's event log to ``export_dir``.
 
-        Runs only after confirmed termination, before the session directory is removed. Failures,
-        including an exhausted budget, are recorded as an ``export_dir_write_failed`` gap that names
-        each failed session from the runner's status line.
+        Runs once the CLI has stopped, before the session directory is removed. ``sessions.json`` lists the stored
+        session tree first, so the owner can tell a failed export from an absent session; the tree comes from the
+        session store that the capture copied into ``directory``. Each session is exported by a command of its own,
+        which the provider stops at ``deadline``, with the session's private directories but without the run's
+        configuration. Failures, including an exhausted budget, are recorded as one ``export_dir_write_failed`` gap
+        that names each failed session.
         """
         assert self.export_dir is not None
+        started = monotonic()
+        outcomes: dict[str, str] = {}
+        event_log = "not attempted"
+        exhausted = False
+        error = None
         try:
-            budget = deadline - monotonic()
-            if budget <= 0:
-                raise TimeoutError("no time left in the artifact collection budget")
-            # The runner stops first, so it reports each session's outcome before its exec times out.
-            runner_budget = budget - min(5.0, 0.1 * budget)
-            exec_timeout = asyncio.timeout(budget)
-            try:
-                async with exec_timeout:
-                    result = await self.session.sandbox.exec(
-                        f"{quote(self.python_executable)} -I {quote(f'{self.persistent_directory}/{RUNNER_FILE}')} "
-                        f"--export {quote(self.session.session_dir)} {quote(self.persistent_directory)} "
-                        f"{quote(self.export_dir)} {runner_budget:.3f}",
-                        cwd=self.session.workdir,
-                        timeout_s=budget,
+            if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
+                raise RuntimeError("OpenCode session export requires confirmed cleanup")
+            # Never leave an earlier activation's inventory in place of this one.
+            inventory = f"{self.export_dir}/sessions.json"
+            await self._export_step(f"mkdir -p -- {quote(self.export_dir)} && rm -f -- {quote(inventory)}", deadline)
+            sessions = await self._stored_sessions(directory, deadline)
+            staged = f"{self.session.session_dir}/sessions.json"
+            async with asyncio.timeout(deadline - monotonic()):
+                await upload_text(self.session.sandbox, path=staged, text=json.dumps(sessions))
+            exportable = [
+                session["id"]
+                for session in sessions
+                if isinstance(session["id"], str) and _SESSION_ID.fullmatch(session["id"])
+            ]
+            # Each session's earlier export goes first, so a session that is not exported again is never left stale.
+            stale = " ".join(quote(f"{self.export_dir}/{session_id}.json") for session_id in exportable)
+            await self._export_step(
+                f"rm -f -- {stale}\nset -- {quote(staged)} {quote(inventory)}\n{_PUBLISH}", deadline
+            )
+            for session in sessions:
+                session_id = session["id"]
+                if session_id not in exportable:
+                    outcomes[str(session_id)] = "unsafe session ID"
+                    continue
+                command = self.opencode_environment + (
+                    f"set -- {quote(f'{self.runtime}/opencode')} {quote(self.export_dir)} {session_id} "
+                    f"{quote(f'{self.session.session_dir}/export-{session_id}')}\n{_EXPORT_SESSION}"
+                )
+                result = await self._exec_until(command, deadline)
+                if result is None:
+                    exhausted = True
+                    outcomes[session_id] = "export deadline exceeded"
+                elif result.return_code == 0 and result.error_type is None:
+                    outcomes[session_id] = "ok"
+                else:
+                    outcomes[session_id] = (result.stdout or "").strip() or (
+                        f"exit {result.return_code}, error {result.error_type}: {(result.stderr or '')[-1000:]}"
                     )
-            except TimeoutError:
-                if not exec_timeout.expired():
-                    raise
-                raise TimeoutError(
-                    f"the export exec did not return within {budget:.1f} s (runner deadline {runner_budget:.1f} s)"
-                ) from None
-            if result.return_code != 0 or result.error_type:
-                raise RuntimeError(_export_failure(result, budget=budget))
-        except Exception as error:
-            LOG.warning("OpenCode session exports for %s are incomplete", self.export_dir, exc_info=True)
+            roots = [session["id"] for session in sessions if session["parent_id"] is None]
+            if len(roots) == 1 and roots[0] in exportable:
+                suffix = "" if self.activation_id is None else f"activation-{self.activation_id}."
+                events = f"{self.export_dir}/{roots[0]}.{suffix}events.jsonl"
+                result = await self._exec_until(
+                    f"set -- {quote(f'{self.session.session_dir}/stdout.jsonl')} {quote(events)}\n"
+                    + _PUBLISH_EVENT_LOG,
+                    deadline,
+                )
+                if result is None:
+                    exhausted = True
+                    event_log = "export deadline exceeded"
+                elif result.return_code == _NO_EVENT_LOG and result.error_type is None:
+                    event_log = "absent"
+                elif result.return_code == 0 and result.error_type is None:
+                    event_log = "ok"
+                else:
+                    event_log = (
+                        f"exit {result.return_code}, error {result.error_type}: {(result.stderr or '')[-1000:]}"
+                    )
+            else:
+                event_log = f"no single root session to belong to: {roots!r}"
+        except Exception as caught:
+            exhausted = exhausted or isinstance(caught, TimeoutError)
+            error = f"{type(caught).__name__}: {caught}"
+        failures = [f"{session_id}: {outcome}" for session_id, outcome in outcomes.items() if outcome != "ok"]
+        if event_log not in ("ok", "absent"):
+            failures.append(f"event log: {event_log}")
+        if error is not None:
+            failures.append(error)
+        if failures:
+            LOG.warning("OpenCode session exports for %s are incomplete: %s", self.export_dir, failures)
+            exported = sum(outcome == "ok" for outcome in outcomes.values())
+            summary = (
+                f"{exported} of {len(outcomes)} sessions exported in {monotonic() - started:.1f} of "
+                f"{deadline - started:.1f} s{', deadline exhausted' if exhausted else ''}"
+            )
             self._export_gaps.append(
-                ObservationGap(code="export_dir_write_failed", detail=f"{type(error).__name__}: {error}"[:2500])
+                ObservationGap(code="export_dir_write_failed", detail="; ".join([summary, *failures])[:2500])
             )
 
-    async def _capture_artifacts(self, *, timeout: float) -> str:
+    async def _exec_until(self, command: str, deadline: float) -> SandboxExecResult | None:
+        """Run ``command`` from the task workdir; None if ``deadline`` passes first."""
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            async with asyncio.timeout(remaining):
+                result = await self.session.sandbox.exec(command, cwd=self.session.workdir, timeout_s=remaining)
+        except TimeoutError:
+            return None
+        return None if result.error_type == "timeout" else result
+
+    async def _export_step(self, command: str, deadline: float) -> None:
+        """Run a step that every export needs, raising if it fails."""
+        result = await self._exec_until(command, deadline)
+        if result is None:
+            raise TimeoutError("no time left in the artifact collection budget")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(
+                f"exit {result.return_code}, error {result.error_type}: {(result.stderr or result.stdout or '')[-1000:]}"
+            )
+
+    async def _stored_sessions(self, directory: Path, deadline: float) -> list[dict[str, str | None]]:
+        """The stored session tree, from the store the capture copied out or, if it did not, a fresh copy."""
+        database = directory / "opencode.db"
+        if not database.is_file():
+            remaining = deadline - monotonic()
+            async with asyncio.timeout(remaining):
+                names = await self.list_store(timeout=remaining)
+                if "opencode.db" not in names:
+                    raise RuntimeError("OpenCode left no session store")
+                await self.download_store(names, directory)
+        return await asyncio.to_thread(stored_sessions, database)
+
+    async def _collect_artifacts(self, directory: Path, *, timeout: float) -> str:
         previous_session_id = self.harness_session_id
         try:
             self.stderr = (await self.read_text("stderr.log"))[-16000:]
         except Exception:
             LOG.warning("OpenCode stderr log unavailable", exc_info=True)
         try:
-            await self.snapshot(timeout)
+            await self.snapshot(directory, timeout)
         except Exception as error:
             if self.stderr:
                 raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
@@ -373,7 +511,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         # Messages that predate this activation (earlier activations, an imported prefix) are history, not output.
         scoped = self.is_continuation or bool(self.message_ids)
         if self.is_continuation:
-            export_text = await self._read_export()
+            export_text = await self._read_export(directory)
             export = json.loads(export_text)
             harness_session_id = export.get("session_id")
             if not isinstance(harness_session_id, str) or not harness_session_id:
@@ -383,40 +521,40 @@ class OpenCodeSandboxSession(AgentSessionState):
             self.harness_session_id = harness_session_id
             self.message_ids = export["message_ids"]
         elif scoped:
-            export = json.loads(await self._read_export())
+            export = json.loads(await self._read_export(directory))
         try:
             self.activation_log = await self.read_text("stdout.jsonl")
         except Exception:
             LOG.warning("OpenCode event log unavailable", exc_info=True)
         try:
-            with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
-                path = Path(directory) / "observations.db"
-                await self.session.sandbox.download(f"{self.session.session_dir}/observations.db", path)
-                trajectory = TrajectoryRecord(
-                    task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
-                )
-                observations = await asyncio.to_thread(
-                    parse_opencode_observations,
-                    path,
-                    self.request.episode_id.capture_key,
+            trajectory = TrajectoryRecord(
+                task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
+            )
+            database = directory / "observations.db"
+            if not database.is_file():
+                raise FileNotFoundError(f"OpenCode observations were not captured: {database}")
+            observations = await asyncio.to_thread(
+                parse_opencode_observations,
+                database,
+                self.request.episode_id.capture_key,
+                trajectory,
+                require_terminal_finish=True,
+                model_ref=self.model_ref,
+                message_ids=set(export.get("activation_message_ids", [])) if scoped else None,
+            )
+            if self.is_continuation:
+                assert self.activation_id is not None
+                scope_opencode_activation(
+                    observations,
                     trajectory,
-                    require_terminal_finish=True,
-                    model_ref=self.model_ref,
-                    message_ids=set(export.get("activation_message_ids", [])) if scoped else None,
+                    invocation_prefix=self.invocation_prefix,
+                    activation_id=self.activation_id,
                 )
-                if self.is_continuation:
-                    assert self.activation_id is not None
-                    scope_opencode_activation(
-                        observations,
-                        trajectory,
-                        invocation_prefix=self.invocation_prefix,
-                        activation_id=self.activation_id,
-                    )
-                    self.activation_observations = observations
-                    self.activation_trajectory = trajectory
-                else:
-                    self.observations = observations
-                    self.trajectory = trajectory
+                self.activation_observations = observations
+                self.activation_trajectory = trajectory
+            else:
+                self.observations = observations
+                self.trajectory = trajectory
         except Exception:
             LOG.exception("Failed to parse OpenCode observations")
             observations = AgentObservationBundle(
@@ -440,7 +578,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             # Preserve the single-turn evidence/error order. The response layer
             # parses this raw export and translates malformed content to 502.
             await self._check_task_environment()
-            return await self._read_export()
+            return await self._read_export(directory)
         try:
             await self._check_task_environment()
         except Exception as error:
@@ -462,10 +600,10 @@ class OpenCodeSandboxSession(AgentSessionState):
             ) from error
         return export_text
 
-    async def _read_export(self) -> str:
+    async def _read_export(self, directory: Path) -> str:
         try:
-            return await self.read_text("export.json")
-        except Exception as error:
+            return (directory / "export.json").read_text()
+        except OSError as error:
             logs = await self.session.read_output_log()
             raise RuntimeError(
                 format_error_message(
@@ -482,15 +620,56 @@ class OpenCodeSandboxSession(AgentSessionState):
                 format_error_message("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
             ) from error
 
-    async def snapshot(self, timeout: float) -> None:
-        """Capture SQLite after CLI completion; borrowed task services may remain alive."""
-        if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
-            raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
-        captured = await self.session.sandbox.exec(
-            f"{quote(self.python_executable)} -I {quote(f'{self.persistent_directory}/{RUNNER_FILE}')} "
-            f"--snapshot {quote(self.session.session_dir)} {quote(self.persistent_directory)}",
+    @property
+    def store_directory(self) -> str:
+        """Where OpenCode keeps its session database in private storage."""
+        return f"{self.persistent_directory}/data/opencode"
+
+    async def list_store(self, *, timeout: float) -> list[str]:
+        """The session database files in private storage.
+
+        A stopped CLI may leave its write-ahead log behind; it holds the latest messages.
+        """
+        listed = await self.session.sandbox.exec(
+            "for name in opencode.db opencode.db-wal opencode.db-shm; "
+            f'do [ ! -e {quote(self.store_directory)}/"$name" ] || echo "$name"; done',
             cwd=self.session.workdir,
             timeout_s=timeout,
         )
-        if captured.return_code != 0 or captured.error_type:
-            raise RuntimeError(f"OpenCode transcript capture failed: {captured.stderr}")
+        if listed.return_code != 0 or listed.error_type:
+            raise RuntimeError(listed.stderr)
+        return (listed.stdout or "").split()
+
+    async def download_store(self, names: list[str], directory: Path) -> None:
+        """Copy the session database files ``names`` into ``directory``."""
+        for name in names:
+            await self.session.sandbox.download(f"{self.store_directory}/{name}", directory / name)
+
+    async def snapshot(self, directory: Path, timeout: float) -> None:
+        """Copy SQLite out after CLI completion and export it here; borrowed task services may remain alive."""
+        if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
+            raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
+        deadline = asyncio.get_running_loop().time() + timeout
+        try:
+            async with asyncio.timeout_at(deadline):
+                names = await self.list_store(timeout=timeout)
+        except Exception as error:
+            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
+        if "opencode.db" not in names:
+            return  # No export: collection reports the missing result with the CLI logs.
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self.download_store(names, directory)
+        except Exception:
+            LOG.warning("OpenCode session database unavailable", exc_info=True)
+            return
+        try:
+            await asyncio.to_thread(
+                snapshot,
+                directory / "opencode.db",
+                directory,
+                harness_session_id=self.harness_session_id,
+                previous_message_ids=self.message_ids,
+            )
+        except Exception as error:
+            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error

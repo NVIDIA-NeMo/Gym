@@ -3,12 +3,13 @@
 """Owner-staged plugins, pinned binaries and owner exports are opt-in; unset, sessions are unchanged."""
 
 import asyncio
+import hashlib
+import io
 import json
 import shlex
-import shutil
 import sqlite3
 import subprocess
-import sys
+import tarfile
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
@@ -18,13 +19,17 @@ from fastapi import Request
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedRejectedError
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from responses_api_agents.opencode_agent import sandbox_runner
-from responses_api_agents.opencode_agent.app import _CHECK_EXPORT_DIR, _CHECK_PLUGIN_FILES, OpenCodeAgentConfig
+from responses_api_agents.opencode_agent.app import (
+    _CHECK_EXPORT_DIR,
+    _CHECK_PLUGIN_FILES,
+    OpenCodeAgentConfig,
+    _sandbox_prepare_command,
+)
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_agent.tests.test_continuation import activate, close, install_artifact_runner, start
@@ -40,6 +45,15 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
 PIN = "ab" * 32
 RUNTIME = "/tmp/nemo-gym-opencode-runtime-1.17.11"
 EXPORT_DIR = "/owner/exports"
+# Distinctive text of each sandbox step, to find its command.
+PLUGIN_CHECK = 'for path in "$@"'
+EXPORT_SESSION = '"$1" export "$3"'
+EVENT_LOG = ".events.jsonl"
+PINNED_COPY = "sha256sum"
+VERSION_PROBE = "--version"
+UNPACK = "tar -x"
+IMPORT_CHECK = "test -f"
+IMPORT = "/opencode import "
 
 
 def result(code=0, *, stdout="", stderr="", error_type=None):
@@ -105,29 +119,66 @@ def seed_status(agent, *, raise_server_exceptions=True):
         return client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
 
 
+def positional(command):
+    """The arguments that a step's first ``set --`` line gives its script."""
+    line = next(line for line in command.splitlines() if line.startswith("set -- "))
+    return shlex.split(line)[2:]
+
+
+def environment(command):
+    """The variables that the OpenCode environment prelude of ``command`` exports."""
+    line = next(line for line in command.splitlines() if line.startswith("export "))
+    return dict(word.split("=", 1) for word in shlex.split(line)[1:])
+
+
+def session_store(path, *, roots, messages=()):
+    """An OpenCode session store holding the root sessions ``roots`` and the messages ``messages``."""
+    with sqlite3.connect(path) as connection:
+        connection.execute("create table session(id text, parent_id text, time_created integer)")
+        connection.execute("create table message(id text, session_id text, data text, time_created integer)")
+        connection.executemany("insert into session values (?, null, ?)", [(root, n) for n, root in enumerate(roots)])
+        connection.executemany(
+            "insert into message values (?, ?, '{}', ?)",
+            [(message, roots[0], n) for n, message in enumerate(messages)],
+        )
+    return path
+
+
+def plugin_dependencies(sandbox, tmp_path, *members):
+    """A dependency archive that the fake serves where the adapter downloads its checked copy; returns its SHA-256."""
+    archive = tmp_path / "plugin-dependencies.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        for name, data in members or [("package.json", b"{}")]:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            bundle.addfile(info, io.BytesIO(data))
+    original = sandbox.download
+
+    async def download(source, destination):
+        if source.endswith("/.pinned-opencode"):
+            Path(destination).write_bytes(archive.read_bytes())
+        else:
+            await original(source, destination)
+
+    sandbox.download = download
+    return hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
 async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setup):
     agent, sandbox = setup
     events = record(sandbox)
     response, closed = await episode(agent, sandbox)
     directory = sandbox.directory
     install = events[index(events, "install_opencode_runtime.sh")]
-    assert shlex.split(install) == [
-        "bash",
-        f"{directory}/install_opencode_runtime.sh",
-        RUNTIME,
-        "1.17.11",
-        "",
-        "",
-        "python3",
-        "",
-    ]
+    assert shlex.split(install) == ["bash", f"{directory}/install_opencode_runtime.sh", RUNTIME, "1.17.11", "", "", ""]
     assert index(events, "install_opencode_runtime.sh") == 1
-    for marker in ("os.path.isfile", "--export", "--stage-", "--import", "NG_OPENCODE_SKIP_RIPGREP"):
+    for marker in (PLUGIN_CHECK, EXPORT_SESSION, EVENT_LOG, PINNED_COPY, IMPORT_CHECK, "NG_OPENCODE_SKIP_RIPGREP"):
         assert not any(marker in event for event in events)
-    payload = json.loads(sandbox.files[f"{directory}/input.json"])
-    assert payload["command"][0] == f"{RUNTIME}/opencode"
-    assert payload["harness_session_id"] is None and payload["previous_message_ids"] == []
-    assert list(payload["env"]) == [
+    assert _CHECK_EXPORT_DIR not in events[0]
+    params, config = launch_config(sandbox)
+    assert params["command"][0] == f"{RUNTIME}/opencode" and "--session" not in params["command"]
+    assert sandbox.snapshots == [{"harness_session_id": None, "previous_message_ids": []}]
+    assert list(params["env"]) == [
         "HOME",
         "XDG_DATA_HOME",
         "XDG_CONFIG_HOME",
@@ -139,7 +190,6 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
         "OPENCODE_DISABLE_MODELS_FETCH",
         "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",
     ]
-    config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
     assert "agent" not in config
     assert config["provider"]["nemo_gym"]["models"]["dummy_model"] == {
         "interleaved": {"field": "reasoning_content"},
@@ -159,11 +209,11 @@ async def test_owner_plugins_are_checked_at_seed_and_load_after_gym_plugins_in_o
     events = record(sandbox)
     response, _ = await episode(agent, sandbox)
     assert response.status == "completed"
-    check = index(events, "os.path.isfile")
+    check = index(events, PLUGIN_CHECK)
     assert 0 < check < index(events, "install_opencode_runtime.sh")
-    assert shlex.split(events[check])[-2:] == agent.config.plugins
+    assert positional(events[check]) == agent.config.plugins
     directory = sandbox.directory
-    config = json.loads(json.loads(sandbox.files[f"{directory}/input.json"])["env"]["OPENCODE_CONFIG_CONTENT"])
+    _, config = launch_config(sandbox)
     gym_plugins = [Path(f"{directory}/{OBSERVABILITY_PATCH.name}").as_uri()] if capture else []
     gym_plugins.append(Path(f"{directory}/task_environment.mjs").as_uri())
     assert config["plugin"] == [*gym_plugins, "file:///opt/owner/z-last.mjs", "file:///opt/owner/a%20first.mjs"]
@@ -174,11 +224,11 @@ def test_plugin_check_reports_only_paths_that_are_not_regular_files(tmp_path):
     plugin.write_text("export const Plugin = async () => ({});\n")
     paths = [str(plugin), str(tmp_path), str(tmp_path / "missing.mjs")]
     checked = subprocess.run(
-        [sys.executable, "-I", "-c", _CHECK_PLUGIN_FILES, *paths], capture_output=True, text=True, timeout=30
+        ["/bin/sh", "-c", _CHECK_PLUGIN_FILES, "sh", *paths], capture_output=True, text=True, timeout=30
     )
     assert checked.returncode == 3
     assert checked.stdout.split() == paths[1:]
-    assert subprocess.run([sys.executable, "-I", "-c", _CHECK_PLUGIN_FILES, str(plugin)], timeout=30).returncode == 0
+    assert subprocess.run(["/bin/sh", "-c", _CHECK_PLUGIN_FILES, "sh", str(plugin)], timeout=30).returncode == 0
 
 
 def test_missing_owner_plugin_fails_seed_with_422_and_releases_the_sandbox(setup):
@@ -188,7 +238,7 @@ def test_missing_owner_plugin_fails_seed_with_422_and_releases_the_sandbox(setup
     async def missing(command, **kwargs):
         return result(3, stdout="/opt/owner/missing.mjs\n")
 
-    intercept(sandbox, "os.path.isfile", missing)
+    intercept(sandbox, PLUGIN_CHECK, missing)
     response = seed_status(agent)
     assert response.status_code == 422, response.text
     assert response.json()["detail"].endswith("/opt/owner/missing.mjs")
@@ -208,7 +258,7 @@ def test_plugin_check_outage_stays_retryable(setup):
     async def outage(command, **kwargs):
         return result(0, stderr="provider timed out", error_type="timeout")
 
-    intercept(sandbox, "os.path.isfile", outage)
+    intercept(sandbox, PLUGIN_CHECK, outage)
     response = seed_status(agent, raise_server_exceptions=False)
     assert response.status_code == 500
     sandbox.disconnect.assert_awaited_once()
@@ -270,41 +320,39 @@ async def test_exports_follow_capture_and_precede_session_file_removal(setup, tm
     capture_observations(sandbox, tmp_path)
     events = record(sandbox)
     response, closed = await episode(agent, sandbox, close_during_run=close_during_run)
-    export = index(events, "--export")
-    assert index(events, "--snapshot") < export < index(events, "rm -rf") < events.index("disconnect")
-    assert len([event for event in events if "--export" in event]) == 1
-    argv = shlex.split(events[export])
+    export, event_log = index(events, EXPORT_SESSION), index(events, EVENT_LOG)
+    snapshot = index(events, "opencode.db-wal")
+    assert snapshot < index(events, "/sessions.json") < export < event_log < index(events, "rm -rf")
+    assert index(events, "rm -rf") < events.index("disconnect")
+    assert len([event for event in events if EXPORT_SESSION in event]) == 1
     directory = sandbox.directory
-    assert argv[:7] == [
-        "python3",
-        "-I",
-        f"{directory}/{RUNNER_FILE}",
-        "--export",
-        directory,
-        directory,
-        EXPORT_DIR,
-    ]
-    # The export deadline keeps a tenth of the 1 s collection budget for the capture to return.
-    assert 0 < float(argv[7]) <= 0.9
-    # The run, and with it the export that reads its input, binds the session to the task workdir.
-    assert json.loads(sandbox.files[f"{directory}/input.json"])["env"]["PWD"] == "/app"
+    assert positional(events[export]) == [f"{RUNTIME}/opencode", EXPORT_DIR, "root", f"{directory}/export-root"]
+    # The run's private store, from the task workdir, without the run's configuration.
+    assert "cd /app || exit 125\nunset OPENCODE_CONFIG_CONTENT\n" in events[export]
+    env = environment(events[export])
+    assert env["XDG_DATA_HOME"] == f"{directory}/data" and env["PWD"] == "/app"
+    assert "OPENCODE_CONFIG_CONTENT" not in env
+    assert positional(events[event_log]) == [f"{directory}/stdout.jsonl", f"{EXPORT_DIR}/root.events.jsonl"]
+    assert json.loads(sandbox.files[f"{directory}/sessions.json"]) == [{"id": "root", "parent_id": None}]
     assert "export_dir_write_failed" not in gap_codes(closed.agent_observations)
     if not close_during_run:
         assert response.status == "completed"
 
 
 @pytest.mark.parametrize("failure", ["exit", "provider", "transport"])
-async def test_export_failure_is_a_gap_that_keeps_the_result_and_release(setup, failure):
+async def test_export_failure_is_a_gap_that_keeps_the_result_and_release(setup, tmp_path, failure):
     agent, sandbox = setup
     agent.config.export_dir = EXPORT_DIR
+    capture_observations(sandbox, tmp_path)
 
     async def failed(command, **kwargs):
         if failure == "transport":
             raise ConnectionError("exec stream lost")
-        error_type = "sandbox" if failure == "provider" else None
-        return result(1 if failure == "exit" else 0, stderr="child export failed", error_type=error_type)
+        if failure == "provider":
+            return result(0, stderr="child export failed", error_type="sandbox")
+        return result(1, stdout="exit 1: child export failed")
 
-    intercept(sandbox, "--export", failed)
+    intercept(sandbox, EXPORT_SESSION, failed)
     response, closed = await episode(agent, sandbox)
     assert response.status == "completed"
     assert response.output[-1].content[0].text == "Fixed"
@@ -315,21 +363,23 @@ async def test_export_failure_is_a_gap_that_keeps_the_result_and_release(setup, 
     assert not active_sessions(agent)
 
 
-async def test_hanging_export_is_bounded_by_the_collection_budget(setup):
+async def test_hanging_export_is_bounded_by_the_collection_budget(setup, tmp_path):
     agent, sandbox = setup
     agent.config.export_dir = EXPORT_DIR
+    capture_observations(sandbox, tmp_path)
     never = asyncio.Event()
 
     async def hang(command, **kwargs):
         await never.wait()
 
-    intercept(sandbox, "--export", hang)
+    intercept(sandbox, EXPORT_SESSION, hang)
     started = monotonic()
     response, closed = await asyncio.wait_for(episode(agent, sandbox), 10)
     assert monotonic() - started < 5
     assert response.status == "completed"
-    gaps = [gap for gap in closed.agent_observations.gaps if gap.code == "export_dir_write_failed"]
-    assert len(gaps) == 1 and gaps[0].detail.startswith("TimeoutError")
+    (gap,) = [gap for gap in closed.agent_observations.gaps if gap.code == "export_dir_write_failed"]
+    assert gap.detail.startswith("0 of 1 sessions exported in ") and ", deadline exhausted; " in gap.detail
+    assert "root: export deadline exceeded" in gap.detail
     sandbox.disconnect.assert_awaited_once()
 
 
@@ -341,7 +391,8 @@ async def test_session_without_a_launch_writes_no_exports(setup):
     closed = await asyncio.wait_for(
         agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id))), 10
     )
-    assert not any("--export" in call.args[0] for call in sandbox.exec.await_args_list)
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    assert not any(EXPORT_SESSION in command or "/sessions.json" in command for command in commands)
     assert gap_codes(closed.agent_observations) == ["agent_activation_interrupted"]
 
 
@@ -354,185 +405,50 @@ def test_continuation_rewrites_exports_after_every_activation(setup, tmp_path):
         assert activate(client, 1).status_code == 200
         assert activate(client, 2).status_code == 200
         receipt = close(client, request)
-    exports = [shlex.split(call.args[0]) for call in sandbox.exec.await_args_list if "--export" in call.args[0]]
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    exports = [positional(command) for command in commands if EXPORT_SESSION in command]
     activation_directories = [payload["directory"] for payload in payloads]
-    assert [argv[4] for argv in exports] == activation_directories
-    assert {argv[5] for argv in exports} == {str(Path(activation_directories[0]).parent)}
+    assert [argv[3] for argv in exports] == [
+        f"{directory}/export-opencode-session" for directory in activation_directories
+    ]
+    # One conversation store across activations; one event log per activation.
+    conversation = str(Path(activation_directories[0]).parent)
+    assert {environment(command)["XDG_DATA_HOME"] for command in commands if EXPORT_SESSION in command} == {
+        f"{conversation}/data"
+    }
+    assert [positional(command)[1] for command in commands if EVENT_LOG in command] == [
+        f"{EXPORT_DIR}/opencode-session.activation-1.events.jsonl",
+        f"{EXPORT_DIR}/opencode-session.activation-2.events.jsonl",
+    ]
     assert "export_dir_write_failed" not in [gap["code"] for gap in receipt["agent_observations"]["gaps"]]
 
 
-class HostSandbox:
-    """Run sandbox commands on this host, with the test interpreter standing in for ``python3``.
-
-    ``streams`` mimics what a provider keeps of the command's output: both streams, stderr merged into stdout
-    with only the exit status as stderr (OpenSandbox's background exec), or no stderr at all.
-    """
-
-    def __init__(self, streams="separate"):
-        self.streams = streams
-
-    async def exec(self, command, *, cwd=None, timeout_s=30):
-        command = command.replace("python3 ", shlex.quote(sys.executable) + " ", 1)
-        stderr_to = asyncio.subprocess.STDOUT if self.streams == "merged" else asyncio.subprocess.PIPE
-        process = await asyncio.create_subprocess_shell(
-            command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=stderr_to
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
-        except BaseException:
-            process.kill()
-            await process.wait()
-            raise
-        stderr = (stderr or b"").decode(errors="replace")
-        if self.streams == "merged":
-            stderr = f"exit status {process.returncode}" if process.returncode else ""
-        elif self.streams == "dropped":
-            stderr = ""
-        return SandboxExecResult(stdout.decode(errors="replace"), stderr, process.returncode)
-
-
-def host_export_session(tmp_path, *, failing=(), streams="separate"):
-    """A finished single-turn session on this host whose stand-in CLI exports each session, failing ``failing``."""
-    conversation = tmp_path / "session"
-    database = conversation / "data/opencode/opencode.db"
-    database.parent.mkdir(parents=True)
-    workdir = tmp_path / "task"
-    workdir.mkdir()
-    shutil.copyfile(sandbox_runner.__file__, conversation / RUNNER_FILE)
-    with sqlite3.connect(database) as connection:
-        connection.executescript("""
-            create table session(id text, parent_id text, time_created integer);
-            insert into session values('ses_root', null, 0), ('ses_child', 'ses_root', 1);
-        """)
-    cli = tmp_path / "opencode"
-    cli.write_text(
-        f"#!{sys.executable}\nimport json, sys\n"
-        f"if sys.argv[2] in {list(failing)!r}:\n"
-        "    sys.exit('Session not found: ' + sys.argv[2])\n"
-        "print(json.dumps({'info': {'id': sys.argv[2]}, 'messages': []}))\n"
-    )
-    cli.chmod(0o755)
-    (conversation / "input.json").write_text(
-        json.dumps({"command": [str(cli), "run"], "cwd": str(workdir), "env": {}, "activation_id": None})
-    )
-    (conversation / "stdout.jsonl").write_text('{"type": "step_start"}\n')
-    exports = tmp_path / "owner exports"
-    state = OpenCodeSandboxSession(
-        request=seed(),
-        session=SandboxSession(
-            sandbox=HostSandbox(streams), session_dir=str(conversation), workdir=str(workdir), harness="OpenCode"
-        ),
-        runtime=str(tmp_path),
-        export_dir=str(exports),
-    )
-    return state, exports
-
-
-async def test_adapter_export_command_runs_the_runner_inside_the_sandbox(tmp_path):
-    state, exports = host_export_session(tmp_path)
-    await asyncio.wait_for(state.write_exports(deadline=monotonic() + 30), 40)
-    assert state.take_export_gaps() == []
-    assert json.loads((exports / "sessions.json").read_text()) == [
-        {"id": "ses_root", "parent_id": None},
-        {"id": "ses_child", "parent_id": "ses_root"},
-    ]
-    for session_id in ("ses_root", "ses_child"):
-        assert json.loads((exports / f"{session_id}.json").read_text())["info"]["id"] == session_id
-    assert (exports / "ses_root.events.jsonl").read_text() == '{"type": "step_start"}\n'
-
-
-@pytest.mark.parametrize("streams", ["separate", "merged", "dropped"])
-async def test_failed_session_reaches_the_gap_whatever_the_provider_keeps_of_stderr(tmp_path, streams):
-    state, _ = host_export_session(tmp_path, failing=["ses_child"], streams=streams)
-    await asyncio.wait_for(state.write_exports(deadline=monotonic() + 30), 40)
-    (gap,) = state.take_export_gaps()
-    assert gap.code == "export_dir_write_failed"
-    assert gap.detail.startswith("RuntimeError: exit=1, error=None, exec budget ")
-    assert "1 of 2 sessions exported in " in gap.detail
-    assert "ses_child: exit 1: Session not found: ses_child" in gap.detail
-    if streams == "merged":
-        assert gap.detail.endswith("stderr: exit status 1")
-
-
-EXPORT_STATUS_LINE = json.dumps(
-    {
-        "sessions": {"ses_root": "ok", "ses_child": "exit 1: Session not found: ses_child"},
-        "event_log": "ok",
-        "deadline_exhausted": False,
-        "error": None,
-        "budget_seconds": 43.2,
-        "elapsed_seconds": 3.1,
-    }
-)
-EXPORT_FAILED_LINE = "OpenCode session export failed: ses_child: exit 1: Session not found: ses_child"
-
-
-@pytest.mark.parametrize(
-    ("stdout", "stderr"),
-    [
-        (EXPORT_STATUS_LINE + "\n", EXPORT_FAILED_LINE + "\n"),
-        (f"{EXPORT_FAILED_LINE}\n{EXPORT_STATUS_LINE}\n", "exit status 1"),
-        (EXPORT_STATUS_LINE + "\n", ""),
-        (EXPORT_STATUS_LINE + "\n", None),
-    ],
-    ids=["separate", "merged", "stderr empty", "stderr none"],
-)
-async def test_export_gap_detail_comes_from_the_status_line(setup, stdout, stderr):
-    agent, sandbox = setup
-    agent.config.export_dir = EXPORT_DIR
-
-    async def failed(command, **kwargs):
-        return result(1, stdout=stdout, stderr=stderr)
-
-    intercept(sandbox, "--export", failed)
-    response, closed = await episode(agent, sandbox)
-    assert response.status == "completed"
-    (gap,) = [gap for gap in closed.agent_observations.gaps if gap.code == "export_dir_write_failed"]
-    assert "1 of 2 sessions exported in 3.1 of 43.2 s; ses_child: exit 1: Session not found: ses_child" in gap.detail
-    if stderr:
-        assert gap.detail.endswith(f"stderr: {stderr}")
-
-
-async def test_export_gap_without_a_status_line_keeps_what_the_provider_returned(setup):
-    agent, sandbox = setup
-    agent.config.export_dir = EXPORT_DIR
-
-    async def killed(command, **kwargs):
-        return result(137, stdout="partial output", stderr="")
-
-    intercept(sandbox, "--export", killed)
-    _, closed = await episode(agent, sandbox)
-    (gap,) = [gap for gap in closed.agent_observations.gaps if gap.code == "export_dir_write_failed"]
-    assert "exit=137, error=None" in gap.detail
-    assert gap.detail.endswith("no export status; stdout: partial output")
-
-
-@pytest.mark.parametrize(("budget", "margin"), [(100.0, 5.0), (10.0, 1.0)])
-async def test_export_runner_stops_before_its_exec_times_out(budget, margin):
-    calls = []
+async def test_each_export_step_gets_what_is_left_of_the_budget(tmp_path):
+    timeouts = []
 
     class Recorder:
         async def exec(self, command, *, cwd=None, timeout_s=None):
-            calls.append((shlex.split(command), timeout_s))
+            timeouts.append(timeout_s)
             return SandboxExecResult("", "", 0)
 
-    state = OpenCodeSandboxSession(
-        request=seed(),
-        session=SandboxSession(sandbox=Recorder(), session_dir="/s/one", workdir="/app", harness="OpenCode"),
-        runtime="/r",
-        export_dir=EXPORT_DIR,
-    )
-    await state.write_exports(deadline=monotonic() + budget)
-    ((argv, exec_timeout),) = calls
-    assert budget - 1 < exec_timeout <= budget
-    # The runner's own deadline leaves it time to report each session before the exec is abandoned.
-    assert float(argv[-1]) == pytest.approx(exec_timeout - margin, abs=0.05)
+        async def upload(self, source, destination):
+            pass
+
+    session = SandboxSession(sandbox=Recorder(), session_dir="/s/one", workdir="/app", harness="OpenCode")
+    session.cleanup = {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None}
+    state = OpenCodeSandboxSession(request=seed(), session=session, runtime="/r", export_dir=EXPORT_DIR)
+    session_store(tmp_path / "opencode.db", roots=["root"])
+    budget = 10.0
+    await state.write_exports(tmp_path, deadline=monotonic() + budget)
     assert state.take_export_gaps() == []
+    # Prepare, publish the inventory, the session, the event log: each until the same deadline.
+    assert len(timeouts) == 4
+    assert budget - 1 < timeouts[0] <= budget and timeouts == sorted(timeouts, reverse=True)
 
 
 def launch_config(sandbox):
-    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
-    return payload, json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+    params = sandbox.params()
+    return params, json.loads(params["env"]["OPENCODE_CONFIG_CONTENT"])
 
 
 BUILTIN_AGENTS = {"build", "plan", "general", "explore", "compaction", "title", "summary"}
@@ -642,40 +558,52 @@ async def test_pinned_ripgrep_is_staged_where_opencode_looks_and_replaces_the_pa
     directory = sandbox.directory
     install = events[index(events, "install_opencode_runtime.sh")]
     assert install.startswith("NG_OPENCODE_SKIP_RIPGREP=1 bash ")
-    stage = index(events, "--stage-executable")
+    stage = index(events, VERSION_PROBE)
     assert index(events, "install_opencode_runtime.sh") < stage < index(events, "--receipt")
-    assert shlex.split(events[stage]) == [
-        "python3",
-        "-I",
-        f"{directory}/{RUNNER_FILE}",
-        "--stage-executable",
+    assert positional(events[stage]) == [
         "/mnt/cache/rg",
         PIN,
+        f"{directory}/cache/opencode/bin/.pinned-rg",
         f"{directory}/cache/opencode/bin/rg",
     ]
-    payload, _ = launch_config(sandbox)
-    assert payload["env"]["XDG_CACHE_HOME"] == f"{directory}/cache"
+    params, _ = launch_config(sandbox)
+    assert params["env"]["XDG_CACHE_HOME"] == f"{directory}/cache"
 
 
-async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directory(setup):
+async def test_pinned_plugin_dependencies_unpack_into_the_private_config_directory(setup, tmp_path):
     agent, sandbox = setup
     agent.config.sandbox_plugin_dependencies_path = "/mnt/cache/opencode-plugin-dependencies.tar.gz"
-    agent.config.sandbox_plugin_dependencies_sha256 = PIN
+    agent.config.sandbox_plugin_dependencies_sha256 = plugin_dependencies(sandbox, tmp_path)
     events = record(sandbox)
     response, _ = await episode(agent, sandbox)
     assert response.status == "completed"
     directory = sandbox.directory
-    argv = shlex.split(events[index(events, "--stage-archive")])
-    assert argv[3:] == [
-        "--stage-archive",
+    copy, unpack = index(events, PINNED_COPY), index(events, UNPACK)
+    assert index(events, "install_opencode_runtime.sh") < copy < unpack < index(events, "--receipt")
+    assert positional(events[copy]) == [
         agent.config.sandbox_plugin_dependencies_path,
-        PIN,
-        f"{directory}/config/opencode",
+        agent.config.sandbox_plugin_dependencies_sha256,
+        f"{directory}/config/.pinned-opencode",
     ]
-    payload, _ = launch_config(sandbox)
-    assert payload["env"]["XDG_CONFIG_HOME"] == f"{directory}/config"
+    assert positional(events[unpack]) == [f"{directory}/config/.pinned-opencode", f"{directory}/config/opencode"]
+    params, _ = launch_config(sandbox)
+    assert params["env"]["XDG_CONFIG_HOME"] == f"{directory}/config"
     # Without a pinned rg the installer keeps its best-effort ripgrep install.
     assert not any(event.startswith("NG_OPENCODE_SKIP_RIPGREP") for event in events)
+
+
+def test_a_dependency_archive_that_leaves_its_folder_refuses_the_seed(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.sandbox_plugin_dependencies_path = "/mnt/cache/opencode-plugin-dependencies.tar.gz"
+    agent.config.sandbox_plugin_dependencies_sha256 = plugin_dependencies(sandbox, tmp_path, ("../escape", b"x"))
+    response = seed_status(agent)
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "Pinned plugin dependency archive rejected: archive member '../escape' leaves the target directory"
+    )
+    assert not any(UNPACK in call.args[0] for call in sandbox.exec.await_args_list)
+    sandbox.disconnect.assert_awaited_once()
+    assert not active_sessions(agent)
 
 
 @pytest.mark.parametrize("kind", ["ripgrep", "plugin_dependencies"])
@@ -686,9 +614,9 @@ def test_only_rejected_bundle_bytes_are_a_deterministic_setup_error(setup, kind,
     setattr(agent.config, f"sandbox_{kind}_sha256", PIN)
 
     async def staged(command, **kwargs):
-        return result(code, stderr="Rejected: SHA-256 mismatch: expected a, found b")
+        return result(code, stderr="SHA-256 mismatch: expected a, found b")
 
-    intercept(sandbox, "--stage-", staged)
+    intercept(sandbox, PINNED_COPY, staged)
     response = seed_status(agent, raise_server_exceptions=False)
     assert response.status_code == status
     if status == 422:
@@ -721,22 +649,19 @@ IMPORT_PATH = "/owner/prefix-export.json"
 async def test_imported_session_is_continued_without_its_prefix(setup, tmp_path):
     agent, sandbox = setup
     agent.config.session_import_path = IMPORT_PATH
-    imported = {"session_id": "ses_prefix", "message_ids": ["prefix-user", "prefix-reply"]}
 
     async def import_(command, **kwargs):
-        argv = shlex.split(command)
-        params = json.loads(sandbox.files[argv[4]])
-        assert argv[3] == "--import" and argv[5] == IMPORT_PATH
-        assert params["cwd"] == kwargs["cwd"] == "/app"
-        assert params["command"] == [f"{RUNTIME}/opencode"]
-        directory = argv[2].rsplit("/", 1)[0]
-        assert params["env"]["XDG_DATA_HOME"] == f"{directory}/data"
-        assert params["env"]["PWD"] == "/app"
-        assert "OPENCODE_CONFIG_CONTENT" not in params["env"]
-        return result(stdout=json.dumps(imported))
+        directory = command.split("mkdir -p -- ", 1)[1].split("/home", 1)[0]
+        assert command.endswith(f"exec {RUNTIME}/opencode import {IMPORT_PATH} </dev/null")
+        assert "cd /app || exit 125\nunset OPENCODE_CONFIG_CONTENT\n" in command
+        env = environment(command)
+        assert env["XDG_DATA_HOME"] == f"{directory}/data" and env["PWD"] == "/app"
+        assert "OPENCODE_CONFIG_CONTENT" not in env
+        return result()
 
-    intercept(sandbox, "--import", import_)
-    # The stored transcript holds the imported prefix before this activation's turn.
+    intercept(sandbox, IMPORT, import_)
+    # The store holds only the imported prefix until the run adds this activation's turn.
+    imported = session_store(tmp_path / "imported.db", roots=["ses_prefix"], messages=["prefix-user", "prefix-reply"])
     database = tmp_path / "observations.db"
     with sqlite3.connect(database) as connection:
         connection.executescript("""
@@ -760,7 +685,7 @@ async def test_imported_session_is_continued_without_its_prefix(setup, tmp_path)
                 "insert into part values (?, ?, 'ses_prefix', ?, ?)",
                 (f"part-{position}", message_id, json.dumps(part), position),
             )
-    # The runner's snapshot leaves previous messages out of the exported turns (see test_sandbox_runner).
+    # The host snapshot leaves previous messages out of the exported turns (see test_snapshot).
     sandbox.events = json.dumps(
         {
             **export,
@@ -773,19 +698,20 @@ async def test_imported_session_is_continued_without_its_prefix(setup, tmp_path)
     original = sandbox.download
 
     async def download(source, destination):
-        if source.endswith("/observations.db"):
-            Path(destination).write_bytes(database.read_bytes())
+        if source.endswith("/opencode.db"):
+            Path(destination).write_bytes((database if sandbox.started.is_set() else imported).read_bytes())
         else:
             await original(source, destination)
 
     sandbox.download = download
     events = record(sandbox)
     response, closed = await episode(agent, sandbox)
-    assert index(events, "--import") < index(events, "--receipt")
-    payload, _ = launch_config(sandbox)
-    assert payload["command"][-2:] == ["--session", "ses_prefix"]
-    assert payload["harness_session_id"] == "ses_prefix"
-    assert payload["previous_message_ids"] == ["prefix-user", "prefix-reply"]
+    assert index(events, IMPORT_CHECK) < index(events, IMPORT) < index(events, "--receipt")
+    params, _ = launch_config(sandbox)
+    assert params["command"][-2:] == ["--session", "ses_prefix"]
+    assert sandbox.snapshots == [
+        {"harness_session_id": "ses_prefix", "previous_message_ids": ["prefix-user", "prefix-reply"]}
+    ]
     assert response.status == "completed"
     assert "Earlier answer" not in json.dumps(response.model_dump(mode="json"))
     assert response.output[-1].content[0].text == "Fixed"
@@ -800,25 +726,27 @@ async def test_absent_import_file_leaves_a_fresh_session(setup):
     agent.config.session_import_path = IMPORT_PATH
 
     async def nothing_staged(command, **kwargs):
-        return result(stdout="null\n")
+        return result(1)
 
-    intercept(sandbox, "--import", nothing_staged)
+    intercept(sandbox, IMPORT_CHECK, nothing_staged)
+    events = record(sandbox)
     response, _ = await episode(agent, sandbox)
     assert response.status == "completed"
-    payload, _ = launch_config(sandbox)
-    assert "--session" not in payload["command"]
-    assert payload["harness_session_id"] is None and payload["previous_message_ids"] == []
+    assert not any(IMPORT in event for event in events)
+    params, _ = launch_config(sandbox)
+    assert "--session" not in params["command"]
+    assert sandbox.snapshots == [{"harness_session_id": None, "previous_message_ids": []}]
 
 
-@pytest.mark.parametrize(("code", "status"), [(3, 422), (1, 500)])
-def test_failed_import_is_a_deterministic_setup_error_only_when_rejected(setup, code, status):
+@pytest.mark.parametrize(("code", "status"), [(1, 422), (125, 500), (127, 500), (137, 500)])
+def test_failed_import_is_a_deterministic_setup_error_only_when_opencode_refused_it(setup, code, status):
     agent, sandbox = setup
     agent.config.session_import_path = IMPORT_PATH
 
     async def failed(command, **kwargs):
-        return result(code, stderr="Rejected: opencode import exited 1: invalid export")
+        return result(code, stderr="Error: invalid export")
 
-    intercept(sandbox, "--import", failed)
+    intercept(sandbox, IMPORT, failed)
     response = seed_status(agent, raise_server_exceptions=False)
     assert response.status_code == status
     if status == 422:
@@ -836,9 +764,9 @@ def test_export_failure_is_reported_by_the_activation_that_had_it(setup, tmp_pat
 
     async def first_fails(command, **kwargs):
         exports.append(command)
-        return result(1 if len(exports) == 1 else 0, stderr="disk full")
+        return result(1, stdout="exit 1: disk full") if len(exports) == 1 else result()
 
-    intercept(sandbox, "--export", first_fails)
+    intercept(sandbox, EXPORT_SESSION, first_fails)
     with TestClient(agent.setup_webserver()) as client:
         request = start(client)
         first, second = activate(client, 1).json(), activate(client, 2).json()
@@ -868,11 +796,9 @@ def test_export_dir_must_be_neither_the_workdir_inside_it_nor_above_it(setup, ex
         sandbox.exec.assert_not_awaited()
     else:
         # The prepare step checks the resolved paths too, before any session file exists.
-        argv = shlex.split(sandbox.exec.await_args_list[0].args[0])
-        check = argv.index(_CHECK_EXPORT_DIR)
-        assert argv[check - 3 : check] == ["python3", "-I", "-c"]
-        assert argv[check + 1 : check + 4] == ["/srv/task", "/srv/exports", "&&"]
-        assert argv[check + 4 : check + 6] == ["mkdir", "-p"]
+        prepare = sandbox.exec.await_args_list[0].args[0]
+        check = prepare.index(f"set -- /srv/exports\n{_CHECK_EXPORT_DIR}")
+        assert prepare.index("OpenCode runtime/session storage overlaps") < check < prepare.index("mkdir -p ")
 
 
 def test_resolved_export_dir_check_follows_links_in_the_sandbox(tmp_path):
@@ -883,58 +809,35 @@ def test_resolved_export_dir_check_follows_links_in_the_sandbox(tmp_path):
     above = tmp_path / "above"
     above.symlink_to(tmp_path, target_is_directory=True)
     cases = {inside: False, inside / "not-yet": False, above: False, workdir: False, tmp_path / "exports": True}
-    for export_dir, accepted in cases.items():
-        checked = subprocess.run(
-            [sys.executable, "-I", "-c", _CHECK_EXPORT_DIR, str(workdir), str(export_dir)],
-            capture_output=True,
-            text=True,
-            timeout=30,
+    for number, (export_dir, accepted) in enumerate(cases.items()):
+        directory = tmp_path / "sessions" / str(number)
+        command = _sandbox_prepare_command(
+            str(workdir), str(directory), str(tmp_path / "runtime"), export_dir=str(export_dir)
         )
+        checked = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True, timeout=30)
         assert (checked.returncode == 0) is accepted, (export_dir, checked.stderr)
+        # The check runs before the session directory exists.
+        assert directory.is_dir() is accepted
         if not accepted:
             assert "OpenCode export_dir overlaps the task workdir" in checked.stderr
 
 
-async def test_configured_interpreter_and_path_prefix_reach_every_sandbox_command(setup, tmp_path):
+async def test_path_prefix_reaches_the_installer_and_every_opencode_process(setup, tmp_path):
     agent, sandbox = setup
-    python, prefix = "/opt/gym runtime/python/bin/python3", "/opt/gym runtime/bin"
-    agent.config.sandbox_python_executable = python
+    prefix = "/opt/gym runtime/bin"
     agent.config.sandbox_path_prefix = [prefix]
-    agent.config.plugins = ["/opt/owner/plugin.mjs"]
-    agent.config.sandbox_ripgrep_path = "/mnt/cache/rg"
-    agent.config.sandbox_ripgrep_sha256 = PIN
-    agent.config.sandbox_plugin_dependencies_path = "/mnt/cache/deps.tar.gz"
-    agent.config.sandbox_plugin_dependencies_sha256 = PIN
     agent.config.session_import_path = IMPORT_PATH
     agent.config.export_dir = EXPORT_DIR
-
-    async def nothing_staged(command, **kwargs):
-        return result(stdout="null\n")
-
-    intercept(sandbox, "--import", nothing_staged)
     capture_observations(sandbox, tmp_path)
     events = record(sandbox)
     response, closed = await episode(agent, sandbox)
     assert response.status == "completed"
-    prepare = shlex.split(events[0])
-    assert prepare[prepare.index(_CHECK_EXPORT_DIR) - 3] == python
-    assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[-2:] == [python, prefix]
-    for marker in ("os.path.isfile", "--stage-executable", "--stage-archive", "--import", "--export", "--snapshot"):
-        assert shlex.split(events[index(events, marker)])[0] == python, marker
-    # The supervisor launch starts from the configured interpreter; it runs through a link to it when it can.
-    assert f"py={shlex.quote(python)}; " in events[index(events, "--receipt")]
-    directory = sandbox.directory
-    for name in ("input.json", "import.json"):
-        assert json.loads(sandbox.files[f"{directory}/{name}"])["path_prefix"] == [prefix], name
+    assert shlex.split(events[index(events, "install_opencode_runtime.sh")])[-1] == prefix
+    assert f"PATH={shlex.quote(prefix)}:$PATH\n" in launch_config(sandbox)[0]["setup"]
+    for marker in (IMPORT, EXPORT_SESSION):
+        assert f"PATH={shlex.quote(prefix)}:$PATH\n" in events[index(events, marker)], marker
+    assert not any("python" in event for event in events)
     assert "export_dir_write_failed" not in gap_codes(closed.agent_observations)
-
-
-async def test_unset_export_dir_adds_no_prepare_check(setup):
-    agent, sandbox = setup
-    await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
-    prepare = sandbox.exec.await_args_list[0].args[0]
-    assert prepare.count("python3 -I -c") == 1
-    assert _CHECK_EXPORT_DIR not in shlex.split(prepare)
 
 
 def refused(agent, caplog):
@@ -992,26 +895,26 @@ def test_unusable_owner_setting_refuses_the_seed_before_connecting(setup, caplog
 INPUT_REFUSALS = {
     "plugin file missing": (
         {"plugins": ["/opt/owner/missing.mjs"]},
-        "os.path.isfile",
+        PLUGIN_CHECK,
         result(3, stdout="/opt/owner/missing.mjs\n"),
         "OpenCode plugin files are missing from the sandbox: /opt/owner/missing.mjs",
     ),
     "pinned ripgrep": (
         {"sandbox_ripgrep_path": "/mnt/cache/rg", "sandbox_ripgrep_sha256": PIN},
-        "--stage-executable",
-        result(3, stderr="Rejected: /mnt/cache/rg --version exited 2: no"),
+        VERSION_PROBE,
+        result(3, stderr="/mnt/cache/rg --version exited 2: no"),
         "Pinned ripgrep executable rejected",
     ),
     "pinned plugin dependencies": (
         {"sandbox_plugin_dependencies_path": "/mnt/cache/deps.tar", "sandbox_plugin_dependencies_sha256": PIN},
-        "--stage-archive",
-        result(3, stderr="Rejected: archive member 'd/l/l2' passes through the link 'd/l'"),
+        PINNED_COPY,
+        result(3, stderr="SHA-256 mismatch: expected a, found b in /mnt/cache/deps.tar"),
         "Pinned plugin dependency archive rejected",
     ),
     "session import": (
         {"session_import_path": IMPORT_PATH},
-        "--import",
-        result(3, stderr="Rejected: opencode import exited 1: invalid export"),
+        IMPORT,
+        result(1, stderr="Error: invalid export"),
         "OpenCode could not import session_import_path",
     ),
 }

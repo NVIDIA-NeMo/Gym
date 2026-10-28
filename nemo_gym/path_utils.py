@@ -41,3 +41,27 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
 def aggregation_sources_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_sources.json`: the shards `gym eval aggregate` merged into it."""
     return output_fpath.with_stem(output_fpath.stem + "_sources").with_suffix(".json")
+
+
+def run_summary_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_run_summary.json`.
+
+    The per-run summary a Harbor run writes beside its rollouts (`nemo_gym.tasks.harbor.run_summary`),
+    named like the other sidecars so a renamed `--output` keeps them together.
+    """
+    return output_fpath.with_stem(output_fpath.stem + "_run_summary").with_suffix(".json")
+
+
+def resolved_config_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_resolved_config.yaml`."""
+    return output_fpath.with_stem(output_fpath.stem + "_resolved_config").with_suffix(".yaml")
+
+
+def exporter_run_id_path_for(output_fpath: Path, exporter: str) -> Path:
+    """`results/rollouts.jsonl`, `mlflow` -> `results/rollouts_mlflow_run_id`: the run a live exporter logs to."""
+    return output_fpath.with_name(f"{output_fpath.stem}_{exporter}_run_id")
+
+
+def export_done_path_for(output_fpath: Path, exporter: str) -> Path:
+    """`results/rollouts.jsonl`, `mlflow` -> `results/rollouts_mlflow_export_done`: set once the run was exported."""
+    return output_fpath.with_name(f"{output_fpath.stem}_{exporter}_export_done")

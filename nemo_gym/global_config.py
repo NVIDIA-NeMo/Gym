@@ -391,6 +391,10 @@ class GlobalConfigDictParserConfig(BaseModel):
     # Static inspection avoids network and process side effects. Assigned ports are placeholders,
     # not evidence that a runtime is ready.
     offline: bool = False
+    # Leave live exporters unopened. Like `offline`, this is set by a command in code, not by users: nothing on the
+    # command line reaches this model. `gym eval export` sets it because it opens its own backend session, so
+    # parsing its config must not also start a live exporter, which would log the run twice.
+    skip_exporters: bool = False
 
     # This is a shorthand we use for config resolution use cases that shouldn't require a model
     # e.g. data loading, etc
@@ -1739,7 +1743,7 @@ Set the keys individually, in a config or as overrides, e.g.:
             recursively_hide_secrets(global_config_dict)
 
         # Set up exporters and log config. This must happen at the very last step.
-        if not parse_config.offline:  # pragma: no cover
+        if not parse_config.offline and not parse_config.skip_exporters:  # pragma: no cover
             setup_exporters(global_config_dict)
 
         return global_config_dict

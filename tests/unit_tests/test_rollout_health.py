@@ -2589,7 +2589,9 @@ def test_a_new_run_removes_the_previous_jobs_health_reports(tmp_path: Path, monk
     seen = {}
 
     async def collection(self, config):
-        seen["reports"] = sorted(path.name for path in tmp_path.iterdir())
+        seen["reports"] = sorted(
+            path.name for path in tmp_path.iterdir() if path.name in ("quality_summary.json", "rollout_verdicts.jsonl")
+        )
 
     monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collection)
     monkeypatch.setattr(
@@ -2640,6 +2642,19 @@ def test_only_inventory_rows_count_and_non_object_sidecar_lines_are_skipped(tmp_
 
     assert (artifacts["expected"], artifacts["missing"]) == (4, 1)
     assert artifacts["failed"]["total"] == 0
+
+
+def test_the_reports_record_the_rollouts_they_were_computed_from(tmp_path: Path) -> None:
+    """The reports keep one name per folder whatever the rollouts file is called, so the quality summary names the
+    rollouts it was computed from, relative to its own folder (a Harbor run's summary links a report by it)."""
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    result = run_health_checks(rollout_path, workers=1)
+    assert json.loads(result.summary_path.read_text())["run"]["rollouts"] == ["rollouts.jsonl"]
+    elsewhere = run_health_checks(rollout_path, output_dir=tmp_path / "reports", workers=1)
+    assert json.loads(elsewhere.summary_path.read_text())["run"]["rollouts"] == ["../rollouts.jsonl"]
+    _inventory(tmp_path, 1)
+    provisional = health.write_provisional_summary(rollout_path, {(0, 0)})
+    assert json.loads(provisional.read_text())["run"]["rollouts"] == ["rollouts.jsonl"]
 
 
 def test_a_provisional_summary_without_a_reason_leaves_healthy_unknown(tmp_path: Path) -> None:

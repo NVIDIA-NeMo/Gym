@@ -5585,6 +5585,41 @@ class TestRolloutCollection:
         ]
         assert (tmp_path / "output_resubmit_offset").read_text() == "2\n"
 
+    @pytest.mark.parametrize("missing", ["output", "materialized inputs"])
+    async def test_a_resume_with_nothing_to_resume_starts_the_tracking_run_over(
+        self, tmp_path: Path, empty_global_config: MagicMock, monkeypatch: pytest.MonkeyPatch, missing: str
+    ) -> None:
+        """The exporters reopened the run recorded next to the output, but collection starts the output anew."""
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + b"\n"
+        )
+        output_fpath = tmp_path / "output.jsonl"
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result={"reward": 1.0}, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        base = dict(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True)
+        await Helper().run_from_config(RolloutCollectionConfig(**base, resume_from_cache=False))
+        exporter = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [exporter])
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", MagicMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", MagicMock())
+
+        config = RolloutCollectionConfig(**base, resume_from_cache=True)
+        await Helper().run_from_config(config)
+        exporter.start_over.assert_not_called()
+
+        (output_fpath if missing == "output" else config.materialized_jsonl_fpath).unlink()
+        await Helper().run_from_config(config)
+        exporter.start_over.assert_called_once_with()
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
         self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool
@@ -6387,6 +6422,35 @@ class TestRolloutCollection:
         )
 
         assert expected_results == actual_returned_results
+
+    async def test_opted_in_helper_reuses_its_client_across_run_examples_and_aggregation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Every head-server lookup on an opted-in helper goes through the one cached client."""
+        rows = [
+            {TASK_INDEX_KEY_NAME: task_index, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"}
+            for task_index in range(2)
+        ]
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/aggregate_metrics":
+                metrics = compute_aggregate_metrics([dict(r) for r in json.verify_responses])
+                return FakeResponse(200, metrics.model_dump())
+            return FakeResponse(200, {"reward": 1.0})
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = _environment_server_config()
+        loader = MagicMock(return_value=client)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", loader)
+
+        helper = RolloutCollectionHelper(reuse_server_client=True)
+        scored = []
+        for row in rows:
+            _, result = await next(helper.run_examples([row]))
+            scored.append(dict(row, **result))
+        await helper._call_aggregate_metrics(scored, scored, tmp_path / "output.jsonl")
+
+        loader.assert_called_once_with(None)
 
     async def test_call_aggregate_metrics(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""

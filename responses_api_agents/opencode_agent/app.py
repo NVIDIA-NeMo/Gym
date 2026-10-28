@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -33,13 +34,19 @@ from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from openai.types.responses.response import IncompleteDetails
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    SandboxSession,
+)
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -90,13 +97,21 @@ from responses_api_agents.opencode_agent.artifacts import (
 )
 from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
+from responses_api_agents.opencode_agent.pinned import (
+    COPY_PINNED,
+    REJECTED,
+    STAGE_EXECUTABLE,
+    UNPACK_ARCHIVE,
+    check_archive,
+)
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
     OPENCODE_VERSION,
     apply_observability_patch,
 )
-from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_error_message
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, cli_environment, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
+from responses_api_agents.opencode_agent.snapshot import stored_message_ids, stored_sessions
 
 
 LOG = logging.getLogger(__name__)
@@ -139,13 +154,10 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
-def _sandbox_prepare_command(
-    workdir: str, directory: str, runtime: str, *, python: str = "python3", export_dir: str | None = None
-) -> str:
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str, *, export_dir: str | None = None) -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "OpenCode sandbox execution requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -160,22 +172,32 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
-    validate_paths = (
-        "from pathlib import Path; import sys; "
-        "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
-        "assert workdir.is_dir(), 'OpenCode task workdir is missing'; "
-        "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
-        "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
-    )
+    # Resolve symlinks like realpath -m: storage roots need not exist yet.
+    validate_paths = """resolve() {
+    if [ -e "$1" ]; then (cd -P "$1" && pwd -P); else
+        parent=${1%/*}
+        parent=$(resolve "${parent:-/}") && printf '%s/%s\\n' "${parent%/}" "${1##*/}"
+    fi
+}
+[ -d "$1" ] || { echo 'OpenCode task workdir is missing' >&2; exit 1; }
+workdir=$(resolve "$1")
+shift
+for root in "$@"; do
+    root=$(resolve "$root")
+    case "$root/" in "${workdir%/}"/*) overlap=1 ;; esac
+    case "$workdir/" in "${root%/}"/*) overlap=1 ;; esac
+done
+[ -z "${overlap-}" ] || { echo 'OpenCode runtime/session storage overlaps the task workdir' >&2; exit 1; }
+"""
     command = (
-        bootstrap.replace("command -v python3", "command -v " + quote(python))
-        + f"{quote(python)} -I -c {quote(validate_paths)} {quote(workdir)} "
-        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)}"
+        bootstrap
+        + f"set -- {quote(workdir)} {quote(str(PurePosixPath(directory).parent))} {quote(runtime)}\n"
+        + validate_paths
     )
     if export_dir is not None:
         # Exports are written after the agent stops; in the workdir they would become part of the task's result.
-        command += f" && {quote(python)} -I -c {quote(_CHECK_EXPORT_DIR)} {quote(workdir)} {quote(export_dir)}"
-    return command + f" && mkdir -p {quote(directory)}"
+        command += f"set -- {quote(export_dir)}\n" + _CHECK_EXPORT_DIR
+    return command + f"mkdir -p {quote(directory)}"
 
 
 def _is_sandbox_path(path: object) -> bool:
@@ -188,21 +210,23 @@ def _is_sandbox_path(path: object) -> bool:
     )
 
 
-# Exit status of the runner's setup modes and the plugin check when an owner-supplied input is unusable (pinned
-# bytes failing their SHA-256 or health check, an export OpenCode cannot import): a retry cannot succeed.
-_INPUT_REJECTED = 3
-# Prints each owner-staged plugin path that is not a regular file and exits with _INPUT_REJECTED if any.
-_CHECK_PLUGIN_FILES = (
-    "import os, sys; missing = [path for path in sys.argv[1:] if not os.path.isfile(path)]; "
-    "print('\\n'.join(missing)); sys.exit(3 if missing else 0)"
-)
-# Exits non-zero when the owner's export directory resolves to the task workdir, a folder inside it, or one above it.
-_CHECK_EXPORT_DIR = (
-    "from pathlib import Path; import sys; "
-    "workdir, export_dir = [Path(p).resolve() for p in sys.argv[1:]]; "
-    "assert workdir != export_dir and workdir not in export_dir.parents and export_dir not in workdir.parents, "
-    "'OpenCode export_dir overlaps the task workdir'"
-)
+# Exit status of the plugin check and the pinned-file steps when an owner-supplied input is unusable (a missing plugin
+# file, pinned bytes failing their SHA-256 or health check): a retry cannot succeed.
+_INPUT_REJECTED = REJECTED
+# Prints each owner-staged plugin path ("$@") that is not a regular file and exits _INPUT_REJECTED if any.
+_CHECK_PLUGIN_FILES = f"""missing=
+for path in "$@"; do
+    [ -f "$path" ] || {{ printf '%s\\n' "$path"; missing=1; }}
+done
+[ -z "$missing" ] || exit {_INPUT_REJECTED}
+"""
+# Runs after the prepare step's path checks, whose resolve() and workdir it uses: exits non-zero when the owner's export
+# directory "$1" resolves to the task workdir, a folder inside it, or one above it.
+_CHECK_EXPORT_DIR = """export_dir=$(resolve "$1")
+case "$export_dir/" in "${workdir%/}"/*) overlap=1 ;; esac
+case "$workdir/" in "${export_dir%/}"/*) overlap=1 ;; esac
+[ -z "${overlap-}" ] || { echo 'OpenCode export_dir overlaps the task workdir' >&2; exit 1; }
+"""
 
 
 # Built-in agents by OpenCode version. Each sets its own sampling (1.17.11's ``title`` fixes temperature 0.5) and none
@@ -236,23 +260,18 @@ def _without_empty_tools(opencode_config: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in opencode_config.items() if key != "tools" or value}
 
 
-class _ImportedSession(BaseModel):
-    """The root session and stored message IDs after the runner's ``--import``."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-    session_id: str = Field(min_length=1)
-    message_ids: list[str]
-
-
-_IMPORTED_SESSION = TypeAdapter(_ImportedSession | None)
-
-
 @dataclass(frozen=True, kw_only=True)
 class _PinnedFile:
     """A file inside the sandbox that the session must use byte for byte."""
 
     digest: str
     sandbox_path: str
+
+
+def _pinned_copy(target: str) -> str:
+    """Where a pinned file is copied and checked before it becomes ``target``: a hidden file beside it."""
+    path = PurePosixPath(target)
+    return str(path.with_name(f".pinned-{path.name}"))
 
 
 class _ActivationDeadlineExpired(Exception):
@@ -281,7 +300,6 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_version: str = OPENCODE_VERSION
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
-    sandbox_python_executable: str = "python3"
     sandbox_path_prefix: list[str] = Field(default_factory=list)
     sandbox_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
@@ -861,9 +879,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
             ),
             runtime=runtime,
-            python_executable=self.config.sandbox_python_executable,
             model_ref=self.config.model_server,
             export_dir=self.config.export_dir,
+            opencode_environment=cli_environment(
+                workdir=workdir,
+                env={**_private_directories(directory), **_OPENCODE_ISOLATION},
+                path_prefix=self.config.sandbox_path_prefix,
+            ),
         )
         prepared_directory = False
         try:
@@ -876,21 +898,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             state.sandbox_id = sandbox.sandbox_id
-            command = _sandbox_prepare_command(
-                workdir,
-                directory,
-                runtime,
-                python=self.config.sandbox_python_executable,
-                export_dir=self.config.export_dir,
-            )
+            command = _sandbox_prepare_command(workdir, directory, runtime, export_dir=self.config.export_dir)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
             if self.config.plugins:
-                # The prepare step guarantees the interpreter. Owner-staged plugins are checked before installation.
-                command = f"{quote(state.python_executable)} -I -c {quote(_CHECK_PLUGIN_FILES)} " + " ".join(
-                    map(quote, self.config.plugins)
-                )
+                # Owner-staged plugins are checked before installation.
+                command = f"set -- {' '.join(map(quote, self.config.plugins))}\n{_CHECK_PLUGIN_FILES}"
                 result = await sandbox.exec(command, cwd="/", timeout_s=30)
                 if result.return_code == _INPUT_REJECTED and result.error_type is None:
                     raise AgentSeedRejectedError(
@@ -909,30 +923,27 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self.config.opencode_version,
                     self.config.sandbox_executable_path or "",
                     self.config.sandbox_executable_sha256 or "",
-                    self.config.sandbox_python_executable,
                     ":".join(self.config.sandbox_path_prefix),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
             if ripgrep is not None:
                 # OpenCode 1.17.11 runs the rg on PATH, else <XDG_CACHE_HOME>/opencode/bin/rg, else downloads one.
                 # The private cache keeps the pin off task shells' PATH; an rg on the task PATH still takes precedence.
-                await self._stage_pinned_file(
+                await self._stage_executable(
                     state,
                     ripgrep,
-                    mode="--stage-executable",
                     target=f"{state.persistent_directory}/cache/opencode/bin/rg",
                     what="ripgrep executable",
                 )
             if plugin_dependencies is not None:
                 # With any plugin configured, OpenCode installs @opencode-ai/plugin into XDG_CONFIG_HOME/opencode
                 # unless node_modules exists and package-lock.json covers package.json.
-                await self._stage_pinned_file(
+                await self._stage_archive(
                     state,
                     plugin_dependencies,
-                    mode="--stage-archive",
                     target=f"{state.persistent_directory}/config/opencode",
                     what="plugin dependency archive",
                 )
@@ -967,55 +978,87 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(f"{path_field} must be an absolute, normalized sandbox path")
         return _PinnedFile(digest=digest.lower(), sandbox_path=path)
 
-    async def _stage_pinned_file(
-        self, state: OpenCodeSandboxSession, pin: _PinnedFile, *, mode: str, target: str, what: str
+    async def _stage_executable(
+        self, state: OpenCodeSandboxSession, pin: _PinnedFile, *, target: str, what: str
     ) -> None:
-        """Copy a pinned file into session storage through the runner, which checks the copy's SHA-256 first."""
+        """Install a pinned executable at ``target`` once a private copy matches its SHA-256 and answers ``--version``."""
         command = (
-            f"{quote(state.python_executable)} -I {quote(f'{state.session.session_dir}/{RUNNER_FILE}')} {mode} "
-            f"{quote(pin.sandbox_path)} {pin.digest} {quote(target)}"
+            f"set -- {quote(pin.sandbox_path)} {pin.digest} {quote(_pinned_copy(target))} {quote(target)}\n"
+            + STAGE_EXECUTABLE
         )
         result = await state.session.sandbox.exec(
             command, cwd="/", timeout_s=self.config.sandbox_install_timeout_seconds
         )
         self._check_sandbox_setup(command, result, pinned=what)
 
+    async def _stage_archive(self, state: OpenCodeSandboxSession, pin: _PinnedFile, *, target: str, what: str) -> None:
+        """Unpack a pinned tar archive into ``target`` once a private copy matches its SHA-256 and its members pass
+        ``check_archive``, which runs here on a download of that copy."""
+        sandbox, timeout = state.session.sandbox, self.config.sandbox_install_timeout_seconds
+        copy = _pinned_copy(target)
+        command = f"set -- {quote(pin.sandbox_path)} {pin.digest} {quote(copy)}\n" + COPY_PINNED
+        self._check_sandbox_setup(command, await sandbox.exec(command, cwd="/", timeout_s=timeout), pinned=what)
+        with tempfile.TemporaryDirectory(prefix="opencode-pinned-") as directory:
+            archive = Path(directory) / "archive"
+            async with asyncio.timeout(timeout):
+                await sandbox.download(copy, archive)
+            try:
+                await asyncio.to_thread(check_archive, archive, pin.digest)
+            except ValueError as error:
+                raise AgentSeedRejectedError(f"Pinned {what} rejected: {error}") from error
+        command = f"set -- {quote(copy)} {quote(target)}\n" + UNPACK_ARCHIVE
+        self._check_sandbox_setup(command, await sandbox.exec(command, cwd="/", timeout_s=timeout))
+
     async def _import_session(self, state: OpenCodeSandboxSession) -> None:
         """Import the owner's staged export, if present, so the first activation continues that session.
 
-        The import uses the run's private directories without plugins, from the task workdir: OpenCode binds an
-        imported session to the importing process's directory. The prefix then stays out of output, usage and
-        trajectory through ``previous_message_ids``, as for continuations.
+        ``opencode import`` runs with the session's private directories and without plugins, from the task workdir:
+        OpenCode binds an imported session to the importing process's directory. The prefix then stays out of
+        output, usage and trajectory through ``previous_message_ids``, as for continuations. Only an export that
+        OpenCode refuses, or one that leaves other than one root session, refuses the seed; a signal, a timeout or a
+        command that never started stays retryable.
         """
-        directory = state.session.session_dir
-        await state.upload_json(
-            "import.json",
-            {
-                "command": [f"{state.runtime}/opencode"],
-                "cwd": state.session.workdir,
-                "env": {
-                    **_private_directories(state.persistent_directory),
-                    **self._bound_directory(state),
-                    **_OPENCODE_ISOLATION,
-                },
-                "path_prefix": self.config.sandbox_path_prefix,
-            },
-        )
+        sandbox, path = state.session.sandbox, self.config.session_import_path
+        assert path is not None
         timeout = self.config.sandbox_install_timeout_seconds
+        command = f"test -f {quote(path)}"
+        staged = await sandbox.exec(command, cwd="/", timeout_s=30)
+        if staged.return_code == 1 and staged.error_type is None:
+            return
+        self._check_sandbox_setup(command, staged)
+        private = _private_directories(state.persistent_directory).values()
         command = (
-            f"{quote(state.python_executable)} -I {quote(f'{directory}/{RUNNER_FILE}')} "
-            f"--import {quote(directory + '/import.json')} {quote(self.config.session_import_path)} {timeout}"
+            f"mkdir -p -- {' '.join(map(quote, private))} || exit {HARNESS_RUNNER_FAILED}\n"
+            + state.opencode_environment
+            + f"exec {quote(f'{state.runtime}/opencode')} import {quote(path)} </dev/null"
         )
-        result = await state.session.sandbox.exec(command, cwd=state.session.workdir, timeout_s=timeout + 30)
-        if result.return_code == _INPUT_REJECTED and result.error_type is None:
+        result = await sandbox.exec(command, cwd="/", timeout_s=timeout)
+        code = result.return_code
+        if (
+            result.error_type is None
+            and 0 < code < 128
+            and code not in (HARNESS_RUNNER_FAILED, *HARNESS_COMMAND_NOT_STARTED)
+        ):
             raise AgentSeedRejectedError(
-                format_error_message("OpenCode could not import session_import_path", stderr=result.stderr or "")
+                format_error_message(
+                    f"OpenCode could not import session_import_path (exit {code})",
+                    stderr=result.stderr or result.stdout or "",
+                )
             )
         self._check_sandbox_setup(command, result)
-        imported = _IMPORTED_SESSION.validate_json(result.stdout or "")
-        if imported is not None:
-            state.harness_session_id = imported.session_id
-            state.message_ids = imported.message_ids
+        with tempfile.TemporaryDirectory(prefix="opencode-import-") as directory:
+            async with asyncio.timeout(timeout):
+                names = await state.list_store(timeout=timeout)
+                if "opencode.db" not in names:
+                    raise RuntimeError("OpenCode import left no session store")
+                await state.download_store(names, Path(directory))
+            database = Path(directory) / "opencode.db"
+            sessions = await asyncio.to_thread(stored_sessions, database)
+            roots = [session["id"] for session in sessions if session["parent_id"] is None]
+            if len(roots) != 1:
+                raise AgentSeedRejectedError(f"Expected one imported root session, found {len(roots)}")
+            state.harness_session_id = roots[0]
+            state.message_ids = await asyncio.to_thread(stored_message_ids, database)
 
     @staticmethod
     def _check_sandbox_setup(command: str, result: SandboxExecResult, *, pinned: str | None = None) -> None:
@@ -1043,17 +1086,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             trajectory=state.trajectory if state.is_continuation or self.config.return_session_trajectory else None,
             cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
         )
-
-    def _bound_directory(self, state: OpenCodeSandboxSession) -> dict[str, str]:
-        """``PWD`` for OpenCode's processes when the owner exports or imports sessions, else nothing.
-
-        OpenCode takes its directory from ``PWD`` before the process cwd and binds its sessions to it, and an
-        imported session runs its tools there. With ``export_dir`` or ``session_import_path`` the run, export and
-        import all get the task workdir; otherwise they inherit ``PWD`` from the sandbox as before.
-        """
-        if self.config.export_dir is None and self.config.session_import_path is None:
-            return {}
-        return {"PWD": state.session.workdir}
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         # Sampling is applied to every OpenCode agent (see _session_response); other controls are rejected.
@@ -1403,16 +1435,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         payload = {
             "instructions": system,
             "path_prefix": self.config.sandbox_path_prefix,
-            "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
-            "harness_session_id": state.harness_session_id,
-            "previous_message_ids": state.message_ids,
-            "activation_id": state.activation_id,
             "env": {
                 **_private_directories(state.persistent_directory),
-                **self._bound_directory(state),
                 **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 **_OPENCODE_ISOLATION,

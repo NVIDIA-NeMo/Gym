@@ -43,6 +43,7 @@ from nemo_gym.config_types import (
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
@@ -902,20 +903,7 @@ async def _call_aggregate_metrics(
         key_metrics = agent_entry.get("key_metrics", {})
         print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
 
-    primitive_types = (bool, int, float, str, type(None))
-    metrics_to_log = dict()
-    for agent_entry in all_agent_metrics:
-        agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-        metrics_to_log.update(
-            {f"{agent_name}/{k}": v for k, v in agent_entry["agent_metrics"].items() if isinstance(v, primitive_types)}
-        )
-        metrics_to_log.update(
-            {
-                f"key_metrics/{agent_name}/{k}": v
-                for k, v in agent_entry["key_metrics"].items()
-                if isinstance(v, primitive_types)
-            }
-        )
+    metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
     export_metrics(metrics_to_log)
 
     # Write single file with all agents
@@ -958,6 +946,15 @@ def _prepare_output_fpaths(
         # Nor the shard list of the merged rows it deleted. A run that appends drops it when it starts writing.
         aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
     return OutputPaths(output=output_fpath, failures=failures_fpath)
+
+
+def _start_over_without_cache(config: RolloutReverificationConfig, output_fpaths: OutputPaths) -> None:
+    """A resume that finds neither the output nor its failures sidecar starts the output anew, so the exporters,
+    which reopened the run recorded next to it, start a new run too. Append recovery continues its output."""
+    if config.resume_from_cache and not config.append:
+        if not (output_fpaths.output.exists() or output_fpaths.failures.exists()):
+            for exporter in get_exporters():
+                exporter.start_over()
 
 
 def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]]:
@@ -1017,6 +1014,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.overwrite,
                 config.append,
             )
+            _start_over_without_cache(config, output_fpaths)
             reverify_source_fpath = rollouts_jsonl_fpath
             rollout_predicate = None
 

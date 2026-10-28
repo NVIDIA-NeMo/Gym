@@ -73,8 +73,8 @@ task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
-needs Linux, Python 3.8+ with SQLite and `fcntl`, and Bash. Missing Python/Bash can
-be installed with apt-get or apk when running as root; otherwise preinstall them.
+needs Linux and Bash; it does not need Python. Missing Bash can be installed with
+apt-get or apk when running as root; otherwise preinstall it.
 Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
 bundle. Missing required packages are installed with apt-get or apk as root;
 non-root images must preinstall them. System `rg` is a best-effort optimization:
@@ -88,18 +88,19 @@ correlation plugin. The plugin is uploaded into each sandbox when model-call
 observability is enabled. Sessions disable automatic updates and models.dev fetches.
 
 The runner uses ordinary sandbox `exec`, with an internal deadline.
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
-The supervisor and the runner above OpenCode run as `gym-supervisor` and `gym-runner` (links to the
-sandbox's `python3`) from files without a `.py` suffix, so a task agent's `pkill -f python3`,
-`pkill python3` or `killall python3` does not end OpenCode.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
+The supervisor and the runner above OpenCode are bash scripts, so a task agent's
+`pkill -f python3`, `pkill python3` or `killall python3` does not end OpenCode.
 The CLI must exit before
-SQLite observations are captured; services must use task-owned files rather than the
+its SQLite database is copied to the agent server and exported there; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
 but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
@@ -221,8 +222,7 @@ captured call, and the summary call of a compaction is counted as a step too.
 For a sandbox without runtime-download egress, set `sandbox_executable_path` to
 an existing sandbox-visible OpenCode binary and `sandbox_executable_sha256` to its
 SHA-256. Seed verifies bytes and version before copying it into the adapter cache.
-`sandbox_python_executable` selects an existing Python interpreter (default
-`python3`); `sandbox_path_prefix` adds executable directories for installation and
+`sandbox_path_prefix` adds executable directories for installation and
 CLI/tool subprocesses while retaining the image PATH. These paths must already
 exist; the sandbox owner supplies mounts or image contents.
 
@@ -238,9 +238,11 @@ above. Local calls do not use them. Each is general-purpose: the sandbox owner (
 the Resources Server that lends the sandbox) supplies the files, and the adapter stages,
 checks or reads them without any benchmark-specific logic. Seed refuses an unusable
 setting or owner-supplied input with `AgentSeedRejectedError`, a final 422, so the
-episode fails once with the reason; a failure a retry can fix stays a 5xx. Their checks,
-staging, import and export run with `sandbox_python_executable`, and OpenCode's `export`
-and `import` get `sandbox_path_prefix` ahead of `PATH`, as `run` does.
+episode fails once with the reason; a failure a retry can fix stays a 5xx. In the
+sandbox, their checks, staging, import and export need only a POSIX shell and coreutils
+(`sha256sum`, and `tar` for an archive); the agent server reads OpenCode's session store
+and checks archive members itself. OpenCode's `export` and `import` get
+`sandbox_path_prefix` ahead of `PATH`, as `run` does.
 
 ### Request sampling
 
@@ -283,7 +285,7 @@ killer's), is a retryable setup error.
 | Item | Fields | Where it goes | How to build it |
 | --- | --- | --- | --- |
 | ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's best-effort package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
-| Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch. Members must be files, folders or links that stay inside it. Where the sandbox's Python lacks tarfile's `data` filter (PEP 706), no member path or link target may pass through a link either; npm's `node_modules/.bin` links pass | See below |
+| Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch by the sandbox's `tar`, once the agent server has checked a download of the verified copy: members must be files, folders or links that stay inside it, no member path or link target may pass through a link, and none may carry setuid, setgid or sticky bits; npm's `node_modules/.bin` links pass | See below |
 
 With any plugin configured (the adapter always configures `task_environment.mjs`),
 OpenCode 1.17.11 installs `@opencode-ai/plugin` into its config directory at every start
@@ -317,14 +319,15 @@ and before the session directory is removed, each activation's capture writes th
 - `<root id>.events.jsonl` (`<root id>.activation-<n>.events.jsonl` in continuation
   sessions): the run's `--format json` event log, when one exists.
 
-The CLI runs with the session's private directories, from the task workdir, without the
-run's configuration, so no plugin loads again. Writing shares the capture step's budget
-(`session_close_timeout_seconds`): the exec ends a tenth of it early, and the runner
-stops another tenth of what remains (at most 5 s) before that, so it can report each
-session. A failure, including an exhausted budget, never fails the activation or blocks
-release: it is reported as an `export_dir_write_failed` observation gap whose detail
-comes from the runner's status, printed as one JSON line on stdout because some
-providers drop or merge stderr. Files the model's tools can reach are not a trusted
+The session tree comes from the session store that the agent server copies out for the
+capture. Each session is exported by a command of its own, with the session's private
+directories, from the task workdir, without the run's configuration, so no plugin loads
+again. An export counts only if OpenCode exits 0 and writes a JSON object. Writing shares
+the capture step's budget (`session_close_timeout_seconds`) and ends a tenth of it early;
+the provider stops an export still running then. A failure, including an exhausted
+budget, never fails the activation or blocks release: it is reported as an
+`export_dir_write_failed` observation gap whose detail names each failed session and
+why. Files the model's tools can reach are not a trusted
 channel; pick a fresh directory. The owner can then grade OpenCode's own transcript
 after agent close. In a sandbox the agent owns, the files last only as long as the
 provider keeps the sandbox's files after close: a provider that deletes the sandbox
@@ -336,7 +339,8 @@ deletes them too.
 session export. If the file exists at seed, the adapter runs `opencode import` with the
 session's private directories, without plugins, from the task workdir with `PWD` set to
 it: OpenCode binds an imported session to the importing process's directory, and a
-session imported elsewhere runs its tools there and can hang. The first activation then
+session imported elsewhere runs its tools there and can hang. The agent server then reads
+the imported session from a copy of the session store. The first activation then
 continues that session with `--session`, and the imported messages are passed as
 `previous_message_ids`, so they stay out of output, usage and the trajectory, as in
 multi-turn continuation. A missing file leaves the session unchanged. An export OpenCode
@@ -345,7 +349,6 @@ an import that times out or is ended by a signal is a retryable setup error.
 
 ### Working directory
 
-OpenCode takes its directory from `PWD` before the process working directory. With
-`export_dir` or `session_import_path`, the adapter sets `PWD` to the task workdir for `run`,
-`export` and `import`, so all three bind the session to the same directory; otherwise they
-inherit `PWD` from the sandbox, as before.
+OpenCode takes its directory from `PWD` before the process working directory. `run`,
+`export` and `import` all start in the task workdir with `PWD` set to it (for `run`, the
+harness runner's `cd` sets it), so all three bind the session to the same directory.
