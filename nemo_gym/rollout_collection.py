@@ -3440,6 +3440,9 @@ class RolloutCollectionHelper(BaseModel):
                     print(
                         f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
                     )
+                # The exporters reopened the run recorded next to this output, which starts anew: so does that run.
+                for exporter in get_exporters():
+                    exporter.start_over()
             else:
                 print("Clearing output fpath since `resume_from_cache=False`!")
 
