@@ -29,7 +29,7 @@ from nemo_gym.data.task_data import (
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_FILES = sorted(
     list((REPO_ROOT / "resources_servers").glob("*/task_data.py"))
     + list((REPO_ROOT / "responses_api_agents").glob("*/task_data.py"))
