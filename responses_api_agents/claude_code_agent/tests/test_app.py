@@ -70,11 +70,14 @@ def _config(**kwargs) -> ClaudeCodeAgentConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_host_install(monkeypatch):
+    # These tests exercise invocation behavior without installing the external CLI.
+    monkeypatch.setattr("responses_api_agents.claude_code_agent.app.ensure_claude_code", lambda version: None)
+
+
 def _make_agent(**kwargs) -> ClaudeCodeAgent:
-    # Patch only the Claude Code installation check.
-    # The real model initialization still configures private attributes and the semaphore.
-    with patch("responses_api_agents.claude_code_agent.app.ensure_claude_code"):
-        return ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+    return ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _event(type_: str, **kwargs) -> str:
@@ -313,6 +316,7 @@ class TestRunForwardsSkillsPath:
 
     def test_no_skills_ref_forwards_none(self) -> None:
         agent = _make_agent()
+        agent.server_client.global_config_dict = {"skills": {"path": "must-not-be-staged"}}
         run_claude_code = AsyncMock(
             return_value=([], "claude-sonnet-4-6", {"status": "incomplete", "error_type": "result_missing"})
         )
@@ -1266,3 +1270,17 @@ class TestCaptureFriendlyTranscript:
         assert attribution.model_call_id == "parent", attribution.reason
         assert attribution.method == "response_id"
         assert "corroborated_by=item_id+content_cumulative" in attribution.reason
+
+
+@pytest.mark.asyncio
+async def test_unseeded_responses_do_not_pick_up_configured_skills(monkeypatch):
+    agent = _make_agent()
+    agent.server_client.global_config_dict = {"skills": {"path": "must-not-be-staged"}}
+    run = AsyncMock(return_value=([], "model", {}))
+    monkeypatch.setattr(ClaudeCodeAgent, "_run_claude_code", run)
+    request = Request({"type": "http", "path_params": {}})
+    await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="Question"))
+    assert run.await_args.kwargs["skills_path"] is None
+    assert "--bare" in agent._build_command(
+        "model", "Question", skills_active=bool(run.await_args.kwargs["skills_path"])
+    )

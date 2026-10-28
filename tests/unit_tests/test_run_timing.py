@@ -5,6 +5,8 @@
 import asyncio
 import signal
 
+import pytest
+
 from nemo_gym.rollout_collection import _NO_SIGTERM_HOOK, RunTimingReport, _print_on_sigterm, _restore_sigterm
 
 
@@ -65,10 +67,19 @@ def test_partial_start_warns_after_the_deadlines():
     assert table.count("WARNING") == 2
 
 
-def test_timeout_failure_class_counts_as_timed_out():
+@pytest.mark.parametrize("failure_class", ["timeout_exceeded", "agent_timeout"])
+def test_timeout_failure_class_counts_as_timed_out(failure_class):
     r = _report(1)
     r.record_start(r._t0)
-    r.record_result({"_ng_failure_class": "timeout_exceeded"}, 10)
+    r.record_result({"_ng_failure_class": failure_class}, 10)
+    assert "100.0% (1)" in _row(r.table(), "hit wall-clock limit")
+
+
+def test_a_timeout_the_run_health_summary_counts_counts_here_too():
+    """The table and run.stats.timeouts classify a rollout alike, so the Codex agent's own deadline counts."""
+    r = _report(1)
+    r.record_start(r._t0)
+    r.record_result({"agent_timed_out": True}, 10)
     assert "100.0% (1)" in _row(r.table(), "hit wall-clock limit")
 
 

@@ -4,14 +4,16 @@
 """Pydantic mirror of Harbor's ``task.toml`` (schema 1.4).
 
 Field names are Harbor's. Deprecated spellings (``version``, ``memory``, ``storage``,
-``allow_internet``) are read and normalized but never written back. Keys
-this mirror does not know are ignored, as Harbor ignores them; :meth:`HarborSettings.unknown_keys`
-lists them so the loader can say so.
+``allow_internet``) are read and normalized but never written back; the pre-1.3 ``multi_step_reward_mode``
+is accepted and dropped, as Harbor drops it. Keys this mirror does not know are ignored, as Harbor ignores
+them; :meth:`HarborSettings.unknown_keys` lists them so the loader can say so.
 """
 
+import re
+from pathlib import PurePosixPath
 from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 class HarborSettings(BaseModel):
@@ -54,12 +56,18 @@ def _nested_settings(annotation: Any) -> type[HarborSettings] | None:
 
 
 class HarborHealthcheck(HarborSettings):
+    """Mirrors Harbor's ``HealthcheckConfig``: plain numbers with Harbor's defaults and no bounds.
+
+    Published tasks pin values at the lower bound (``retries = 0``: one attempt once the start
+    period ends), and Harbor loads them; bounding the fields here rejected those tasks.
+    """
+
     command: str
-    interval_sec: float = Field(default=5, ge=0)
-    timeout_sec: float = Field(default=30, gt=0)
-    start_period_sec: float = Field(default=0, ge=0)
-    start_interval_sec: float = Field(default=5, ge=0)
-    retries: int = Field(default=3, gt=0)
+    interval_sec: float = 5.0
+    timeout_sec: float = 30.0
+    start_period_sec: float = 0.0
+    start_interval_sec: float = 5.0
+    retries: int = 3
 
 
 class HarborMCPServer(HarborSettings):
@@ -152,12 +160,22 @@ class HarborAgent(HarborPhaseSettings):
     user: str | int | None = None
 
 
+class HarborCollectHook(HarborSettings):
+    """``[[verifier.collect]]``: a command run in a service before its artifacts are collected."""
+
+    command: str
+    service: str = "main"
+    timeout_sec: float = Field(default=60, gt=0)
+    user: str | int | None = None
+
+
 class HarborVerifier(HarborPhaseSettings):
     timeout_sec: float = Field(default=600, gt=0)
     user: str | int | None = None
     env: dict[str, str] = Field(default_factory=dict)
     environment_mode: Literal["separate", "shared"] | None = None
     environment: HarborEnvironment | None = None
+    collect: list[HarborCollectHook] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def shared_has_no_environment(self) -> "HarborVerifier":
@@ -170,10 +188,109 @@ class HarborSolution(HarborSettings):
     env: dict[str, str] = Field(default_factory=dict)
 
 
+# The verifier's own directories in the sandbox: the uploaded tests and where test.sh writes its reward. An
+# artifact there would hand the agent the grader's files when a separate verifier restores it, so the loader
+# refuses it (and the environment server refuses the same paths again at the restore). /logs is not listed:
+# it holds the agent's own folders too, and the server empties /logs/verifier again after restoring it.
+PROTECTED_ARTIFACT_SOURCES = ("/tests", "/logs/verifier")
+
+
+class HarborArtifact(HarborSettings):
+    """One ``artifacts`` entry: a path copied out of the agent's sandbox after it finishes.
+
+    A bare string is the ``source``. ``destination`` is where it lands relative to the run's
+    artifacts folder (default: the source path without its leading slash). ``service`` names a
+    Compose sidecar; ``None`` or ``"main"`` is the agent's own container.
+    """
+
+    source: str
+    destination: str | None = None
+    service: str | None = None
+    exclude: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def from_string(cls, data: Any) -> Any:
+        return {"source": data} if isinstance(data, str) else data
+
+    @model_validator(mode="after")
+    def contained_paths(self) -> "HarborArtifact":
+        for path in (self.source, self.destination):
+            if path and (".." in PurePosixPath(path).parts or "\\" in path):
+                raise ValueError(f"Artifact paths must stay inside the sandbox and the artifacts folder: {path!r}")
+        if self.destination and PurePosixPath(self.destination).is_absolute():
+            raise ValueError(f"Artifact destination must be relative: {self.destination!r}")
+        if self.source.startswith("/"):
+            # One leading slash: POSIX lets "//x" name something other than "/x", and the server compares the
+            # sandbox paths it guards by their text, so the spelling is settled here (a trailing slash stays).
+            self.source = "/" + self.source.lstrip("/")
+        source = PurePosixPath(self.source)
+        tests, verifier_logs = (PurePosixPath(path) for path in PROTECTED_ARTIFACT_SOURCES)
+        if source.is_relative_to(tests) or tests.is_relative_to(source) or source.is_relative_to(verifier_logs):
+            replaced = tests if source.is_relative_to(tests) or tests.is_relative_to(source) else verifier_logs
+            raise ValueError(
+                f"Artifact source {self.source!r} would replace the verifier's {replaced} in a separate verifier "
+                "and cannot be restored there"
+            )
+        return self
+
+    @property
+    def host_path(self) -> PurePosixPath:
+        return PurePosixPath(self.destination or self.source.lstrip("/"))
+
+
+_STEP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class HarborStepAgent(HarborPhaseSettings):
+    """``[steps.agent]``: unset values fall back to the task's ``[agent]``, as in Harbor."""
+
+    timeout_sec: float | None = Field(default=None, gt=0)
+    user: str | int | None = None
+
+
+class HarborStepVerifier(HarborPhaseSettings):
+    """``[steps.verifier]``: unset values fall back to the task's ``[verifier]``, as in Harbor."""
+
+    timeout_sec: float | None = Field(default=None, gt=0)
+    user: str | int | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    environment_mode: Literal["separate", "shared"] | None = None
+    environment: HarborEnvironment | None = None
+
+
+class HarborStep(HarborSettings):
+    """One ``[[steps]]`` entry, which Gym runs as one turn.
+
+    The turn has its own instruction (``steps/<name>/instruction.md``) and verifier (the task's
+    ``tests/`` with ``steps/<name>/tests/`` on top). ``min_reward`` stops the episode after this turn
+    when its rewards fall short: a number gates the ``reward`` key, a mapping gates each named key, and a
+    turn without a verifier result fails every gate.
+    """
+
+    name: str
+    agent: HarborStepAgent = Field(default_factory=HarborStepAgent)
+    verifier: HarborStepVerifier = Field(default_factory=HarborStepVerifier)
+    min_reward: float | dict[str, float] | None = None
+    healthcheck: HarborHealthcheck | None = None
+    artifacts: list[HarborArtifact] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def portable_name(self) -> "HarborStep":
+        if not _STEP_NAME.fullmatch(self.name) or self.name in (".", ".."):
+            raise ValueError(f"Step name {self.name!r} must be a portable directory name under steps/")
+        return self
+
+
 class HarborTaskConfig(HarborSettings):
     """One ``task.toml``."""
 
-    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"version", "steps", "multi_step_reward_strategy"})
+    # `multi_step_reward_mode` is the pre-1.3 spelling older multi-step generators (the MemoryArena adapters
+    # among them) write as "aggregate". Harbor 0.22.0 has no such field: `TaskConfig` drops the key and the
+    # task rolls up with the default `mean`, or its own `multi_step_reward_strategy`. The mirror does the same
+    # through `extra="ignore"`; naming the key here only keeps the loader from reporting it as unknown (the
+    # loader warns about a value other than "aggregate", which Harbor drops silently).
+    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"version", "multi_step_reward_mode"})
 
     schema_version: str = "1.4"
     task: dict[str, Any] = Field(default_factory=dict)
@@ -183,7 +300,14 @@ class HarborTaskConfig(HarborSettings):
     agent: HarborAgent = Field(default_factory=HarborAgent)
     environment: HarborEnvironment = Field(default_factory=HarborEnvironment)
     verifier: HarborVerifier = Field(default_factory=HarborVerifier)
-    artifacts: list[Any] = Field(default_factory=list)
+    artifacts: list[HarborArtifact] = Field(default_factory=list)
+    # A task with steps runs them in order as turns in one sandbox; ``mean`` is Harbor's default roll-up.
+    steps: list[HarborStep] = Field(default_factory=list)
+    multi_step_reward_strategy: Literal["mean", "final"] = "mean"
+    # The dataset's `[gym.defaults].timeout_multiplier` once `apply_dataset_config` has scaled this task's budgets by
+    # it (not a task.toml key): the default a step inherits for a budget it does not name reads scaled by it too,
+    # like the budgets the task names (`step_verifier_timeout_sec`).
+    _timeout_multiplier: float = PrivateAttr(default=1.0)
 
     @model_validator(mode="before")
     @classmethod
@@ -193,11 +317,32 @@ class HarborTaskConfig(HarborSettings):
         data = dict(data)
         if "version" in data:
             data.setdefault("schema_version", str(data.pop("version")))
-        if data.get("steps") or data.get("multi_step_reward_strategy"):
-            raise ValueError("Multi-step tasks ([[steps]]) are not supported yet")
         return data
+
+    @model_validator(mode="after")
+    def unique_step_names(self) -> "HarborTaskConfig":
+        names = [step.name for step in self.steps]
+        if len(names) != len(set(names)):
+            raise ValueError(f"Step names must be unique: {names}")
+        return self
+
+    @property
+    def is_multi_turn(self) -> bool:
+        return bool(self.steps)
+
+    def step_agent_timeout_sec(self, step: HarborStep) -> float:
+        return step.agent.timeout_sec if step.agent.timeout_sec is not None else self.agent.timeout_sec
+
+    def step_verifier_timeout_sec(self, step: HarborStep) -> float:
+        return step.verifier.timeout_sec if step.verifier.timeout_sec is not None else self.verifier.timeout_sec
 
     @property
     def is_shared_verifier(self) -> bool:
-        """Harbor runs the verifier in the agent's container unless a separate one is declared."""
-        return self.verifier.environment is None and self.verifier.environment_mode != "separate"
+        """Harbor runs the verifier in the agent's container unless the task says otherwise.
+
+        As in Harbor, ``[verifier].environment_mode = "separate"`` or a ``[verifier.environment]``
+        block selects the separate mode, where a fresh container receives ``/logs/artifacts`` and
+        the declared ``artifacts``. A verifier is shared unless the mode is ``"separate"`` or a
+        ``[verifier.environment]`` block is declared.
+        """
+        return self.verifier.environment_mode != "separate" and self.verifier.environment is None

@@ -370,7 +370,7 @@ Do not put rollout-specific mutable data in an unkeyed server attribute.
 - **Seed/verify protocol**: remove custom state in `verify()`, preferably in a `finally` block. `SimpleResourcesServer` does not automatically clear custom state.
 - **Gymnasium protocol**: when `step()` returns `terminated=True` or `truncated=True`, `GymnasiumServer` calls `close_session()` and removes the entry from `self.session_state`.
 - **Heavyweight state**: override `close_session()`, release the external resource, and call `await super().close_session(session_id)`.
-- **Environment Server sessions**: an Environment Server seeds with a `ResourcesSeedSessionRequest` and closes through `/close_session`. `SimpleResourcesServer` answers both with no-op defaults, so a server without per-rollout state needs no changes. A server with state overrides `seed_session()` and `close_resources_session()`, which is named differently from the Gymnasium `close_session()` helper.
+- **Environment Server sessions**: an Environment Server seeds with a `ResourcesSeedSessionRequest` and closes through `/close_session`. `SimpleResourcesServer` answers both with no-op defaults, so a server without per-rollout state needs no changes. A server with state overrides `seed_session()` and `close_resources_session()`, which is named differently from the Gymnasium `close_session()` helper. Release state by `resources_session_id`, not by the cookie: after a lost seed reply the close arrives without one. Refuse a seed that no retry can fix with `ResourcesSeedRejectedError` (422) for invalid input or `ResourcesSessionConflictError` (409) for an ID bound to another episode, and answer a verify for a session the server no longer holds with the masked sample from `lost_session_verification()`. `ResourcesSessionFence` serializes seed and close per session and refuses a seed after close; check these rules from the server's tests with `check_resources_session_contract(app, seed, keeps_state=True, holds_state=..., verify_body=...)` from `nemo_gym.testing.session_conformance`.
 
 ```python
 async def close_session(self, session_id):
@@ -381,6 +381,43 @@ async def close_session(self, session_id):
 ```
 
 Ensure a Gymnasium environment returns a terminal or truncated result before the Agent Server's `max_steps` is exhausted. Also use timeouts or stale-session reclamation so client failures cannot leak external resources indefinitely.
+
+### State With Several Workers
+
+With `num_workers` above 1, each Uvicorn worker is a separate process with its own memory, so a session's state lives only in the worker that created it. Gym routes every request by one rule, so the in-memory patterns above keep working: it finds the request's session ID, looks up which worker claimed that session, and forwards the request to that worker. If this worker holds the claim, or nobody does, the request is handled where it arrived.
+
+The session ID comes from the request itself:
+
+| Request | Where its session ID comes from |
+| --- | --- |
+| Any request with the session cookie | The cookie's `SESSION_ID_KEY` |
+| A tool call over MCP | The `sid` in the MCP session token minted at `/seed_session` |
+| An Environment Server's `/seed_session` or `/close_session` | The body's `resources_session_id` |
+| A request with none of these | None yet: it gets a new ID, which the worker that handles it claims if it is a seed or the handler uses the session |
+
+A typed seed's `resources_session_id` becomes its cookie's `SESSION_ID_KEY`, so the seed, its close, and every request in between name the session by the same ID. If a request's cookie and body name different sessions, it gets HTTP 409. A seed, or another route in `checkpoint_session_starts`, claims its session even if its handler never reads it. Any other request whose handler never reads or writes the session, such as a health check or `/aggregate_metrics`, claims nothing and gets no session cookie. A cookie whose claim has ended is claimed again by the worker that serves it, if the handler uses the session.
+
+The worker that creates a session claims it, including a seed that failed and the close of an ID nobody has seeded, which keeps a delayed seed from opening it on another worker. A claim lasts while the session is open, from a successful `/seed_session` (or another route in `checkpoint_session_starts`) until its `/close_session`, its `/verify`, or `checkpoint_session_ended`; a `/verify` that says a close follows, as `single_agent_turn`'s does, leaves it open for that close. After that, and for a session that never opened, the claim ends `session_close_retry_window_seconds` (default 300) after the last request for the session, so a retried close or a delayed seed still reaches the worker that saw it. Remember closed sessions with `ClosedResourcesSessionRecords` from `nemo_gym.base_resources_server`, constructed with the same setting: a record then ends no later than the claim, so every worker gives a late seed the same answer.
+
+If the worker that holds a session is no longer running, for example because it crashed and Uvicorn replaced it, the session's requests get HTTP 410 instead of running against empty state. State keyed only by some other ID in the request body is not routed; key state by the session ID as shown above. Agent Server sessions follow the same rule, with `agent_session_id` as the session ID, in the cookie and in the seed and close bodies.
+
+Uvicorn starts several workers by importing the server's entrypoint module in each of them and serving its module-level `app`. A server that supports several workers ends its entrypoint with:
+
+```python
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+
+if __name__ == "__main__":
+    StatefulServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StatefulServer.run_webserver()  # noqa: F401
+```
+
+A server whose state routing cannot reach, such as a registry keyed by another ID in the request body, overrides `multiple_workers_unsupported_reason()` instead and returns why it needs one worker. `run_webserver` then refuses `num_workers` above 1 with that reason before Uvicorn starts, and a dry run reports it too.
+
+A server that keeps no per-session state, or shares it outside the process, can opt out of routing with `routes_sessions_to_owner = False` on its class.
+
+Concurrency limits such as judge semaphores apply per worker, so the server as a whole allows `num_workers` times the configured limit.
 
 ## YAML Configuration
 

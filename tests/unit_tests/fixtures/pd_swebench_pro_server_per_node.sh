@@ -26,20 +26,20 @@ env OTEL_TOKEN=${OTEL_TOKEN} SLURM_JOB_ID=${SLURM_JOB_ID} srun --overlap --nodel
 OTEL_COLLECTOR_PID=$!
 
 # service: policy-prefill
-srun --overlap --nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4 --no-container-mount-home --container-image=vllm:img --output=logs/policy-prefill-$SLURM_JOB_ID.log bash -c 'export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)
+srun --overlap --nodelist="${GYM_POOL_PREFILL_NODES}" --nodes=4 --ntasks=4 --no-container-mount-home --container-image=vllm:img --kill-on-bad-exit=1 --wait=1 --output=logs/policy-prefill-$SLURM_JOB_ID.log bash -c 'export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)
 export VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 exec vllm serve /ckpt --port 8001 --tensor-parallel-size 4 --served-model-name super35 --max-model-len 131072 --kv-transfer-config '"'"'{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'"'"'' &
 POLICY_PREFILL_PID=$!
 
 # service: policy-decode
-env UCX_TLS=rc,cuda_copy srun --overlap --nodelist="${GYM_POOL_DECODE_NODES}" --nodes=6 --ntasks=6 --no-container-mount-home --container-image=vllm:img --output=logs/policy-decode-$SLURM_JOB_ID.log bash -c 'export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)
+env UCX_TLS=rc,cuda_copy srun --overlap --nodelist="${GYM_POOL_DECODE_NODES}" --nodes=6 --ntasks=6 --no-container-mount-home --container-image=vllm:img --kill-on-bad-exit=1 --wait=1 --output=logs/policy-decode-$SLURM_JOB_ID.log bash -c 'export VLLM_NIXL_SIDE_CHANNEL_HOST=$(hostname)
 export VLLM_NIXL_SIDE_CHANNEL_PORT=5601
 export NCCL_DEBUG=WARN
 exec vllm serve /ckpt --port 8002 --tensor-parallel-size 4 --served-model-name super35 --kv-transfer-config '"'"'{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'"'"'' &
 POLICY_DECODE_PID=$!
 
 # service: policy
-srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --no-container-mount-home --container-image=vllm:img --output=logs/policy-$SLURM_JOB_ID.log vllm-router --prefill-policy cache_aware --decode-policy cache_aware --vllm-pd-disaggregation --prefill "http://${gym_nodes[0]}:8001" --prefill "http://${gym_nodes[1]}:8001" --prefill "http://${gym_nodes[2]}:8001" --prefill "http://${gym_nodes[3]}:8001" --decode "http://${gym_nodes[4]}:8002" --decode "http://${gym_nodes[5]}:8002" --decode "http://${gym_nodes[6]}:8002" --decode "http://${gym_nodes[7]}:8002" --decode "http://${gym_nodes[8]}:8002" --decode "http://${gym_nodes[9]}:8002" --host 0.0.0.0 --port 8000 --intra-node-data-parallel-size 1 --request-timeout-secs 86400 --log-level error &
+srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --no-container-mount-home --container-image=vllm:img --kill-on-bad-exit=1 --wait=1 --output=logs/policy-$SLURM_JOB_ID.log vllm-router --prefill-policy cache_aware --decode-policy cache_aware --vllm-pd-disaggregation --prefill "http://${gym_nodes[0]}:8001" --prefill "http://${gym_nodes[1]}:8001" --prefill "http://${gym_nodes[2]}:8001" --prefill "http://${gym_nodes[3]}:8001" --decode "http://${gym_nodes[4]}:8002" --decode "http://${gym_nodes[5]}:8002" --decode "http://${gym_nodes[6]}:8002" --decode "http://${gym_nodes[7]}:8002" --decode "http://${gym_nodes[8]}:8002" --decode "http://${gym_nodes[9]}:8002" --host 0.0.0.0 --port 8000 --intra-node-data-parallel-size 1 --request-timeout-secs 86400 --log-level error &
 POLICY_PID=$!
 
 # Wait for otel_collector (try multiple health endpoints)
@@ -139,7 +139,32 @@ GYM_CMD=(
     +model_call_capture_dir=/jobs/swebench_pro/model-calls
     +require_complete=True
 )
-env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=default,verify NEMO_GYM_OTEL_LOGS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf srun --overlap --no-container-mount-home --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --container-mounts=/jobs/swebench_pro:/jobs/swebench_pro --container-image=img --output=logs/driver-$SLURM_JOB_ID.log "${GYM_CMD[@]}"
+if [ "${_gym_resubmit:-${GYM_RESUBMIT:-}}" = 1 ]; then GYM_CMD+=(++resubmit=True ++resume_from_cache=True); fi
+env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=default,verify NEMO_GYM_OTEL_LOGS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf srun --overlap --no-container-mount-home --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --container-mounts=/jobs/swebench_pro:/jobs/swebench_pro --container-image=img --output=logs/driver-$SLURM_JOB_ID.log "${GYM_CMD[@]}" &
+_gym_driver_pid=$!
+_gym_service_exited() {
+    # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
+    if ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+        wait "$_gym_driver_pid"
+        return
+    fi
+    wait "$2"
+    local status=$?
+    echo "ERROR: service $1 exited (status $status) while the driver was running; stopping the driver."
+    kill -TERM "$_gym_driver_pid" 2>/dev/null
+    wait "$_gym_driver_pid"
+    return 1
+}
+_gym_run_driver() {
+    while kill -0 "$_gym_driver_pid" 2>/dev/null; do
+        kill -0 $POLICY_PREFILL_PID 2>/dev/null || { _gym_service_exited policy-prefill $POLICY_PREFILL_PID; return; }
+        kill -0 $POLICY_DECODE_PID 2>/dev/null || { _gym_service_exited policy-decode $POLICY_DECODE_PID; return; }
+        kill -0 $POLICY_PID 2>/dev/null || { _gym_service_exited policy $POLICY_PID; return; }
+        sleep 5
+    done
+    wait "$_gym_driver_pid"
+}
+_gym_run_driver
 DRIVER_RC=$?
 sleep 20
 pkill -TERM -u "$USER" -f -- '^otelcol\-contrib --config /jobs/swebench_pro/otel/collector\.yaml' || true

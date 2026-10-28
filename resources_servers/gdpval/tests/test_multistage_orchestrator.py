@@ -29,6 +29,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
+from nemo_gym.base_resources_server import lost_session_verification
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -37,7 +38,7 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_DISPATCH_DRAINED_KEY,
@@ -47,6 +48,7 @@ from nemo_gym.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     SharedRolloutCollectionConfig,
+    is_terminal_failure,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
@@ -58,6 +60,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     _is_retryable_failure,
     _partial_stage_outcome,
     _prepare_resume,
+    _prune_downstream_files,
     _require_final_stage_rows,
     aggregate_metrics_path_for,
     append_journal_record,
@@ -346,6 +349,20 @@ class TestRowHelpers:
         assert tagged[0]["expected_final_stage_index"] == 2
         assert tagged[0]["expected_stage_row_count"] == 17
         assert tagged[0]["task_id"] == "t3"
+
+    def test_tag_results_keeps_a_lost_session_a_terminal_verification_failure(self, tmp_path: Path) -> None:
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, AGENT_REF_KEY_NAME: {"name": "ag"}, "task_id": "t0"}
+
+        tagged = tag_results([(row, lost_session_verification("server restarted"))], stage_index=0)
+
+        # A masked lost session holds no measurement, so it must not count as a judged success.
+        assert tagged[0][NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert tagged[0]["_ng_failure_stage"] == "verification"
+        assert is_terminal_failure(tagged[0])
+        assert not _is_retryable_failure(tagged[0])
+        output = tmp_path / "rollouts.jsonl"
+        route_stage_rows(output, tagged)
+        assert load_persisted_rows(output) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -3027,6 +3044,23 @@ class TestFailureRouting:
         assert (2, 0) in gated[0]
         assert (3, 0) not in gated[0]
 
+    def test_a_resubmit_offset_gives_capped_stage_rows_a_fresh_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        out = tmp_path / "rollouts.jsonl"
+        out.write_bytes(b"")
+        capped = {"stage_index": 1, TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "x"}
+        failures_path_for(out).write_bytes(b"".join(json.dumps(capped).encode() + b"\n" for _ in range(3)))
+        assert (2, 0) in load_gated_keys(out, {})[1]
+
+        # `gym eval resubmit` records the sidecar length; the three earlier attempts no longer count to the cap.
+        (tmp_path / "rollouts_resubmit_offset").write_text("3\n")
+        assert (2, 0) not in load_gated_keys(out, {}).get(1, set())
+        assert load_failure_attempts(out, since_resubmit=True) == {}
+        # Attempt identities stay cumulative, so a retry's capture key does not collide with an earlier one.
+        assert load_failure_attempts(out) == {1: {(2, 0): 3}}
+
     def test_reopening_stage_prunes_all_downstream_persisted_state(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
         journal = journal_path_for(out)
@@ -3382,6 +3416,92 @@ class TestPrepareResume:
         plans, _, got_fp = read_journal(journal)
         assert 0 in plans and got_fp == fp
 
+    def test_a_resubmit_gives_capped_stage_rows_a_fresh_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, _distribution(["t0"]))
+        out.write_bytes(b"")
+        append_journal_record(journal, {"stage_index": 0, "status": "planned", "task_ids": ["t0"]}, fp)
+        capped = {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "x"}
+        failures_path_for(out).write_bytes(b"".join(json.dumps(capped).encode() + b"\n" for _ in range(3)))
+        assert (0, 0) in _prepare_resume(self._cfg(True), out, journal, fp).gated_keys[0]
+
+        resume = _prepare_resume(SimpleNamespace(resume_from_cache=True, resubmit=True), out, journal, fp)
+
+        assert (tmp_path / "rollouts_resubmit_offset").read_text() == "3\n"
+        assert (0, 0) not in resume.gated_keys.get(0, set())
+
+    @pytest.mark.parametrize("resume_from_cache", [False, True])
+    def test_drops_the_shard_list_of_the_output_it_takes_over(self, tmp_path: Path, resume_from_cache: bool) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        journal = journal_path_for(out)
+        fp = compute_fingerprint(_two_stage_cfg(), REF_ELOS, _distribution(["t0"]))
+        out.write_bytes(b"")
+        append_journal_record(journal, {"stage_index": 0, "status": "planned", "task_ids": ["t0"]}, fp)
+        aggregation_sources_path_for(out).write_text("{}")
+
+        _prepare_resume(self._cfg(resume_from_cache), out, journal, fp)
+        # A fresh run sets the list aside with the rows it names; a resumed one keeps it until it writes a row.
+        assert aggregation_sources_path_for(out).exists() is resume_from_cache
+        row = {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "t0"}
+        row[NG_ENVIRONMENT_SERVER_KEY] = "gdpval_environment_server"
+        route_stage_rows(out, [{**row, NG_NO_PERSIST_KEY: True}])
+        assert aggregation_sources_path_for(out).exists() is resume_from_cache
+        route_stage_rows(out, [row])
+
+        assert not aggregation_sources_path_for(out).exists()
+
+    @pytest.mark.parametrize("stream", ["main", "failures"])
+    def test_a_run_that_cannot_open_the_output_keeps_its_shard_list(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stream: str
+    ) -> None:
+        """No row is written, so the merged rows and the shards listed for them stay as they were."""
+        out = tmp_path / "rollouts.jsonl"
+        out.write_bytes(b"")
+        aggregation_sources_path_for(out).write_text("{}")
+        refused = out if stream == "main" else failures_path_for(out)
+        open_path = Path.open
+
+        def guarded_open(path, *args, **kwargs):
+            if path == refused:
+                raise PermissionError(f"read-only: {path}")
+            return open_path(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", guarded_open)
+        row = {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "t0"}
+        row[NG_ENVIRONMENT_SERVER_KEY] = "gdpval_environment_server"
+
+        with pytest.raises(PermissionError):
+            route_stage_rows(out, [row])
+        monkeypatch.undo()
+
+        assert aggregation_sources_path_for(out).read_text() == "{}"
+        assert out.read_bytes() == b""
+
+    def test_a_rewrite_of_the_output_drops_its_shard_list(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        row = {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "task_id": "t0"}
+        out.write_text(json.dumps(row) + "\n")
+        aggregation_sources_path_for(out).write_text("{}")
+
+        write_rollouts([row], out)
+
+        assert not aggregation_sources_path_for(out).exists()
+
+    @pytest.mark.parametrize("prunes", [True, False], ids=["prunes a row", "prunes nothing"])
+    def test_pruning_rows_drops_the_shard_list(self, tmp_path: Path, prunes: bool) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        rows = [{"stage_index": stage, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0} for stage in (0, 1)]
+        out.write_text("".join(json.dumps(row) + "\n" for row in (rows if prunes else rows[:1])))
+        aggregation_sources_path_for(out).write_text("{}")
+
+        _prune_downstream_files(out, restart_stage=0)
+
+        assert aggregation_sources_path_for(out).exists() is not prunes
+
     def test_resume_disabled_clears_existing_and_empties_state(self, tmp_path: Path) -> None:
         out = tmp_path / "rollouts.jsonl"
         journal = journal_path_for(out)
@@ -3665,6 +3785,7 @@ class TestCachedDeliverableReuse:
         *,
         cached: bool,
         first_failure_stage: Optional[str] = None,
+        first_failure_fields: Optional[Dict[str, Any]] = None,
         failed_cached_verifies: int = 0,
         task_ids: Sequence[str] = ("t0",),
         repeats: int = 1,
@@ -3676,6 +3797,7 @@ class TestCachedDeliverableReuse:
         self.inputs_at_dispatch: List[List[int]] = []
         dispatched: List[Dict[str, Any]] = []
         verified: List[Dict[str, Any]] = []
+        self.verified_calls = verified
         test = self
 
         async def verify_endpoint(request: web.Request) -> web.Response:
@@ -3710,6 +3832,8 @@ class TestCachedDeliverableReuse:
                             NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS,
                             "_ng_failure_stage": first_failure_stage,
                         }
+                    if first_failure_fields is not None and len(dispatched) == 1:
+                        result = dict(first_failure_fields)
                     if capture_dir is not None:
                         CaptureStore(capture_dir).record(
                             maybe_rollout_id_from_run_body(row), _capture_exchange("dispatched")
@@ -3887,6 +4011,52 @@ class TestCachedDeliverableReuse:
         assert [call["json"]["stage_index"] for call in verified] == [0, 1]
         assert sorted(row["stage_index"] for row in persisted) == [0, 1]
 
+    @pytest.mark.parametrize("failure_class", ["reference_missing", "transport_ineligible"])
+    async def test_a_resume_judges_a_repairable_terminal_failure_again_without_dispatching(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_class: str
+    ) -> None:
+        from resources_servers.gdpval.app import _gdpval_failure
+
+        with pytest.raises(RuntimeError, match="rejected on coverage"):
+            await self._run_two_stages(
+                tmp_path,
+                monkeypatch,
+                cached=True,
+                first_failure_fields=_gdpval_failure(failure_class, terminal=True),
+                retry_inprocess=False,
+            )
+
+        dispatched, verified, persisted = await self._run_two_stages(
+            tmp_path, monkeypatch, cached=True, retry_inprocess=False, resume_from_cache=True
+        )
+
+        assert dispatched == [], "the policy does not run again"
+        assert [call["json"]["stage_index"] for call in verified] == [0, 1]
+        assert all(call["json"]["reuse_cached_deliverable"] for call in verified[:1])
+        assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+
+    @pytest.mark.parametrize("failure_class", ["eval_missing", "missing_rubric"])
+    async def test_a_resume_leaves_other_terminal_failures_closed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_class: str
+    ) -> None:
+        from resources_servers.gdpval.app import _gdpval_failure
+
+        with pytest.raises(RuntimeError, match="rejected on coverage"):
+            await self._run_two_stages(
+                tmp_path,
+                monkeypatch,
+                cached=True,
+                first_failure_fields=_gdpval_failure(failure_class, terminal=True),
+                retry_inprocess=False,
+            )
+
+        with pytest.raises(RuntimeError, match="rejected on coverage"):
+            await self._run_two_stages(
+                tmp_path, monkeypatch, cached=True, retry_inprocess=False, resume_from_cache=True
+            )
+
+        assert self.verified_calls == [], "a closed failure is not judged again"
+
     async def test_without_a_cached_deliverable_the_policy_runs(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -3966,14 +4136,11 @@ class TestCachedDeliverableReuse:
 class TestReferenceMissingCoverage:
     """How a ``reference_missing`` row is counted by a partial-completion policy.
 
-    The row is not terminal: it is retried across resumes, since the reference tree can be
-    repaired between runs, and it stays unresolved until it reaches
-    ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS``. The outcome-level tests below pass
-    ``unresolved_keys=set()``, i.e. the state at the max attempt, where the row
-    is an ordinary omission governed by the coverage floors. Before that, only
-    ``tolerate_unresolved`` accepts it (see the loop-level tests), or
-    ``transport_assignment_repair.reference_availability_only`` avoids it by
-    moving tasks off references without a completed deliverable.
+    The row is terminal: retrying cannot make the reference appear, so it is resolved from the first launch
+    and an ordinary omission governed by the coverage floors. It never holds the stage open, and a resume
+    does not retry it. The outcome-level tests below pass ``unresolved_keys=set()``.
+    ``transport_assignment_repair.reference_availability_only`` avoids it by moving tasks off references
+    without a completed deliverable.
     """
 
     @staticmethod
@@ -4030,7 +4197,7 @@ class TestReferenceMissingCoverage:
         assert _partial_stage_outcome(policy, stage_rows, successful, [], set(), [ref], 1200.0, 1) is None
 
     @pytest.mark.parametrize("tolerate_unresolved", [False, True])
-    async def test_first_launch_advances_only_when_tolerating(self, tolerate_unresolved: bool) -> None:
+    async def test_a_missing_reference_does_not_hold_the_stage_open(self, tolerate_unresolved: bool) -> None:
         task_ids = [f"t{i}" for i in range(20)]
         partial_completion = {
             "min_success_fraction": 0.9,
@@ -4052,25 +4219,21 @@ class TestReferenceMissingCoverage:
             {"a": 1000.0, "b": 1200.0},
             _distribution(task_ids),
             _materialized_rows(task_ids),
-            TestPartialStageCompletion._runner({0}, failure_class="reference_missing", dispatched_stages=dispatched),
+            TestPartialStageCompletion._runner(
+                {0}, failure_class="reference_missing", terminal=True, dispatched_stages=dispatched
+            ),
         )
 
-        if tolerate_unresolved:
-            assert set(dispatched) == {0, 1}
-            assert summaries[0]["partial"] is True
-        else:
-            # Retryable across resumes, so the stage stays open instead of failing.
-            assert set(dispatched) == {0}
-            assert summaries[-1]["incomplete"] is True
-            assert summaries[-1]["coverage_blocked"] is False
-            assert not any(row["stage_index"] == 1 for row in results)
+        # Terminal, so the row is an omission under the coverage floors whether or not unresolved rows are tolerated.
+        assert set(dispatched) == {0, 1}
+        assert summaries[0]["partial"] is True
 
 
 class TestGDPValFailures:
-    """GDPVal's own failures are masked and retried only on resume, when the deliverable tree can be repaired."""
+    """GDPVal's own failures are masked and terminal: not retried in process or on resume, and an omission."""
 
     @pytest.mark.parametrize("failure_class", ["reference_missing", "eval_missing", "transport_ineligible"])
-    async def test_a_failure_holds_a_non_final_stage_open_without_an_in_process_retry(
+    async def test_a_failure_is_not_retried_and_a_strict_stage_cannot_advance_past_it(
         self, failure_class: str
     ) -> None:
         from resources_servers.gdpval.app import _gdpval_failure
@@ -4094,7 +4257,7 @@ class TestGDPValFailures:
             TestPartialStageCompletion._runner(
                 {0},
                 failure_class=failure_class,
-                failure_fields=_gdpval_failure(failure_class),
+                failure_fields=_gdpval_failure(failure_class, terminal=True),
                 dispatched_stages=dispatched,
             ),
         )

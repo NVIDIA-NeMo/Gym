@@ -8,14 +8,19 @@ import logging
 from pathlib import Path
 from shlex import quote
 from time import monotonic, time
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
-from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import (
+    DEFAULT_CLEANUP_TIMEOUT,
+    SUPERVISOR_FILE,
+    SUPERVISOR_SCRIPT,
+    exec_timeout,
+)
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -142,6 +147,8 @@ def trajectory_response(result, body, model, error_type=None):
 
 class HermesSandboxedAgent(SimpleResponsesAPIAgent):
     config: HermesSandboxedAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, context):
         super().model_post_init(context)
@@ -224,16 +231,17 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             (local / "request.json").write_text(json.dumps(params))
             await sandbox.upload(local / "request.json", f"{remote}/request.json")
             await sandbox.upload(Path(__file__).with_name("runner.py"), f"{remote}/runner.py")
-            await sandbox.upload(Path(process_supervisor.__file__), f"{remote}/process_supervisor.py")
+            await sandbox.upload(SUPERVISOR_SCRIPT, f"{remote}/{SUPERVISOR_FILE}")
             launched = True
             executed = await sandbox.exec(
-                f"{quote(self.config.runtime_python)} -I {quote(remote + '/process_supervisor.py')} "
-                f"--timeout {self.config.sandbox_timeout} --receipt {quote(remote + '/cleanup.json')} -- "
+                f"bash {quote(f'{remote}/{SUPERVISOR_FILE}')} "
+                f"--timeout {self.config.sandbox_timeout} --cleanup-timeout {DEFAULT_CLEANUP_TIMEOUT} "
+                f"--receipt {quote(remote + '/cleanup.json')} --stop-file {quote(remote + '/stop.request')} -- "
                 f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')} "
                 f">{quote(remote + '/output.log')} 2>&1",
                 cwd=remote,
                 # The runner owns the model budget; leave time for process cleanup.
-                timeout_s=process_supervisor.exec_timeout(timeout=self.config.sandbox_timeout),
+                timeout_s=exec_timeout(timeout=self.config.sandbox_timeout),
             )
             return_code, error_type = executed.return_code, executed.error_type
             stdout, stderr = executed.stdout or "", executed.stderr or ""

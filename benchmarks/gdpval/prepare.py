@@ -42,17 +42,17 @@ def reference_files_str(reference_files: list[str]) -> str:
     return "".join(f"- {path}\n" for path in sorted(p.lstrip("/") for p in reference_files)) or "None"
 
 
-def prepare() -> Path:
+def write_benchmark(output_fpath: Path, *, tools: list[dict] | None) -> Path:
+    """Write one row per task; ``tools`` (the task tool list) goes into ``responses_create_params``."""
     from datasets import load_dataset
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
     # Pass HF_TOKEN explicitly — ``load_dataset`` doesn't always pick it up
     # from the env, and GDPVal's bucket aggressively rate-limits anonymous IPs.
     hf_token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     ds = load_dataset(HF_DATASET, split=HF_SPLIT, token=hf_token)
-    tools = json.loads(TOOLS_FPATH.read_text())
 
-    with OUTPUT_FPATH.open("w") as f:
+    with output_fpath.open("w") as f:
         for row in ds:
             record = {
                 "task_id": row["task_id"],
@@ -64,12 +64,17 @@ def prepare() -> Path:
                 "reference_file_urls": row.get("reference_file_urls", []),
                 "rubric_json": row.get("rubric_json", {}),
                 "rubric_pretty": row.get("rubric_pretty", ""),
-                "responses_create_params": {"tools": tools},
             }
+            if tools is not None:
+                record["responses_create_params"] = {"tools": tools}
             f.write(json.dumps(record) + "\n")
 
-    print(f"Wrote {len(ds)} tasks to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+    print(f"Wrote {len(ds)} tasks to {output_fpath}")
+    return output_fpath
+
+
+def prepare() -> Path:
+    return write_benchmark(OUTPUT_FPATH, tools=json.loads(TOOLS_FPATH.read_text()))
 
 
 if __name__ == "__main__":

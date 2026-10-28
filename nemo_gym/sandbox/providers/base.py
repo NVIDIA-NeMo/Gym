@@ -22,6 +22,12 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 
+# How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
+# and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
+# above the provider's budget, so the provider can report what it found before the caller gives up.
+ORPHAN_REAP_TIMEOUT_S = 60.0
+
+
 class SandboxStatus(str, Enum):
     """Provider-neutral sandbox lifecycle status."""
 
@@ -91,6 +97,35 @@ class SandboxResources:
         )
 
 
+# The resources a scheduler compares request against limit for; ``gpu_type`` is a selector, not a quantity.
+SCHEDULABLE_RESOURCE_KEYS = ("cpu", "memory_mib", "disk_gib", "gpu")
+
+
+def clamp_resource_requests(
+    requests: Mapping[str, Any] | SandboxResources,
+    limits: Mapping[str, Any] | SandboxResources,
+) -> tuple[dict[str, Any], dict[str, tuple[Any, Any]]]:
+    """Cap each scheduling request at the limit the spec declares for the same key.
+
+    Kubernetes never schedules a pod whose request exceeds its limit, and OpenSandbox reports such a
+    sandbox only as "pending allocation", so a request above a task's declared limit must not reach the
+    create call. Returns the requests with the offending keys set to their limit, and
+    ``{key: (request, limit)}`` for the keys that changed so the caller can log a warning naming them.
+    Keys the limits do not declare pass through untouched.
+    """
+    requested = requests if isinstance(requests, SandboxResources) else SandboxResources.from_mapping(requests)
+    limited = limits if isinstance(limits, SandboxResources) else SandboxResources.from_mapping(limits)
+    clamped = dict(requests.__dict__ if isinstance(requests, SandboxResources) else requests)
+    changed: dict[str, tuple[Any, Any]] = {}
+    for key in SCHEDULABLE_RESOURCE_KEYS:
+        request, limit = getattr(requested, key), getattr(limited, key)
+        if request is None or limit is None or request <= limit:
+            continue
+        changed[key] = (clamped[key], limit)
+        clamped[key] = limit
+    return clamped, changed
+
+
 @dataclass(frozen=True)
 class SandboxSidecarSpec:
     """An extra container started with the sandbox from its own image.
@@ -131,6 +166,9 @@ class SandboxSpec:
     sidecars: tuple[SandboxSidecarSpec, ...] | list[SandboxSidecarSpec | Mapping[str, Any]] = field(
         default_factory=tuple
     )
+    # The user commands run as when an exec names none (a Dockerfile's final ``USER``). Providers that
+    # cannot set a container default apply it per exec through the sandbox facade.
+    user: str | int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
@@ -291,7 +329,9 @@ class SupportsSandboxBackgroundServices(Protocol):
         command: str,
         *,
         cwd: str | None = None,
+        env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
+        user: str | int | None = None,
     ) -> SandboxExecResult: ...
 
 
@@ -345,6 +385,43 @@ class SupportsSandboxSharedStorage(Protocol):
     def shared_volume_options(self, source: str | None, target: str, *, read_only: bool = False) -> dict[str, Any]: ...
 
     def shared_volume_metadata(self) -> dict[str, str]: ...
+
+
+# The per-service container settings a Compose file may declare behind ``SupportsSandboxServiceOptions``.
+COMPOSE_SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+
+
+@runtime_checkable
+class SupportsSandboxServiceOptions(Protocol):
+    """Optional container settings a Compose service declares: ``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``.
+
+    ``SERVICE_OPTION_FIELDS`` names the subset the provider can apply; it is a class attribute so prepare
+    can check a task against a provider by name, without instantiating it. ``service_options`` returns
+    the ``provider_options`` that apply the given values at create time (an empty mapping when none are
+    given) and raises ``ValueError`` for a value it cannot express.
+    """
+
+    SERVICE_OPTION_FIELDS: frozenset[str]
+
+    def service_options(
+        self,
+        *,
+        tmpfs: tuple[str, ...] = (),
+        ulimits: Mapping[str, Any] | None = None,
+        sysctls: Mapping[str, str] | None = None,
+        security_opt: tuple[str, ...] = (),
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxPullPolicy(Protocol):
+    """Optional per-sandbox image pull policy: ``always``, ``missing`` or ``never`` (Compose's ``pull_policy``).
+
+    ``pull_policy_options`` returns the ``provider_options`` that apply it at create time. A provider
+    without this capability leaves the pull behaviour to the deployment's default.
+    """
+
+    def pull_policy_options(self, policy: str) -> dict[str, Any]: ...
 
 
 @runtime_checkable

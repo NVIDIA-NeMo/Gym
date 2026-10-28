@@ -24,7 +24,7 @@ from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -177,6 +177,8 @@ def parse_opencode_observations(
         part = _load_json(row["data"])
         if not part:
             gaps.append(ObservationGap(code="agent_artifact_record_unparseable"))
+            # The part may have been a tool call, so the tool history read is not complete.
+            gaps.append(ObservationGap(code="tool_timing_unavailable", detail=row["id"]))
             continue
         ptype = part.get("type")
         message_id = row["message_id"]
@@ -184,9 +186,15 @@ def parse_opencode_observations(
         session_id = row["session_id"] or message_sessions.get(message_id)
         if not isinstance(session_id, str):
             gaps.append(ObservationGap(code="agent_artifact_record_unowned"))
+            if ptype == "tool":
+                # A tool part that belongs to no session is left out, so the tool history read is not complete.
+                gaps.append(ObservationGap(code="tool_timing_unavailable", detail=row["id"]))
             continue
         conversation = conversations.setdefault(session_id, [])
         role = message.get("role")
+        if ptype == "tool" and role not in ("assistant", "user"):
+            # A tool part whose message cannot say who sent it is left out, so the tool history read is not complete.
+            gaps.append(ObservationGap(code="tool_timing_unavailable", invocation_id=session_id, detail=row["id"]))
 
         if ptype == "step-finish":
             continue
@@ -301,6 +309,14 @@ def parse_opencode_observations(
                 gaps.append(
                     ObservationGap(
                         code="tool_call_identity_unavailable",
+                        invocation_id=session_id,
+                        detail=row["id"],
+                    )
+                )
+                # The tool ran but has no observation to time, so the tool history read is not complete.
+                gaps.append(
+                    ObservationGap(
+                        code="tool_timing_unavailable",
                         invocation_id=session_id,
                         detail=row["id"],
                     )
@@ -534,6 +550,8 @@ class OpenCodeSandboxedAgentVerifyResponse(BaseVerifyResponse):
 
 class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     config: OpenCodeSandboxedAgentConfig
+    # The harness runs inside the task sandbox and calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)

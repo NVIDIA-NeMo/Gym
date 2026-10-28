@@ -4,9 +4,9 @@
 """Resolve ``harbor:<dataset>[@<version>]`` through the Harbor registry.
 
 The registry is one JSON file listing datasets; each task entry names a git
-repository, a commit and a path. Fetching copies the task folders into Gym's shared
-datasets folder so that every server reads the same bytes and nothing downloads at
-run time. A ``HEAD`` pin is resolved to a commit before anything is copied.
+repository, a commit and a path. Fetching copies the task folders into Gym's pulled
+datasets folder, ``environments/harbor/`` under the working root, so that every server reads the
+same bytes and nothing downloads at run time. A ``HEAD`` pin is resolved to a commit before anything is copied.
 """
 
 import json
@@ -16,10 +16,19 @@ import re
 import shutil
 import subprocess
 import tempfile
-import tomllib
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from nemo_gym import WORKING_DIR
+from nemo_gym.tasks.harbor.digest import content_hash
+from nemo_gym.tasks.harbor.manifest import (
+    MANIFEST_FILE,
+    Manifest,
+    ManifestError,
+    UnsupportedManifestError,
+    task_folders,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -27,16 +36,24 @@ logger = logging.getLogger(__name__)
 REGISTRY_URL = "https://raw.githubusercontent.com/harbor-framework/harbor/main/registry.json"
 REF_PREFIX = "harbor:"
 DATASETS_DIR_ENV = "NEMO_GYM_DATASETS_DIR"
-MANIFEST_FILE = "manifest.toml"
+REGISTRY_SOURCE = "harbor-registry"
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 _SHA = re.compile(r"[0-9a-f]{40}")
+# The fetch stages its clone inside the dataset folder (the same filesystem, for the atomic rename into
+# place). Hidden, so recursive task discovery, which skips dot-folders, never enters a staging directory an
+# interrupted fetch left behind: its clone holds another copy of each task.
+_STAGING_PREFIX = ".nemo-gym-harbor-"
 # Registry entries may only point at network git remotes: a URL scheme git fetches over,
 # or the scp-like `user@host:path` form. Anything else (file paths, `ext::`, option-looking
 # strings) is refused before it reaches a git command line.
 _GIT_URL_SCHEME = re.compile(r"(https|ssh|git)://[A-Za-z0-9]", re.IGNORECASE)
 _GIT_URL_SCP = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:(?!-)[^:]*")
+# Package-store datasets are `org/name`; registry datasets are a bare name.
+_PACKAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+# Task names become one path component under the dataset folder; these can never be.
+_NAME_SEPARATORS = ("/", "\\", "\0")
 
 
 class HubError(ValueError):
@@ -48,8 +65,16 @@ def is_hub_ref(target: str) -> bool:
 
 
 def datasets_dir() -> Path:
-    """Gym's shared datasets folder: ``$NEMO_GYM_DATASETS_DIR`` or ``./datasets``."""
-    return Path(os.environ.get(DATASETS_DIR_ENV) or Path.cwd() / "datasets").expanduser().resolve()
+    """Where pulled datasets live: ``$NEMO_GYM_DATASETS_DIR``, else ``environments/harbor/`` under the working root.
+
+    That root is :data:`nemo_gym.WORKING_DIR`: the Gym checkout of an editable install, the working directory of
+    a package install, whose ``PARENT_DIR`` is ``site-packages`` (shared, often read-only) and could hold neither
+    a dataset nor the registry cache.
+
+    Each fetched dataset is one folder under it (``environments/harbor/<dataset>/``), gitignored there
+    next to the committed per-dataset entries, which keep only their README and YAML files.
+    """
+    return Path(os.environ.get(DATASETS_DIR_ENV) or WORKING_DIR / "environments" / "harbor").expanduser().resolve()
 
 
 @dataclass(frozen=True)
@@ -63,9 +88,16 @@ class HubRef:
             raise HubError(f"Not a Harbor hub reference: {target!r} (expected `harbor:<dataset>[@<version>]`)")
         body = target[len(REF_PREFIX) :]
         name, _, version = body.partition("@")
-        if not _NAME.fullmatch(name) or (version and not _NAME.fullmatch(version)):
+        if not (_NAME.fullmatch(name) or _PACKAGE_NAME.fullmatch(name)) or (
+            version and not (_NAME.fullmatch(version) or version.startswith("sha256:"))
+        ):
             raise HubError(f"Malformed Harbor hub reference: {target!r}")
         return cls(name=name, version=version or None)
+
+    @property
+    def is_package(self) -> bool:
+        """``org/name`` references live in Harbor's package store, not in ``registry.json``."""
+        return "/" in self.name
 
 
 @dataclass(frozen=True)
@@ -102,10 +134,16 @@ def _version_key(version: str) -> tuple:
     return (0, numeric, "") if numeric is not None else (1, (), version)
 
 
-def validate_task_name(name: str) -> str:
-    """Require one folder component, reserving the dataset manifest's name."""
-    if not name or ".." in name or name in (".", MANIFEST_FILE) or any(char in name for char in ("/", "\\", "\0")):
-        raise HubError(f"Unsafe Harbor task name {name!r}: expected a single folder name")
+def validate_task_name(name: str, *, error: type[ValueError] = HubError) -> str:
+    """Require one folder component, reserving the dataset manifest's name; raise ``error`` otherwise.
+
+    Task names arrive from ``registry.json`` and from package-store replies, and the fetchers
+    use them as path components, so empty names, ``.``, anything containing ``..``, a path
+    separator or NUL is refused. Other characters, such as ``$``, which real Harbor task names
+    contain, are accepted.
+    """
+    if not name or ".." in name or name in (".", MANIFEST_FILE) or any(char in name for char in _NAME_SEPARATORS):
+        raise error(f"Unsafe Harbor task name {name!r}: expected a single folder name")
     return name
 
 
@@ -134,6 +172,21 @@ def _validate_task_tree(source: Path) -> None:
             raise HubError(f"Invalid task symlink {link}: {exc}") from exc
         if target.is_absolute() or not resolved.is_relative_to(source.resolve()):
             raise HubError(f"Task symlink {link} leaves the task folder")
+
+
+def contained_path(target: Path, root: Path, *, error: type[ValueError] = HubError) -> Path:
+    """Return ``target`` after checking that it resolves to a path strictly inside ``root``; else raise ``error``.
+
+    Called before anything under a dataset folder is removed or replaced, so a spoofed name
+    or a symlink pointing elsewhere can never make a fetch touch files outside the dataset.
+    """
+    resolved_root = Path(root).resolve()
+    resolved = Path(target).resolve()
+    if resolved == resolved_root or not resolved.is_relative_to(resolved_root):
+        raise error(
+            f"Refusing to replace {target}: it resolves to {resolved}, outside the dataset folder {resolved_root}"
+        )
+    return target
 
 
 def validate_git_url(git_url: str) -> str:
@@ -288,54 +341,81 @@ def resolve_commit(git_url: str, git_commit_id: str, cache: dict[tuple[str, str]
     raise HubError(f"{git_url} has no ref {git_commit_id!r}")
 
 
-def _read_manifest_pins(folder: Path) -> dict[str, tuple[str, str, str]]:
-    """The ``(git_url, commit, path)`` pins a previous fetch recorded, or ``{}``."""
-    manifest = folder / MANIFEST_FILE
-    if not manifest.is_file():
-        return {}
+def _read_manifest(folder: Path) -> Manifest | None:
+    """The manifest a previous fetch wrote, or ``None`` (a malformed one is rewritten).
+
+    One a newer Gym wrote (a schema this Gym does not read) raises instead, so the fetch stops
+    with the folder untouched rather than replacing a manifest this Gym cannot read in full.
+    """
     try:
-        tasks = tomllib.loads(manifest.read_text()).get("tasks", {})
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-        logger.warning("%s is unreadable and will be rewritten: %s", manifest, exc)
+        return Manifest.read(folder)
+    except UnsupportedManifestError:
+        raise
+    except ManifestError as exc:
+        logger.warning("%s is unreadable and will be rewritten: %s", folder / MANIFEST_FILE, exc)
+        return None
+
+
+def _read_manifest_pins(manifest: Manifest | None) -> dict[str, tuple[str, str, str]]:
+    """The ``(git_url, commit, path)`` pins a previous fetch recorded, or ``{}``."""
+    if manifest is None:
         return {}
     pins = {}
-    for name, pin in tasks.items():
-        if isinstance(pin, dict) and all(
-            isinstance(pin.get(key), str) for key in ("git_url", "git_commit_id", "path")
-        ):
+    for name, pin in manifest.pins.items():
+        if all(isinstance(pin.get(key), str) for key in ("git_url", "git_commit_id", "path")):
             pins[name] = (pin["git_url"], pin["git_commit_id"], pin["path"])
     return pins
 
 
-def _write_manifest(folder: Path, dataset: RegistryDataset, pins: dict[str, tuple[str, str, str]]) -> None:
-    def quote(value: str) -> str:
-        return json.dumps(value)
+def _write_manifest(folder: Path, pins: dict[str, tuple[str, str, str]], digests: dict[str, str]) -> None:
+    """Publish the pins with the digests of their folders; only pinned tasks are recorded.
 
-    lines = [
-        "[dataset]",
-        f"name = {quote(dataset.name)}",
-        f"version = {quote(dataset.version)}",
-        'source = "harbor-registry"',
-        "",
-    ]
-    for task_name in sorted(pins):
-        git_url, commit, path = pins[task_name]
-        lines += [
-            f"[tasks.{quote(task_name)}]",
-            f"git_url = {quote(git_url)}",
-            f"git_commit_id = {quote(commit)}",
-            f"path = {quote(path)}",
-            "",
-        ]
-    # A failed write must leave the previous, truthful manifest intact.
-    with tempfile.NamedTemporaryFile(mode="w", dir=folder, prefix=".manifest-", delete=False) as stream:
-        temporary = Path(stream.name)
-        try:
-            stream.write("\n".join(lines))
-            stream.close()
-            temporary.replace(folder / MANIFEST_FILE)
-        finally:
-            temporary.unlink(missing_ok=True)
+    ``digests`` caches the hashing across the per-task checkpoints, and naming the pinned tasks keeps each
+    checkpoint from scanning the dataset folder again: a folder the fetch did not pin stays unrecorded,
+    so prepare refuses it instead of running it as part of the dataset.
+    """
+    Manifest.build(
+        folder,
+        source=REGISTRY_SOURCE,
+        pins={
+            name: {"git_url": url, "git_commit_id": commit, "path": path} for name, (url, commit, path) in pins.items()
+        },
+        digests=digests,
+        names=pins,
+    ).write(folder)
+
+
+def refuse_unrecorded_folders(folder: Path, known: set[str], *, what: str, error: type[ValueError] = HubError) -> None:
+    """Refuse task folders under ``folder`` that neither the source names nor a previous fetch recorded.
+
+    The manifest a fetch writes is the record prepare trusts, so a folder nobody fetched must not sit
+    beside the fetched ones when it is written: it would run and score as part of the dataset.
+    """
+    extra = sorted(path.name for path in task_folders(folder) if path.name not in known)
+    if extra:
+        raise error(
+            f"Task folder(s) {', '.join(extra)} in {folder} are not in the {what} and not recorded by a previous "
+            "fetch; move them aside and run again"
+        )
+
+
+def _check_kept_folders(folder: Path, kept: list[str], previous: Manifest | None, digests: dict[str, str]) -> None:
+    """Hash the task folders a fetch keeps and refuse one whose content differs from the manifest.
+
+    A rewritten manifest records what is on disk, so without this check a fetch that adds a task would
+    bless a hand-edited folder next to it. A folder recorded without a digest (a manifest written
+    before digests existed) is accepted and recorded now.
+    """
+    recorded = previous.task_digests if previous is not None else {}
+    for name in kept:
+        digests[name] = content_hash(folder / name)
+        expected = recorded.get(name)
+        if expected is not None and expected != digests[name]:
+            raise HubError(
+                f"{folder / name} differs from its fetch record in {folder / MANIFEST_FILE}: its content hash is "
+                f"{digests[name]} but the manifest records {expected}. The folder was edited by hand. Delete the "
+                "dataset folder, or move it aside, and run again to fetch the registry's copy"
+            )
 
 
 def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
@@ -343,7 +423,9 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
 
     Publish a pin after each task, so a later failure leaves completed tasks reusable.
     A folder without a trustworthy pin (including interruption before pin publication)
-    is refused; the user can move it aside and retry without losing local edits.
+    is refused; the user can move it aside and retry without losing local edits. The
+    manifest records each folder's digest beside its pin; when a fetch adds tasks to an
+    existing folder, the kept folders must still match their recorded digests.
     """
     if not _NAME.fullmatch(dataset.name):
         raise HubError(f"Unsafe Harbor dataset name {dataset.name!r}")
@@ -360,9 +442,12 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     if (folder / MANIFEST_FILE).is_symlink():
         raise HubError(f"Dataset manifest must not be a symlink: {folder / MANIFEST_FILE}")
-    previous = _read_manifest_pins(folder)
+    manifest = _read_manifest(folder)
+    previous = _read_manifest_pins(manifest)
     resolved: dict[tuple[str, str], str] = {}
     pins: dict[str, tuple[str, str, str]] = {}
+    digests: dict[str, str] = {}
+    kept: list[str] = []
     by_repo: dict[tuple[str, str], list[RegistryTask]] = {}
     for task in dataset.tasks:
         destination = folder / task.name
@@ -383,12 +468,18 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
                     f"Existing task folder {destination} has no trustworthy source pin; move it aside and retry"
                 )
             _validate_task_tree(destination)
+            kept.append(task.name)
             continue
         commit = pin[1] if pin else resolve_commit(task.git_url, task.git_commit_id, resolved)
         by_repo.setdefault((task.git_url, commit), []).append(task)
 
+    if by_repo or not dataset.tasks:
+        # The manifest is about to be rewritten: a folder it would not pin must not be there, and the
+        # kept folders must still be what it recorded.
+        refuse_unrecorded_folders(folder, names | set(previous), what="registry")
+        _check_kept_folders(folder, kept, manifest, digests)
     for (git_url, commit), tasks in by_repo.items():
-        with tempfile.TemporaryDirectory(prefix="nemo-gym-harbor-", dir=folder) as tmp:
+        with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=folder) as tmp:
             clone = Path(tmp) / "repo"
             _git("clone", "--quiet", "--filter=blob:none", "--no-checkout", "--", git_url, str(clone))
             _git("sparse-checkout", "set", "--no-cone", "--", *(task.path for task in tasks), cwd=clone)
@@ -409,15 +500,29 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
                     raise HubError(f"Task destination appeared during fetch: {destination}; retry preparation")
                 staged.rename(destination)
                 pins[task.name] = (git_url, commit, task.path)
-                _write_manifest(folder, dataset, pins)
+                _write_manifest(folder, pins, digests)
     if not dataset.tasks:
-        _write_manifest(folder, dataset, pins)
+        _write_manifest(folder, pins, digests)
     return folder
 
 
 def fetch_ref(target: str, root: Path | None = None, *, refresh_registry: bool = False) -> Path:
-    """Resolve and fetch a ``harbor:`` reference; return the dataset folder."""
+    """Resolve and fetch a ``harbor:`` reference; return the dataset folder.
+
+    A package-store fetch refuses a task folder whose content no longer matches the store
+    (see :func:`nemo_gym.tasks.harbor.package_store.fetch_package_dataset`). Whatever the store fetch
+    refuses or cannot read (a ``PackageStoreError``) is raised as a :class:`HubError`, so a caller handles
+    one error type for a ``harbor:`` reference of either source.
+    """
     root = Path(root) if root is not None else datasets_dir()
     ref = HubRef.parse(target)
+    if ref.is_package:
+        from nemo_gym.tasks.harbor.package_store import PackageRef, PackageStoreError, fetch_package_dataset
+
+        org, _, name = ref.name.partition("/")
+        try:
+            return fetch_package_dataset(PackageRef(org=org, name=name, ref=ref.version or "latest"), root)
+        except PackageStoreError as exc:
+            raise HubError(str(exc)) from exc
     registry = load_registry(root / ".harbor", refresh=refresh_registry)
     return fetch_dataset(resolve_dataset(ref, registry), root)

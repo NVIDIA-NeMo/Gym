@@ -1,21 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Agent-server lifecycle for one supervised harness activation."""
+"""Supervised harness activations over one retained sandbox connection."""
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
+import re
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from shlex import quote
+from time import monotonic
 from typing import cast
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
 from nemo_gym.agent_utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
+    SUPERVISOR_SCRIPT,
+    CleanupReceipt,
     HarnessTerminationError,
+    check_stdlib_runner,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
@@ -27,6 +31,17 @@ from nemo_gym.sandbox.utils import read_text
 
 
 LOG = logging.getLogger(__name__)
+# Shared runner uploaded by adapters; reads the bash source written by shell_assignments().
+HARNESS_RUNNER_FILE = "harness_runner.sh"
+HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
+# The runner's exit statuses when the CLI never ran: its own failure (bad cwd, setup), and a CLI that
+# could not be started. Any other status is the CLI's own.
+HARNESS_RUNNER_FAILED = 125
+HARNESS_COMMAND_NOT_STARTED = (126, 127)
+# Where adapters upload a standard-library Python runner, relative to session_dir. Without a
+# .py suffix, a `pkill -f '\.py'` in the task cannot match the runner's command line.
+RUNNER_FILE = "sandbox_runner"
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _reuse_or_start[T](
@@ -39,10 +54,48 @@ def _reuse_or_start[T](
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxCommand:
-    """Harness argv and the installed interpreter used to launch its supervisor."""
+    """Harness argv, run under the bash process supervisor.
+
+    ``stdlib_runner`` declares a Python runner that needs nothing beyond the standard library.
+    Its argv, which must start with the interpreter, then runs under a neutral process name so
+    that ``pkill python3`` in the task cannot stop it. The renamed interpreter is the base
+    interpreter, outside any virtual environment.
+    """
 
     argv: list[str]
-    python: str
+    stdlib_runner: bool = False
+
+    def __post_init__(self) -> None:
+        check_stdlib_runner(self.argv, stdlib_runner=self.stdlib_runner)
+
+
+def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, str]]) -> str:
+    """Bash source assigning each value, for sandbox runners that cannot parse JSON.
+
+    A string becomes a scalar and a sequence an array. A mapping becomes an array of
+    ``KEY=VALUE`` words, ready for ``export`` or ``env``. Every word is shell-quoted.
+    Words must be strings without NUL, which bash cannot hold.
+    """
+
+    def word(item: object) -> str:
+        if not isinstance(item, str) or "\0" in item:
+            raise ValueError(f"Invalid shell word, which must be a string without NUL: {item!r}")
+        return quote(item)
+
+    lines = []
+    for name, value in values.items():
+        if not _SHELL_NAME.fullmatch(name):
+            raise ValueError(f"Invalid shell variable name: {name!r}")
+        if isinstance(value, str):
+            lines.append(f"{name}={word(value)}")
+            continue
+        if isinstance(value, Mapping):
+            invalid = [key for key in value if not _SHELL_NAME.fullmatch(key)]
+            if invalid:
+                raise ValueError(f"Invalid environment variable names: {invalid!r}")
+            value = [f"{key}={item}" if isinstance(item, str) else item for key, item in value.items()]
+        lines.append(f"{name}=({' '.join(word(item) for item in value)})")
+    return "".join(f"{line}\n" for line in lines)
 
 
 @dataclass(kw_only=True)
@@ -54,17 +107,20 @@ class SandboxSession[Artifacts]:
     to the agent server after cleanup is confirmed. It may run a bounded snapshot
     command, but must not restart the harness. Parsing responses stays in the adapter.
 
-    A new session stages input and its supervisor, runs the harness process, then
-    stops and collects artifacts. Execution retains the sandbox until close
+    Each activation stages input and a fresh supervisor, runs the harness process, then
+    stops and collects artifacts. Adapters may explicitly rearm it with ``begin_activation``
+    after confirmed cleanup, retaining native state outside the per-activation directory.
+    The default still permits only one launch. Execution retains the sandbox until close
     releases it. Missing termination evidence remains retryable. A final negative
     receipt skips capture, releases a borrowed connection and leaves teardown to
     Resources; an owned sandbox falls back to provider stop. Closed means release succeeded.
 
-    On timeout or close, the supervisor preserves previously adopted children outside
-    the harness group and drains newly adopted children, including services orphaned
-    by in-flight tools during the stop. Preserved children can also be unfinished
-    background jobs; they remain until the sandbox owner destroys the sandbox.
-    Natural CLI exit has no adoption cutoff, so detached unfinished tools may remain.
+    The supervisor stops the harness process group; a forced stop also reaches the
+    harness's descendants in other groups and processes that inherited its
+    ``NEMO_GYM_SUPERVISOR`` marker. Processes that had left the harness when the stop
+    began, processes in other groups after a natural exit, and a process that left
+    between two scans without the marker remain until the sandbox owner destroys the
+    sandbox.
     Borrowed sandboxes stay available for Resources verification; owned sandboxes are
     stopped on close. Unconfirmed harness termination prevents capture and verification.
 
@@ -85,6 +141,7 @@ class SandboxSession[Artifacts]:
     capture_error: Exception | None = field(default=None, init=False)
     termination_error: HarnessTerminationError | None = field(default=None, init=False)
     sandbox_stopped: bool = field(default=False, init=False)
+    _session_root: str | None = field(default=None, init=False)
     _stage_task: asyncio.Future[SandboxCommand] | None = field(default=None, init=False)
     _exec_task: asyncio.Task[SandboxExecResult] | None = field(default=None, init=False)
     _finalize_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -104,6 +161,14 @@ class SandboxSession[Artifacts]:
         return task is not None and task.done() and not task.cancelled() and task.exception() is None
 
     @property
+    def cleanup_confirmed(self) -> bool:
+        """Whether no launch occurred, termination was witnessed, or owned sandbox stopped."""
+        return self.sandbox_stopped or (
+            self.termination_error is None
+            and (not self.launch_started or bool(self.cleanup and self.cleanup["cleanup_confirmed"]))
+        )
+
+    @property
     def stop_request_path(self) -> str:
         """Marker path an adapter may pass to its harness for cancellation diagnostics."""
         return f"{self.session_dir}/{STOP_REQUEST_FILE}"
@@ -118,7 +183,7 @@ class SandboxSession[Artifacts]:
 
     async def _stage(self, stage_activation: Callable[[], Awaitable[SandboxCommand]]) -> SandboxCommand:
         command = await stage_activation()
-        await self.sandbox.upload(Path(process_supervisor.__file__), f"{self.session_dir}/{SUPERVISOR_FILE}")
+        await self.sandbox.upload(SUPERVISOR_SCRIPT, f"{self.session_dir}/{SUPERVISOR_FILE}")
         return command
 
     async def execute(
@@ -128,6 +193,7 @@ class SandboxSession[Artifacts]:
         collect: Callable[[], Awaitable[Artifacts]],
         timeout: float,
         close_timeout: float,
+        deadline: float | None = None,
     ) -> Artifacts:
         """Run once, preserving captured artifacts even when execution raises.
 
@@ -141,16 +207,22 @@ class SandboxSession[Artifacts]:
         self._collect = collect
         self._stage_task = asyncio.create_task(self._stage(stage_activation))
         try:
-            command = await asyncio.shield(self._stage_task)
+            async with asyncio.timeout_at(deadline):
+                command = await asyncio.shield(self._stage_task)
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
+            if deadline is not None:
+                timeout = min(timeout, deadline - monotonic())
+            # The supervisor counts whole centiseconds; less than one cannot run the harness.
+            if timeout < 0.01:
+                raise TimeoutError(f"{self.harness} activation deadline expired before launch")
             cleanup_timeout, provider_timeout = supervision_timeouts(timeout=timeout, close_timeout=close_timeout)
             launch = supervised_launch_command(
                 session_dir=self.session_dir,
                 command=command.argv,
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
-                python=command.python,
+                stdlib_runner=command.stdlib_runner,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(
@@ -166,13 +238,16 @@ class SandboxSession[Artifacts]:
             if result.error_type:
                 raise RuntimeError(f"{self.harness} sandbox execution failed: {result.error_type}: {result.stderr}")
             # A harness process's nonzero exit can still carry useful, adapter-specific output.
+            await self._finish(timeout=close_timeout)
         except BaseException:
-            try:
-                await self._finish(timeout=close_timeout)
-            except Exception:
-                LOG.exception("%s harness termination was not confirmed; close must release the session", self.harness)
+            if self._finalize_task is None or not self._finalize_task.done():
+                try:
+                    await self._finish(timeout=close_timeout)
+                except Exception:
+                    LOG.exception(
+                        "%s harness termination was not confirmed; close must release the session", self.harness
+                    )
             raise
-        await self._finish(timeout=close_timeout)
         if result.return_code != 0 and self.capture_error is not None:
             raise RuntimeError(
                 f"{self.harness} sandbox execution failed (exit {result.return_code}): {result.stderr or ''}"
@@ -181,6 +256,36 @@ class SandboxSession[Artifacts]:
             raise self.capture_error
         # Collection either returned artifacts (including a valid None) or recorded an error.
         return cast(Artifacts, self.artifacts)
+
+    async def begin_activation(self, *, session_dir: str, timeout: float) -> None:
+        """Rearm a stopped harness using fresh supervisor files in the same sandbox.
+
+        The adapter retains its native conversation elsewhere in the sandbox. A
+        previous launch must be reaped before any activation fields can be reset.
+        Close fences all later activations, including when release needs retry.
+        """
+        if self.closing:
+            raise RuntimeError(f"{self.harness} sandbox session is closing")
+        if self._stage_task is not None:
+            if session_dir == self.session_dir:
+                raise ValueError("Repeated activations require a fresh supervisor directory")
+            await self._finish(timeout=timeout)
+            if self.closing:
+                raise RuntimeError(f"{self.harness} sandbox session is closing")
+            if not self.cleanup_confirmed:
+                raise RuntimeError(f"{self.harness} previous activation cleanup is unconfirmed")
+        if self._session_root is None:
+            self._session_root = self.session_dir
+        self.session_dir = session_dir
+        self.launch_started = False
+        self.cleanup = None
+        self.artifacts = None
+        self.capture_error = None
+        self._stage_task = None
+        self._exec_task = None
+        self._finalize_task = None
+        self._collect = None
+        self._capture_attempted = False
 
     async def stop_harness(self, *, timeout: float) -> None:
         """Confirm harness termination before capture and transport release."""
@@ -204,6 +309,7 @@ class SandboxSession[Artifacts]:
             raise RuntimeError(f"{self.harness} launch outcome is unknown; termination deadline exceeded") from error
 
     async def _finish(self, *, timeout: float) -> None:
+        """Join process finalization without releasing the sandbox connection."""
         self._finalize_task = _reuse_or_start(self._finalize_task, lambda: self._finalize(timeout=timeout))
         await asyncio.shield(self._finalize_task)
 
@@ -277,7 +383,7 @@ class SandboxSession[Artifacts]:
             async with asyncio.timeout(timeout):
                 await remove_session_directory(
                     self.sandbox,
-                    session_dir=self.session_dir,
+                    session_dir=self._session_root or self.session_dir,
                     workdir=self.workdir,
                     timeout=timeout,
                     harness=self.harness,

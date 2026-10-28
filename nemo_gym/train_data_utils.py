@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Literal, Optional, Self, Tuple, Union
 
 from devtools import pprint
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 from tqdm.auto import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -72,6 +72,12 @@ from nemo_gym.task_data import (
 from nemo_gym.task_materialization import materialize_task
 
 
+def _ref_name(ref: Any) -> Optional[str]:
+    """The ``name`` of a server reference given as a mapping, a model or nothing."""
+    name = ref.get("name") if isinstance(ref, (dict, DictConfig)) else getattr(ref, "name", None)
+    return name if isinstance(name, str) else None
+
+
 class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     """
     Prepare and validate training data, generating metrics and statistics for datasets.
@@ -101,6 +107,9 @@ class TrainDataProcessorConfig(BaseNeMoGymCLIConfig):
     )
     overwrite_metrics_conflicts: bool = Field(
         default=False, description="Whether or not to overwrite metrics conflicts."
+    )
+    num_repeats: Optional[Union[int, Dict[str, int]]] = Field(
+        default=None, description="Rollouts per task from `--num-repeats`; when set, it replaces each dataset's own."
     )
     task_data_validation: Literal["off", "warn", "error", "auto"] = Field(
         default="auto",
@@ -370,6 +379,41 @@ def postprocess_other_metrics(metrics: DatasetMetrics, other_metrics: Dict[str, 
             setattr(metrics, k, StringMetrics(unique_count=len(v), total_count=sum(v.values())))
 
 
+# Catalog declarations a dataset entry may carry about itself (`domain`, `verified`, `allowed_agents`): what a
+# trainer and the catalog read, never a property of the rows, so they stay out of the metrics sidecar beside the
+# rows. A Harbor dataset writes them into its generated entry from its `dataset.toml`, and flipping `verified`
+# after baselining, widening `allowed_agents` or changing `domain` between two runs must not conflict with the
+# sidecar the first run wrote.
+_CATALOG_DATASET_FIELDS = frozenset({"domain", "verified", "allowed_agents"})
+
+
+def _sidecar_excluded_dataset_fields(
+    dataset: DatasetConfig | BenchmarkDatasetConfig, *, preparation: bool = True
+) -> set[str]:
+    """The entry fields left out of the metrics sidecar's record of ``dataset``.
+
+    Agent and taskset select routing, not source data, so taskset and flat declarations of one file share its
+    sidecar. Preparation (``prepare_script``, ``prepare_dependencies``) controls how a local source file is
+    produced and is not a property of the rows, and defaults must not churn existing sidecars. The catalog
+    declarations (``_CATALOG_DATASET_FIELDS``) are left out for the same reason.
+
+    ``preparation`` False keeps the preparation fields: the per-split sidecar (``<split>_metrics.json`` in the
+    output folder, :meth:`TrainDataProcessor.collate_samples`) has always recorded them, and
+    :meth:`TrainDataProcessor._validate_aggregate_metrics` requires every key of an existing sidecar, so leaving
+    them out there would reject every prepared dataset whose sidecar names them.
+    """
+    excluded = {"agent", "taskset", *_CATALOG_DATASET_FIELDS}
+    if preparation and isinstance(dataset, DatasetConfig):
+        excluded.update({"prepare_script", "prepare_dependencies"})
+    return excluded
+
+
+def _own_task_source(row: Mapping[str, Any]) -> bool:
+    """Whether ``row`` already carries a non-empty ``task_source`` of its own."""
+    task_source = row.get(TASK_SOURCE_KEY_NAME)
+    return isinstance(task_source, str) and bool(task_source.strip())
+
+
 def _materialized_task_parts(sample: Mapping[str, Any]) -> tuple[TaskId, Mapping[str, Any]] | None:
     if not is_materialized_task_row(sample):
         return None
@@ -512,6 +556,19 @@ def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
 
 
 class TrainDataProcessor(BaseModel):
+    # Every server instance of the run config, kept by `load_and_validate_server_instance_configs`. The
+    # in-scope list it returns holds only dataset-bearing instances, but the schema that validates an
+    # agent's rows may live on the environment server that drives it (the Harbor layout), which declares
+    # no datasets itself and would otherwise never be seen by the lookup.
+    _all_server_instance_configs: List[ServerInstanceConfig] = PrivateAttr(default_factory=list)
+
+    def _schema_lookup_configs(
+        self, server_instance_configs: List[ServerInstanceConfig]
+    ) -> List[ServerInstanceConfig]:
+        """The in-scope instances plus every other instance of the run config, for schema-home lookups."""
+        names = {c.name for c in server_instance_configs}
+        return list(server_instance_configs) + [c for c in self._all_server_instance_configs if c.name not in names]
+
     def run(self, global_config_dict: DictConfig):  # pragma: no cover
         """
         See the README section "How To: Prepare and validate data for PR submission or RL training"
@@ -551,6 +608,7 @@ class TrainDataProcessor(BaseModel):
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+        self._all_server_instance_configs = list(server_instance_configs)
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
         # the task schema and verifier) or by agents (self-contained environments that verify
@@ -904,7 +962,9 @@ class TrainDataProcessor(BaseModel):
         dataset_type_to_aggregate_metrics: Dict[str, DatasetMetrics] = defaultdict(DatasetMetrics)
         for c in server_instance_configs:
             for d in c.datasets:
-                dataset_metrics_hook = self._dataset_metrics_hook_for(c, server_instance_configs)
+                dataset_metrics_hook = self._dataset_metrics_hook_for(
+                    c, self._schema_lookup_configs(server_instance_configs)
+                )
                 state = self._validate_samples_and_aggregate_metrics_single_dataset(d, dataset_metrics_hook)
 
                 dataset_type_to_aggregate_metrics[d.type].add(state.metrics)
@@ -912,15 +972,8 @@ class TrainDataProcessor(BaseModel):
                 aggregate_metrics = state.metrics.aggregate()
 
                 aggregate_metrics_dict = aggregate_metrics.model_dump_for_output()
-                # Agent and taskset select routing, not source data. Exclude both so taskset
-                # and flat declarations of the same file can share its metrics sidecar.
-                excluded_dataset_fields = {"agent", "taskset"}
-                if isinstance(d, DatasetConfig):
-                    # Preparation controls how a local source file is produced; they are not
-                    # properties of the rows and defaults must not churn existing sidecars.
-                    excluded_dataset_fields.update({"prepare_script", "prepare_dependencies"})
                 aggregate_metrics_dict = (
-                    d.model_dump(mode="json", exclude=excluded_dataset_fields) | aggregate_metrics_dict
+                    d.model_dump(mode="json", exclude=_sidecar_excluded_dataset_fields(d)) | aggregate_metrics_dict
                 )
 
                 data_fpath = Path(d.jsonl_fpath)
@@ -984,21 +1037,108 @@ This could be due to a change in how metrics are calculated, leading to outdated
         Datasets declared by a resources server belong to its own implementation; datasets
         declared by an agent belong to the resources server the agent references. Self-contained
         agents (no resources_server reference) return None here; the validator lookup then falls
-        back to the agent's own directory.
+        back to the environment server that drives the agent, then to the agent's own directory.
         """
         if c.SERVER_TYPE == "resources_servers":
             return next(iter(c.resources_servers))
         if c.SERVER_TYPE != "responses_api_agents":
             return None
-        inner = c.get_inner_run_server_config()
-        ref = getattr(inner, "resources_server", None)
-        rs_name = ref.get("name") if isinstance(ref, (dict, DictConfig)) else getattr(ref, "name", None)
-        if not isinstance(rs_name, str):
+        rs_name = _ref_name(getattr(c.get_inner_run_server_config(), "resources_server", None))
+        if rs_name is None:
             return None
         for other in server_instance_configs:
             if other.SERVER_TYPE == "resources_servers" and other.name == rs_name:
                 return next(iter(other.resources_servers))
         return None
+
+    @staticmethod
+    def _environment_servers_naming(
+        c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> List[ServerInstanceConfig]:
+        """Every environment-server instance whose ``agent_server`` is the agent ``c``, in config order."""
+        if c.SERVER_TYPE != "responses_api_agents":
+            return []
+        return [
+            other
+            for other in server_instance_configs
+            if other.SERVER_TYPE == "environment_servers"
+            and _ref_name(getattr(other.get_inner_run_server_config(), "agent_server", None)) == c.name
+        ]
+
+    @classmethod
+    def _owning_environment_server(
+        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[ServerInstanceConfig]:
+        """The environment-server instance that drives a self-contained agent's episodes.
+
+        An environment server that names the agent as its ``agent_server`` owns the rows the agent
+        declares (the Harbor layout: the agent block carries ``datasets`` so rollout collection
+        finds them, the environment server seeds and verifies them), so its ``task_data.py``,
+        when it ships one, is the schema to validate against. Several environment servers may name
+        one agent (one per taskset, each routing its own rows to one harness instance); they share
+        the implementation the first one stands for here, and :meth:`_taskset_folder` tells them
+        apart by the dataset's taskset.
+        """
+        return next(iter(cls._environment_servers_naming(c, server_instance_configs)), None)
+
+    @classmethod
+    def _owning_environment_server_impl(
+        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[str]:
+        """The implementation key of :meth:`_owning_environment_server`, or None."""
+        owner = cls._owning_environment_server(c, server_instance_configs)
+        return next(iter(owner.environment_servers)) if owner is not None else None
+
+    @classmethod
+    def _taskset_folder(
+        cls,
+        c: ServerInstanceConfig,
+        d: Union[DatasetConfig, BenchmarkDatasetConfig],
+        server_instance_configs: List[ServerInstanceConfig],
+    ) -> Optional[Path]:
+        """The task folder of the Harbor taskset the agent ``c``'s dataset ``d`` was materialized from, or None.
+
+        Rows route to the environment server whose ``tasksets`` carries their taskset (the generated run config
+        names the agent's dataset after the taskset and routes by taskset), so that server's
+        ``tasksets.<taskset>.folder`` is where the loader read the tasks from, whichever of the environment
+        servers naming the agent comes first in the config. None for a dataset no such server carries.
+        """
+        taskset = d.taskset or d.name
+        for owner in cls._environment_servers_naming(c, server_instance_configs):
+            inner = owner.get_inner_run_server_config()
+            tasksets = inner.get("tasksets") if isinstance(inner, Mapping) else getattr(inner, "tasksets", None)
+            entry = tasksets.get(taskset) if isinstance(tasksets, Mapping) else None
+            folder = entry.get("folder") if isinstance(entry, Mapping) else getattr(entry, "folder", None)
+            if isinstance(folder, (str, Path)):
+                return Path(folder)
+        return None
+
+    @classmethod
+    def _schema_home_for(
+        cls, c: ServerInstanceConfig, server_instance_configs: List[ServerInstanceConfig]
+    ) -> Optional[tuple[str, str]]:
+        """``(implementation, base_folder)`` whose ``task_data.py`` validates ``c``'s datasets, or None.
+
+        A resources server owns its own data and the data of agents that reference it. An agent
+        without a reference is owned by the environment server that names it when that server
+        ships a ``task_data.py`` (the Harbor layout), else by itself: a self-contained agent
+        wrapped by a schema-less environment server (the ``legacy_agent`` layout) validates
+        against its own ``task_data.py``. An agent whose reference is dangling is skipped: its
+        schema home is the (missing) server.
+        """
+        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
+        if impl_key is not None:
+            return impl_key, "resources_servers"
+        if c.SERVER_TYPE != "responses_api_agents":
+            return None
+        if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
+            return None
+        impl_key = cls._owning_environment_server_impl(c, server_instance_configs)
+        if impl_key is not None:
+            env_dir = find_server_dir(impl_key, base_folder="environment_servers")
+            if env_dir is not None and (env_dir / "task_data.py").is_file():
+                return impl_key, "environment_servers"
+        return next(iter(c.responses_api_agents)), "responses_api_agents"
 
     @classmethod
     def _task_data_validator_for(
@@ -1006,20 +1146,20 @@ This could be due to a change in how metrics are calculated, leading to outdated
         c: ServerInstanceConfig,
         d: Union[DatasetConfig, BenchmarkDatasetConfig],
         server_instance_configs: List[ServerInstanceConfig],
+        task_data_validation: str = "warn",
     ) -> Optional[TaskDataValidator]:
-        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
-        base_folder = "resources_servers"
-        if impl_key is None:
-            # No resources server owns this data. A self-contained agent (one that declares no
-            # resources_server reference at all) may own a schema itself, under
-            # responses_api_agents/<implementation>/task_data.py. An agent whose reference is
-            # dangling is skipped: its schema home is the (missing) resources server.
-            if c.SERVER_TYPE != "responses_api_agents":
-                return None
-            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
-                return None
-            impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
+        """The validator for ``c``'s dataset ``d``, or None when no schema applies.
+
+        ``task_data_validation`` is the collation's mode. A server schema that does not load is skipped with a
+        warning in every mode, as before. A Harbor dataset's own ``task_data.py`` that does not load is a warning in
+        ``warn`` mode too, and the rows are then checked for the server's reserved keys alone, as an untyped
+        dataset's are (the seed refuses every episode of that taskset with the same error); in ``error`` mode it
+        fails the collation, as a row the schema rejects would.
+        """
+        home = cls._schema_home_for(c, server_instance_configs)
+        if home is None:
+            return None
+        impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             return None
@@ -1030,6 +1170,28 @@ This could be due to a change in how metrics are calculated, leading to outdated
             return None
         if adapter is None:
             return None
+        if base_folder == "environment_servers":
+            # A Harbor taskset's rows carry the dataset's own fields beside the server's reserved keys: the
+            # server's schema checks the reserved keys alone, the dataset's TaskData, when it ships one, the fields.
+            folder = cls._taskset_folder(c, d, server_instance_configs)
+            if folder is not None:
+                from nemo_gym.tasks.harbor.task_data import DatasetRowValidator, TaskDataError
+                from nemo_gym.tasks.harbor.task_data import load_task_data_schema as load_dataset_schema
+
+                try:
+                    schema = load_dataset_schema(folder)
+                except TaskDataError as e:
+                    if task_data_validation == "error":
+                        raise
+                    warnings.warn(
+                        f"{d.jsonl_fpath}: the dataset's task_data.py does not load, so its rows are checked for "
+                        f"the reserved keys alone (the seed will refuse every episode of the taskset): {e}",
+                        stacklevel=2,
+                    )
+                    schema = None
+                return DatasetRowValidator(
+                    server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath), schema=schema
+                )
         return TaskDataValidator(server_name=impl_key, adapter=adapter, dataset_fpath=str(d.jsonl_fpath))
 
     @classmethod
@@ -1038,15 +1200,10 @@ This could be due to a change in how metrics are calculated, leading to outdated
         c: ServerInstanceConfig,
         server_instance_configs: List[ServerInstanceConfig],
     ) -> DatasetMetricHook | None:
-        impl_key = cls._owning_resources_server_impl(c, server_instance_configs)
-        base_folder = "resources_servers"
-        if impl_key is None:
-            if c.SERVER_TYPE != "responses_api_agents":
-                return None
-            if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
-                return None
-            impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
+        home = cls._schema_home_for(c, server_instance_configs)
+        if home is None:
+            return None
+        impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             return None
@@ -1060,6 +1217,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
         type: DatasetType,
         server_instance_configs: List[ServerInstanceConfig],
         task_data_validation: str = "warn",
+        num_repeats: Optional[Union[int, Dict[str, int]]] = None,
     ) -> List[Path]:
         paths_to_collate = []
         used_prepare_paths: set[Path] = set()
@@ -1102,9 +1260,17 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 legacy_agent_ref_rows = 0
                 validator = None
                 if task_data_validation != "off":
-                    validator = self._task_data_validator_for(c, d, server_instance_configs)
+                    validator = self._task_data_validator_for(
+                        c,
+                        d,
+                        self._schema_lookup_configs(server_instance_configs),
+                        task_data_validation=task_data_validation,
+                    )
                 with open(prepare_path, "w") as target:
                     for row_index, line in enumerate(self._iter_dataset_lines(d)):
+                        # --num-repeats replaces the dataset's num_repeats: keep one copy, rollout collection repeats it.
+                        if num_repeats is not None and row_index % d.num_repeats:
+                            continue
                         row = json.loads(line)
 
                         if prompt_cfg:
@@ -1113,7 +1279,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
 
                         if row.pop(AGENT_REF_KEY, None) is not None:
                             legacy_agent_ref_rows += 1
-                        row[TASK_SOURCE_KEY_NAME] = c.name
+                        # A materialized task row routes by its taskset and names its dataset itself: its
+                        # task_source is the dataset folder's name, written at preparation (Harbor rows), and it
+                        # never resolves to an instance. Every other row is stamped with the declaring instance.
+                        if not (is_materialized_task_row(row) and _own_task_source(row)):
+                            row[TASK_SOURCE_KEY_NAME] = c.name
                         if row_index % d.num_repeats == 0:
                             source_task_index += 1
                         # Validate flat rows before conversion, which would hide misplaced fields.
@@ -1175,9 +1345,11 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 None,
             )
             if d is not None:
-                # Routing choices do not change source metrics.
+                # Routing choices and catalog declarations do not change source metrics. The preparation fields
+                # stay: this sidecar has always recorded them, and an existing one is validated key by key.
                 aggregate_metrics_dict = (
-                    d.model_dump(mode="json", exclude={"agent", "taskset"}) | aggregate_metrics_dict
+                    d.model_dump(mode="json", exclude=_sidecar_excluded_dataset_fields(d, preparation=False))
+                    | aggregate_metrics_dict
                 )
 
             parent = Path(config.output_dirpath)
@@ -1202,6 +1374,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                 type=type,
                 server_instance_configs=server_instance_configs,
                 task_data_validation=config.effective_task_data_validation,
+                num_repeats=config.num_repeats,
             )
             collated_fpath = parent / f"{type}.jsonl"
             with open(collated_fpath, "wb") as outfile:

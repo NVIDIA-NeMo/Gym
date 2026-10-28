@@ -65,6 +65,7 @@ def _parse_opencode_session(
     *,
     model_ref: ModelServerRef | None = None,
     require_terminal_finish: bool = False,
+    message_ids: set[str] | None = None,
 ) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
@@ -93,6 +94,14 @@ def _parse_opencode_session(
     finally:
         con.close()
 
+    all_part_rows = part_rows
+    if message_ids is not None:
+        all_messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
+        all_message_sessions = {row["id"]: row["session_id"] for row in message_rows}
+        message_rows = [row for row in message_rows if row["id"] in message_ids]
+        part_rows = [row for row in part_rows if row["message_id"] in message_ids]
+        active_sessions = {row["session_id"] for row in message_rows}
+        session_rows = [row for row in session_rows if row["id"] in active_sessions or row["parent_id"] is None]
     messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
     message_sessions = {row["id"]: row["session_id"] for row in message_rows}
     conversations: dict[str, list[Any]] = {row["id"]: [] for row in session_rows}
@@ -105,6 +114,23 @@ def _parse_opencode_session(
     summary_text: dict[str, list[str]] = {}
     summaries_by_parent: dict[tuple[str, str], list[str]] = {}
     first_item_id_by_message: dict[tuple[str, str], str] = {}
+    if message_ids is not None:
+        # A compaction can retain an item from an earlier activation. Its identity
+        # remains valid context even though that old conversation is not emitted again.
+        for row in all_part_rows:
+            if row["message_id"] in message_ids or all_messages.get(row["message_id"], {}).get("role") != "assistant":
+                continue
+            part = _load_json(row["data"])
+            text = part.get("text")
+            if part.get("type") in {"text", "reasoning"} and isinstance(text, str) and text.strip():
+                item_id = row["id"]
+            elif part.get("type") == "tool":
+                item_id = part.get("callID")
+            else:
+                continue
+            session_id = row["session_id"] or all_message_sessions.get(row["message_id"])
+            if isinstance(session_id, str) and isinstance(item_id, str) and item_id:
+                first_item_id_by_message.setdefault((session_id, row["message_id"]), item_id)
 
     for row in message_rows:
         message = messages[row["id"]]
@@ -136,6 +162,8 @@ def _parse_opencode_session(
         part = _load_json(row["data"])
         if not part:
             gaps.append(ObservationGap(code="agent_artifact_record_unparseable"))
+            # The part may have been a tool call, so the tool history read is not complete.
+            gaps.append(ObservationGap(code="tool_timing_unavailable", detail=row["id"]))
             continue
         ptype = part.get("type")
         message_id = row["message_id"]
@@ -143,9 +171,15 @@ def _parse_opencode_session(
         session_id = row["session_id"] or message_sessions.get(message_id)
         if not isinstance(session_id, str):
             gaps.append(ObservationGap(code="agent_artifact_record_unowned"))
+            if ptype == "tool":
+                # A tool part that belongs to no session is left out, so the tool history read is not complete.
+                gaps.append(ObservationGap(code="tool_timing_unavailable", detail=row["id"]))
             continue
         conversation = conversations.setdefault(session_id, [])
         role = message.get("role")
+        if ptype == "tool" and role not in ("assistant", "user"):
+            # A tool part whose message cannot say who sent it is left out, so the tool history read is not complete.
+            gaps.append(ObservationGap(code="tool_timing_unavailable", invocation_id=session_id, detail=row["id"]))
 
         if ptype == "step-finish":
             continue
@@ -230,7 +264,7 @@ def _parse_opencode_session(
             }.get(opencode_status, "unknown")
             if opencode_status == "completed" and part.get("tool") == "bash":
                 # Completion describes the tool lifecycle, not shell success. Timeout/abort
-                # can complete that lifecycle with a null exit code in the native artifact.
+                # can complete that lifecycle with a null exit code in the OpenCode artifact.
                 metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
                 exit_code = metadata.get("exit")
                 if type(exit_code) is int:
@@ -260,6 +294,14 @@ def _parse_opencode_session(
                 gaps.append(
                     ObservationGap(
                         code="tool_call_identity_unavailable",
+                        invocation_id=session_id,
+                        detail=row["id"],
+                    )
+                )
+                # The tool ran but has no observation to time, so the tool history read is not complete.
+                gaps.append(
+                    ObservationGap(
+                        code="tool_timing_unavailable",
                         invocation_id=session_id,
                         detail=row["id"],
                     )
