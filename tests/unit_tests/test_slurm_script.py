@@ -30,6 +30,7 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import (
+    SAVED_CONFIG,
     DeclarativeServiceConfig,
     NodePool,
     RayServiceConfig,
@@ -2319,7 +2320,7 @@ def test_a_pd_service_is_recorded_as_written(tmp_path):
     assert list(dumped["services"]) == ["policy"]
     for benchmark in dumped["driver"]["benchmarks"].values():
         benchmark["run"] = {}
-    reloaded = SubmitConfig.model_validate(dumped)
+    reloaded = SubmitConfig.model_validate(dumped, context={SAVED_CONFIG: True})
     assert list(reloaded.deployed_services) == ["policy-prefill", "policy-decode", "policy"]
     assert reloaded.deployed_services["policy-decode"].kv_transfer_config["kv_role"] == "kv_consumer"
 
@@ -2338,7 +2339,7 @@ def test_a_reloaded_pd_config_keeps_the_derived_tier_values_out(tmp_path):
     for benchmark in dumped["driver"]["benchmarks"].values():
         benchmark["run"] = {}
     dumped["services"]["policy"]["nixl_side_channel_port"] = 8000
-    decode = SubmitConfig.model_validate(dumped).deployed_services["policy-decode"]
+    decode = SubmitConfig.model_validate(dumped, context={SAVED_CONFIG: True}).deployed_services["policy-decode"]
     assert (decode.nixl_side_channel_port, decode.server_per_node) == (8001, True)
 
 
@@ -2781,7 +2782,7 @@ def per_node_config(tmp_path, pool_size):
             {
                 "services": {"policy": service},
                 "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": {"gpu": pool}}},
-                "driver": {"container": "img", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+                "driver": {"container": "img", "benchmarks": {"b": {"run": {}}}},
                 "job": {"output_path": str(tmp_path / "jobs")},
             }
         )

@@ -188,7 +188,7 @@ run:
       openai_model: service:policy
 ```
 
-- **Implicit:** when `run` has no `policy_model` and `services` holds exactly one model service (`vllm` or `vllm_pd`; declarative and `ray` services do not count), submit adds `openai_model: service:<that service>` for you. Several model services without an explicit `policy_model` fail validation, naming them.
+- **Implicit:** when `run` has no `policy_model` and `services` holds exactly one model service (`vllm` or `vllm_pd`; declarative and `ray` services do not count), submit adds `openai_model: service:<that service>` for you (`vllm_model` when the service runs `server_per_node`, since that policy has one URL per node). Several model services without an explicit `policy_model` fail validation, naming them.
 - **Explicit:** write the reference yourself to choose among several services, to use a declarative service (a hosted endpoint) as the policy, or to use a server type other than `openai_model`.
 - **Opt out:** a benchmark whose own config already declares a complete policy writes `policy_model: {}`. Nothing is added or passed.
 - **`--model-type`:** submit passes `--model-type <type>` to `gym eval run` when the `policy_model` node holds a `service:` reference, where `<type>` is the key the reference sits under (`openai_model` for the implicit binding). Otherwise it passes none.

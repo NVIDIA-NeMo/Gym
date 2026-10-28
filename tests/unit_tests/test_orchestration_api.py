@@ -203,6 +203,57 @@ def test_a_command_benchmark_with_several_model_services_gets_no_policy():
     assert _gsm8k(config).run == {}
 
 
+def test_the_policy_binding_is_derived_and_cannot_be_written():
+    driver = _policy_driver(run={})
+    driver["benchmarks"]["gsm8k"]["policy_service"] = "svc"
+    with pytest.raises(ValidationError, match="policy_service is set by submit"):
+        SubmitConfig.model_validate(_config(driver=driver))
+
+
+@pytest.mark.parametrize(
+    "run, services",
+    [
+        ({}, {"svc": SERVICE}),
+        ({"policy_model": {}}, {"svc": SERVICE}),
+        ({"policy_model": {"responses_api_models": {"vllm_model": "service:svc"}}}, {"svc": SERVICE}),
+        (
+            {"policy_model": {"responses_api_models": {"openai_model": "service:judge"}}},
+            {"judge": {"type": "openai_compatible", "base_url": "https://j.example.com/v1", "model": "m"}},
+        ),
+    ],
+    ids=["implicit", "opt_out", "explicit", "declarative"],
+)
+def test_a_saved_config_reloads_to_the_same_policy_binding(run, services):
+    config = SubmitConfig.model_validate(_config(services=services, driver=_policy_driver(run=run)))
+    saved = config.model_dump(mode="json")
+    reloaded = SubmitConfig.model_validate(saved, context={SAVED_CONFIG: True})
+    before, after = _gsm8k(config), _gsm8k(reloaded)
+    assert (after.policy_service, after.policy_model_type, after.run) == (
+        before.policy_service,
+        before.policy_model_type,
+        before.run,
+    )
+
+
+def test_a_saved_command_benchmark_keeps_its_policy_variables():
+    config = SubmitConfig.model_validate(_config(driver=_policy_driver(command="./run.sh")))
+    reloaded = SubmitConfig.model_validate(config.model_dump(mode="json"), context={SAVED_CONFIG: True})
+    assert _gsm8k(reloaded).run == _gsm8k(config).run
+    assert _gsm8k(reloaded).policy_service == "svc"
+
+
+def test_a_server_per_node_service_is_the_implicit_policy_through_vllm_model():
+    pools = {
+        "cluster": {**POOLS["cluster"], "node_pools": {"main": {"partition": "p", "nodes": 2, "gpus_per_node": 8}}}
+    }
+    service = {**SERVICE, "node_pool": "main", "server_per_node": True}
+    benchmark = _gsm8k(SubmitConfig.model_validate(_config(compute=pools, services={"svc": service})))
+    urls = [f"http://${{oc.env:GYM_POOL_MAIN_NODE_{i}}}:8000/v1" for i in range(2)]
+    assert benchmark.policy_model_type == "vllm_model"
+    assert benchmark.run["policy_model"]["responses_api_models"]["vllm_model"]["base_url"] == urls
+    assert benchmark.run["policy_base_url"] == urls
+
+
 def test_service_env_accepted():
     config = SubmitConfig.model_validate(_config(services={"svc": {**SERVICE, "env": {"FOO": "lit:bar"}}}))
     assert config.services["svc"].env == {"FOO": "bar"}
