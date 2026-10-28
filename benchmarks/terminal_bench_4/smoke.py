@@ -80,9 +80,12 @@ async def main(args):
             "responses_api_agents/miniswe_sandboxed_agent/harness.py",
             "responses_api_agents/miniswe_sandboxed_agent/bootstrap.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
-            "environment_servers/terminal_bench_4/app.py",
+            "environment_servers/single_agent_turn/app.py",
             "responses_api_agents/opencode_agent/app.py",
             "benchmarks/terminal_bench_4/opencode.yaml",
+            "benchmarks/terminal_bench_4/miniswe.yaml",
+            "benchmarks/terminal_bench_4/sessions.yaml",
+            "responses_api_agents/opencode_agent/task_context.py",
         ]
     ]
     (args.output / "run.json").write_text(
@@ -165,27 +168,12 @@ async def main(args):
         server_client=client,
     )
     if args.harness == "opencode":
-        from environment_servers.terminal_bench_4.app import (
-            TerminalBench4EnvironmentConfig,
-            TerminalBench4EnvironmentServer,
-        )
         from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
 
         agent = OpenCodeAgent(
             config=OpenCodeAgentConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
             server_client=client,
         )
-        environment_name = agent_name + "_environment_server"
-        ports[environment_name] = free_port()
-        environment_config = config[environment_name].environment_servers.terminal_bench_4
-        environment_config.update(name=environment_name, host=host, port=ports[environment_name])
-        environment = TerminalBench4EnvironmentServer(
-            config=TerminalBench4EnvironmentConfig.model_validate(
-                OmegaConf.to_container(environment_config, resolve=True)
-            ),
-            server_client=client,
-        )
-        run_name = environment_name
     else:
         from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 
@@ -193,13 +181,27 @@ async def main(args):
             config=MiniSWESandboxedConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
             server_client=client,
         )
-        run_name = agent_name
+    from environment_servers.single_agent_turn.app import (
+        SingleAgentTurnEnvironmentServer,
+        SingleAgentTurnEnvironmentServerConfig,
+    )
+
+    run_name = agent_name + "_environment_server"
+    ports[run_name] = free_port()
+    environment_config = config[run_name].environment_servers.single_agent_turn
+    environment_config.update(name=run_name, host=host, port=ports[run_name])
+    environment = SingleAgentTurnEnvironmentServer(
+        config=SingleAgentTurnEnvironmentServerConfig.model_validate(
+            OmegaConf.to_container(environment_config, resolve=True)
+        ),
+        server_client=client,
+    )
     model = SimpleModelServer(config=SimpleModelServerConfig.model_validate(model_config), server_client=client)
     servers = [
         uvicorn.Server(uvicorn.Config(instance.setup_webserver(), host=host, port=ports[name], log_level="warning"))
         for name, instance in [("terminal_bench_4", resource), (agent_name, agent), ("policy_model", model)]
     ]
-    if args.harness == "opencode":
+    if environment is not None:
         servers.append(
             uvicorn.Server(
                 uvicorn.Config(environment.setup_webserver(), host=host, port=ports[run_name], log_level="warning")
@@ -231,24 +233,33 @@ async def main(args):
                     async with session.post(
                         f"http://{host}:{ports[run_name]}/run",
                         json={
-                            "task_id": f"terminal-bench/{task['name']}",
-                            "task_name": "terminal-bench/" + task["name"],
-                            "task_ref": task["ref"],
-                            "dataset_ref": manifest["ref"],
-                            "rollout_id": f"{args.output.name}-{task['name']}",
-                            "_ng_rollout_id": f"{args.output.name}-{task['name']}",
-                            "_ng_task_index": manifest["tasks"].index(task),
-                            "_ng_rollout_index": 0,
-                            "responses_create_params": {"input": []}
-                            if args.harness == "opencode"
-                            else {"input": [], "max_output_tokens": 16384},
+                            "episode_id": {"rollout_id": f"{args.output.name}-{task['name']}", "attempt": 0},
+                            "task": {
+                                "task_id": {"taskset": manifest["ref"], "task_id": "terminal-bench/" + task["name"]},
+                                "task_input": {
+                                    "task_id": f"terminal-bench/{task['name']}",
+                                    "task_name": "terminal-bench/" + task["name"],
+                                    "task_ref": task["ref"],
+                                    "dataset_ref": manifest["ref"],
+                                    "rollout_id": f"{args.output.name}-{task['name']}",
+                                    "_ng_rollout_id": f"{args.output.name}-{task['name']}",
+                                    "_ng_task_index": manifest["tasks"].index(task),
+                                    "_ng_rollout_index": 0,
+                                    "responses_create_params": {"input": []}
+                                    if args.harness == "opencode"
+                                    else {"input": [], "max_output_tokens": 16384},
+                                },
+                            },
                         },
                     ) as response:
                         text = await response.text()
                         (args.output / f"{task['name']}.json").write_text(text)
                         if response.status != 200:
                             raise RuntimeError(f"Agent HTTP {response.status}; see task response")
-                        result = json.loads(text)
+                        envelope = json.loads(text)
+                        if envelope.get("failure"):
+                            raise RuntimeError(str(envelope["failure"]))
+                        result = envelope["result"]
                         result.update(
                             _ng_rollout_id=f"{args.output.name}-{task['name']}",
                             _ng_task_index=manifest["tasks"].index(task),

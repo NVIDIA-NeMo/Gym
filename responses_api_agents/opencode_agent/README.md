@@ -227,3 +227,7 @@ still controls the actual provider/model. Native ID changes can affect scores.
 Single-turn session close also returns confirmed cleanup and the captured trajectory.
 Borrowed sessions honor `SandboxAccess.user` for setup and execution. Non-root
 images must supply the runtime prerequisites described above.
+
+When `task_tool_context` is enabled, the owner may also include `instruction` and
+`agent_timeout_sec` in the sandbox's task context. The instruction fills an empty
+request input; the timeout bounds the configured and request execution budgets.

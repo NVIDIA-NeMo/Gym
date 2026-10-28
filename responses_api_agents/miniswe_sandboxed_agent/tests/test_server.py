@@ -89,6 +89,7 @@ async def fixture(tmp_path, monkeypatch):
             build_spec=lambda: None,
             resource_identities=lambda: [],
             provider_config={"local": {}},
+            provider_ref=None,
             main=SimpleNamespace(
                 serialize=AsyncMock(return_value={"sandbox_id": session_id}),
                 exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/task\n")),

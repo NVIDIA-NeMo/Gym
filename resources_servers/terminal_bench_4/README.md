@@ -223,3 +223,23 @@ deletion fails, EFS data is retained to avoid deleting a live mount. Persistent
 session records include the helper ID and exact EFS host path/subdirectory for
 recovery. Provider TTL expires sandboxes after abrupt process death, but EFS data
 requires separate cleanup in that case.
+
+## Standard resource sessions
+
+Both `terminal_bench_4/miniswe` and `terminal_bench_4/opencode` use the shared
+`single_agent_turn` environment. `/seed_session` accepts a
+`ResourcesSeedSessionRequest` whose `task_data` contains the pinned `task_name`,
+`task_ref`, and `dataset_ref`, and returns borrowed `SandboxAccess`.
+Resources writes the package instruction, execution budget, MCP servers, and
+skills path to `/tmp/.nemo-gym/task.json`. Both agents read this context; an empty
+row input uses the package instruction, and the task budget caps execution.
+
+The environment closes the agent before verification. `/verify` identifies the
+task through the seed cookie and derives its execution outcome from the agent
+response. Resources retains ownership of task containers, artifact collection,
+and the separate verifier. `/close_session` accepts the caller-assigned resources
+session ID even when the seed response was lost, fences late seeds, and releases
+all task resources. Process restart requires a fresh episode attempt.
+
+The earlier seed/verify request shapes remain supported for Terminal-Bench-Science
+and existing mini-SWE `/run` clients.

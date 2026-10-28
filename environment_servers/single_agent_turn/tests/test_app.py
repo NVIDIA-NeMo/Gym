@@ -1625,3 +1625,17 @@ async def test_verifier_evidence_reaches_collector_through_result_or_failure(out
     assert invocation["model_calls"] == []
     assert "ng_verifier_invocations" not in record  # Only the canonical trajectory is persisted.
     assert list(tmp_path.iterdir()) == []  # Resources never writes verifier sidecars.
+
+
+async def test_negative_agent_cleanup_receipt_prevents_verification() -> None:
+    environment_server, client = _environment_server()
+    client.responses[3:] = [
+        _Response({"agent_session_id": "agent-session", "cleanup_confirmed": False}),
+        _Response({"agent_session_id": "agent-session", "cleanup_confirmed": False}),
+        _Response({"resources_session_id": "resources-session"}),
+    ]
+    result = await environment_server.run_request(_request())
+    assert result.failure is not None
+    assert result.failure.stage == "cleanup"
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert client.calls[-1][1] == "/close_session"

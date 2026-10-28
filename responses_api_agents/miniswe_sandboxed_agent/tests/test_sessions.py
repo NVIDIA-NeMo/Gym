@@ -484,6 +484,7 @@ async def test_close_does_not_wait_forever_for_a_harness_that_ignores_cancellati
             close = await client.post("/v1/agent_sessions/close", json=CLOSE_BODY)
 
         assert close.status_code == 200, close.text
+        assert close.json()["cleanup_confirmed"] is False
         assert events == ["disconnect"]
         assert any("did not stop within 0.05s" in record.message for record in caplog.records)
         response = await turn
@@ -584,3 +585,21 @@ async def test_a_turn_cancelled_before_its_first_step_is_a_masked_cancellation(t
     assert refused.value.status_code == 503 and "cancelled" in refused.value.detail
     assert state.result is not None and state.result.termination.reason == "cancelled"
     assert state.result.agent_started is False
+
+
+def test_owner_task_context_supplies_instruction_and_execution_budget(tmp_path, monkeypatch):
+    _, client, _, _, _ = make_agent(
+        tmp_path,
+        monkeypatch,
+        task_context={
+            "instruction": "Solve the pinned task",
+            "agent_timeout_sec": 7,
+        },
+    )
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+    result = client.post(capture_path(), json={"input": []})
+    assert result.status_code == 200, result.text
+    (harness,) = FakeHarness.instances
+    assert harness.kwargs["context"].instruction == "Solve the pinned task"
+    assert 0 < harness.budget <= 7
+    assert client.post("/v1/agent_sessions/close", json=CLOSE_BODY).status_code == 200

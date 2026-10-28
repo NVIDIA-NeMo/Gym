@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, JsonValue, model_validator
 
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox
 
 
@@ -30,6 +31,8 @@ class TaskMCPServer(BaseModel):
 
 
 class TaskToolContext(BaseModel):
+    instruction: str | None = None
+    agent_timeout_sec: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     mcp_servers: list[TaskMCPServer] = Field(default_factory=list)
     skills_dir: str | None = None
 
@@ -40,6 +43,20 @@ class TaskToolContext(BaseModel):
         if self.skills_dir and not PurePosixPath(self.skills_dir).is_absolute():
             raise ValueError("Task skills directory must be absolute")
         return self
+
+    def apply(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Fill an identity-only task prompt and bound the agent by its owner's task budget."""
+        body = body.model_copy(deep=True)
+        if not body.input and self.instruction:
+            body.input = self.instruction
+        if self.agent_timeout_sec is not None:
+            metadata = dict(body.metadata or {})
+            budget = self.agent_timeout_sec
+            if "agent_timeout_sec" in metadata:
+                budget = min(budget, float(metadata["agent_timeout_sec"]))
+            metadata["agent_timeout_sec"] = str(budget)
+            body.metadata = metadata
+        return body
 
     def opencode_config(self) -> dict[str, JsonValue]:
         """Use native MCP transport negotiation and explicit skill discovery paths."""

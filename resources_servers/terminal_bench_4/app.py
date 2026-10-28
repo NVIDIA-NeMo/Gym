@@ -18,6 +18,11 @@ from pydantic import Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -58,6 +63,7 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     shutdown_timeout_sec: float = Field(default=30, ge=0)
     seeded_session_timeout_sec: float = Field(default=10 * 60 * 60, gt=0)
     task_download_dir: Path | None = None
+    agent_max_timeout_sec: float | None = Field(default=None, gt=0)
 
 
 def atomic_json(path, value):
@@ -118,6 +124,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         self._loader = PackageLoader(self.config.task_download_dir)
         self._closing = False
         self._closed_identities: set[str] = set()
+        self._standard_seeds: dict[str, ResourcesSeedSessionRequest] = {}
+        self._closed_standard_sessions: set[str] = set()
         self.config.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     def setup_webserver(self):
@@ -195,7 +203,40 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         session.persist = lambda: self._persist(session)
         return session
 
-    async def seed_session(self, request: Request, body: TerminalBench4RunRequest) -> SeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | TerminalBench4RunRequest
+    ) -> ResourcesSeedSessionResponse | SeedSessionResponse:
+        """Accept standard sessions; retain the previous protocol for existing Science clients."""
+        if isinstance(body, TerminalBench4RunRequest):
+            return await self._seed_tb4_session(request, body)
+        identifier = body.resources_session_id
+        if identifier in self._closed_standard_sessions:
+            raise HTTPException(410, "Resources session was closed")
+        previous = self._standard_seeds.get(identifier)
+        if previous is not None and previous != body:
+            raise HTTPException(409, "Resources session is bound to another episode or task")
+        payload = TerminalBench4RunRequest.model_validate(
+            body.task_data
+            | {
+                "rollout_id": body.episode_id.capture_key,
+                "client_session_id": identifier,
+                "responses_create_params": {"input": []},
+                "_ng_rollout_id": body.episode_id.capture_key,
+            }
+        )
+        self._standard_seeds[identifier] = body.model_copy(deep=True)
+        seed = await self._seed_tb4_session(request, payload)
+        if identifier in self._closed_standard_sessions:
+            raise HTTPException(410, "Resources session was closed during preparation")
+        if seed.termination is not None or seed.sandbox_access is None:
+            session = self._session(request, seed.session_id)
+            failure_type = (session.result.get("exception_info") or {}).get("exception_type")
+            status = 422 if failure_type == ExecLimitConfigurationError.__name__ else 503
+            raise HTTPException(status, f"TB4 preparation did not yield a sandbox: {seed.termination}")
+        request.session["tb4_standard_session_id"] = seed.session_id
+        return ResourcesSeedSessionResponse(resources_session_id=identifier, sandbox_access=seed.sandbox_access)
+
+    async def _seed_tb4_session(self, request: Request, body: TerminalBench4RunRequest) -> SeedSessionResponse:
         if self._closing:
             raise HTTPException(503, "Resources server is shutting down")
         task = self._tasks.get(body.task_name)
@@ -244,6 +285,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                         path="/tmp/.nemo-gym/task.json",
                         text=json.dumps(
                             {
+                                "instruction": session.task.instruction,
+                                "agent_timeout_sec": min(
+                                    session.task.config.agent.timeout_sec,
+                                    self.config.agent_max_timeout_sec or float("inf"),
+                                ),
                                 "mcp_servers": [
                                     server.model_dump(mode="json")
                                     for server in session.task.config.environment.mcp_servers
@@ -430,7 +476,42 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             raise HTTPException(404, "Unknown session")
         return session
 
-    async def verify(self, request: Request, body: SandboxedVerifyRequest) -> SandboxedVerifyResponse:
+    async def verify(
+        self, request: Request, body: SandboxedVerifyRequest | BaseVerifyRequest
+    ) -> SandboxedVerifyResponse:
+        """Translate a standard agent response into the existing TB4 verifier lifecycle."""
+        if isinstance(body, SandboxedVerifyRequest):
+            return await self._verify_tb4(request, body)
+        session_id = request.session.get("tb4_standard_session_id")
+        if not session_id:
+            raise HTTPException(409, "No standard TB4 resources session was seeded")
+        session = self._session(request, session_id)
+        metadata = body.response.metadata or {}
+        reason = metadata.get("miniswe_termination") or (
+            "timeout"
+            if body.response.status == "incomplete"
+            else "infrastructure_error"
+            if body.response.status in ("failed", "cancelled")
+            else "completed"
+        )
+        started = metadata.get("miniswe_agent_started", "true") == "true"
+        params = body.responses_create_params.model_copy(update={"input": session.seed_response.instruction})
+        result = await self._verify_tb4(
+            request,
+            SandboxedVerifyRequest.model_validate(
+                session.request.model_dump(mode="json")
+                | {
+                    "session_id": session_id,
+                    "responses_create_params": params.model_dump(mode="json"),
+                    "response": body.response.model_dump(mode="json"),
+                    "termination": {"reason": reason, "detail": metadata.get("miniswe_termination_detail")},
+                    "agent_started": started and reason != "infrastructure_error",
+                }
+            ),
+        )
+        return result.model_copy(update={"mask_sample": bool(result.infrastructure_error)})
+
+    async def _verify_tb4(self, request: Request, body: SandboxedVerifyRequest) -> SandboxedVerifyResponse:
         session = self._session(request, body.session_id)
         if session.execution is not None:
             await asyncio.shield(session.execution)
@@ -439,7 +520,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             raise HTTPException(409, "Session is already bound to another verification request")
         if session.verified_response is not None:
             return session.verified_response
-        if session.phase == "closed" or session.identity in self._closed_identities:
+        if session.identity in self._closed_identities or (
+            session.phase == "closed" and (session.seed_response is None or session.seed_response.termination is None)
+        ):
             raise HTTPException(410, "Episode was closed without verification")
         if session.seed_response is None:
             raise HTTPException(409, "Episode has no recorded seed response")
@@ -453,11 +536,26 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         await asyncio.shield(session.finalization)
         return session.verified_response
 
-    async def close_resources_session(self, request: Request, body: TerminalBench4RunRequest) -> dict[str, bool]:
+    async def close_resources_session(
+        self, request: Request, body: ResourcesCloseSessionRequest | TerminalBench4RunRequest
+    ) -> ResourcesCloseSessionResponse | dict[str, bool]:
+        """Fence standard seeds even when their response was lost, then release task resources."""
+        if isinstance(body, TerminalBench4RunRequest):
+            return await self._close_tb4_session(request, body.client_session_id, body.rollout_id)
+        previous = self._standard_seeds.get(body.resources_session_id)
+        if previous is not None and previous.episode_id != body.episode_id:
+            raise HTTPException(409, "Resources session belongs to another episode")
+        self._closed_standard_sessions.add(body.resources_session_id)
+        await self._close_tb4_session(request, body.resources_session_id, body.episode_id.capture_key)
+        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+
+    async def _close_tb4_session(
+        self, request: Request, client_session_id: str | None, rollout_id: str
+    ) -> dict[str, bool]:
         """Close by the original rollout identity, including when the seed reply was lost."""
-        if body.client_session_id:
-            request.session["tb4_client_session_id"] = body.client_session_id
-        identity = hashlib.sha256(f"{self._owner(request)}:{body.rollout_id}".encode()).hexdigest()
+        if client_session_id:
+            request.session["tb4_client_session_id"] = client_session_id
+        identity = hashlib.sha256(f"{self._owner(request)}:{rollout_id}".encode()).hexdigest()
         self._closed_identities.add(identity)
         session_id = self._by_identity.get(identity)
         if session_id is None:

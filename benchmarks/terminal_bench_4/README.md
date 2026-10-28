@@ -10,7 +10,7 @@
 
 - `terminal_bench_4/opencode`: OpenCode **1.17.11**, using its native tools,
   task-local MCP servers and skills in the same resource-owned task containers.
-  Subagents and web tools are disabled. The environment closes OpenCode before
+  Subagents and web tools are disabled. The shared `single_agent_turn` environment closes OpenCode before
   collecting task files and running the existing separate verifier.
 
 To use OpenCode, replace `terminal_bench_4/miniswe` with
@@ -22,12 +22,12 @@ budgets under `terminal_bench_4_opencode.responses_api_agents.opencode_agent`.
 mini-SWE's step and command-timeout settings do not apply to OpenCode.
 
 OpenCode uses named `tb4_sandbox`, `tb4_sandbox_cpu`, and `tb4_sandbox_gpu`
-connections so agent and Resources reconnect to the same deployment. A custom
+connections (shared by both profiles) so agent and Resources reconnect to the same deployment. A custom
 provider must be defined at the top level and selected through
 `environment.sandbox_provider`; split deployments also supply
 `environment.sandbox_provider_by_pool`. OpenCode requires a task working directory
 outside `/` and `/tmp`, plus its documented runtime prerequisites. See the
-[session environment](../../environment_servers/terminal_bench_4/README.md).
+[Resources session protocol](../../resources_servers/terminal_bench_4/README.md).
 
 ## Artificial Analysis comparison
 

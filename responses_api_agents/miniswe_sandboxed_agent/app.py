@@ -293,6 +293,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
         provider = create_provider(provider_config)
         try:
             sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+            if body.sandbox_access.user is not None:
+                sandbox.set_default_user(body.sandbox_access.user)
         except BaseException:
             await provider.aclose()
             raise
@@ -352,13 +354,15 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 # Resources retains sandbox/Compose ownership; release only our transport.
                 await session.provider.aclose()
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id, agent_observations=session.observations
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=session.observations,
+            cleanup_confirmed=False if worker is not None and not worker.done() else None,
         )
 
     async def _bind_episode_turn(
         self, state: MiniSWESession, body: NeMoGymResponseCreateParamsNonStreaming, rollout_id: str | None
     ) -> None:
-        """First /v1/responses on an episode session: the input is the instruction, task.json the tool grants.
+        """Bind the first turn, taking an omitted instruction and its budget from the owner task context.
 
         Everything is read before anything is published, and ``original_params`` is set last: a request
         that overlaps the first one waits on the lock, finds the binding complete and replays it, so it
@@ -370,7 +374,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             if state.closed:
                 raise HTTPException(409, "Agent session is closed")
             task_context = await _read_task_context(state.sandbox)
-            state.seed.instruction = _instruction(body.input)
+            state.seed.instruction = _instruction(body.input) if body.input else task_context.get("instruction", "")
+            if task_context.get("agent_timeout_sec") is not None:
+                budget = float(task_context["agent_timeout_sec"])
+                if not 0 < budget < float("inf"):
+                    raise HTTPException(422, "Invalid task execution budget")
+                state.seed.agent_timeout_sec = min(state.seed.agent_timeout_sec, budget)
             state.seed.mcp_servers = task_context.get("mcp_servers") or []
             state.seed.skills_dir = task_context.get("skills_dir")
             # Model calls carry the /ng-rollout/<id> the environment server used, so capture correlates them.

@@ -453,6 +453,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         close = AgentCloseSessionResponse.model_validate(await get_response_json(close_http_response))
         if close.agent_session_id != handles.agent_session_id:
             raise ValueError("Agent close returned a different agent_session_id")
+        if close.cleanup_confirmed is False:
+            raise RuntimeError("Agent process termination was not confirmed")
         # Verify identifies the episode by the Resources session cookie.
         # An agent that held no Resources cookie jar returns None or an empty jar.
         # Neither may replace the cookie from the Resources seed.

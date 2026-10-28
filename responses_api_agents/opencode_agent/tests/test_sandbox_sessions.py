@@ -1821,3 +1821,20 @@ def test_native_skill_permissions_do_not_restore_legacy_tool_flags(setup, monkey
         assert "tools" not in config
         assert config["permission"] == {"*": "allow", "task": "deny", "webfetch": "deny", "skill": "allow"}
         assert config["skills"] == {"paths": ["/app/.agents/skills"]}
+
+
+def test_owner_context_supplies_empty_prompt_and_bounds_budget(setup, monkeypatch):
+    from responses_api_agents.opencode_agent.task_context import TaskToolContext
+
+    agent, sandbox = setup
+    agent.config.task_tool_context = True
+    monkeypatch.setattr(
+        "responses_api_agents.opencode_agent.app.read_task_context",
+        AsyncMock(return_value=TaskToolContext(instruction="Solve the pinned task", agent_timeout_sec=7)),
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": []})
+        assert response.status_code == 200, response.text
+        assert sandbox.params()["prompt"] == "Solve the pinned task"
+        assert float(response.json()["metadata"]["agent_timeout_sec"]) <= 7

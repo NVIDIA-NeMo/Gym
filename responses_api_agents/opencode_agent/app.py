@@ -578,7 +578,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
-            prompt, system = self._session_input(body)
+            prompt, system = self._session_input(state.task_context.apply(body))
             if state.task is None:
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
@@ -954,7 +954,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> None:
         assert isinstance(state, OpenCodeSandboxSession)
-        _, system = self._session_input(body)
+        _, system = self._session_input(state.task_context.apply(body))
         supplied_instructions = body.instructions is not None or (
             not isinstance(body.input, str)
             and any(getattr(item, "role", None) in {"system", "developer"} for item in body.input)
@@ -967,10 +967,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         """Run a delta under one budget, including preparation and the concurrency queue."""
         assert isinstance(state, OpenCodeSandboxSession)
-        prompt, system = self._session_input(body)
+        prompt, system = self._session_input(state.task_context.apply(body))
         if state.system_instructions is None:
             state.system_instructions = system
-        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        timeout = resolve_agent_timeout(state.task_context.apply(body).metadata, ceiling=self.config.timeout)
         started = monotonic()
         deadline = started + timeout
         failure: BaseException | None = None
@@ -1104,7 +1104,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         timeout: float | None = None,
         deadline: float | None = None,
     ) -> NeMoGymResponse:
-        timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        timeout = (
+            timeout
+            if timeout is not None
+            else resolve_agent_timeout(state.task_context.apply(body).metadata, ceiling=self.config.timeout)
+        )
         started = monotonic()
         previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
