@@ -511,11 +511,10 @@ class TestNemoRLUsage:
             import nemo_gym.rollout_collection as gym_rollout_collection
 
         fake_helper, fake_collection = object(), object()
-        with warnings.catch_warnings():
-            # monkeypatch reads the old value first, which goes through the CLI refactor's warning shim.
-            warnings.simplefilter("ignore")
-            monkeypatch.setattr(gym_cli, "RunHelper", fake_helper)
-            monkeypatch.setattr(gym_rollout_collection, "RolloutCollectionHelper", fake_collection)
+        # `RunHelper` reaches nemo_gym.cli through the CLI refactor's `__getattr__` shim. Patch the module's namespace,
+        # so undoing the patch removes the name again; restoring it with setattr would leave it set for later tests.
+        monkeypatch.setitem(vars(gym_cli), "RunHelper", fake_helper)
+        monkeypatch.setattr(gym_rollout_collection, "RolloutCollectionHelper", fake_collection)
         namespace: dict = {}
         exec(
             "from nemo_gym.cli import RunHelper\nfrom nemo_gym.rollout_collection import RolloutCollectionHelper",
