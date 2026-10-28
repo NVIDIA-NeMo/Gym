@@ -299,10 +299,12 @@ class ResponsesConverter(BaseModel):
 
         A Responses field with no Chat Completions representation raises ``NotImplementedError``,
         so the caller can route the request to a server that serves Responses natively. With
-        ``drop_unrepresentable_request_fields`` the reporting-only fields are removed from the
-        request instead and the conversion proceeds: a non-empty ``include`` (every value; an
-        empty one is already treated as absent), ``reasoning.summary`` and
-        ``reasoning.generate_summary``, and a message ``phase``. An image part in a tool's output
+        ``drop_unrepresentable_request_fields`` those fields are removed from the request instead
+        and the conversion proceeds: a non-empty ``include`` (every value; an empty one is already
+        treated as absent), ``reasoning.summary`` and ``reasoning.generate_summary``, a message
+        ``phase``, and a declared tool this backend cannot run, which is a hosted tool such as web
+        search or tool search. A tool marked ``defer_loading`` is not dropped: this path has no
+        search step, so the tool is declared eagerly instead. An image part in a tool's output
         becomes the text placeholder ``_IMAGE_OUTPUT_PLACEHOLDER``, which does replace that part
         of the prompt. Every other unrepresentable field, ``reasoning.context`` included, is still
         refused.
@@ -499,10 +501,19 @@ class ResponsesConverter(BaseModel):
             for tool_dict in tools:
                 tool_type = tool_dict.get("type")
                 if tool_type not in {"function", "custom"}:
-                    raise NotImplementedError(
-                        f"Responses tool type {tool_type!r} has no implemented Chat Completions conversion."
+                    # A hosted tool (web search, tool search) runs on the provider's side, which a model
+                    # served elsewhere cannot reach, so only the drop path accepts the request without it.
+                    if not drop_unrepresentable_request_fields:
+                        raise NotImplementedError(
+                            f"Responses tool type {tool_type!r} has no implemented Chat Completions conversion."
+                        )
+                    logger.debug(
+                        "Dropping Responses tool type %r: a chat backend cannot run a hosted tool.", tool_type
                     )
-                if tool_dict.get("defer_loading"):
+                    continue
+                # A client defers a tool to keep it out of context until a search loads it. This path has
+                # no search step, so on the drop path the tool is declared eagerly rather than dropped.
+                if tool_dict.get("defer_loading") and not drop_unrepresentable_request_fields:
                     raise NotImplementedError(
                         f"Responses {tool_type} tools with defer_loading enabled "
                         "have no Chat Completions representation."
@@ -527,9 +538,12 @@ class ResponsesConverter(BaseModel):
                         "custom": self._responses_custom_tool_to_chat(tool_dict),
                     }
                 responses_create_params["tools"].append(converted_tool)
+        # Decide on the converted tools: a request whose only tools were dropped is a no-tools request.
+        if responses_create_params.get("tools"):
             if tool_choice is not None:
                 responses_create_params["tool_choice"] = tool_choice
         else:
+            responses_create_params.pop("tools", None)
             if tool_choice not in (None, "auto", "none"):
                 raise ValueError(f"tool_choice={tool_choice!r} requires at least one tool")
 

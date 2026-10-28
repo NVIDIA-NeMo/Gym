@@ -452,6 +452,19 @@ class TestSanitizeStreamingBody:
         assert "annotations" not in item["content"][0]
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
+    def test_keeps_replayed_assistant_message_with_null_annotations(self) -> None:
+        # The same replay may send annotations as null instead of omitting it.
+        item = {
+            "type": "message",
+            "id": "msg_2",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Let me inspect the workload first.", "annotations": None}],
+        }
+        cleaned, _ = sanitize_streaming_responses_body({"input": [item], "stream": True})
+        params = validate_streaming_responses_params(cleaned)
+
+        assert params.input[0].model_dump(mode="json")["content"][0]["annotations"] == []
+
     def test_flattens_namespace_tools(self) -> None:
         flat, ns_map = flatten_namespace_tools([NAMESPACE_TOOL])
         assert len(flat) == 1
@@ -936,7 +949,6 @@ class TestResponsesDispatchRoute:
         [
             {"id": None},
             {"id": []},
-            {"content": [{"type": "output_text", "text": "keep", "annotations": None}]},
             {"content": [{"type": "output_text", "text": None}]},
             {"content": [{"type": "output_text"}]},
             {"content": [{"type": "unknown", "text": "keep"}]},

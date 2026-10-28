@@ -138,6 +138,20 @@ def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: Mon
     assert "strict" not in body_dict["tools"][0]["function"]
 
 
+def test_preprocess_chat_completion_create_params_drops_replayed_annotations(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    params = NeMoGymChatCompletionCreateParamsNonStreaming(
+        model="my-model",
+        messages=[
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello", "annotations": None},
+            {"role": "user", "content": "again"},
+        ],
+    )
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), params.model_dump(exclude_unset=True))
+    assert body_dict["messages"][1] == {"role": "assistant", "content": "hello"}
+
+
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-transport.jsonl"
     monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
@@ -7792,6 +7806,27 @@ class TestUnrepresentableRequestFields:
 
         assert client.post("/v1/responses", json=self.BODY).status_code == 200
         assert "include" not in captured["value"].model_dump(exclude_unset=True)
+
+    TOOLS_BODY = {
+        "input": "hi",
+        "tools": [
+            {"type": "function", "name": "get_weather", "parameters": None, "strict": None},
+            {"type": "web_search_preview"},
+        ],
+    }
+
+    def test_hosted_tool_refused_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        client, _ = self._client(monkeypatch, drop=False)
+
+        with raises(NotImplementedError, match="tool type"):
+            client.post("/v1/responses", json=self.TOOLS_BODY)
+
+    def test_hosted_tool_dropped_when_configured(self, monkeypatch: MonkeyPatch) -> None:
+        client, captured = self._client(monkeypatch, drop=True)
+
+        assert client.post("/v1/responses", json=self.TOOLS_BODY).status_code == 200
+        tools = captured["value"].model_dump(exclude_unset=True)["tools"]
+        assert [tool["function"]["name"] for tool in tools] == ["get_weather"]
         assert captured["value"].messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
 
     def test_dropped_on_the_streaming_path_too(self, monkeypatch: MonkeyPatch) -> None:

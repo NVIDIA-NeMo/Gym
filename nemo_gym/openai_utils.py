@@ -233,7 +233,9 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     prompt_token_ids: List[int]
     generation_token_ids: List[int]
     generation_log_probs: List[float]
-    routed_experts: NotRequired[RoutedExperts]
+    # Null is accepted because a client replays the field as it received it, and a dense model
+    # returns null.
+    routed_experts: NotRequired[Optional[RoutedExperts]]
 
 
 REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
@@ -309,12 +311,18 @@ class NeMoGymLogprob(TypedDict, total=False):
     top_logprobs: Required[List[NeMoGymLogprobTopLogprob]]
 
 
+def _null_to_empty_list(value: Any) -> Any:
+    """Accept an explicit null where the field is a list a client may also omit."""
+    return [] if value is None else value
+
+
 class NeMoGymResponseOutputText(BaseModel):
     # Override the Iterable to avoid lazy iterators in Pydantic validation.
     # The default is the empty list because a client that replays an output message it received
-    # may omit `annotations` (the Responses API accepts that on input, and the Codex CLI does it).
+    # may omit `annotations` (the Responses API accepts that on input, and the Codex CLI does it),
+    # or send it as null.
     # Gym still emits `[]` on output.
-    annotations: List[Annotation] = Field(default_factory=list)
+    annotations: Annotated[List[Annotation], BeforeValidator(_null_to_empty_list)] = Field(default_factory=list)
     text: str
     type: Literal["output_text"] = "output_text"
     logprobs: Optional[List[NeMoGymLogprob]] = None
@@ -1375,6 +1383,8 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
     # Some harnesses replay reasoning on assistant history in Chat Completions.
     reasoning_content: str | None
+    # OpenAI SDK clients replay the assistant message as the SDK dumped it, including `annotations: null`.
+    annotations: Optional[Any]
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
