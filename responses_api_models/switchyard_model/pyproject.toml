@@ -41,8 +41,8 @@ dependencies = [
     # No extras: the [server] extra covers only Switchyard's deprecated Python serve path, which
     # this server does not use.
     #
-    # 0.2.0 is the floor (the pin is 0.3.0) -- it is the first release whose chat->responses
-    # translation emits the input_tokens_details and output_tokens_details objects the Responses
+    # Keep the exact 0.3.0 pin. Do not downgrade below 0.2.0: it is the first release whose
+    # chat->responses translation emits the input_tokens_details and output_tokens_details objects the Responses
     # schema requires (NVIDIA-NeMo/Switchyard#144); published 0.1.0 fails NeMoGymResponse
     # validation on every /v1/responses call. Installs from PyPI cp310-abi3 wheels; no Rust
     # toolchain, no git, no non-PyPI egress.
