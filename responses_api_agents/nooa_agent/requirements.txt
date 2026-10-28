@@ -1,9 +1,9 @@
 -e nemo-gym[dev,sandbox] @ ../../
 jsonschema>=4.25.1,<5
 # dev/atom head plus nooa_atom.gym (the Atom harness) and mcp 2.x compatibility; fork pin until a NOOA tag is cut.
-nooa @ git+https://github.com/furgalep/labs-OO-Agents.git@7064f28da069190bb157bd8abd6afe8cf1f9e2c7
+nooa @ git+https://github.com/furgalep/labs-OO-Agents.git@5f7fd80f733a50b016c43f4dbb337185cb1b620d
 # Keep the CLI and benchmark packages on the same revision as NOOA core.
-nooa-cli @ https://github.com/furgalep/labs-OO-Agents/archive/7064f28da069190bb157bd8abd6afe8cf1f9e2c7.tar.gz#subdirectory=packages/nooa-cli
-nooa-bench @ https://github.com/furgalep/labs-OO-Agents/archive/7064f28da069190bb157bd8abd6afe8cf1f9e2c7.tar.gz#subdirectory=packages/nooa-bench
+nooa-cli @ https://github.com/furgalep/labs-OO-Agents/archive/5f7fd80f733a50b016c43f4dbb337185cb1b620d.tar.gz#subdirectory=packages/nooa-cli
+nooa-bench @ https://github.com/furgalep/labs-OO-Agents/archive/5f7fd80f733a50b016c43f4dbb337185cb1b620d.tar.gz#subdirectory=packages/nooa-bench
 # Atom, the orchestrating NOOA agent (nooa_atom.gym:AtomHarness), same revision.
-nooa-atom @ https://github.com/furgalep/labs-OO-Agents/archive/7064f28da069190bb157bd8abd6afe8cf1f9e2c7.tar.gz#subdirectory=packages/nooa-atom
+nooa-atom @ https://github.com/furgalep/labs-OO-Agents/archive/5f7fd80f733a50b016c43f4dbb337185cb1b620d.tar.gz#subdirectory=packages/nooa-atom
