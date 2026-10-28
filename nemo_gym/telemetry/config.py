@@ -71,6 +71,17 @@ class TelemetryConfig(BaseModel, extra="allow"):
     ``service.name``, which makes a backend's service map useless. The unsuffixed name
     stays available as the ``nemo.gym.service_group`` resource attribute."""
 
+    fastapi_operation_spans: bool = False
+    """Let FastAPI's native instrumentation trace dependency resolution, endpoints,
+    serialization and background tasks (FastAPI >= 0.142; ignored below that).
+
+    Off by default because the spans are near-pure duplication. On one NeMo-RL run they
+    were 160,665 of 336,228 spans -- 48% of everything the job emitted. `fastapi.endpoint`
+    was 1:1 with its parent HTTP server span and within 1% of its duration, while
+    `fastapi.dependencies` and `fastapi.serialization` had medians of 0.07 ms and 0.23 ms.
+    The server spans themselves and `http.server.request.duration` are unaffected either
+    way; this only controls the three child spans beneath them."""
+
     span_groups: str = "default"
     """Span-group spec: a preset (``default`` | ``per_rollout`` | ``all``) or a
     comma-separated list of group names (e.g. ``"default,sandbox"``). See

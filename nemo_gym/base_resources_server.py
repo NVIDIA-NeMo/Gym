@@ -58,6 +58,7 @@ from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.session_routing import SessionKind
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
+from nemo_gym.telemetry.setup import fastapi_telemetry_kwargs
 
 
 logger = logging.getLogger(__name__)
@@ -521,7 +522,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         A server with another protocol, such as Gymnasium's ``/reset`` and ``/step``,
         overrides ``register_protocol_routes`` instead of building its own app.
         """
-        app = FastAPI()
+        app = FastAPI(**fastapi_telemetry_kwargs())
 
         self.setup_session_middleware(app)
         app.add_middleware(RolloutContextMiddleware)

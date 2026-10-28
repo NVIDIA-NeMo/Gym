@@ -298,6 +298,42 @@ def test_each_server_reports_itself_as_a_single_rank_world(enabled_console_env, 
     assert captured[NV_DL_WORLD_SIZE] == 1
 
 
+def test_each_server_names_its_own_instance(enabled_console_env, monkeypatch):
+    """The companion to the rank above: nemo-lens derives `service.instance.id` as
+    f"{run_id}-rank{rank}" when a rank is present and no identity was supplied. Rank is
+    pinned to 0 for every server and run_id is deliberately shared fleet-wide, so
+    leaving the derivation to lens gives the whole job one instance id.
+    """
+    monkeypatch.setenv("NEMO_GYM_OTEL_RUN_ID", "job-1416252")
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(server_name="weather")
+
+    assert captured["service.instance.id"] == f"job-1416252-weather-{os.getpid()}"
+
+
+def test_an_instance_id_from_the_caller_wins(enabled_console_env, monkeypatch):
+    """A deployment that already names its processes keeps its own scheme."""
+    captured = {}
+
+    def capture(config, **kwargs):
+        captured.update(kwargs.get("resource_attributes") or {})
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("nemo.lens.setup_telemetry", capture)
+    init_telemetry(
+        server_name="weather",
+        resource_attributes={"service.instance.id": "chosen-by-the-caller"},
+    )
+
+    assert captured["service.instance.id"] == "chosen-by-the-caller"
+
+
 # --------------------------------------------------------------------------- #
 # Another library already initialised nemo-lens in this process (NeMo-RL)
 # --------------------------------------------------------------------------- #
@@ -554,3 +590,42 @@ def test_init_registers_the_rollout_id_provider_for_sandbox_spans(enabled_consol
 
     init_telemetry()
     assert sandbox_observability._span_attribute_provider is rollout_span_attributes
+
+
+def test_fastapi_operation_spans_are_off_unless_asked_for(clean_otel_env, monkeypatch):
+    """FastAPI's native instrumentation traces dependency resolution, the endpoint and
+    serialization beneath every request span. On one NeMo-RL run that was 48% of all
+    spans, duplicating what the parent HTTP server span already recorded.
+    """
+    from nemo_gym.telemetry.setup import is_fastapi_operation_spans_enabled
+
+    assert is_fastapi_operation_spans_enabled() is False
+
+    monkeypatch.setenv("NEMO_GYM_OTEL_FASTAPI_OPERATION_SPANS", "1")
+    assert is_fastapi_operation_spans_enabled() is True
+
+
+def test_fastapi_telemetry_kwargs_match_the_installed_fastapi(clean_otel_env):
+    """``telemetry=`` arrived in FastAPI 0.142; older versions raise on the keyword."""
+    import inspect
+
+    from fastapi import FastAPI
+
+    from nemo_gym.telemetry.setup import fastapi_telemetry_kwargs
+
+    kwargs = fastapi_telemetry_kwargs()
+    if "telemetry" in inspect.signature(FastAPI.__init__).parameters:
+        assert kwargs == {"telemetry": {"operation_spans": False}}
+    else:
+        assert kwargs == {}
+    FastAPI(**kwargs)
+
+
+def test_fastapi_operation_spans_setting_reaches_a_server_process(clean_otel_env):
+    """The flag is read in the server process, so it has to survive `configure_telemetry_env`."""
+    from nemo_gym.telemetry.config import TelemetryConfig
+    from nemo_gym.telemetry.setup import configure_telemetry_env, is_fastapi_operation_spans_enabled
+
+    configure_telemetry_env(TelemetryConfig(enabled=True, fastapi_operation_spans=True))
+
+    assert is_fastapi_operation_spans_enabled() is True
