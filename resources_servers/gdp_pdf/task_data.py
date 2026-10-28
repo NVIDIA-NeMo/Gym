@@ -96,7 +96,8 @@ class TaskData(BaseModel):
     source_pdf: Optional[str] = Field(
         default=None,
         description="Path to the original source PDF the manifest was rendered from, relative to "
-        "documents_base_dir. Provenance only -- not read by the agent or verify().",
+        "documents_base_dir. Not read by the agent or verify(); the optional python tool uploads it into the "
+        "rollout's sandbox.",
         json_schema_extra={"consumed_by": ["provenance"], "legacy_location": "verifier_metadata"},
     )
     criteria: List[Criterion] = Field(

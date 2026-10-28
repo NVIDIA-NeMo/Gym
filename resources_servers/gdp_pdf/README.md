@@ -65,8 +65,8 @@ Rows are lightweight — no base64 in the JSONL:
 ```
 
 `verifier_metadata.prompt` is stored explicitly so `verify()` does not have to dig the prompt back
-out of the content blocks after the agent has rewritten them. `source_pdf` is provenance only
-(re-derives the original download without guessing a filename) — never read at rollout time.
+out of the content blocks after the agent has rewritten them. `source_pdf` records the original
+download; at rollout time only the optional [Python tool](#python-tool-optional) reads it.
 
 The upstream table pads every row out to 30 fixed-width rubric column groups
 (`rubric - {i}. criterion`, `... criterion_type`, and so on); `extract_criteria` in
@@ -104,6 +104,11 @@ the agent raises an error naming the exact command to run.
 | `judge_prompt_template_fpath` | `prompt_templates/judge.txt` | Per-criterion judge prompt |
 | `judge_max_attempts` | 5 | Attempts on parse failure before the row is excluded (see Grading) |
 | `judge_endpoint_max_concurrency` | 64 | Caps concurrent judge calls; a single task fans out to up to 30 |
+| `sandbox_provider` | `null` | Sandbox provider block that serves the optional `python` tool; `null` turns it off |
+| `sandbox_config` | `workdir: /sandbox`, `ttl_s: 21600` | Each rollout's sandbox: `image`, `workdir`, `ttl_s`, `resources`, `env` |
+| `documents_base_dir` | `data` | Base of `source_pdf`, relative to this directory |
+| `python_timeout_s` | 120 | A longer cell is interrupted; the kernel keeps its state |
+| `python_max_output_chars` | 20000 | Tool output beyond this is truncated |
 
 ## Grading
 
@@ -206,6 +211,26 @@ gym eval run --no-serve \
 
 The full benchmark runs via `benchmarks/gdp_pdf` at `num_repeats: 5`, matching the published
 five-attempts-per-task protocol.
+
+## Python Tool (optional)
+
+With `sandbox_provider` set, the server serves `POST /python`: a persistent IPython kernel in a
+per-rollout sandbox whose working directory holds the task's source PDF as `document.pdf`. Rows
+offer it as a `python` function tool in `responses_create_params.tools`, which `gdp_pdf_agent`
+dispatches like any row tool; the document is still delivered in the prompt. Tool output is text (streams, the
+last expression's value, tracebacks). The sandbox starts at `/seed_session` and stops at `/verify`;
+grading never reads it.
+
+`--benchmark gdp_pdf/python` (`benchmarks/gdp_pdf/python.yaml`) runs the benchmark this way: its
+prepare script adds the tool to the rows, and the agent may take up to 50 steps. Add a sandbox
+provider config and an image with `python3`, `ipykernel` and `jupyter_client`, such as
+`resources_servers/gdp_pdf/containers/Dockerfile`:
+
+```bash
+docker build -t gdp-pdf-sandbox resources_servers/gdp_pdf/containers
+export GDP_PDF_SANDBOX_IMAGE=gdp-pdf-sandbox
+gym eval run --benchmark gdp_pdf/python --config nemo_gym/sandbox/providers/docker/configs/docker.yaml ...
+```
 
 ## Throttling
 

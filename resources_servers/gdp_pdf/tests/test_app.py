@@ -15,14 +15,20 @@
 """Tests for the gdp_pdf resources server and its data preparation helpers."""
 
 import json
+import os
+import sys
+import time
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from types import SimpleNamespace
+from typing import Any, Iterator, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from pytest import approx, fixture, raises
 
+from benchmarks.gdp_pdf import prepare_python
 from benchmarks.gdp_pdf.prepare import (
     _PROMPT_RESTORES,
     EXAMPLE_PDF_SIZE_WARN_BYTES,
@@ -36,6 +42,7 @@ from benchmarks.gdp_pdf.prepare import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
+from nemo_gym.mcp_auto_exposure import harvest_tools
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -48,6 +55,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.server_utils import ServerClient
+from resources_servers.gdp_pdf import python_sandbox
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
     GdpPdfResourcesServer,
@@ -64,6 +72,9 @@ JUDGE_PROMPT_FPATH = str(SERVER_DIR / "prompt_templates/judge.txt")
 DATA_DIR = SERVER_DIR / "data"
 
 PROMPT = "According to the attached filing, what is the effective indemnity cap?"
+
+# verify() releases the rollout's python sandbox by session; direct calls have none.
+_NO_SESSION = SimpleNamespace(session={})
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +339,7 @@ class TestVerify:
             criteria=[_criterion(1, "States $5M."), _criterion(2, "Cites the clause.")],
         )
 
-        result = await server.verify(body)
+        result = await server.verify(_NO_SESSION, body)
 
         assert result.reward == 1.0
         assert result.all_pass == 1.0
@@ -348,7 +359,7 @@ class TestVerify:
             criteria=[_criterion(1, "a"), _criterion(2, "b"), _criterion(3, "c")],
         )
 
-        result = await server.verify(body)
+        result = await server.verify(_NO_SESSION, body)
 
         assert result.reward == approx(1 / 3)
         assert result.all_pass == 0.0
@@ -360,7 +371,7 @@ class TestVerify:
         _mock_judge(server, _scored_content("1"))
         criteria = [_criterion(2, "second slot"), _criterion(7, "seventh slot")]
 
-        result = await server.verify(_verify_request("answer", criteria=criteria))
+        result = await server.verify(_NO_SESSION, _verify_request("answer", criteria=criteria))
 
         assert [e.index for e in result.criterion_evaluations] == [2, 7]
         assert [e.criterion for e in result.criterion_evaluations] == ["second slot", "seventh slot"]
@@ -370,7 +381,7 @@ class TestVerify:
         mock = _mock_judge(server, _scored_content("1"))
         body = _verify_request("", criteria=[_criterion(1, "a"), _criterion(2, "b")])
 
-        result = await server.verify(body)
+        result = await server.verify(_NO_SESSION, body)
 
         assert result.reward == 0.0
         assert result.all_pass == 0.0
@@ -384,7 +395,7 @@ class TestVerify:
     async def test_missing_rubric_scores_zero_and_is_flagged(self, server: GdpPdfResourcesServer) -> None:
         mock = _mock_judge(server, _scored_content("1"))
 
-        result = await server.verify(_verify_request("An answer.", criteria=[]))
+        result = await server.verify(_NO_SESSION, _verify_request("An answer.", criteria=[]))
 
         # all([]) is True -- an ungradeable row must not report a vacuous all-pass.
         assert result.reward == 0.0
@@ -398,7 +409,7 @@ class TestVerify:
             response=_model_response("answer"),
             verifier_metadata=None,
         )
-        result = await server.verify(body)
+        result = await server.verify(_NO_SESSION, body)
         assert result.reward == 0.0
 
     @pytest.mark.asyncio
@@ -411,7 +422,7 @@ class TestVerify:
         mock = _mock_judge(server, _scored_content("1"))
         body = _verify_request("The cap is $5M.", criteria=[_criterion(1, "States the cap is $5M.")])
 
-        await server.verify(body)
+        await server.verify(_NO_SESSION, body)
 
         sent = mock.await_args.kwargs["json"]
         judge_text = sent.messages[0]["content"]
@@ -430,7 +441,7 @@ class TestVerify:
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge down"))
 
         with raises(JudgeError):
-            await server.verify(_verify_request("answer"))
+            await server.verify(_NO_SESSION, _verify_request("answer"))
 
     @pytest.mark.asyncio
     async def test_concurrency_semaphore_disabled(self, config: GdpPdfConfig) -> None:
@@ -438,7 +449,7 @@ class TestVerify:
         server = GdpPdfResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
         _mock_judge(server, _scored_content("1"))
 
-        result = await server.verify(_verify_request("answer"))
+        result = await server.verify(_NO_SESSION, _verify_request("answer"))
 
         assert result.reward == 1.0
 
@@ -517,7 +528,7 @@ class TestJudgeRetry:
     async def test_malformed_then_valid_succeeds_on_retry(self, server: GdpPdfResourcesServer) -> None:
         _mock_judge(server, "not json at all", _scored_content("1", "recovered"))
 
-        result = await server.verify(_verify_request("answer"))
+        result = await server.verify(_NO_SESSION, _verify_request("answer"))
 
         assert result.criterion_evaluations[0].passed is True
         assert result.criterion_evaluations[0].rationale == "recovered"
@@ -529,7 +540,7 @@ class TestJudgeRetry:
         mock = _mock_judge(server, "still not json", "still not json")
 
         with raises(JudgeError, match="unparseable after 2 attempts"):
-            await server.verify(_verify_request("answer"))
+            await server.verify(_NO_SESSION, _verify_request("answer"))
 
         assert mock.await_count == 2
 
@@ -540,7 +551,134 @@ class TestJudgeRetry:
         _mock_judge(server, "")
 
         with raises(JudgeError):
-            await server.verify(_verify_request("answer"))
+            await server.verify(_NO_SESSION, _verify_request("answer"))
+
+
+# ---------------------------------------------------------------------------
+# python tool (a real IPython kernel through the local sandbox provider)
+# ---------------------------------------------------------------------------
+
+
+@fixture
+def python_server(config: GdpPdfConfig, tmp_path: Path, monkeypatch) -> GdpPdfResourcesServer:
+    monkeypatch.setattr(python_sandbox, "get_global_config_dict", lambda: {"sandbox": {"local": {}}})
+    (tmp_path / "source.pdf").write_bytes(b"%PDF-1.4\n% a GDP.pdf test document\n")
+    # The local provider runs `python3` from PATH; make it this interpreter, which has ipykernel.
+    path = f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"
+    sandbox_config = python_sandbox.PythonSandboxConfig(workdir=str(tmp_path / "sandbox"), env={"PATH": path})
+    config = config.model_copy(
+        update={
+            "sandbox_provider": "sandbox",
+            "sandbox_config": sandbox_config,
+            "documents_base_dir": str(tmp_path),
+            "python_timeout_s": 5,
+        }
+    )
+    return GdpPdfResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def _seed(client: TestClient, source_pdf: str = "source.pdf"):
+    return client.post("/seed_session", json={"verifier_metadata": {"task_id": "t1", "source_pdf": source_pdf}})
+
+
+@fixture
+def python_client(python_server: GdpPdfResourcesServer) -> Iterator[TestClient]:
+    """A client whose rollout has been seeded with a small PDF."""
+    with TestClient(python_server.setup_webserver()) as client:
+        seeded = _seed(client)
+        assert seeded.status_code == 200, seeded.text
+        yield client
+
+
+def _python(client: TestClient, code: str) -> str:
+    response = client.post("/python", json={"code": code})
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+def _process_ended(pid: int) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+class TestPythonTool:
+    def test_the_benchmark_rows_offer_the_tool_the_server_serves(self, python_server: GdpPdfResourcesServer) -> None:
+        tool = harvest_tools(python_server.setup_webserver(), python_server)["python"].tool
+        served = {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.model_dump(by_alias=True)["inputSchema"],
+            "strict": None,
+        }
+
+        assert prepare_python.PYTHON_TOOL == served
+
+    def test_cells_share_state_and_read_the_source_pdf(self, python_client: TestClient, tmp_path: Path) -> None:
+        size = (tmp_path / "source.pdf").stat().st_size
+
+        assert _python(python_client, "data = open('document.pdf', 'rb').read()\nprint(len(data))") == f"{size}\n"
+        assert _python(python_client, "data[:8]") == "b'%PDF-1.4'\n"
+        assert "ZeroDivisionError" in _python(python_client, "1 / 0")
+        assert _seed(python_client).status_code == 200  # a repeated seed keeps the rollout's kernel
+        assert _python(python_client, "len(data)") == f"{size}\n"
+
+    def test_a_slow_cell_is_interrupted_and_the_kernel_keeps_its_state(self, python_client: TestClient) -> None:
+        _python(python_client, "x = 42")
+
+        output = _python(python_client, "import time\ntime.sleep(60)")
+
+        assert "KeyboardInterrupt" in output
+        assert "[Execution exceeded 5 seconds and was interrupted.]" in output
+        assert _python(python_client, "x") == "42\n"
+
+    def test_a_kernel_that_exits_is_restarted(self, python_client: TestClient) -> None:
+        _python(python_client, "x = 42")
+        _python(python_client, "exit()")
+
+        output = _python(python_client, "print(open('document.pdf', 'rb').read(4))")
+
+        assert output.startswith("b'%PDF'\n")
+        assert "[The Python kernel was restarted; variables from earlier cells are gone.]" in output
+        assert "NameError" in _python(python_client, "x")
+
+    def test_long_output_is_truncated_in_the_sandbox(
+        self, python_server: GdpPdfResourcesServer, python_client: TestClient
+    ) -> None:
+        python_server.config.python_max_output_chars = 100
+
+        output = _python(python_client, "print('a' * 1000)")
+
+        assert output == "a" * 100 + "\n[Output truncated to 100 characters.]\n"
+
+    def test_verify_stops_the_sandbox_and_its_kernel(
+        self, python_server: GdpPdfResourcesServer, python_client: TestClient, tmp_path: Path
+    ) -> None:
+        kernel_pid = int((tmp_path / "sandbox" / ".ipython_kernel" / "kernel.pid").read_text())
+        _mock_judge(python_server, _scored_content("1"))
+
+        verified = python_client.post("/verify", json=_verify_request("The cap is $5M.").model_dump(mode="json"))
+
+        assert verified.status_code == 200, verified.text
+        assert verified.json()["reward"] == 1.0
+        assert python_client.post("/python", json={"code": "1"}).status_code == 404
+        assert _process_ended(kernel_pid)
+
+    def test_a_missing_source_pdf_rejects_the_seed(self, python_server: GdpPdfResourcesServer) -> None:
+        with TestClient(python_server.setup_webserver()) as client:
+            assert _seed(client, source_pdf="missing.pdf").status_code == 422
+            assert client.post("/python", json={"code": "1"}).status_code == 404
+
+    def test_without_a_sandbox_provider_there_is_no_tool(self, server: GdpPdfResourcesServer) -> None:
+        with TestClient(server.setup_webserver()) as client:
+            assert _seed(client).status_code == 200
+            assert client.post("/python", json={"code": "1"}).status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +926,22 @@ class TestPrepare:
         monkeypatch.setitem(__import__("sys").modules, "nemo_gym.global_config", fake_module)
 
         assert _resolve_hf_token() is None
+
+
+class TestPreparePython:
+    def test_adds_the_python_tool_to_every_benchmark_row(self, monkeypatch, tmp_path: Path) -> None:
+        rows = [{"responses_create_params": {"input": [{"role": "user", "content": f"q{i}"}]}} for i in range(2)]
+        base = tmp_path / "gdp_pdf_benchmark.jsonl"
+        base.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        monkeypatch.setattr(prepare_python, "_prepare", lambda: base)
+        monkeypatch.setattr(prepare_python, "OUTPUT_FPATH", tmp_path / "gdp_pdf_python_benchmark.jsonl")
+
+        written = [json.loads(line) for line in prepare_python.prepare().read_text().splitlines()]
+
+        assert [row["responses_create_params"]["input"] for row in written] == [
+            row["responses_create_params"]["input"] for row in rows
+        ]
+        assert all(row["responses_create_params"]["tools"] == [prepare_python.PYTHON_TOOL] for row in written)
 
 
 class TestFetchExampleMedia:
