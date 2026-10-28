@@ -72,7 +72,11 @@ def datasets_dir() -> Path:
     a dataset nor the registry cache.
 
     Each fetched dataset is one folder under it (``environments/harbor/<dataset>/``), gitignored there
-    next to the committed per-dataset entries, which keep only their README and YAML files.
+    next to the committed per-dataset entries, which keep only their README, YAML files and ``dataset.toml``.
+    An entry that declares a ``[gym] source`` is pulled into its own folder when that folder is under the working
+    root and not installed, else (an entry a package install ships under ``site-packages``, a project-local ``.venv``
+    included, or one an extra search root commits, or any entry when ``NEMO_GYM_DATASETS_DIR`` is set) into
+    ``<datasets dir>/<entry>/`` (:mod:`nemo_gym.tasks.harbor.entries`).
     """
     return Path(os.environ.get(DATASETS_DIR_ENV) or WORKING_DIR / "environments" / "harbor").expanduser().resolve()
 
@@ -121,6 +125,12 @@ class RegistryDataset:
         if not self.version:
             return self.name
         return f"{self.name}-{_UNSAFE.sub('-', self.version)}"
+
+    @property
+    def reference(self) -> str:
+        """The reference a fetch of this dataset records in its manifest: ``harbor:<name>@<version>``, the version
+        resolved, so a fetch of ``harbor:<name>`` records which version the registry picked."""
+        return f"{REF_PREFIX}{self.name}@{self.version}" if self.version else f"{REF_PREFIX}{self.name}"
 
 
 def _numeric_version(version: str) -> tuple[int, ...] | None:
@@ -367,8 +377,10 @@ def _read_manifest_pins(manifest: Manifest | None) -> dict[str, tuple[str, str, 
     return pins
 
 
-def _write_manifest(folder: Path, pins: dict[str, tuple[str, str, str]], digests: dict[str, str]) -> None:
-    """Publish the pins with the digests of their folders; only pinned tasks are recorded.
+def _write_manifest(
+    folder: Path, pins: dict[str, tuple[str, str, str]], digests: dict[str, str], *, reference: str
+) -> None:
+    """Publish the pins with the digests of their folders, and the ``reference`` fetched; only pinned tasks are recorded.
 
     ``digests`` caches the hashing across the per-task checkpoints, and naming the pinned tasks keeps each
     checkpoint from scanning the dataset folder again: a folder the fetch did not pin stays unrecorded,
@@ -382,6 +394,7 @@ def _write_manifest(folder: Path, pins: dict[str, tuple[str, str, str]], digests
         },
         digests=digests,
         names=pins,
+        ref=reference,
     ).write(folder)
 
 
@@ -396,6 +409,53 @@ def refuse_unrecorded_folders(folder: Path, known: set[str], *, what: str, error
         raise error(
             f"Task folder(s) {', '.join(extra)} in {folder} are not in the {what} and not recorded by a previous "
             "fetch; move them aside and run again"
+        )
+
+
+def _refuse_dropped_folders(
+    folder: Path, previous: dict[str, tuple[str, str, str]], names: set[str], dataset: RegistryDataset
+) -> None:
+    """Refuse the task folders a previous fetch pinned for tasks that ``dataset`` no longer lists.
+
+    The manifest a fetch writes pins the dataset's tasks alone, so such a folder would stay on disk unrecorded and
+    the next prepare would refuse the whole folder as edited by hand, after a pull that reported success. The folder
+    holds another version's task (a committed entry's ``source`` moved to a version with fewer tasks, the registry
+    revised this one, or ``harbor:<dataset>`` now resolves to such a version), so it is refused here, named, with
+    what to move aside, before anything is cloned or rewritten: the registry's counterpart of the store's refusal of
+    a manifest written for another version (``tasks removed``, :mod:`nemo_gym.tasks.harbor.package_store`).
+    """
+    dropped = sorted(name for name in previous if name not in names and (folder / name / "task.toml").is_file())
+    if dropped:
+        raise HubError(
+            f"Task folder(s) {', '.join(dropped)} in {folder} were fetched for another version of {dataset.name}: a "
+            f"previous fetch pinned them and {dataset.reference} does not list them; move them aside and run again "
+            f"to fetch {dataset.reference}"
+        )
+
+
+def _refuse_repinned_folders(folder: Path, repinned: dict[str, tuple[str, str]], dataset: RegistryDataset) -> None:
+    """Refuse the task folders a previous fetch pinned at a commit other than the one ``dataset`` pins them at.
+
+    A recorded pin is kept when the registry still names the same repository and path, so a version that pins a
+    task at another commit (a committed entry's ``source`` moved to it, ``harbor:<dataset>`` now resolves to it, or
+    the registry revised this version in place) used to keep the folder of the commit fetched before and record it
+    under the new reference: the other version's content, run by name as this one's. Harbor caches a git task by
+    ``(git_url, git_commit_id, path)`` and downloads a task pinned at another commit afresh
+    (``harbor.models.task.id.GitTaskId``), so the folder is refused here, named with both commits, before anything
+    is cloned or rewritten; moved aside, the fetch clones the commit the registry pins. A registry pin that is not
+    a commit (``HEAD``, a branch) keeps the recorded one while the reference stays the same: the fetch pinned what
+    it pointed at then. A fetch of another reference into the folder (the version changed) resolves such a pin
+    afresh, as the first fetch of that version into a folder of its own did before entries shared one, and Harbor
+    never serves a task without a resolved commit from its cache (``harbor.tasks.client``); a commit that moved
+    since is refused here the same way, named with both commits.
+    """
+    if repinned:
+        was = ", ".join(f"{name} at {old[:12]}" for name, (old, _) in sorted(repinned.items()))
+        now = ", ".join(f"{name} at {new[:12]}" for name, (_, new) in sorted(repinned.items()))
+        raise HubError(
+            f"Task folder(s) {', '.join(sorted(repinned))} in {folder} were fetched for another version of "
+            f"{dataset.name}: a previous fetch pinned {was} and {dataset.reference} pins {now}; move them aside and "
+            f"run again to fetch {dataset.reference}"
         )
 
 
@@ -418,7 +478,7 @@ def _check_kept_folders(folder: Path, kept: list[str], previous: Manifest | None
             )
 
 
-def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
+def fetch_dataset(dataset: RegistryDataset, root: Path, *, folder: Path | None = None) -> Path:
     """Fetch tasks, retaining the recorded source pins of existing folders.
 
     Publish a pin after each task, so a later failure leaves completed tasks reusable.
@@ -426,6 +486,15 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
     is refused; the user can move it aside and retry without losing local edits. The
     manifest records each folder's digest beside its pin; when a fetch adds tasks to an
     existing folder, the kept folders must still match their recorded digests.
+
+    The tasks land in ``root/<name>-<version>/`` (:attr:`RegistryDataset.folder_name`) unless ``folder``
+    names the dataset folder itself: a committed entry under ``environments/harbor/`` whose ``dataset.toml``
+    declares this dataset as its ``[gym] source`` (:mod:`nemo_gym.tasks.harbor.entries`). The folder's other
+    files (the entry's README, YAML overlays and ``dataset.toml``) are not task folders and stay as they are.
+    A folder holding a task of another version (the entry's source moved to a version that no longer lists it, or
+    that pins it at another commit, a ``HEAD`` pin that moved since included) is refused with the folder named, as
+    the store's fetch refuses a manifest written for another version (:func:`_refuse_dropped_folders`,
+    :func:`_refuse_repinned_folders`), never left unrecorded beside the fetched tasks or recorded as this version's.
     """
     if not _NAME.fullmatch(dataset.name):
         raise HubError(f"Unsafe Harbor dataset name {dataset.name!r}")
@@ -436,7 +505,7 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
         if task.name in names:
             raise HubError(f"Duplicate Harbor task name {task.name!r}")
         names.add(task.name)
-    folder = Path(root).resolve() / dataset.folder_name
+    folder = Path(folder).resolve() if folder is not None else Path(root).resolve() / dataset.folder_name
     if folder.is_symlink():
         raise HubError(f"Dataset folder must not be a symlink: {folder}")
     folder.mkdir(parents=True, exist_ok=True)
@@ -444,10 +513,15 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
         raise HubError(f"Dataset manifest must not be a symlink: {folder / MANIFEST_FILE}")
     manifest = _read_manifest(folder)
     previous = _read_manifest_pins(manifest)
+    # The record names another reference than this fetch's (another version of the dataset: a committed entry's
+    # source moved, or the registry's pick did), so the folder holds that version's fetch; one that records no
+    # reference (written before it was recorded) is this fetch's as far as it says.
+    moved = manifest is not None and manifest.ref is not None and manifest.ref != dataset.reference
     resolved: dict[tuple[str, str], str] = {}
     pins: dict[str, tuple[str, str, str]] = {}
     digests: dict[str, str] = {}
     kept: list[str] = []
+    repinned: dict[str, tuple[str, str]] = {}
     by_repo: dict[tuple[str, str], list[RegistryTask]] = {}
     for task in dataset.tasks:
         destination = folder / task.name
@@ -458,6 +532,21 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
             raise HubError(
                 f"Recorded source pin for {destination} is invalid or differs from the registry; move the folder aside and retry"
             )
+        pinned = task.git_commit_id if _SHA.fullmatch(task.git_commit_id) else None
+        if pin is not None and pinned is None and moved:
+            # A pin that is not a commit (`HEAD`, a branch) stays as the recorded fetch resolved it while the
+            # reference stays the same, but this fetch is another version's, into the folder the previous version's
+            # fetch filled: its pin is resolved afresh, as a fetch into a folder of this version's own resolved it,
+            # and a commit that moved since is handled below like one the registry changed.
+            pinned = resolve_commit(task.git_url, task.git_commit_id, resolved)
+        if pin is not None and pinned is not None and pinned != pin[1]:
+            # The registry pins this task at another commit than the recorded fetch. An existing folder holds that
+            # other commit's content and is refused below (_refuse_repinned_folders); a missing one is no repair of
+            # the recorded bytes but a fetch of the commit the registry pins.
+            if destination.exists():
+                repinned[task.name] = (pin[1], pinned)
+                continue
+            pin = None
         if pin is not None:
             # A missing folder is a repair of these pinned bytes. Keep its validated pin in every
             # publication, even before copying it, so an interrupted repair cannot follow new HEAD.
@@ -473,10 +562,17 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
         commit = pin[1] if pin else resolve_commit(task.git_url, task.git_commit_id, resolved)
         by_repo.setdefault((task.git_url, commit), []).append(task)
 
-    if by_repo or not dataset.tasks:
-        # The manifest is about to be rewritten: a folder it would not pin must not be there, and the
-        # kept folders must still be what it recorded.
-        refuse_unrecorded_folders(folder, names | set(previous), what="registry")
+    _refuse_repinned_folders(folder, repinned, dataset)
+    # A manifest that records another reference for these pins (one written before the reference was recorded, or a
+    # version the registry lists with the same tasks) is rewritten with this fetch's, so a run by the entry's name
+    # finds the fetch it declares on record (nemo_gym.tasks.harbor.cli._check_fetch_record).
+    rerecord = manifest is not None and manifest.ref != dataset.reference
+    if by_repo or not dataset.tasks or rerecord:
+        # The manifest is about to be rewritten: a folder it would not pin must not be there (one a previous fetch
+        # pinned for a task this version does not list is named as such, with the version), and the kept folders
+        # must still be what it recorded.
+        _refuse_dropped_folders(folder, previous, names, dataset)
+        refuse_unrecorded_folders(folder, names, what="registry")
         _check_kept_folders(folder, kept, manifest, digests)
     for (git_url, commit), tasks in by_repo.items():
         with tempfile.TemporaryDirectory(prefix=_STAGING_PREFIX, dir=folder) as tmp:
@@ -500,14 +596,96 @@ def fetch_dataset(dataset: RegistryDataset, root: Path) -> Path:
                     raise HubError(f"Task destination appeared during fetch: {destination}; retry preparation")
                 staged.rename(destination)
                 pins[task.name] = (git_url, commit, task.path)
-                _write_manifest(folder, pins, digests)
-    if not dataset.tasks:
-        _write_manifest(folder, pins, digests)
+                _write_manifest(folder, pins, digests, reference=dataset.reference)
+    if not dataset.tasks or (rerecord and not by_repo):
+        _write_manifest(folder, pins, digests, reference=dataset.reference)
     return folder
 
 
-def fetch_ref(target: str, root: Path | None = None, *, refresh_registry: bool = False) -> Path:
+def expected_folder(target: str, root: Path | None = None) -> Path | None:
+    """Where a fetch of ``target`` lands when that follows from the reference alone, without resolving it.
+
+    A package-store dataset's folder is named from its reference (``<name>`` for ``latest``, ``<name>-<tag>``,
+    ``<name>-<12 digest chars>`` for a digest pin, :meth:`PackageRef.folder_name`), and a registry dataset's from
+    its name and version; ``None`` for a registry reference whose version the registry picks. ``gym dataset pull``
+    reads the folder's manifest here before the fetch to report an unchanged dataset.
+    """
+    root = Path(root) if root is not None else datasets_dir()
+    ref = HubRef.parse(target)
+    if ref.is_package:
+        from nemo_gym.tasks.harbor.package_store import PackageRef
+
+        package = PackageRef.of(ref)
+        return root / package.folder_name(package.digest or "")
+    if ref.version is None:
+        return None
+    return root / RegistryDataset(name=ref.name, version=ref.version, description="", tasks=()).folder_name
+
+
+def resolved_folder(target: str, root: Path | None = None, *, refresh_registry: bool = False) -> Path:
+    """Where a fetch of ``target`` lands, resolving a registry reference whose version the registry picks.
+
+    :func:`expected_folder` names the folder when the reference alone does; for ``harbor:<dataset>`` without a
+    version the registry's cache under ``root/.harbor/`` (downloaded, or refreshed when ``refresh_registry``) is
+    read and the version it picks names the folder, as :func:`fetch_ref` will. ``gym dataset pull`` resolves such a
+    reference here, before the fetch, so it can read the folder's manifest and report an unchanged dataset.
+    """
+    root = Path(root) if root is not None else datasets_dir()
+    folder = expected_folder(target, root)
+    if folder is not None:
+        return folder
+    registry = load_registry(root / ".harbor", refresh=refresh_registry)
+    return root / resolve_dataset(HubRef.parse(target), registry).folder_name
+
+
+def canonical_reference(target: str) -> str:
+    """The ``harbor:`` reference ``target`` as the fetchers record it, so two spellings of one reference compare equal.
+
+    A package-store reference is read as the store reads it (:attr:`~nemo_gym.tasks.harbor.package_store.PackageRef.reference`:
+    ``harbor:org/name`` is ``@latest``, a digest is its ``sha256:`` form). A registry reference is itself: a version it
+    names is the version, and ``harbor:<dataset>`` without one is the registry's pick, another reference than any
+    version it may resolve to. A malformed reference raises :class:`HubError`, as :meth:`HubRef.parse` does.
+    """
+    ref = HubRef.parse(target)
+    if ref.is_package:
+        from nemo_gym.tasks.harbor.package_store import PackageRef
+
+        return PackageRef.of(ref).reference
+    return f"{REF_PREFIX}{ref.name}@{ref.version}" if ref.version else f"{REF_PREFIX}{ref.name}"
+
+
+def declares_recorded_fetch(declared: str, recorded: str) -> bool:
+    """Whether the ``harbor:`` reference ``declared`` (a committed entry's ``[gym] source``) names the fetch a manifest
+    records as ``recorded`` (:attr:`~nemo_gym.tasks.harbor.manifest.Manifest.ref`), without asking the hub.
+
+    A package-store reference matches by package and by tag, ``latest`` or digest, read as the store reads them
+    (:attr:`~nemo_gym.tasks.harbor.package_store.PackageRef.reference`: ``harbor:org/name`` is ``@latest``, a digest is
+    its ``sha256:`` form). A registry reference matches by dataset and, when it pins one, by version: the version an
+    unpinned ``harbor:<dataset>`` gets is the registry's pick, which the record holds and only a pull can revise.
+    A record that does not parse as a reference matches nothing.
+    """
+    try:
+        wanted, found = HubRef.parse(declared), HubRef.parse(recorded)
+    except HubError:
+        return False
+    if wanted.is_package != found.is_package or wanted.name != found.name:
+        return False
+    if wanted.is_package:
+        from nemo_gym.tasks.harbor.package_store import PackageRef
+
+        return PackageRef.of(wanted).reference == PackageRef.of(found).reference
+    return wanted.version is None or wanted.version == found.version
+
+
+def fetch_ref(
+    target: str, root: Path | None = None, *, refresh_registry: bool = False, folder: Path | None = None
+) -> Path:
     """Resolve and fetch a ``harbor:`` reference; return the dataset folder.
+
+    The dataset lands in its own folder under ``root`` (:func:`datasets_dir` unless given), named after the
+    dataset and its version, or in ``folder`` when a caller names the destination: the folder of a committed
+    entry that declares the reference as its ``[gym] source`` (:func:`nemo_gym.tasks.harbor.entries.plan_pull`
+    decides that; this function does not read entries). The registry cache stays under ``root/.harbor/``.
 
     A package-store fetch refuses a task folder whose content no longer matches the store
     (see :func:`nemo_gym.tasks.harbor.package_store.fetch_package_dataset`). Whatever the store fetch
@@ -519,10 +697,9 @@ def fetch_ref(target: str, root: Path | None = None, *, refresh_registry: bool =
     if ref.is_package:
         from nemo_gym.tasks.harbor.package_store import PackageRef, PackageStoreError, fetch_package_dataset
 
-        org, _, name = ref.name.partition("/")
         try:
-            return fetch_package_dataset(PackageRef(org=org, name=name, ref=ref.version or "latest"), root)
+            return fetch_package_dataset(PackageRef.of(ref), root, folder=folder)
         except PackageStoreError as exc:
             raise HubError(str(exc)) from exc
     registry = load_registry(root / ".harbor", refresh=refresh_registry)
-    return fetch_dataset(resolve_dataset(ref, registry), root)
+    return fetch_dataset(resolve_dataset(ref, registry), root, folder=folder)

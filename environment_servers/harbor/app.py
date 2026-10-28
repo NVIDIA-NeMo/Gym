@@ -54,10 +54,13 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
 
 from environment_servers.harbor.entrypoint import (
+    ENTRYPOINT_FAILED_KIND,
+    ENTRYPOINT_LOG_NAME,
     EntrypointLaunch,
     HarborEntrypointError,
     HarborEntrypointMixin,
@@ -71,6 +74,7 @@ from environment_servers.harbor.sandboxes import (
     HarborSandboxMixin,
 )
 from environment_servers.harbor.session import HarborSession, HarborSessionMixin, resolve_env_templates
+from environment_servers.harbor.steps import HarborStepsMixin, StepPrepareError
 from environment_servers.harbor.users import HarborUsersMixin
 from environment_servers.harbor.verifier import (
     COLLECT_HOOK_GRACE_S,
@@ -80,7 +84,8 @@ from environment_servers.harbor.verifier import (
     _verifier_key,
     summing_components,
 )
-from nemo_gym import RESULTS_DIR
+from nemo_gym import RESULTS_DIR, failure_kinds
+from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.atif_export import AtifExportError
 from nemo_gym.base_environment_server import (
@@ -91,10 +96,12 @@ from nemo_gym.base_environment_server import (
     dependency_failure,
 )
 from nemo_gym.base_responses_api_agent import (
+    AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
+    AgentSessionCapabilitiesResponse,
 )
 from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, TaskId
@@ -111,11 +118,13 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
+from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
 from nemo_gym.tasks.harbor.compose_overlay import ComposeOverlayError, HarborComposeOverlay, wrap_first_instruction
 from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, HarborTaskInput
 from nemo_gym.tasks.harbor.models import HarborMCPServer
+from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
 from nemo_gym.tasks.harbor.task import HarborTurn
 from nemo_gym.tasks.harbor.task_data import (
@@ -138,7 +147,10 @@ class HarborTurnResult(BaseModel):
     """One turn of a multi-step task: what the agent returned and what the step's verifier wrote.
 
     ``verifier_rewards`` is ``None`` when the turn produced no verifier result (``test.sh`` timed out
-    or wrote no valid reward file); such a turn ends the episode.
+    or wrote no valid reward file); such a turn ends the episode. ``response`` is ``None`` for a turn whose
+    step preparation failed (``steps/<name>/workdir/setup.sh`` exited non-zero, or ``[steps.healthcheck]`` never
+    passed): no agent session opened and no verifier ran, ``failure_kind`` says why, and the episode stops there
+    too, as Harbor stops after a step whose preparation raised.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -155,7 +167,9 @@ class HarborTurnResult(BaseModel):
     verifier_logs_dir: str | None = None
     verifier_seconds: float | None = None
     verifier_network: str | None = None
-    response: NeMoGymResponse
+    # "shared": the step's test.sh ran in the agent's sandbox; "separate": in a sandbox of its own for this turn.
+    verifier_mode: Literal["shared", "separate"] | None = None
+    response: NeMoGymResponse | None = None
     agent_observations: AgentObservationBundle | None = None
     # The harness's own turns from the session close, as ``ng_trajectory`` carries them for a single-turn task.
     trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -169,6 +183,20 @@ class _TurnProgress:
     response: NeMoGymResponse | None = None
     observations: AgentObservationBundle | None = None
     trajectory: TrajectoryRecord | None = None
+
+
+@dataclass
+class _AgentSessionHandle:
+    """An open agent session on the episode's sandbox: its id, the cookies that route to it, and, once closed,
+    the harness's observations and its own trajectory (cumulative for a continuation session)."""
+
+    agent_session_id: str
+    cookies: dict[str, str]
+    cleanup: Any
+    continuation: bool = False
+    observations: AgentObservationBundle | None = None
+    trajectory: TrajectoryRecord | None = None
+    closed: bool = False
 
 
 # The agent transcript could not be exported to ATIF; the turn is masked so a converter defect is never a reward.
@@ -196,8 +224,17 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     key, which is the dataset's contract to keep, not this server's.
 
     A multi-step task fills ``turns`` in order. The top-level reward follows
-    ``turn_reward_strategy`` over them (Harbor's ``multi_step_reward_strategy``), and ``response``,
-    ``responses_create_params`` and ``ng_agent_observations`` are those of the last turn that ran.
+    ``turn_reward_strategy`` over them (Harbor's ``multi_step_reward_strategy``), and ``response`` and
+    ``responses_create_params`` are those of the last turn that ran; ``ng_agent_observations`` and
+    ``ng_trajectory`` are the whole session's under ``turn_sessions: continue`` and, under ``fresh``, that one
+    session's when a single turn's agent ran and empty when more did (each step's own session is on its turn, one record
+    per step as Harbor keeps one ``steps/<name>/agent/`` per step; a merged episode record is issue #5063).
+    Under ``continue`` that pair is the last activation's input and its new output alone (a continuation
+    response carries only new work), produced with the earlier steps in the harness's own conversation, so it is
+    not a standalone prompt and completion: the record of a continued episode is the cumulative ``ng_trajectory``
+    (every trajectory turn names its activation) with, when model-call capture is enabled at the model server
+    (``observability_enabled``, opt-in outside ``gym eval submit``), the captured model calls, which hold what the
+    model saw and produced; the pair is the last step's request and reply, for inspection.
     """
 
     verifier_rewards: dict[str, float] | None = None
@@ -205,8 +242,9 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     verifier_return_code: int | None = None
     verifier_logs_dir: str | None = None
     verifier_seconds: float | None = None
-    # "shared": test.sh ran in the agent's sandbox; "separate": in its own sandbox from [verifier.environment].
-    verifier_mode: Literal["shared", "separate"] | None = None
+    # "shared": test.sh ran in the agent's sandbox; "separate": in its own sandbox from [verifier.environment]. A
+    # multi-step task reports the mode its turns shared, or "mixed" when its steps resolved to both (each turn says).
+    verifier_mode: Literal["shared", "separate", "mixed"] | None = None
     # The network the verifier ran under (the task's `[verifier].network_mode`, "public" when unset).
     verifier_network: str | None = None
     turns: list[HarborTurnResult] | None = None
@@ -214,6 +252,8 @@ class HarborEpisodeResult(SingleAgentTurnResult):
     turns_without_verifier_result: int | None = None
     # The turn after which the episode stopped early: a mask, no verifier result, or a missed min_reward.
     stopped_after_turn: str | None = None
+    # How the turns reached the harness: a session per turn, or one continuation session (see `turn_sessions`).
+    turn_sessions: Literal["fresh", "continue"] | None = None
 
 
 class HarborEpisodeRequest(BaseEpisodeRequest[HarborTaskInput]):
@@ -301,11 +341,17 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Give every episode the time budget of its task instead of the run-wide `default_episode_timeout_seconds`
     # alone: once its sandbox is ready, `harness_setup_allowance_s`, `[agent].timeout_sec`, every
     # `[[verifier.collect]]` hook's `timeout_sec` with its grace, `[verifier].timeout_sec` and the verifier
-    # grace (plus a separate verifier's start). Sandbox setup, image pull retries included, is not charged
+    # grace (plus a separate verifier's start), per step for a multi-step task, with each step's `setup.sh` bound
+    # (`step_setup_timeout_s`) and its `[steps.healthcheck]` worst case when it has them. Sandbox setup, image pull
+    # retries included, is not charged
     # against it; the sandbox lifetime covers both. Off ignores task timeouts.
     enforce_task_timeouts: bool = True
     # Seconds a harness may spend setting itself up in the sandbox before the task's `[agent].timeout_sec` starts.
     harness_setup_allowance_s: float = Field(default=300, ge=0)
+    # Seconds a step's `workdir/setup.sh` may run before the step fails (Harbor bounds it by nothing but the trial's
+    # own timeout). Unset: the step's agent budget, `[steps.agent].timeout_sec` else `[agent].timeout_sec`, the
+    # task's own bound on that step's time. Counted in the episode budget for every step that ships the script.
+    step_setup_timeout_s: float | None = Field(default=None, gt=0)
     # How many times a sandbox start that failed on an image pull (the agent's sandbox, a Compose group or
     # a separate verifier's sandbox) is retried here before the failure is reported as retryable. Bounded,
     # jittered and gated per server.
@@ -317,6 +363,11 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # them in /tmp/.nemo-gym/task.json only; "required" makes an agent that cannot connect fail its seed or its
     # first turn, so a harness without supports_task_tool_context can take a task whose MCP servers are all granted.
     task_mcp_grants: Literal["off", "optional", "required"] = "off"
+    # How a multi-step task's turns reach the harness. "fresh": one agent session per step (Harbor's default,
+    # `resume_trajectory = false`). "continue": one continuation session for the episode, each step an activation
+    # of it, so the agent keeps its conversation across steps (Harbor's `--resume-trajectory`); refused before any
+    # sandbox for a harness without multi-turn continuation, as Harbor refuses an agent without SUPPORTS_RESUME.
+    turn_sessions: Literal["fresh", "continue"] = "fresh"
     # Values for the `${NAME}` references a task's Compose file leaves to the deployment, such as a sidecar's
     # model endpoint and key. Resolved at seed; the task and Harbor's own variables take precedence.
     compose_variables: dict[str, ComposeVariable] = Field(default_factory=dict)
@@ -361,11 +412,33 @@ def roll_up_turns(turns: list["HarborTurnResult"], strategy: str, *, task_id: st
     sum to the rolled-up reward are dropped with a warning naming the task (``task_id``), the keys and both
     numbers: a results row names ``reward_components`` only when they sum to its ``reward``. With nothing to
     roll up the episode is measured 0, as a single turn without a reward file is.
+
+    A turn whose agent never ran (``response`` is ``None``: its step's own ``workdir/`` merge, ``setup.sh`` or
+    healthcheck failed) ends the episode too. As the first turn it masks the episode with the step's failure kind
+    under both strategies: no agent has acted, so there is nothing to score (the server raises a terminal agent-stage
+    failure for it before rolling up). As a later turn it is that same measured 0: it counts in ``mean`` and makes
+    ``final`` 0, and the episode carries the step's failure kind and reason. That is a deliberate divergence from
+    Harbor, whose ``_aggregate_step_rewards`` leaves a step without a verifier result out of its denominator and
+    whose ``final`` then has no reward at all: a step's ``workdir/``, ``setup.sh`` and healthcheck run in the sandbox
+    the earlier turns' agent had, where a process it left running, a working directory it corrupted or a service it
+    killed can fail them, and a masked sample (or a mean over the earlier turns alone) would give an RL policy no
+    signal against wrecking the next step's setup. The denominator is still the turns that ran: the steps after the
+    failed one never ran and are not in it (Harbor's ``_run`` leaves its step loop after a step whose
+    ``_prepare_step`` set ``exception_info``, so they are not in its ``step_results`` either), so in a task of three
+    or more steps a wrecked second step scores the first turn's reward over 2, not over the task's step count; the
+    policy loses the step it broke, not the steps after it. A task whose own step preparation is broken fails the
+    same way in every rollout, the oracle's included, under that failure kind.
     """
     masked = next((turn for turn in turns if turn.mask_sample), None)
     if masked is not None:
         reason = f"turn {masked.name!r}: {masked.failure_reason}"[:2000]
         return {"reward": 0.0, "mask_sample": True, "failure_kind": masked.failure_kind, "failure_reason": reason}
+    # A first turn whose agent never ran (its failed preparation ended the episode before any agent acted) masks the
+    # episode under either strategy. A later turn's failed preparation is a turn without a verifier result below:
+    # measured 0, counted in `mean`, the last turn under `final`, with the step's failure kind on the episode.
+    if turns[0].response is None:
+        reason = f"turn {turns[0].name!r}: {turns[0].failure_reason}"[:2000]
+        return HarborEnvironmentServer._masked(turns[0].failure_kind or NO_TURN_RESULT_KIND, reason)
     if strategy == "final":
         last = turns[-1]
         if last.verifier_rewards is None:
@@ -431,6 +504,7 @@ class HarborEnvironmentServer(
     HarborEntrypointMixin,
     HarborOverlayMixin,
     HarborUsersMixin,
+    HarborStepsMixin,
 ):
     config: HarborEnvironmentServerConfig
     request_model = HarborEpisodeRequest
@@ -440,6 +514,8 @@ class HarborEnvironmentServer(
         super().model_post_init(context)
         # Episode keys with an attempt inside run(); a redelivered key is refused while its attempt is live.
         self._active: set[str] = set()
+        # The agent server's session capabilities, asked once per process before the first run that needs them.
+        self._agent_capabilities: AgentSessionCapabilitiesResponse | None = None
         # Seeded sessions, by episode key; listed here until the sandbox is stopped.
         self._sessions: dict[str, HarborSession] = {}
         # Ownership starts before sandbox.start(), and ends only after stop() succeeds.
@@ -542,7 +618,7 @@ class HarborEnvironmentServer(
             # discovered deeper) and the loader reads them from the snapshot's parent, so the snapshot
             # gets copies there: the dataset's own settings (dataset.toml), the recorded image
             # configurations and the built images.
-            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE):
+            for name in (DATASET_FILE, COMPOSE_IMAGES_FILE, BUILT_IMAGES_FILE, VERIFIER_FILE):
                 sidecar = root / name
                 if sidecar.is_file():
                     shutil.copy2(sidecar, snapshot_root / name)
@@ -633,29 +709,42 @@ class HarborEnvironmentServer(
         The harness's setup, `[agent].timeout_sec`, the `[[verifier.collect]]` hooks (run one after the
         other in both verifier modes, each within its own `timeout_sec` plus the exec grace), then
         `[verifier].timeout_sec` with its grace, plus a second sandbox start (and overlay) for a separate
-        verifier. The seed is not counted: its own bounds are the sandbox ready timeout per start and the
-        image pull retries, so a start that recovered on a retry begins the task with its whole budget.
+        verifier. A multi-step task sums that per step, plus the bound of each step's `setup.sh` when it ships
+        one (:meth:`_step_setup_budget_s`) and the worst case of its `[steps.healthcheck]` when it declares one
+        (:meth:`_step_healthcheck_budget_s`). The seed is not counted: its own bounds are the sandbox ready timeout
+        per start and the image pull retries, so a start that recovered on a retry begins the task with its whole
+        budget.
         """
-        separate = self._separate_verifier(task)
         hooks = sum(hook.timeout_sec + COLLECT_HOOK_GRACE_S for hook in task.config.verifier.collect)
         if task.turns:
-            # Every step is a turn of its own: a fresh harness session, the hooks and the step's verifier.
+            # Every step is a turn of its own: a fresh harness session, the step's setup.sh and healthcheck when it
+            # has them, the task's hooks and the step's own, and the step's verifier, plus a verifier sandbox start
+            # (and overlay) for every turn that verifies separately.
             budget = sum(
                 self.config.harness_setup_allowance_s
+                + self._step_setup_budget_s(task, turn)
+                + self._step_healthcheck_budget_s(turn)
                 + task.config.step_agent_timeout_sec(turn.config)
                 + hooks
+                + sum(hook.timeout_sec + COLLECT_HOOK_GRACE_S for hook in turn.config.verifier.collect)
                 + task.config.step_verifier_timeout_sec(turn.config)
                 + self.config.verifier_grace_s
                 for turn in task.turns
             )
-        else:
-            budget = (
-                self.config.harness_setup_allowance_s
-                + task.config.agent.timeout_sec
-                + hooks
-                + task.config.verifier.timeout_sec
-                + self.config.verifier_grace_s
-            )
+            for turn in task.turns:
+                if self._turn_separate(task, turn):
+                    budget += self.config.sandbox_ready_timeout_s
+                    if _verifier_gets_overlay(self._turn_verifier_view(task, turn), True):
+                        budget += task.config.environment.build_timeout_sec
+            return budget
+        budget = (
+            self.config.harness_setup_allowance_s
+            + task.config.agent.timeout_sec
+            + hooks
+            + task.config.verifier.timeout_sec
+            + self.config.verifier_grace_s
+        )
+        separate = self._separate_verifier(task)
         if separate:
             budget += self.config.sandbox_ready_timeout_s
             if _verifier_gets_overlay(task, separate):
@@ -763,6 +852,10 @@ class HarborEnvironmentServer(
         except ComposeOverlayError as error:
             raise self._failure(stage="seed", failure_reason=str(error), terminal=True)
         task_input = request.task.task_input
+        if len(task_input.turns) > 1 and self.config.turn_sessions == "continue":
+            # Before anything is provisioned, as Harbor refuses `resume_trajectory` for an agent without resume
+            # support before any environment spend; a single step could never continue, so the setting is moot.
+            await self._require_turn_continuation()
         try:
             session = await self._seed(request, episode_key)
             # The sandbox is seeded; the oracle alone also gets the task's solution before its session opens.
@@ -885,8 +978,9 @@ class HarborEnvironmentServer(
         """The staged failure of an episode that ran past its task's time budget, with the turn's evidence so far."""
         if task.turns:
             budget_parts = (
-                f"over {len(task.turns)} turn(s): harness setup, each step's [agent].timeout_sec, "
-                f"{len(task.config.verifier.collect)} [[verifier.collect]] hook(s) and its [verifier].timeout_sec"
+                f"over {len(task.turns)} turn(s): each step's workdir/setup.sh and [steps.healthcheck] bounds, "
+                f"harness setup, its [agent].timeout_sec, {len(task.config.verifier.collect)} [[verifier.collect]] "
+                "hook(s) plus its own, and its [verifier].timeout_sec"
             )
         else:
             budget_parts = (
@@ -915,8 +1009,11 @@ class HarborEnvironmentServer(
         turn: tuple[HarborTurn, Any] | None = None,
     ) -> dict[str, Any]:
         """Export the turn's transcript for the verifier and run it: the task's verifier for a single-turn
-        episode, or the shared verifier with a step's settings and ``tests/`` for ``turn`` (the step and the
-        request it was sent). A transcript the converter cannot represent masks the turn instead of grading it."""
+        episode, or, for ``turn`` (the step and the request it was sent), the turn's collection pass
+        (:meth:`_collect_turn_artifacts`) and then the step's verifier with its settings and ``tests/``, in the
+        agent's sandbox or, for a step that verifies separately (:meth:`_turn_separate`), in a verifier sandbox of
+        its own. A transcript the converter cannot represent masks the turn instead of grading it; a collection the
+        sandbox could not serve masks it as an outage."""
         task = session.task
         try:
             if turn is None:
@@ -927,14 +1024,75 @@ class HarborEnvironmentServer(
             LOGGER.error(f"{task.task_id}: could not export the agent transcript to ATIF: {error}")
             return self._masked(TRAJECTORY_EXPORT_KIND, f"Could not export the agent transcript to ATIF: {error}")
         if turn is None:
-            return await self._run_verifier(session, trajectory)
+            return await self._run_verifier(session, trajectory, response=agent_response)
         step = turn[0]
-        return await self._run_shared_verifier(
-            session,
-            trajectory,
-            settings=self._turn_verifier_settings(task, step),
-            test_dirs=(task.path / "tests", task.path / step.tests_dir),
+        # Harbor's per-step order: the collection pass (hooks, /logs/artifacts, the task's and the step's artifacts)
+        # after the agent and before the verifier, into the turn's own logs folder. Nothing is stopped, except on the
+        # last turn of a task whose last step verifies separately (Harbor's `_run_step`: `main` before the sidecar
+        # pass, the whole agent environment before the step's verifier), as the single-step separate path stops it.
+        separate = self._turn_separate(task, step)
+        last_separate = separate and step.name == task.turns[-1].name
+        try:
+            logs_dir = self._reserve_logs_dir()
+        except (OSError, RuntimeError) as exc:
+            LOGGER.exception("Could not create verifier logs under %s", self._artifacts_dir)
+            return self._masked(
+                failure_kinds.PERSISTENCE_FAILED,
+                f"Could not create verifier logs under {self._artifacts_dir}: {type(exc).__name__}: {exc}",
+            )
+        started = asyncio.get_running_loop().time()
+        try:
+            if separate and session.entrypoint is not None:
+                # The agent image's entrypoint is checked while the agent's sandbox is still up, as the single-step
+                # paths check it before grading: the collection pass below stops `main` on the last separate turn,
+                # and the step's own verifier sandbox never held the entrypoint. A death masks the turn as in shared
+                # mode (`_run_shared_verifier`); the log is kept whenever it was read, and always on the last turn,
+                # whose agent sandbox is stopped before test.sh runs.
+                died = await self._entrypoint_died_during_rollout(session.sandbox, task, session.entrypoint, logs_dir)
+                if died is not None or last_separate:
+                    await self._collect_entrypoint_log(session.sandbox, task, logs_dir / ENTRYPOINT_LOG_NAME)
+                if died is not None:
+                    return self._masked(ENTRYPOINT_FAILED_KIND, died) | {
+                        "verifier_logs_dir": str(logs_dir.resolve()),
+                        "verifier_mode": "separate",
+                    }
+            restored = await self._collect_turn_artifacts(
+                session, step, logs_dir / "artifacts", stop_main=last_separate
+            )
+            if last_separate:
+                # Nothing of the agent's may keep running while the verifier sandbox grades its last turn.
+                await session.stop_agent_side()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            LOGGER.exception(f"Artifact collection failed for {task.task_id} turn {step.name!r}")
+            return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}") | {
+                "verifier_logs_dir": str(logs_dir.resolve())
+            }
+        settings = self._turn_verifier_settings(task, step)
+        test_dirs = (task.path / "tests", task.path / step.tests_dir)
+        if separate:
+            # Harbor's separate mode for this step alone: a verifier sandbox of its own around this verification,
+            # fed the collected archives and the tests, while the agent's sandbox keeps running for the next turn.
+            outcome = await self._verify_separately(
+                session,
+                self._turn_verifier_view(task, step),
+                settings,
+                trajectory,
+                logs_dir,
+                restored,
+                started=started,
+                test_dirs=test_dirs,
+            )
+            return outcome | {"verifier_mode": "separate"}
+        # A shared turn restores nothing: the staged trees stay as the diagnostic, the archives have served their
+        # purpose (a separate turn's are removed once restored, by `_verify_separately`).
+        for archive, *_ in restored:
+            archive.unlink(missing_ok=True)
+        outcome = await self._run_shared_verifier(
+            session, trajectory, settings=settings, test_dirs=test_dirs, logs_dir=logs_dir, collect_hooks=False
         )
+        return outcome | {"verifier_mode": "shared"}
 
     async def _agent_turn(
         self,
@@ -953,37 +1111,62 @@ class HarborEnvironmentServer(
         observations are in hand. A failed seed or activation raises the staged episode failure.
         ``progress`` is kept current with what the turn has produced, for the task deadline's failure.
         """
+        handle = await self._open_agent_session(
+            request, access, cleanup, task, progress, agent_timeout_sec=agent_timeout_sec, continuation=False
+        )
+        agent_response = await self._activate_agent_session(request, handle, responses_create_params, progress)
+        # Verification needs this close first: the harness must have let go of the sandbox, and its
+        # observations travel with the result.
+        await self._close_agent_session(handle, task, progress, partial_response=agent_response)
+        self._route_failed_response(agent_response, handle)
+        return agent_response, handle.observations, handle.trajectory
+
+    async def _open_agent_session(
+        self,
+        request: HarborEpisodeRequest,
+        access: SandboxAccess,
+        cleanup: CleanupContext,
+        task: HarborTask,
+        progress: "_TurnProgress",
+        *,
+        agent_timeout_sec: float,
+        continuation: bool,
+    ) -> _AgentSessionHandle:
+        """Seed an agent session on the episode's sandbox and check the task's tools can reach the harness.
+
+        With ``continuation`` the seed asks for the harness's multi-turn continuation (its saved session resumed
+        across activations), so a multi-step task's steps can follow one another in one conversation. A failed or
+        refused seed raises the staged episode failure.
+        """
         progress.stage, progress.response, progress.observations, progress.trajectory = "agent", None, None, None
-        agent_session_id = f"agent-session-{uuid4().hex}"
-        agent_cookies: dict[str, str] = {}
-        agent_observations: AgentObservationBundle | None = None
-        # The harness's own turns (a TrajectoryRecord) from its close, forwarded on the result.
-        agent_trajectory = None
+        handle = _AgentSessionHandle(
+            agent_session_id=f"agent-session-{uuid4().hex}", cookies={}, cleanup=None, continuation=continuation
+        )
 
         async def close_agent() -> None:
-            nonlocal agent_observations, agent_trajectory
             close_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path="/v1/agent_sessions/close",
                 json=AgentCloseSessionRequest(
-                    agent_session_id=agent_session_id,
+                    agent_session_id=handle.agent_session_id,
                     episode_id=request.episode_id,
                 ).model_dump(mode="json"),
-                cookies=agent_cookies,
+                cookies=handle.cookies,
             )
             await raise_for_status(close_http_response)
             agent_close_response = AgentCloseSessionResponse.model_validate(
                 await get_response_json(close_http_response)
             )
-            if agent_close_response.agent_session_id != agent_session_id:
+            if agent_close_response.agent_session_id != handle.agent_session_id:
                 raise ValueError("Agent close returned a different agent_session_id")
-            agent_observations = agent_close_response.agent_observations
-            agent_trajectory = agent_close_response.trajectory
-            progress.observations = agent_observations
-            progress.trajectory = agent_trajectory
+            handle.observations = agent_close_response.agent_observations
+            handle.trajectory = agent_close_response.trajectory
+            handle.closed = True
+            progress.observations = handle.observations
+            progress.trajectory = handle.trajectory
 
         # Register cleanup before seed so cancellation can close a remotely created session even if its response is lost.
-        agent_cleanup = cleanup.register_cleanup("agent session", close_agent)
+        handle.cleanup = cleanup.register_cleanup("agent session", close_agent)
 
         # One source for the task's MCP declarations: what is granted and what the refusal below checks.
         mcp_servers = self._task_mcp_servers(task)
@@ -994,21 +1177,22 @@ class HarborEnvironmentServer(
                 server_name=self.config.agent_server.name,
                 url_path="/v1/agent_sessions",
                 json=AgentSeedSessionRequest(
-                    agent_session_id=agent_session_id,
+                    agent_session_id=handle.agent_session_id,
                     episode_id=request.episode_id,
                     task_id=request.task.task_id,
                     tool_accesses=tool_accesses,
                     sandbox_access=access,
                     agent_timeout_sec=agent_timeout_sec,
+                    continuation=AgentContinuationRequirements() if continuation else None,
                 ).model_dump(mode="json"),
             )
             await raise_for_status(agent_create_http_response)
             agent_session = AgentSeedSessionResponse.model_validate(
                 await get_response_json(agent_create_http_response)
             )
-            if agent_session.agent_session_id != agent_session_id:
+            if agent_session.agent_session_id != handle.agent_session_id:
                 raise ValueError("Agent seed returned a different agent_session_id")
-            agent_cookies = _cookies(agent_create_http_response)
+            handle.cookies = _cookies(agent_create_http_response)
             unreached = self._unreached_task_tools(task, mcp_servers, tool_accesses)
             if unreached and not agent_session.supports_task_tool_context:
                 # The task's tools would never reach this harness, and the run would score a silent zero.
@@ -1041,57 +1225,109 @@ class HarborEnvironmentServer(
                 failure_model=SingleAgentTurnFailure,
                 stage="agent",
             ) from error
+        return handle
 
-        agent_response = None
+    async def _activate_agent_session(
+        self,
+        request: HarborEpisodeRequest,
+        handle: _AgentSessionHandle,
+        responses_create_params: Any,
+        progress: "_TurnProgress",
+        *,
+        activation: int | None = None,
+    ) -> NeMoGymResponse:
+        """Send one input to the open session: the turn's only activation, or activation ``activation`` (1-based)
+        of a continuation session, named in the header the agent-session contract requires. A failed activation
+        closes the session for its evidence and raises the staged episode failure."""
+        progress.stage, progress.response = "agent", None
+        headers = {AGENT_ACTIVATION_HEADER: str(activation)} if activation is not None else None
         try:
             agent_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path=self._agent_responses_path(request),
                 json=_harness_params(responses_create_params),
-                cookies=agent_cookies,
+                cookies=handle.cookies,
+                **({"headers": headers} if headers else {}),
             )
             await raise_for_status(agent_http_response)
             response_cookies = _cookies(agent_http_response)
             if response_cookies:
-                agent_cookies = response_cookies
+                handle.cookies = response_cookies
             agent_response = NeMoGymResponse.model_validate(await get_response_json(agent_http_response))
             progress.response = agent_response
         except Exception as error:
             # The agent's evidence of the failed turn arrives with its session close.
             try:
-                await agent_cleanup.close()
+                await handle.cleanup.close()
             except Exception:
                 pass  # Final unwind retries the close and logs its failure.
             raise dependency_failure(
                 error,
                 failure_model=SingleAgentTurnFailure,
                 stage="agent",
-                agent_observations=agent_observations,
-                trajectory=agent_trajectory,
+                agent_observations=handle.observations,
+                trajectory=handle.trajectory,
             ) from error
+        return agent_response
 
-        # Verification needs this close first: the harness must have let go of the sandbox, and its
-        # observations travel with the result.
+    async def _close_agent_session(
+        self,
+        handle: _AgentSessionHandle,
+        task: HarborTask,
+        progress: "_TurnProgress",
+        *,
+        partial_response: NeMoGymResponse | None,
+    ) -> None:
+        """Close the session so the harness lets go of the sandbox; its observations and trajectory land on the
+        handle. A close that times out is tolerated (the final unwind retries it); any other failure is a staged
+        cleanup failure."""
         try:
-            await agent_cleanup.close()
+            await handle.cleanup.close()
         except TimeoutError as error:
             # The turn is finished; a harness that is slow to tear down must not cost its score. Its
             # observations are lost with the reply, and the final unwind retries the close.
             LOGGER.warning(f"{task.task_id}: agent session close timed out, verifying anyway: {error}")
-            agent_observations = None
+            handle.observations = None
             progress.observations = None
+            # The episode is done with the session: the final unwind, not a second close here, retries it.
+            handle.closed = True
         except Exception as error:
             raise dependency_failure(
                 error,
                 failure_model=SingleAgentTurnFailure,
                 stage="cleanup",
-                partial_response=agent_response,
+                partial_response=partial_response,
             ) from error
 
-        # A failed response whose harness classified the cause is routed by the deployment's policy before any
-        # grading: a transport or unknown cause is retried ungraded, as on ``single_agent_turn``, instead of
-        # handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
-        # episode at the turn that failed; a verify cause is graded as before.
+    async def _close_before_failure(
+        self,
+        handle: _AgentSessionHandle | None,
+        task: HarborTask,
+        progress: "_TurnProgress",
+        *,
+        partial_response: NeMoGymResponse | None,
+    ) -> None:
+        """Close a continued session that is still open when a failure ends the episode mid-loop, so the evidence
+        its close returns (the harness's observations and cumulative trajectory, on the handle) travels with the
+        failure row. Without this the final unwind closes the session and retrieves both, after the failure response
+        was built without them. The failure being built is kept whatever the close does: a close that fails is
+        logged, never raised over the original error (the final unwind retries it)."""
+        if handle is None or handle.closed:
+            return
+        progress.stage = "cleanup"
+        try:
+            await self._close_agent_session(handle, task, progress, partial_response=partial_response)
+        except HandledEpisodeError as error:
+            LOGGER.warning(
+                f"{task.task_id}: agent session close failed while the episode was ending in a failure, which is "
+                f"kept over the close's: {error.failure.failure_reason}"
+            )
+
+    def _route_failed_response(self, agent_response: NeMoGymResponse, handle: _AgentSessionHandle) -> None:
+        """A failed response whose harness classified the cause is routed by the deployment's policy before any
+        grading: a transport or unknown cause is retried ungraded, as on ``single_agent_turn``, instead of
+        handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
+        episode at the turn that failed; a verify cause is graded as before."""
         action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
         if action != OutcomeAction.VERIFY:
             raise self._failure(
@@ -1099,10 +1335,50 @@ class HarborEnvironmentServer(
                 failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
                 terminal=action == OutcomeAction.FAIL,
                 partial_response=agent_response,
-                agent_observations=agent_observations,
-                trajectory=agent_trajectory,
+                agent_observations=handle.observations,
+                trajectory=handle.trajectory,
             )
-        return agent_response, agent_observations, agent_trajectory
+
+    async def _require_turn_continuation(self) -> None:
+        """Refuse a ``turn_sessions: continue`` run before any sandbox when the harness cannot continue a session.
+
+        The agent server's capabilities are asked once per process. An agent server without the route (an older
+        build) cannot continue either. Harbor's multi-step trial refuses ``resume_trajectory`` the same way for an
+        agent without ``SUPPORTS_RESUME``, before any environment spend.
+        """
+        if self._agent_capabilities is None:
+            try:
+                http_response = await self.server_client.get(
+                    server_name=self.config.agent_server.name, url_path="/v1/agent_sessions/capabilities"
+                )
+                await raise_for_status(http_response)
+                capabilities = AgentSessionCapabilitiesResponse.model_validate(await get_response_json(http_response))
+            except ClientResponseError as error:
+                if error.status not in (404, 405):
+                    raise dependency_failure(
+                        error,
+                        failure_model=SingleAgentTurnFailure,
+                        stage="seed",
+                        terminal=False,
+                    ) from error
+                capabilities = AgentSessionCapabilitiesResponse()
+            except Exception as error:
+                raise dependency_failure(
+                    error,
+                    failure_model=SingleAgentTurnFailure,
+                    stage="seed",
+                ) from error
+            self._agent_capabilities = capabilities
+        if self._agent_capabilities.continuation is None:
+            raise self._failure(
+                stage="seed",
+                failure_reason=(
+                    f"turn_sessions: continue needs a harness with multi-turn continuation, which the agent "
+                    f"{self.config.agent_server.name!r} does not declare; run the multi-step task with "
+                    "turn_sessions: fresh (a session per step) or with a harness that resumes its session"
+                ),
+                terminal=True,
+            )
 
     async def _run_turns(
         self,
@@ -1116,11 +1392,22 @@ class HarborEnvironmentServer(
 
         Each turn opens a fresh agent session (Harbor's default, ``resume_trajectory = false``), sends the
         step's instruction, closes the session and runs the step's verifier: the task's ``tests/`` with
-        ``steps/<name>/tests/`` on top. Before a turn the previous turn's grading files are cleared, the sandbox
-        takes the step's ``[steps.agent].user`` when it has one and the oracle gets the step's own solution
-        (:meth:`_prepare_turn`). The episode stops
-        after a turn that is masked, produces no verifier result, or misses its ``min_reward``; the remaining
-        turns do not run.
+        ``steps/<name>/tests/`` on top. With ``turn_sessions: continue`` (Harbor's ``--resume-trajectory``) the
+        first turn seeds one continuation session and every turn is an activation of it, so the agent keeps its
+        conversation; the session is closed once, after the last turn's activation and before that step's
+        verifier, and its observations and cumulative trajectory are the episode's. The session's conversation state
+        on disk and its borrowed connection to the sandbox then stay in place while every step's verifier but the
+        last's runs (the harness process has exited between activations, as Harbor's resumed agent has between
+        steps); a task whose steps switch the agent user cannot continue, since
+        the session runs as the user it was seeded with (refused at seed, before any sandbox). Before a turn the previous turn's grading files are cleared, the sandbox
+        takes the step's ``[steps.agent].user`` when it has one, the step's ``workdir/``, ``setup.sh`` and
+        ``[steps.healthcheck]`` are applied and the oracle gets the step's own solution (:meth:`_prepare_turn`). The episode stops after a turn whose
+        preparation failed (recorded as a failed turn with no agent response and no verifier result, Harbor's
+        step ``exception_info``, scored 0 by :func:`roll_up_turns` when a turn ran before it), or that is masked,
+        produces no verifier result, or misses its ``min_reward``;
+        the remaining turns do not run. An episode whose first turn's preparation failed has no agent response
+        at all, so it is a terminal failure at the agent stage with the step's failure kind, as Harbor's trial
+        then ends with no verifier result.
         """
         task = session.task
         inputs = request.task.task_input.turns
@@ -1133,36 +1420,99 @@ class HarborEnvironmentServer(
                 ),
                 terminal=True,
             )
+        continued = self.config.turn_sessions == "continue" and len(task.turns) > 1
+        handle: _AgentSessionHandle | None = None
         results: list[HarborTurnResult] = []
         stopped_after: str | None = None
-        for turn, turn_input in zip(task.turns, inputs):
+        for index, (turn, turn_input) in enumerate(zip(task.turns, inputs), start=1):
             try:
+                # The preparation (the step's workdir, setup.sh and healthcheck) is this turn's, before its agent: a
+                # task deadline that fires in it reports the agent stage with no response yet, not the previous turn's
+                # verification with that turn's response, which `_agent_turn` would only reset once the session opens.
+                progress.stage, progress.response, progress.observations, progress.trajectory = (
+                    "agent",
+                    None,
+                    None,
+                    None,
+                )
                 access = await self._prepare_turn(session, turn, access)
+            except StepPrepareError as error:
+                # The step's own setup failed: a failed turn, no agent session, no verifier, and the episode stops.
+                LOGGER.warning(f"{task.task_id}: {error.reason}")
+                results.append(
+                    HarborTurnResult(
+                        name=turn.name,
+                        reward=0.0,
+                        mask_sample=False,
+                        failure_kind=error.kind,
+                        failure_reason=error.reason[:2000],
+                    )
+                )
+                stopped_after = turn.name if len(results) < len(task.turns) else None
+                break
             except HTTPException as error:
+                # A continued session open from the earlier turns is closed first, for its evidence.
+                last_response = results[-1].response if results else None
+                await self._close_before_failure(handle, task, progress, partial_response=last_response)
                 raise self._failure(
                     stage="agent",
                     failure_reason=f"turn {turn.name!r}: {error.detail}",
                     terminal=error.status_code < 500,
+                    agent_observations=handle.observations if handle is not None else None,
+                    trajectory=handle.trajectory if handle is not None else None,
                 ) from error
             except Exception as error:
                 # The sandbox could not clear the previous turn's grading files or take the turn's user or solution:
                 # a provider-side failure, retried elsewhere; a task-caused non-zero exit (turn 1 replaced /tests
                 # with a file) takes the same retryable path. The next agent never opens with those files at their
                 # paths.
+                last_response = results[-1].response if results else None
+                await self._close_before_failure(handle, task, progress, partial_response=last_response)
                 raise self._failure(
                     stage="agent",
                     failure_reason=f"turn {turn.name!r}: {type(error).__name__}: {error}",
                     terminal=False,
+                    agent_observations=handle.observations if handle is not None else None,
+                    trajectory=handle.trajectory if handle is not None else None,
                 ) from error
-            response, observations, trajectory = await self._agent_turn(
-                request,
-                access,
-                turn_input.responses_create_params,
-                cleanup,
-                task,
-                progress,
-                agent_timeout_sec=task.config.step_agent_timeout_sec(turn.config),
-            )
+            if continued:
+                if handle is None:
+                    handle = await self._open_agent_session(
+                        request,
+                        access,
+                        cleanup,
+                        task,
+                        progress,
+                        agent_timeout_sec=task.config.step_agent_timeout_sec(turn.config),
+                        continuation=True,
+                    )
+                response = await self._activate_agent_session(
+                    request, handle, turn_input.responses_create_params, progress, activation=index
+                )
+                try:
+                    self._route_failed_response(response, handle)
+                except HandledEpisodeError:
+                    # The evidence of a continued session arrives with its close.
+                    await self._close_agent_session(handle, task, progress, partial_response=response)
+                    self._route_failed_response(response, handle)
+                if index == len(task.turns):
+                    # No activation follows the last step: the harness lets go of the sandbox before that step's
+                    # verifier, as a fresh session does before every step's, and before a last step that verifies
+                    # separately stops the agent's sandbox (`_verified_outcome`), where a close could no longer run
+                    # in it (OpenCode's close removes its session directory from a borrowed sandbox).
+                    await self._close_agent_session(handle, task, progress, partial_response=response)
+                # A continued session's observations and trajectory are the whole episode's, at its close.
+                observations, trajectory = None, None
+            else:
+                response, observations, trajectory = await self._agent_turn(
+                    request,
+                    access,
+                    turn_input.responses_create_params,
+                    cleanup,
+                    task,
+                    progress,
+                    agent_timeout_sec=task.config.step_agent_timeout_sec(turn.config),
+                )
             progress.stage = "verification"
             try:
                 # The step's verifier runs as its own user, never the step's agent user: the sandbox's default is
@@ -1173,13 +1523,19 @@ class HarborEnvironmentServer(
                         session, request, response, (turn, turn_input.responses_create_params)
                     )
             except HTTPException as error:
+                # A continued session's evidence sits on the handle once its close has returned: after the last
+                # step's activation it already has, and a session still open at an earlier step's verifier failure
+                # (a separate verifier whose sandbox would not start, say) is closed now, before the failure row is
+                # built, so the row carries what the close returned instead of leaving it to the final unwind.
+                # After a close that timed out there is none to carry.
+                await self._close_before_failure(handle, task, progress, partial_response=response)
                 raise self._failure(
                     stage="verification",
                     failure_reason=f"turn {turn.name!r}: {error.detail}",
                     terminal=error.status_code < 500,
                     partial_response=response,
-                    agent_observations=observations,
-                    trajectory=trajectory,
+                    agent_observations=handle.observations if handle is not None else observations,
+                    trajectory=handle.trajectory if handle is not None else trajectory,
                 ) from error
             result = HarborTurnResult(
                 name=turn.name, response=response, agent_observations=observations, trajectory=trajectory, **outcome
@@ -1193,15 +1549,37 @@ class HarborEnvironmentServer(
                 stopped_after = turn.name if len(results) < len(task.turns) else None
                 break
 
+        if handle is not None and not handle.closed:
+            # The episode stopped before its last step's activation: the harness lets go of the sandbox now.
+            progress.stage = "cleanup"
+            await self._close_agent_session(handle, task, progress, partial_response=results[-1].response)
+
         strategy = task.config.multi_step_reward_strategy
         last = results[-1]
+        # The last turn whose agent ran: a turn that failed in its preparation has no response of its own.
+        ran = next((result for result in reversed(results) if result.response is not None), None)
+        if ran is None:
+            raise self._failure(
+                stage="agent",
+                failure_reason=f"turn {last.name!r}: {last.failure_reason}",
+                terminal=True,
+                failure_kind=last.failure_kind,
+            )
+        sessions = sum(1 for result in results if result.response is not None)
         episode = HarborEpisodeResult(
-            responses_create_params=inputs[len(results) - 1].responses_create_params,
-            response=last.response,
-            ng_agent_observations=last.agent_observations,
-            ng_trajectory=last.trajectory,
-            verifier_mode="shared",
+            responses_create_params=inputs[results.index(ran)].responses_create_params,
+            response=ran.response,
+            # Fresh sessions leave one record per step on the turns, as Harbor's steps/<name>/agent/ does; the
+            # episode-level slots carry a session's whole record (continue mode, or the one fresh session when a
+            # single turn's agent ran; a turn whose preparation failed opened none), never one step's standing
+            # for the episode (merging them is issue #5063).
+            ng_agent_observations=handle.observations
+            if handle is not None
+            else (ran.agent_observations if sessions == 1 else None),
+            ng_trajectory=handle.trajectory if handle is not None else (ran.trajectory if sessions == 1 else None),
+            verifier_mode=_turns_verifier_mode(results),
             turns=results,
+            turn_sessions="continue" if continued else "fresh",
             turn_reward_strategy=strategy,
             turns_without_verifier_result=sum(1 for result in results if result.verifier_rewards is None),
             stopped_after_turn=stopped_after,
@@ -1212,14 +1590,16 @@ class HarborEnvironmentServer(
 
     async def _prepare_turn(self, session: HarborSession, turn: HarborTurn, access: SandboxAccess) -> SandboxAccess:
         """What a turn needs in place before its agent session opens: no grading files from the previous turn, the
-        step's user and the step's solution.
+        step's user, the step's ``workdir/`` and ``setup.sh``, and the step's solution.
 
-        Every turn after the first follows a shared verification in this sandbox (a multi-step task verifies in
-        the agent's sandbox), which left its tests, its reward and the previous agent's transcript there, so they
-        are removed first (:meth:`_reset_shared_verifier_dirs`); the first turn keeps whatever the image put in
-        ``/tests``. Harbor 0.22.0 empties ``/tests`` and ``/logs/verifier`` only right before each step's shared
-        verifier, so its next step's agent still sees the previous step's tests; Harbor main moved that reset into
-        its step preparation, and this follows main. Harbor also empties the whole ``/logs/agent`` before a step
+        A turn that follows a turn verified in this sandbox (a shared turn, :meth:`_turn_separate` false) opens
+        where that verification left its tests, its reward and the previous agent's transcript, so they are removed
+        first (:meth:`_reset_shared_verifier_dirs`); the first turn, and a turn after one that verified in a
+        sandbox of its own, keep whatever the image put in ``/tests``, since nothing was graded here. Harbor 0.22.0
+        empties ``/tests`` and ``/logs/verifier`` only right before each step's shared verifier, so its next step's
+        agent still sees the previous step's tests, and its separate mode never touches the agent's ``/tests``;
+        Harbor main moved that reset into its step preparation, gated on the previous step having run a shared
+        verifier there, and this follows main. Harbor also empties the whole ``/logs/agent`` before a step
         that does not resume (or moves the bind-mounted contents away); here only the server's
         ``trajectory.json`` goes and the agent's own files under ``/logs/agent`` stay. The reset removes files at
         those paths: a process the previous agent left running, or a copy it took during its verification, is out
@@ -1227,17 +1607,26 @@ class HarborEnvironmentServer(
         (else the task's ``[agent].user``), so when the turn's user differs from the one the sandbox runs as, the
         sandbox's default user, the working directory's owner and the user the harness is handed switch to it
         (:meth:`_apply_turn_user`), and the access the harness gets is rebuilt for it; the verifier keeps its own
-        user and fallback. The oracle alone then gets the step's ``solution/`` at ``/solution``
-        (:meth:`_place_turn_solution`).
+        user and fallback. Then, as that user, the step's ``steps/<name>/workdir/`` is merged into the working
+        directory and its ``setup.sh`` run, then the step's ``[steps.healthcheck]`` polled to a pass
+        (:meth:`_prepare_step_workdir`, :meth:`_run_step_healthcheck`: Harbor's ``_prepare_step`` order; a failure
+        in either is :class:`StepPrepareError`, the step's failure, and the healthcheck does not run after a failed
+        setup). Nothing stops or pauses what the previous turn left running between the switch and the script, so a
+        process it left behind can touch the working directory, ``setup.sh`` included, before the script runs; a
+        step that takes root after a step that had less is where that matters (see :meth:`_prepare_step_workdir`).
+        The oracle alone then gets the step's ``solution/`` at ``/solution`` (:meth:`_place_turn_solution`).
         """
         task = session.task
-        if turn is not task.turns[0]:
-            await self._reset_shared_verifier_dirs(session.sandbox)
+        index = next(i for i, candidate in enumerate(task.turns) if candidate is turn)
+        if index and not self._turn_separate(task, task.turns[index - 1]):
+            await self._reset_shared_verifier_dirs(session.sandbox, keep=task.config.verifier.inputs)
         user = str(turn.config.agent.user) if turn.config.agent.user is not None else task.user
         # Compared as written (the seed's or the previous turn's), not with the form the sandbox installed.
         if user != session.requested_user:
             await self._apply_turn_user(session, user)
             access = await self._sandbox_access(session)
+        await self._prepare_step_workdir(session, turn)
+        await self._run_step_healthcheck(session, turn)
         await self._place_turn_solution(session, turn)
         return access
 
@@ -1325,12 +1714,64 @@ class HarborEnvironmentServer(
             )
         return accesses
 
+    def _check_seed_trajectory(self, task: HarborTask) -> None:
+        """Refuse a task that ships Harbor's seed ``trajectory.json`` for every agent but the oracle, before anything
+        is provisioned.
+
+        Harbor loads the file into the agent's session for every agent but the oracle and nop
+        (``Trial._resolve_load_trajectory``); no harness here can be seeded with it yet, so the oracle runs the task
+        as Harbor's does and any other agent is refused, not retried. An agent block this server cannot read
+        (several implementations under the instance, a client the merged config does not show) is not known to be
+        any harness in particular: the task runs, with a warning, as :meth:`_seed_solution` places no solution for
+        the same shape with a warning, rather than refusing the oracle wired that way.
+        """
+        implementation = self._agent_implementation()
+        where = task.seed_trajectory.as_posix()
+        if implementation is None:
+            LOGGER.warning(
+                "%s: ships Harbor's seed trajectory %s, and agent %r has no single responses_api_agents "
+                "implementation in the run config, so the server cannot tell whether it is the oracle (which runs "
+                "such a task as Harbor's does); the task runs without its prior context",
+                task.task_id,
+                where,
+                self.config.agent_server.name,
+            )
+            return
+        if implementation != ORACLE_AGENT:
+            raise HTTPException(
+                422,
+                f"Task {task.task_id!r} ships Harbor's seed trajectory {where} (the prior context Harbor loads into "
+                "the agent's session before its first turn, as --load-trajectory does, for every agent but the oracle "
+                "and nop); loading a trajectory into a harness is not supported yet, so the task is refused for agent "
+                f"{self.config.agent_server.name!r} rather than run without it. The oracle validates it, as Harbor's "
+                "does; remove the file to run the task without its prior context",
+            )
+
     async def _seed(self, request: HarborEpisodeRequest, episode_key: str) -> HarborSession:
         """Resolve the task and start its sandbox; the sandbox stays owned by the server until it is stopped."""
         if self._shutting_down:
             raise HTTPException(503, "Environment server is shutting down")
         task = await self._resolve_task(request.task.task_id, request.task.task_input.task_data)
         self._check_task_data(request.task.task_id.taskset, task, request.task.task_input.task_data)
+        if task.seed_trajectory is not None:
+            self._check_seed_trajectory(task)
+        if self.config.turn_sessions == "continue" and len(task.turns) > 1:
+            # A continued session runs as the user it was seeded with (the first step's, which `_prepare_turn`
+            # puts in place before the session opens), where Harbor's resumed agent is relaunched as each step's
+            # user. Each step's effective user is its own `[steps.agent].user`, else the task's, as `_prepare_turn`
+            # resolves it: steps that all resolve to one user never switch, whether the task names it or every step
+            # does; refused here, before any sandbox is created (or its image built or pulled), as the harness's
+            # missing continuation is in `run()`.
+            users = {
+                str(turn.config.agent.user) if turn.config.agent.user is not None else task.user for turn in task.turns
+            }
+            if len(users) > 1:
+                named = ", ".join(sorted(user if user is not None else "the image's default user" for user in users))
+                raise HTTPException(
+                    422,
+                    f"Task {task.task_id!r} switches the agent user between steps ({named}), "
+                    "which a continued harness session cannot follow; run it with turn_sessions: fresh",
+                )
         if not task.needs_sandbox:
             raise HTTPException(
                 422, f"Task {task.task_id!r} declares no image; sandbox-less tasks are not supported yet"
@@ -1348,15 +1789,25 @@ class HarborEnvironmentServer(
                 "re-materialize the taskset",
             )
         separate = self._separate_verifier(task)
-        if separate and task.turns:
-            # The loader admits multi-step tasks in Harbor's shared mode only; `separate_verifier_for_artifacts`
-            # must not force them into a mode their turns do not run.
-            raise HTTPException(
-                422,
-                f"Task {task.task_id!r} is a multi-step task; separate verification of its turns is not supported "
-                "yet (unset separate_verifier_for_artifacts or drop the task's artifacts)",
-            )
-        if separate and _verifier_image(task, separate) is None:
+        # A multi-step task's separate turns each verify in a view of the task (`_turn_verifier_view`): the checks
+        # below that read the task's verifier image, environment and network run on every such view too.
+        views = [
+            (f" step {turn.name!r}", self._turn_verifier_view(task, turn))
+            for turn in task.turns
+            if self._turn_separate(task, turn)
+        ]
+        for where, view in views:
+            if _verifier_image(view, True) is None:
+                raise HTTPException(
+                    422,
+                    f"Task {task.task_id!r}{where} has no image for its separate verifier: no [steps.verifier.environment] "
+                    f"or [verifier.environment] names a docker_image and no verifier image built from "
+                    f"{TESTS_DOCKERFILE} is recorded in {task.path.parent / BUILT_IMAGES_FILE}; prepare the dataset "
+                    "again, or name a prebuilt image",
+                )
+            if view.config.verifier.environment is not None:
+                resolve_env_templates(view.config.verifier.environment.env)
+        if separate and not task.turns and _verifier_image(task, separate) is None:
             # The loader refuses this shape (no [verifier.environment].docker_image and no verifier image built from
             # tests/Dockerfile recorded); kept as the seed's invariant for a task object that did not come from it.
             raise HTTPException(
@@ -1382,11 +1833,13 @@ class HarborEnvironmentServer(
             verifier_network_policy = self._verifier_network_policy(task)
         except ValueError as exc:
             raise HTTPException(422, f"Task {task.task_id!r} [verifier] network policy: {exc}") from exc
-        if verifier_network_policy is not None and not separate:
+        shared_turns = [turn.name for turn in task.turns if not self._turn_separate(task, turn)]
+        if verifier_network_policy is not None and (not separate or shared_turns):
             raise HTTPException(
                 422,
-                f"Task {task.task_id!r} restricts the verifier's network but verifies in the agent's sandbox, whose "
-                "network policy cannot be changed after it started; declare separate verification",
+                f"Task {task.task_id!r} restricts the verifier's network but verifies in the agent's sandbox"
+                f"{' for step(s) ' + ', '.join(shared_turns) if shared_turns else ''}, whose network policy cannot be "
+                "changed after it started; declare separate verification",
             )
         for turn in task.turns:
             # The sources the turn's verifier resolves its env from (`_verifier_env`: the server's secrets, then the
@@ -1420,7 +1873,9 @@ class HarborEnvironmentServer(
             default = self.config.default_episode_timeout_seconds
             need = (
                 f"its {len(task.turns)} steps need up to {after_seed:.0f}s once the sandbox is ready (harness setup, "
-                f"agent and verifier budgets, hooks and grace per step), {nominal:.0f}s with one sandbox start and "
+                f"setup.sh and healthcheck bounds, agent and verifier budgets, hooks and grace per step), "
+                f"{nominal:.0f}s with one "
+                f"sandbox start and "
                 f"up to {bound:.0f}s with every image pull retry"
             )
             if not self.config.enforce_task_timeouts:
@@ -1511,7 +1966,11 @@ class HarborEnvironmentServer(
             launch = session.entrypoint = await self._start_entrypoint(
                 sandbox, task, image_user, prepared_workdir=session.workdir, compose_managed=managed
             )
-            await self._wait_healthy(sandbox, task, launch, user=image_user, compose_managed=managed)
+            # The task's [environment.healthcheck] runs in the prepared workdir, as Harbor's exec runs it; a group's
+            # main runs its command in the Dockerfile's WORKDIR, which may be another directory.
+            await self._wait_healthy(
+                sandbox, task, launch, user=image_user, workdir=session.workdir, compose_managed=managed
+            )
             await self._write_task_context(sandbox, task)
             if launch is not None:
                 # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
@@ -1599,6 +2058,15 @@ class HarborEnvironmentServer(
                 trajectory=trajectory,
             )
         )
+
+
+def _turns_verifier_mode(turns: list[HarborTurnResult]) -> Literal["shared", "separate", "mixed"] | None:
+    """The episode's ``verifier_mode`` from its turns': the one mode every graded turn used, ``mixed`` when the steps
+    resolved to both (Harbor's ``resolve_step_verifier_mode`` is per step), ``None`` when no turn was graded."""
+    modes = {turn.verifier_mode for turn in turns if turn.verifier_mode is not None}
+    if not modes:
+        return None
+    return next(iter(modes)) if len(modes) == 1 else "mixed"
 
 
 def _harness_params(responses_create_params: Any) -> Any:
