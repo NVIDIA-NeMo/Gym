@@ -244,7 +244,7 @@ def identity(pid: int) -> str:
     return f"{pid} {Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()[19]}"
 
 
-@pytest.mark.parametrize("owner", ["exited", "reused"])
+@pytest.mark.parametrize("owner", ["exited", "reused", "zombie"])
 def test_number_of_a_killed_installer_does_not_block_the_queue(
     sandbox: tuple[Path, dict[str, str]], owner: str
 ) -> None:
@@ -255,6 +255,14 @@ def test_number_of_a_killed_installer_does_not_block_the_queue(
         if owner == "exited":
             process.wait()
             recorded = f"{process.pid} 1"
+        elif owner == "zombie":
+            # Killed but not yet reaped: /proc still lists it with the recorded start time.
+            recorded = identity(process.pid)
+            process.kill()
+            deadline = time.monotonic() + 5
+            while Path(f"/proc/{process.pid}/stat").read_text().rsplit(") ", 1)[1].split()[0] != "Z":
+                assert time.monotonic() < deadline, "the killed owner never became a zombie"
+                time.sleep(0.01)
         else:
             # A live process that reuses the owner's PID started later, so it does not hold the lock.
             recorded = f"{process.pid} {int(identity(process.pid).split()[1]) - 1}"

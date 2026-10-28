@@ -35,12 +35,13 @@ verify() {
 }
 
 # A process as "PID START" from /proc, so a reused PID never matches its former owner; PID alone
-# where /proc is missing.
+# where /proc is missing. A zombie or dead process has none: it can never finish its turn.
 process_identity() {
     local stat=
     IFS= read -r -d '' stat 2>/dev/null <"/proc/$1/stat" || true
     if [[ $stat == *') '* ]]; then
         set -- "$1" ${stat##*) }
+        case $2 in Z | X) return ;; esac
         echo "$1 ${21}"
     elif kill -0 "$1" 2>/dev/null; then
         echo "$1"
@@ -67,8 +68,8 @@ else
             number=${number%.done}
             if [[ $number =~ ^[0-9]+$ ]] && ((number > last)); then last=$number; fi
         done
-        ticket=$((last + 1))
-        ln -s "$owner" "$queue/$ticket" 2>/dev/null && break
+        # Hold the number only once its link is ours: on exit the trap marks this ticket done.
+        ln -s "$owner" "$queue/$((last + 1))" 2>/dev/null && { ticket=$((last + 1)); break; }
     done
     until
         ahead=

@@ -12,12 +12,13 @@ if [ -n "$path_prefix" ]; then export PATH="$path_prefix:$PATH"; fi
 
 [ "$(uname -s)" = Linux ] || { echo 'OpenCode sandbox execution requires a Linux task image' >&2; exit 1; }
 # A process as "PID START" from /proc, so a reused PID never matches its former owner; PID alone
-# where /proc is missing.
+# where /proc is missing. A zombie or dead process has none: it can never finish its turn.
 process_identity() {
   local stat=
   IFS= read -r -d '' stat 2>/dev/null <"/proc/$1/stat" || true
   if [[ $stat == *') '* ]]; then
     set -- "$1" ${stat##*) }
+    case $2 in Z | X) return ;; esac
     echo "$1 ${21}"
   elif kill -0 "$1" 2>/dev/null; then
     echo "$1"
