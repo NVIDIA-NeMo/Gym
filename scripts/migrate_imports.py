@@ -118,8 +118,6 @@ class Migrator:
             if self.names
             else None
         )
-        # `monkeypatch.setattr(<old module>, "<name>", ...)` and `patch.object(...)` through a module that names left.
-        self._moved_name_owner = {name: module for module, moved in self.names.items() for name in moved}
 
     def module_path(self, module: str) -> str:
         """The current path of `module`, following module moves (longest moved prefix wins)."""
@@ -164,8 +162,11 @@ class Migrator:
             groups.setdefault(target_module, []).append(spelled)
         return groups
 
-    def _rewrite_import_from(self, node: ast.ImportFrom, statement: str) -> Optional[str]:
-        """Rewrite one `from nemo_gym... import ...` statement, keeping its formatting when nothing splits."""
+    def _rewrite_import_from(self, node: ast.ImportFrom, statement: str, line_prefix: str) -> Optional[str]:
+        """Rewrite one `from nemo_gym... import ...` statement, keeping its formatting when nothing splits.
+
+        `line_prefix` is the text before the statement on its first line.
+        """
         module = node.module
         groups = self._destinations(module, [(alias.name, alias.asname) for alias in node.names])
         original = [alias.name if alias.asname is None else f"{alias.name} as {alias.asname}" for alias in node.names]
@@ -176,9 +177,10 @@ class Migrator:
                     return None
                 # Every name goes to one module under its own name: change only the module path.
                 return re.sub(rf"^from\s+{re.escape(module)}\b", f"from {target}", statement, count=1)
-        indent = " " * node.col_offset
         lines = [f"from {target} import {', '.join(spelled)}" for target, spelled in groups.items()]
-        return f"\n{indent}".join(lines)
+        # A statement that starts its line splits onto lines with the same indentation. One that follows other code
+        # on its line (`if flag: from ...`, `x = 1; from ...`) stays in that line's statement list.
+        return f"\n{line_prefix}".join(lines) if not line_prefix.strip() else "; ".join(lines)
 
     def _rewrite_text_import(self, match: re.Match) -> str:
         """Rewrite a one-line `from <module> import <names>` written as text, such as a code sample in docs."""
@@ -197,7 +199,7 @@ class Migrator:
         return "\n".join(lines) + comment
 
     def rewrite_python(self, source: str, *, path: str = "<source>") -> tuple[str, list[str]]:
-        """Return the rewritten source and notes about relative imports into moved modules."""
+        """Return the rewritten source and notes about what it left for a person to check."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)  # invalid escapes in files being rewritten
             tree = ast.parse(source)
@@ -205,34 +207,136 @@ class Migrator:
         offsets = [0]
         for line in lines:
             offsets.append(offsets[-1] + len(line))
-        edits, notes = [], []
+
+        def span(node: ast.AST) -> tuple[int, int]:
+            start = offsets[node.lineno - 1] + _chars(lines[node.lineno - 1], node.col_offset)
+            end = offsets[node.end_lineno - 1] + _chars(lines[node.end_lineno - 1], node.end_col_offset)
+            return start, end
+
+        edits, kept, notes = [], [], []
+        receivers = _module_bindings(tree)
+        imported = {alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names}
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level > 0:
-                if any(self.module_path(f"nemo_gym.{alias.name}") != f"nemo_gym.{alias.name}" for alias in node.names):
+                if self._relative_import_reaches_moved_code(node, path):
                     notes.append(f"{path}:{node.lineno}: relative import may reach a moved module; check by hand")
+                continue
+            if isinstance(node, ast.Attribute):
+                # `nemo_gym.old.Name` in code: the new module may not be loaded where the old one is.
+                dotted = _dotted_name(node)
+                module, _, name = (dotted or "").rpartition(".")
+                if name in self.names.get(module, {}):
+                    new_module, _ = self.names[module][name]
+                    if not any(i == new_module or i.startswith(new_module + ".") for i in imported):
+                        start, end = span(node)
+                        kept.append((start, end, f"{self.module_path(module)}.{name}"))
+                        notes.append(
+                            f"{path}:{node.lineno}: `{dotted}` moved to `{new_module}`, which this file does not "
+                            "import; left at the old module, so check by hand"
+                        )
                 continue
             # `import nemo_gym.old` needs no statement rewrite: the dotted-path pass below covers it.
             if not (isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "nemo_gym"):
                 continue
-            start = offsets[node.lineno - 1] + _chars(lines[node.lineno - 1], node.col_offset)
-            end = offsets[node.end_lineno - 1] + _chars(lines[node.end_lineno - 1], node.end_col_offset)
-            new = self._rewrite_import_from(node, source[start:end])
+            start, end = span(node)
+            line_start = offsets[node.lineno - 1]
+            new = self._rewrite_import_from(node, source[start:end], source[line_start:start])
             if new is not None:
                 edits.append((start, end, new))
         for match in PATCH_THROUGH_MODULE.finditer(source):
-            owner = self._moved_name_owner.get(match.group("name"))
-            if owner is not None and owner.rpartition(".")[2] == match.group("module").rpartition(".")[2]:
+            owner = receivers.get(match.group("module"))
+            moved = self.names.get(owner, {}).get(match.group("name")) if owner else None
+            if moved is not None:
                 line = source.count("\n", 0, match.start()) + 1
-                new_module, _ = self.names[owner][match.group("name")]
                 notes.append(
                     f"{path}:{line}: patches `{match.group('name')}` through `{match.group('module')}`, but it moved to "
-                    f"`{new_module}`; the patch reaches only code that still looks it up in the old module, so check by hand"
+                    f"`{moved[0]}`; the patch reaches only code that still looks it up in the old module, so check by hand"
                 )
-        for start, end, new in sorted(edits, reverse=True):
-            source = source[:start] + new + source[end:]
         # Everything else: attribute chains, patch targets, and dotted strings.
-        # Rewritten import statements hold only new paths, which no old path matches.
-        return self.rewrite_dotted(source), notes
+        # Rewritten import statements hold only new paths, which no old path matches. Kept chains get only their
+        # module path updated.
+        pieces, last = [], 0
+        for start, end, new in sorted(edits + [(s, e, k) for s, e, k in _outermost(kept)]):
+            pieces += [self.rewrite_dotted(source[last:start]), new]
+            last = end
+        pieces.append(self.rewrite_dotted(source[last:]))
+        return "".join(pieces), notes
+
+    def _relative_import_reaches_moved_code(self, node: ast.ImportFrom, path: str) -> bool:
+        """Whether a relative import in the file at `path` names a moved module or a name moved out of a module."""
+        package = _package_of(path)
+        if package is None or node.level > len(package):
+            return False
+        base = package[: len(package) - node.level + 1]
+        module = ".".join(base + ([node.module] if node.module else []))
+        if module.split(".")[0] != "nemo_gym":
+            return False
+        if self.module_path(module) != module:
+            return True
+        for alias in node.names:
+            if alias.name in self.names.get(module, {}):
+                return True
+            child = f"{module}.{alias.name}"
+            if self.module_path(child) != child or child in self.names:
+                return True
+        return False
+
+
+def _dotted_name(node: ast.AST) -> Optional[str]:
+    """`a.b.c` for an attribute chain on a plain name, else None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    return ".".join([node.id, *reversed(parts)])
+
+
+def _outermost(spans: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """Drop spans nested in another span (`a.b.c` inside `a.b.c.d` is one chain)."""
+    spans = sorted(spans, key=lambda item: (item[0], -item[1]))
+    out: list[tuple[int, int, str]] = []
+    for item in spans:
+        if not out or item[0] >= out[-1][1]:
+            out.append(item)
+    return out
+
+
+def _module_bindings(tree: ast.Module) -> dict[str, str]:
+    """What module each spelling of a patch receiver names: `nemo_gym.x`, or the local name an import binds."""
+    bindings: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    bindings[alias.asname] = alias.name
+                else:
+                    # `import a.b.c` makes every prefix reachable by its own dotted spelling.
+                    parts = alias.name.split(".")
+                    for i in range(1, len(parts) + 1):
+                        bindings[".".join(parts[:i])] = ".".join(parts[:i])
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    # A name bound otherwise in the file (an assignment, a parameter) may shadow the import.
+    shadowed = {
+        target.id
+        for node in ast.walk(tree)
+        for target in (node.targets if isinstance(node, ast.Assign) else [])
+        if isinstance(target, ast.Name)
+    } | {arg.arg for node in ast.walk(tree) if isinstance(node, ast.arguments) for arg in node.args + node.kwonlyargs}
+    return {name: module for name, module in bindings.items() if name not in shadowed}
+
+
+def _package_of(path: str) -> Optional[list[str]]:
+    """The package parts a source file at `path` belongs to, from its location in the repository."""
+    parts = Path(path).with_suffix("").parts
+    if "nemo_gym" not in parts:
+        return None
+    parts = list(parts[parts.index("nemo_gym") :])
+    # A package's `__init__.py` belongs to the package itself; any other file to the package that holds it.
+    return parts[:-1]
 
 
 def _iter_files(paths: Iterable[Path]) -> Iterable[Path]:

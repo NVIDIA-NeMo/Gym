@@ -190,6 +190,118 @@ class TestRewritePython:
         _, warnings = migrator.rewrite_python("from . import server_utils\n", path="nemo_gym/x.py")
         assert warnings == ["nemo_gym/x.py:1: relative import may reach a moved module; check by hand"]
 
+    @pytest.mark.parametrize(
+        ("source", "path"),
+        [
+            ("from .server_utils import SimpleServer\n", "nemo_gym/x.py"),
+            ("from .openai_utils import NeMoGymResponse\n", "nemo_gym/x.py"),
+            ("from ..server_utils import SimpleServer\n", "nemo_gym/pkg/x.py"),
+            ("from .. import server_utils\n", "nemo_gym/pkg/x.py"),
+        ],
+    )
+    def test_relative_imports_of_moved_modules_and_names_are_reported_unchanged(self, migrator, source, path) -> None:
+        rewritten, notes = migrator.rewrite_python(source, path=path)
+        assert rewritten == source
+        assert notes == [f"{path}:1: relative import may reach a moved module; check by hand"]
+
+    def test_relative_import_in_another_package_is_not_reported(self, migrator) -> None:
+        assert migrator.rewrite_python("from .helpers import server_utils\n", path="other/pkg/x.py")[1] == []
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "if enabled: from nemo_gym.server_utils import ServerClient, SimpleServer\n",
+            'x = "\u00e9"; from nemo_gym.server_utils import ServerClient, SimpleServer\n',
+        ],
+    )
+    def test_split_import_after_other_code_on_its_line_stays_in_that_statement(self, migrator, source) -> None:
+        rewritten = _python(migrator, source)
+        assert rewritten.endswith(
+            "from nemo_gym.client.server_client import ServerClient; "
+            "from nemo_gym.server_runtime.server_utils import SimpleServer\n"
+        )
+        compile(rewritten, "<rewritten>", "exec")
+
+    def test_split_import_in_an_inline_suite_runs_only_when_its_condition_holds(self, migrator) -> None:
+        rewritten = _python(migrator, "if enabled: from nemo_gym.server_utils import ServerClient, SimpleServer\n")
+        namespace = {"enabled": False}
+        exec(compile(rewritten, "<rewritten>", "exec"), namespace)  # would fail if either import ran
+        assert "ServerClient" not in namespace and "SimpleServer" not in namespace
+
+    def test_split_import_keeps_tab_indentation(self, migrator) -> None:
+        rewritten = _python(migrator, "def f():\n\tfrom nemo_gym.server_utils import ServerClient, SimpleServer\n")
+        assert rewritten == (
+            "def f():\n\tfrom nemo_gym.client.server_client import ServerClient\n"
+            "\tfrom nemo_gym.server_runtime.server_utils import SimpleServer\n"
+        )
+        compile(rewritten, "<rewritten>", "exec")
+
+    def test_qualified_access_to_a_split_name_is_kept_unless_the_new_module_is_imported(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # The new module may never be loaded where the old one is, so `old.Thing` cannot just become `new.Thing`.
+        package = tmp_path / "fakepkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "destination.py").write_text("class Thing:\n    pass\n")
+        (package / "legacy.py").write_text(
+            "import importlib\n\n\ndef __getattr__(name):\n"
+            "    if name == 'Thing':\n        return importlib.import_module('fakepkg.destination').Thing\n"
+            "    raise AttributeError(name)\n"
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        migrator = migrate_imports.Migrator({}, {"fakepkg.legacy": {"Thing": ("fakepkg.destination", "Thing")}})
+        source = "import fakepkg.legacy\nvalue = fakepkg.legacy.Thing\n"
+        rewritten, notes = migrator.rewrite_python(source, path="x.py")
+        assert rewritten == source
+        assert notes == [
+            "x.py:2: `fakepkg.legacy.Thing` moved to `fakepkg.destination`, which this file does not import; "
+            "left at the old module, so check by hand"
+        ]
+        for name in ("fakepkg", "fakepkg.legacy", "fakepkg.destination"):
+            monkeypatch.delitem(__import__("sys").modules, name, raising=False)
+        namespace: dict = {}
+        exec(compile(rewritten, "x.py", "exec"), namespace)
+        assert namespace["value"] is __import__("sys").modules["fakepkg.destination"].Thing
+
+        imported = "import fakepkg.legacy\nimport fakepkg.destination\nvalue = fakepkg.legacy.Thing\n"
+        assert migrator.rewrite_python(imported, path="x.py") == (
+            "import fakepkg.legacy\nimport fakepkg.destination\nvalue = fakepkg.destination.Thing\n",
+            [],
+        )
+
+    @pytest.mark.parametrize(
+        ("imports", "receiver", "call"),
+        [
+            ("import nemo_gym.server_utils as su", "su", "monkeypatch.setattr"),
+            ("from nemo_gym import server_utils as su", "su", "monkeypatch.setattr"),
+            ("from nemo_gym import openai_utils", "openai_utils", "patch.object"),
+        ],
+    )
+    def test_patch_note_follows_the_receivers_imported_module(self, imports, receiver, call) -> None:
+        # `request` left both modules for different homes; each note must name the right one.
+        names = {
+            "nemo_gym.server_utils": {"request": ("nemo_gym.client.http_client", "request")},
+            "nemo_gym.openai_utils": {"request": ("nemo_gym.models.openai_client", "request")},
+        }
+        migrator = migrate_imports.Migrator({}, names)
+        owner = "nemo_gym.openai_utils" if "openai" in imports else "nemo_gym.server_utils"
+        _, notes = migrator.rewrite_python(f'{imports}\n{call}({receiver}, "request", None)\n', path="t.py")
+        assert notes == [
+            f"t.py:2: patches `request` through `{receiver}`, but it moved to `{names[owner]['request'][0]}`; "
+            "the patch reaches only code that still looks it up in the old module, so check by hand"
+        ]
+
+    def test_patch_of_an_unrelated_or_shadowed_receiver_is_not_reported(self, migrator) -> None:
+        source = (
+            "import nemo_gym.server_utils as su\n"
+            "def test(monkeypatch, client):\n"
+            '    monkeypatch.setattr(client, "request", None)\n'
+            "su = object()\n"
+            'monkeypatch.setattr(su, "request", None)\n'
+        )
+        assert migrator.rewrite_python(source, path="t.py")[1] == []
+
 
 class TestRewriteText:
     def test_library_reference_urls_are_left_for_the_docs_redirects(self, migrator) -> None:
