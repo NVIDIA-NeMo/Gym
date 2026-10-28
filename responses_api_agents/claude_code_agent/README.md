@@ -214,8 +214,10 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   prompt cache's reads and writes, and `cached_tokens` is the cache reads. A run that ends on its
   own takes it from the result event's `modelUsage` (its `usage` covers the main conversation
   only). A run cut off at the timeout has no result event; it counts the calls that finished, from
-  Claude Code's session transcripts. A call cut off in flight is not counted, since its output is
-  reported only when it ends.
+  Claude Code's session transcripts. Two kinds of call are missing there: one cut off in flight,
+  whose output is reported only when it ends, and context compaction, which Claude Code leaves out
+  of its transcripts (each compaction is one call over the whole context, about 0.5% of a long
+  run's input).
 - Usage is Claude Code's own count. Against vLLM it counts a call's prompt twice when the call's
   final usage reports no uncached input: Claude Code then keeps the prompt total it was sent when
   the call started and adds the cache reads and writes to it. With DeepSeek V4.1 Flash that is

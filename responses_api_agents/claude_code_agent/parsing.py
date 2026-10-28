@@ -152,7 +152,8 @@ def parse_stream_json(
     Usage counts every model call the CLI made, subagents' included, with the prompt cache's reads and writes in
     the input. It comes from the result event when there is one. Without it (the CLI was killed), it is the sum
     of the calls that finished, from the session transcripts that ``transcript`` returns (called only then; see
-    ``transcript_usage``). A call cut off in flight is not counted: its output is reported only when it ends.
+    ``transcript_usage``). Not counted there: a call cut off in flight (its output is reported only when it
+    ends) and context compaction, which Claude Code leaves out of its transcripts.
     When there are no transcripts, the stream's per-message usage is all there is, which on servers that send
     output only at the end of a message (vLLM) holds input alone.
 
