@@ -29,7 +29,7 @@ import nemo_gym.exporters.mlflow as mlflow_module
 import nemo_gym.exporters.wandb as wandb_module
 from nemo_gym.config_types import ConfigError
 from nemo_gym.exporters import load_run_exporter_class
-from nemo_gym.exporters.base import BaseExporter, ExportState
+from nemo_gym.exporters.base import BaseExporter, ExportState, _write_marker_atomically
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.exporters.mlflow import MLflowExporter
 from nemo_gym.exporters.wandb import WandbExporter
@@ -66,7 +66,7 @@ class RecordingBackend(BaseExporter):
         self.events.append("teardown")
 
     def _log_config(self, config_dict: DictConfig) -> None:
-        self.marker_during_logging = self._run_id_fpath().exists()
+        self.marker_during_logging = self._exported_artifacts.export_done_fpath(self.name).exists()
         self.configs.append(config_dict)
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
@@ -137,11 +137,11 @@ class TestExport:
         backend.export(artifacts)
 
         assert backend.marker_during_logging is False
-        assert artifacts.exporter_run_id_fpath("recording").read_text() == "backend-run-7"
+        assert artifacts.export_done_fpath("recording").read_text() == "backend-run-7"
 
     def test_an_already_exported_run_is_skipped_without_opening_the_backend(self, tmp_path: Path) -> None:
         artifacts = _make_run(tmp_path)
-        artifacts.exporter_run_id_fpath("recording").write_text("earlier-run")
+        artifacts.export_done_fpath("recording").write_text("earlier-run")
         backend = _backend(artifacts)
 
         result = backend.export(artifacts)
@@ -162,7 +162,7 @@ class TestExport:
         assert result.state is ExportState.FAILED
         assert result.exit_code == 1
         assert "backend rejected the metrics" in result.error
-        assert not artifacts.exporter_run_id_fpath("recording").exists()
+        assert not artifacts.export_done_fpath("recording").exists()
         assert backend.events == ["setup", "teardown"]
 
     def test_a_retry_after_failure_starts_a_fresh_backend_run(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -182,7 +182,53 @@ class TestExport:
         backend.setup()
 
         assert (tmp_path / "live_recording_run_id").read_text() == "backend-run-7"
-        assert backend._recorded_run_id() == "backend-run-7"
+        assert backend._recorded_run_id() is None
+        resumed = RecordingBackend(OmegaConf.create({"output_jsonl_fpath": str(output), "resume_from_cache": True}))
+        assert resumed._recorded_run_id() == "backend-run-7"
+        assert not (tmp_path / "live_recording_export_done").exists()
+
+    def test_the_done_marker_is_its_own_file_and_leaves_the_live_run_id_alone(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+
+        _backend(artifacts).export(artifacts)
+
+        assert (tmp_path / "run_recording_export_done").read_text() == "backend-run-7"
+        assert not (tmp_path / "run_recording_run_id").exists()
+
+    def test_a_live_run_id_does_not_make_the_export_skip_and_is_reported(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        artifacts = _make_run(tmp_path)
+        live = tmp_path / "run_recording_run_id"
+        live.write_text("live-run-3")
+        backend = _backend(artifacts)
+
+        with caplog.at_level("WARNING"):
+            result = backend.export(artifacts)
+
+        assert result.state is ExportState.SUCCEEDED
+        assert result.detail == {"run_id": "backend-run-7", "uploaded_rollouts": True, "live_run_id": "live-run-3"}
+        assert backend.events == ["setup", "teardown"]
+        assert "logged" in caplog.text and "live as run live-run-3" in caplog.text
+        assert live.read_text() == "live-run-3"
+        assert (tmp_path / "run_recording_export_done").read_text() == "backend-run-7"
+
+    def test_an_export_does_not_become_the_run_a_later_live_resume_reopens(self, tmp_path: Path) -> None:
+        artifacts = _make_run(tmp_path)
+        _backend(artifacts).export(artifacts)
+
+        resumed = RecordingBackend(
+            OmegaConf.create({"output_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath), "resume_from_cache": True})
+        )
+
+        assert resumed._recorded_run_id() is None
+
+    def test_a_done_marker_in_a_directory_that_does_not_exist_yet_is_created(self, tmp_path: Path) -> None:
+        nested = tmp_path / "not" / "there" / "marker"
+
+        _write_marker_atomically(nested, "run-1")
+
+        assert nested.read_text() == "run-1"
 
     def test_a_marker_write_that_fails_midway_leaves_no_marker_and_a_retry_succeeds(
         self, tmp_path: Path, monkeypatch: MonkeyPatch
@@ -191,7 +237,7 @@ class TestExport:
         real_write_text = Path.write_text
 
         def disk_full(self: Path, text: str, *args: Any, **kwargs: Any) -> int:
-            if self.name.endswith(".tmp") and "_run_id" in self.name:
+            if self.name.endswith(".tmp") and "_export_done" in self.name:
                 real_write_text(self, text[:1], *args, **kwargs)
                 raise OSError(errno.ENOSPC, "No space left on device")
             return real_write_text(self, text, *args, **kwargs)
@@ -202,10 +248,10 @@ class TestExport:
 
         assert result.state is ExportState.FAILED
         assert "No space left on device" in result.error
-        assert not artifacts.exporter_run_id_fpath("recording").exists()
+        assert not artifacts.export_done_fpath("recording").exists()
         assert not list(tmp_path.glob(".*.tmp"))
         assert _backend(artifacts).export(artifacts).state is ExportState.SUCCEEDED
-        assert artifacts.exporter_run_id_fpath("recording").read_text() == "backend-run-7"
+        assert artifacts.export_done_fpath("recording").read_text() == "backend-run-7"
 
 
 class ForgetfulBackend(RecordingBackend):
@@ -225,7 +271,7 @@ class TestBackendThatReportsNoRunId:
         assert result.state is ExportState.FAILED
         assert "did not report a run id" in result.error
         assert "_record_run_id()" in result.error
-        assert not artifacts.exporter_run_id_fpath("forgetful").exists()
+        assert not artifacts.export_done_fpath("forgetful").exists()
         assert backend.events == ["setup", "teardown"]
 
 
@@ -269,7 +315,7 @@ class TestRunMustBeExportable:
         assert f"Rollouts file not found: {artifacts.rollouts_jsonl_fpath}" in result.error
         assert "+upload_rollouts=false" in result.error
         assert backend.events == []
-        assert not artifacts.exporter_run_id_fpath("recording").exists()
+        assert not artifacts.export_done_fpath("recording").exists()
 
     @pytest.mark.parametrize("where", ["command", "saved config"])
     def test_missing_rollouts_are_fine_when_they_are_not_uploaded(self, tmp_path: Path, where: str) -> None:
@@ -283,7 +329,7 @@ class TestRunMustBeExportable:
         assert result.detail["uploaded_rollouts"] is False
         assert backend.metrics == [flatten_aggregate_metrics(AGGREGATE_ENTRIES)]
         assert backend.rollouts == []
-        assert artifacts.exporter_run_id_fpath("recording").read_text() == "backend-run-7"
+        assert artifacts.export_done_fpath("recording").read_text() == "backend-run-7"
 
     def test_the_freshness_check_needs_the_rollouts_file_to_compare_against(self, tmp_path: Path) -> None:
         artifacts = _make_run(tmp_path)
@@ -322,7 +368,7 @@ class TestRunMustBeExportable:
         assert result.state is ExportState.FAILED
         assert result.error == "Aggregation failed for agents: bad. Run `gym eval aggregate` again."
         assert backend.events == []
-        assert not artifacts.exporter_run_id_fpath("recording").exists()
+        assert not artifacts.export_done_fpath("recording").exists()
 
         repaired = {"agent_ref": {"name": "bad"}, "agent_metrics": {"mean/reward": 0.5}, "key_metrics": {}}
         artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps([healthy, repaired]))
@@ -454,7 +500,7 @@ class TestRegisteredBackends:
         client.log_dict.assert_called_once()
         assert client.log_dict.call_args.args[1] == {"policy_api_key": "****", "model": "m"}
         client.set_terminated.assert_called_once_with("mlflow-run-1", status="FINISHED")
-        assert artifacts.exporter_run_id_fpath("mlflow").read_text() == "mlflow-run-1"
+        assert artifacts.export_done_fpath("mlflow").read_text() == "mlflow-run-1"
         assert MLflowExporter.from_global_config(config).export(artifacts).state is ExportState.SKIPPED
         assert client.create_run.call_count == 1
 
@@ -480,7 +526,7 @@ class TestRegisteredBackends:
         assert "id" not in init.call_args.kwargs
         run.config.update.assert_called_once_with({"policy_api_key": "****", "model": "m"})
         run.finish.assert_called_once()
-        assert artifacts.exporter_run_id_fpath("wandb").read_text() == "wandb-run-1"
+        assert artifacts.export_done_fpath("wandb").read_text() == "wandb-run-1"
 
 
 def test_skip_exporters_leaves_live_exporters_unopened(monkeypatch: MonkeyPatch) -> None:
@@ -526,7 +572,7 @@ class TestWandbCredentials:
 
         assert result.state is ExportState.SUCCEEDED, result.error
         assert os.environ["WANDB_API_KEY"] == "env-key"  # pragma: allowlist secret
-        assert artifacts.exporter_run_id_fpath("wandb").read_text() == "wandb-run-1"
+        assert artifacts.export_done_fpath("wandb").read_text() == "wandb-run-1"
 
     def test_a_key_on_the_command_overrides_the_environment(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setenv("WANDB_API_KEY", "env-key")  # pragma: allowlist secret

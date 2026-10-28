@@ -17,6 +17,7 @@ from pathlib import Path
 
 from nemo_gym.path_utils import (
     aggregate_metrics_path_for,
+    export_done_path_for,
     exporter_run_id_path_for,
     failures_path_for,
     materialized_path_for,
@@ -54,5 +55,9 @@ class RunArtifacts:
         return resolved_config_path_for(self.rollouts_jsonl_fpath)
 
     def exporter_run_id_fpath(self, exporter: str) -> Path:
-        """Marker an exporter writes once the run has been sent to its backend."""
+        """The run a live exporter logged this run to. It exists once the run opened, whether or not it finished."""
         return exporter_run_id_path_for(self.rollouts_jsonl_fpath, exporter)
+
+    def export_done_fpath(self, exporter: str) -> Path:
+        """Marker a post-run export writes, holding the backend run id, once the whole run has been sent."""
+        return export_done_path_for(self.rollouts_jsonl_fpath, exporter)

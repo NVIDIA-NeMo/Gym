@@ -90,6 +90,14 @@ class Exporter(ABC):
         """Export the run. Report an expected failure in the result; raise only for a bug."""
 
 
+def _live_run_id(artifacts: RunArtifacts, name: str) -> Optional[str]:
+    """The backend run a live exporter recorded for this run, or None when there is none or it cannot be read."""
+    try:
+        return artifacts.exporter_run_id_fpath(name).read_text().strip() or None
+    except OSError:
+        return None
+
+
 def _write_marker_atomically(marker: Path, run_id: str) -> None:
     """Publish the already-exported marker only once it is fully written, so a failed write leaves none."""
     marker.parent.mkdir(parents=True, exist_ok=True)
@@ -258,13 +266,12 @@ class BaseExporter(Exporter):
             logger.warning(f"Exporter {self.name} failed to log {what}; continuing: {e}", exc_info=True)
 
     def _run_id_fpath(self) -> Optional[Path]:
-        """`<output stem>_<name>_run_id` next to the run's rollouts file, or None when the run has no output.
+        """`<output stem>_<name>_run_id` next to `output_jsonl_fpath`, or None when the run has no output.
 
         A resumed or resubmitted run writes to the same output, so a backend that records its run id there
-        reopens that run instead of starting a new one. Deleting the file starts a new run.
+        reopens that run instead of starting a new one. Deleting the file starts a new run. Only a live run
+        reads or writes it; a post-run export keeps its own marker (`RunArtifacts.export_done_fpath`).
         """
-        if self._exported_artifacts is not None:
-            return self._exported_artifacts.exporter_run_id_fpath(self.name)
         output = self.global_config_dict.get("output_jsonl_fpath")
         if not output:
             return None
@@ -313,13 +320,21 @@ class BaseExporter(Exporter):
         Skipped, without contacting the backend, when the run was already exported. Failures come back in the
         result rather than being swallowed the way live `export_*` calls are.
         """
-        marker = artifacts.exporter_run_id_fpath(self.name)
+        marker = artifacts.export_done_fpath(self.name)
         if marker.exists():
             return ExportResult.skipped(reason="already exported", run_id=marker.read_text().strip())
         unexportable = self._why_not_exportable(artifacts)
         if unexportable is not None:
             return ExportResult.failed(unexportable)
 
+        live_run_id = _live_run_id(artifacts, self.name)
+        if live_run_id is not None:
+            # A live run's marker proves the backend run was opened, not that every upload landed, so it cannot
+            # stand in for this export. Say so, as this run may now be in the backend twice.
+            logger.warning(
+                f"Exporter {self.name} logged {artifacts.rollouts_jsonl_fpath} live as run {live_run_id}; "
+                "this export sends it again as a separate run."
+            )
         self._exported_artifacts, self._pending_run_id = artifacts, None
         try:
             saved_config = OmegaConf.load(artifacts.resolved_config_yaml_fpath)
@@ -338,8 +353,8 @@ class BaseExporter(Exporter):
                     self._log_rollouts(rollouts)
             run_id = self._pending_run_id
             if not run_id:
-                # The marker's content is what a later live run resumes from, so an empty or made-up id would break
-                # that. A backend that never reports one is a bug in the exporter, and it shows on the first export.
+                # The marker records which backend run holds this export, and a skipped repeat reports it. A backend
+                # that never reports one is a bug in the exporter, and it shows on the first export.
                 raise RuntimeError(
                     f"The {self.name} exporter did not report a run id: its setup() must call _record_run_id(). "
                     "The export is not marked as done."
@@ -350,7 +365,10 @@ class BaseExporter(Exporter):
             return ExportResult.failed(f"{type(exc).__name__}: {exc}")
         finally:
             self._exported_artifacts = None
-        return ExportResult.succeeded(run_id=run_id, uploaded_rollouts=rollouts is not None)
+        detail = {"run_id": run_id, "uploaded_rollouts": rollouts is not None}
+        if live_run_id is not None:
+            detail["live_run_id"] = live_run_id
+        return ExportResult.succeeded(**detail)
 
     @staticmethod
     def _why_not_exportable(artifacts: RunArtifacts) -> Optional[str]:

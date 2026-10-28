@@ -58,5 +58,10 @@ def resolved_config_path_for(output_fpath: Path) -> Path:
 
 
 def exporter_run_id_path_for(output_fpath: Path, exporter: str) -> Path:
-    """`results/rollouts.jsonl`, `mlflow` -> `results/rollouts_mlflow_run_id`."""
+    """`results/rollouts.jsonl`, `mlflow` -> `results/rollouts_mlflow_run_id`: the run a live exporter logs to."""
     return output_fpath.with_name(f"{output_fpath.stem}_{exporter}_run_id")
+
+
+def export_done_path_for(output_fpath: Path, exporter: str) -> Path:
+    """`results/rollouts.jsonl`, `mlflow` -> `results/rollouts_mlflow_export_done`: set once the run was exported."""
+    return output_fpath.with_name(f"{output_fpath.stem}_{exporter}_export_done")

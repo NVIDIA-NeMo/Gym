@@ -1005,9 +1005,10 @@ never from the run's saved config, which masks them. A backend SDK's own environ
 `upload_rollouts` is false; pass `+upload_rollouts=true|false` to override. The rollouts file itself is only needed
 when the rollouts are uploaded, so `+upload_rollouts=false` also exports a run whose rollouts file is gone.
 
-Once a run is exported, `<stem>_<exporter>_run_id` is written next to the rollouts and later exports of the same run
+Once a run is exported, `<stem>_<exporter>_export_done` is written next to the rollouts and later exports of the same run
 are skipped without contacting the backend. Delete that file to export again. A failed export leaves no marker, so it can
-be retried.
+be retried. A run that was also logged live is not skipped: its `<stem>_<exporter>_run_id` shows only that the live run
+opened, not that every upload landed. The export sends the run again as a separate run and reports the live run id.
 
 ```bash
 gym eval export mlflow \
