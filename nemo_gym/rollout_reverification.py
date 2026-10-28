@@ -598,6 +598,11 @@ def _rollout_response(rollout: Dict[str, Any]) -> Any:
     return rollout["response"]
 
 
+# Collection's stamps naming the Environment Server and its result type: kept on the re-verified row, never sent
+# to /verify.
+_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
+
+
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     response = _rollout_response(pair.rollout)
     task_input = pair.input.get("task_input")
@@ -618,6 +623,11 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     # adaptive comparison needs the exact reference subset used for that row.
     # Preserve only verifier inputs, not rewards or failure bookkeeping.
     for key in ("deliverables_dir", "reference_ids"):
+        if key in pair.rollout:
+            payload[key] = pair.rollout[key]
+    # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
+    # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
+    for key in _IDENTITY_KEYS:
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     return payload
@@ -714,7 +724,9 @@ def _run_verification_payloads(
     async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
         async with semaphore:
             rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
-            request_row = {key: value for key, value in row.items() if key != ATIF_PROVENANCE_KEY}
+            request_row = {
+                key: value for key, value in row.items() if key != ATIF_PROVENANCE_KEY and key not in _IDENTITY_KEYS
+            }
             res = await server_client.post(server_name=rs_name, url_path="/verify", json=request_row)
             try:
                 await raise_for_status(
@@ -1054,7 +1066,7 @@ class RolloutReverificationHelper(BaseModel):
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-                for key in (AGENT_REF_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME):
+                for key in (AGENT_REF_KEY_NAME, *_IDENTITY_KEYS):
                     if key in row:
                         result[key] = row[key]
                 # Keep task_source alongside agent_ref: aggregation routes with the same resolver
