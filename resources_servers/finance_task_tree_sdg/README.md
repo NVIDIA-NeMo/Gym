@@ -1,12 +1,15 @@
 # Finance task-tree SDG
 
 Resources server for generating expert finance research questions from a task tree. One server
-implementation serves six stages; each stage has its own config in `configs/` and is selected by
+implementation serves nine stages; each stage has its own config in `configs/` and is selected by
 `stage`.
 
 | Stage | Tools | Submit tool | Verify |
 | --- | --- | --- | --- |
 | `eligibility` | none | `submit_eligibility` | passthrough |
+| `leaf_profile` | none | `submit_leaf_profile` | passthrough |
+| `probe` | `edgar_search`, `fetch_url`, `python_exec` | `submit_probe` | passthrough |
+| `doc_match` | `fetch_url` | `submit_match` | passthrough |
 | `question_gen` | `edgar_search`, `fetch_url`, `python_exec` | `submit_question` or `submit_rejection` | judge |
 | `leak_proposal` | none | `submit_leak_proposal` | judge |
 | `leak_removal` | none | `submit_revised_question` | judge |
@@ -29,9 +32,21 @@ mapping:
 `submit_eligibility` takes `scope` (`any_industry`, `restricted`, or `unsupported`), `sic_codes`
 (non-empty and drawn from the row's list only when `restricted`), and `reason`.
 
+`leaf_profile` also runs once per leaf; its `sdg` carries `variants`
+(`{variant_id: {company_scope, role_ids}}`). `submit_leaf_profile` lists every variant once with
+`sec_obtainable`, `company_relation` (`none` for single-company variants, else `peer` or
+`counterparty`), and, when obtainable, exactly one entry per role with `filing_kinds`, `timing`,
+and `company`. `probe` rows carry `roles` (`{role_id: [candidate urls]}`); `submit_probe` takes
+`feasible` and `documents` (`[{role_id, url}]` drawn from the candidates, at least one per role
+when feasible). `doc_match` rows carry `choices` (`{leaf_id: [modes]}`); `submit_match` takes a
+listed `leaf_id` and one of its modes, or `leaf_id` `none`.
+
 Verify returns the row plus `reward` and `sdg_result`. `sdg_result.status` is one of `mapped`,
-`judge_pass`, `judge_fail`, `judge_unparsed`, `rejected`, `no_submission`, `answered`,
-`no_answer`, or `adjudicated`. Judged stages reward 1 only on `judge_pass`.
+`profiled`, `probed`, `matched`, `judge_pass`, `judge_off_leaf`, `judge_fail`, `judge_unparsed`,
+`rejected`, `no_submission`, `answered`, `no_answer`, or `adjudicated`. Judged stages reward 1
+only on `judge_pass`, and `question_gen` also on `judge_off_leaf`: the judge failed only
+criterion 2 (faithful to the task), so the question is a sound finance question outside its leaf.
+`probe` rewards 1 when feasible and `doc_match` when a leaf was matched.
 
 ## As-of clamp
 
@@ -63,6 +78,9 @@ the verify response, so no judge text reaches a later stage's model. The judge d
 - `tt_sdg_use_cache`, `tt_sdg_cache_dir`: SEC response cache
 - `tt_sdg_sec_corpus_metadata_path`: offline SEC corpus (see above)
 - `tt_sdg_audit_dir`: judge audit directory
+- `tt_sdg_question_gen_judge_prompt`: question_gen judge prompt file (default
+  `prompts/judge_question_gen.txt`); keep criterion 2 as faithful to the task, which
+  `judge_off_leaf` relies on
 
 ## Tests
 

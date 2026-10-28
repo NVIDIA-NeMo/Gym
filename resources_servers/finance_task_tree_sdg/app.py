@@ -15,11 +15,18 @@
 """Task-tree finance question SDG: one resources server, configured per stage.
 
 Each question stage is one rollout followed by an in-verify judge. The judge
-returns only pass or fail; its full output is written to ``audit_dir`` and never
-appears in the verify response, so no judge token reaches a later stage's model.
+returns only pass or fail (question_gen maps a fail on the faithfulness
+criterion alone to off_leaf, which later stages keep); its full output is
+written to ``audit_dir`` and never appears in the verify response, so no judge
+token reaches a later stage's model.
 
 The ``eligibility`` stage runs once per task-tree leaf before sampling: it maps
 the leaf to the SIC industries whose companies can support it, with no judge.
+``leaf_profile`` also runs once per leaf: for each variant it says whether SEC
+filings can supply the inputs, how multi-company slots must be related, and
+which filing kinds can fill each source role. ``probe`` checks that a sampled
+slot's candidate filings hold what the leaf needs, and ``doc_match`` picks the
+task-tree leaf a sampled filing can best support. None of these has a judge.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ import logging
 import os
 import re
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -73,11 +81,41 @@ from resources_servers.finance_task_tree_sdg.sec_tools import AsOfEdgarSearchToo
 
 logger = logging.getLogger(__name__)
 
-Stage = Literal["eligibility", "question_gen", "leak_proposal", "leak_removal", "answer_gen", "adjudicate"]
+Stage = Literal[
+    "eligibility",
+    "leaf_profile",
+    "probe",
+    "doc_match",
+    "question_gen",
+    "leak_proposal",
+    "leak_removal",
+    "answer_gen",
+    "adjudicate",
+]
 
 REJECTION_CODES = ("data_unavailable", "condition_not_met", "company_ineligible", "document_mismatch", "other")
 LEAK_ACTIONS = ("delete", "generalize")
 ELIGIBILITY_SCOPES = ("any_industry", "restricted", "unsupported")
+# Filing kinds a source role can map to; 8-K kinds are keyed by item number.
+FILING_KINDS = (
+    "10-K",
+    "10-Q",
+    "8-K:1.01",
+    "8-K:2.01",
+    "8-K:2.02",
+    "8-K:2.03",
+    "8-K:5.02",
+    "8-K:7.01",
+    "8-K:8.01",
+    "DEF 14A",
+    "S-4",
+    "FWP",
+    "4",
+)
+ROLE_TIMINGS = ("target_fiscal_year", "prior_fiscal_year", "following_fiscal_year", "any_before_as_of")
+COMPANY_RELATIONS = ("none", "peer", "counterparty")
+# Whose filing fills a source role in a multi-company slot.
+ROLE_COMPANIES = ("first", "second", "either")
 
 _PROMPT_DIR = Path(__file__).with_name("prompts")
 _JUDGE_PROMPTS: dict[str, str] = {
@@ -87,6 +125,9 @@ _JUDGE_PROMPTS: dict[str, str] = {
 }
 _DONE_TOOLS: dict[str, tuple[str, ...]] = {
     "eligibility": ("submit_eligibility",),
+    "leaf_profile": ("submit_leaf_profile",),
+    "probe": ("submit_probe",),
+    "doc_match": ("submit_match",),
     "question_gen": ("submit_question", "submit_rejection"),
     "leak_proposal": ("submit_leak_proposal",),
     "leak_removal": ("submit_revised_question",),
@@ -95,6 +136,9 @@ _DONE_TOOLS: dict[str, tuple[str, ...]] = {
 }
 _STAGE_TOOLS: dict[str, tuple[str, ...]] = {
     "eligibility": ("submit_eligibility",),
+    "leaf_profile": ("submit_leaf_profile",),
+    "probe": ("edgar_search", "fetch_url", "python_exec", "submit_probe"),
+    "doc_match": ("fetch_url", "submit_match"),
     "question_gen": ("edgar_search", "fetch_url", "python_exec", "submit_question", "submit_rejection"),
     "leak_proposal": ("submit_leak_proposal",),
     "leak_removal": ("submit_revised_question",),
@@ -114,6 +158,8 @@ _VERDICT_SCHEMA = {
     },
 }
 _SAFE_PATH_RE = re.compile(r"[^A-Za-z0-9._-]+")
+# A question_gen question that fails only this criterion is kept as "off_leaf" instead of dropped.
+_FAITHFUL_CRITERION = 2
 
 
 class FinanceTaskTreeSdgConfig(BaseResourcesServerConfig):
@@ -192,6 +238,104 @@ def validate_eligibility(args: dict[str, Any], sic_codes: list[str]) -> dict[str
     if reason is None:
         raise ToolError("reason is required")
     return {"scope": scope, "sic_codes": codes, "reason": reason}
+
+
+def validate_leaf_profile(args: dict[str, Any], variants: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """``variants`` maps each of the leaf's variant ids to its ``company_scope`` and ``role_ids``."""
+    entries = args.get("variants")
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise ToolError("variants must be a list of objects, one per variant of the leaf")
+    ids = [entry.get("variant_id") for entry in entries]
+    if sorted(map(str, ids)) != sorted(variants) or len(set(ids)) != len(ids):
+        raise ToolError(f"variants must list each of these variant ids exactly once: {sorted(variants)}")
+    profiled: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        variant_id = entry["variant_id"]
+        spec = variants[variant_id]
+        obtainable = entry.get("sec_obtainable")
+        if not isinstance(obtainable, bool):
+            raise ToolError(f"{variant_id}: sec_obtainable must be a boolean")
+        relation = entry.get("company_relation")
+        allowed = ("none",) if spec["company_scope"] == "single_company" else COMPANY_RELATIONS[1:]
+        if relation not in allowed:
+            raise ToolError(f"{variant_id}: company_relation must be one of {list(allowed)}")
+        roles = entry.get("roles")
+        if not isinstance(roles, list) or not all(isinstance(role, dict) for role in roles):
+            raise ToolError(f"{variant_id}: roles must be a list of objects")
+        mapped: dict[str, dict[str, Any]] = {}
+        if obtainable:
+            role_ids = sorted(str(role.get("role_id")) for role in roles)
+            if role_ids != sorted(spec["role_ids"]):
+                raise ToolError(f"{variant_id}: roles must cover exactly these role ids: {sorted(spec['role_ids'])}")
+            for role in roles:
+                kinds = role.get("filing_kinds")
+                if (
+                    not isinstance(kinds, list)
+                    or not kinds
+                    or not all(kind in FILING_KINDS for kind in kinds)
+                ):
+                    raise ToolError(
+                        f"{variant_id}/{role['role_id']}: filing_kinds must be a non-empty list from {list(FILING_KINDS)}"
+                    )
+                if role.get("timing") not in ROLE_TIMINGS:
+                    raise ToolError(f"{variant_id}/{role['role_id']}: timing must be one of {list(ROLE_TIMINGS)}")
+                companies = ("first",) if spec["company_scope"] == "single_company" else ROLE_COMPANIES
+                company = role.get("company", "first")
+                if company not in companies:
+                    raise ToolError(f"{variant_id}/{role['role_id']}: company must be one of {list(companies)}")
+                mapped[str(role["role_id"])] = {
+                    "filing_kinds": sorted(set(kinds)),
+                    "timing": role["timing"],
+                    "company": company,
+                }
+        profiled[variant_id] = {"sec_obtainable": obtainable, "company_relation": relation, "roles": mapped}
+    reason = _non_empty_str(args, "reason")
+    if reason is None:
+        raise ToolError("reason is required")
+    return {"variants": profiled, "reason": reason}
+
+
+def validate_probe(args: dict[str, Any], roles: dict[str, list[str]]) -> dict[str, Any]:
+    """``roles`` maps each source role id to the candidate filing URLs the slot was given."""
+    feasible = args.get("feasible")
+    if not isinstance(feasible, bool):
+        raise ToolError("feasible must be a boolean")
+    documents = args.get("documents")
+    if not isinstance(documents, list) or not all(isinstance(item, dict) for item in documents):
+        raise ToolError("documents must be a list of {role_id, url} objects (empty when not feasible)")
+    chosen: dict[str, list[str]] = defaultdict(list)
+    for item in documents:
+        role_id, url = str(item.get("role_id")), item.get("url")
+        if role_id not in roles:
+            raise ToolError(f"unknown role_id {role_id!r}; use one of {sorted(roles)}")
+        if url not in roles[role_id]:
+            raise ToolError(f"{url!r} is not a candidate filing for role {role_id!r}")
+        if url not in chosen[role_id]:
+            chosen[role_id].append(url)
+    if feasible:
+        missing = sorted(role_id for role_id in roles if not chosen.get(role_id))
+        if missing:
+            raise ToolError(f"a feasible slot needs at least one document for every role; missing: {missing}")
+    reason = _non_empty_str(args, "reason")
+    if reason is None:
+        raise ToolError("reason is required")
+    return {"feasible": feasible, "documents": dict(chosen) if feasible else {}, "reason": reason}
+
+
+def validate_match(args: dict[str, Any], choices: dict[str, list[str]]) -> dict[str, Any]:
+    """``choices`` maps each offered leaf id to the variant modes it can be paired with."""
+    leaf_id = args.get("leaf_id")
+    mode = args.get("variant_mode")
+    reason = _non_empty_str(args, "reason")
+    if reason is None:
+        raise ToolError("reason is required")
+    if leaf_id == "none":
+        return {"leaf_id": "none", "variant_mode": None, "reason": reason}
+    if leaf_id not in choices:
+        raise ToolError("leaf_id must be one of the listed leaf ids, or 'none'")
+    if mode not in choices[leaf_id]:
+        raise ToolError(f"variant_mode for {leaf_id} must be one of {choices[leaf_id]}")
+    return {"leaf_id": leaf_id, "variant_mode": mode, "reason": reason}
 
 
 def validate_question(args: dict[str, Any], config: FinanceTaskTreeSdgConfig) -> str:
@@ -405,6 +549,15 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
         if name == "submit_eligibility":
             validate_eligibility(args, list(session.sdg.get("sic_codes", [])))
             return "Eligibility submitted."
+        if name == "submit_leaf_profile":
+            validate_leaf_profile(args, session.sdg.get("variants") or {})
+            return "Leaf profile submitted."
+        if name == "submit_probe":
+            validate_probe(args, session.sdg.get("roles") or {})
+            return "Probe submitted."
+        if name == "submit_match":
+            validate_match(args, session.sdg.get("choices") or {})
+            return "Match submitted."
         if name == "submit_question":
             validate_question(args, self.config)
             return "Question submitted."
@@ -492,6 +645,14 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
                 "judge_response": raw,
             },
         )
+        failed = parsed.get("failed_criteria")
+        if (
+            self.config.stage == "question_gen"
+            and verdict == "fail"
+            and isinstance(failed, list)
+            and set(failed) == {_FAITHFUL_CRITERION}
+        ):
+            verdict = "off_leaf"
         return {"verdict": verdict, "model": model, "parsed": verdict is not None}
 
     async def verify(self, request: Request, body: SdgVerifyRequest) -> SdgVerifyResponse:
@@ -520,6 +681,15 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
         if stage == "eligibility":
             result.update(status="mapped", **validate_eligibility(args, list(body.sdg.get("sic_codes", []))))
             return self._respond(body, 1.0, result)
+        if stage == "leaf_profile":
+            result.update(status="profiled", **validate_leaf_profile(args, body.sdg.get("variants") or {}))
+            return self._respond(body, 1.0, result)
+        if stage == "probe":
+            result.update(status="probed", **validate_probe(args, body.sdg.get("roles") or {}))
+            return self._respond(body, 1.0 if result["feasible"] else 0.0, result)
+        if stage == "doc_match":
+            result.update(status="matched", **validate_match(args, body.sdg.get("choices") or {}))
+            return self._respond(body, 0.0 if result["leaf_id"] == "none" else 1.0, result)
 
         trace = format_trace(body.response)
         if stage == "question_gen":
@@ -540,7 +710,7 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
             result["status"] = "judge_unparsed"
         else:
             result["status"] = f"judge_{judge['verdict']}"
-            reward = 1.0 if judge["verdict"] == "pass" else 0.0
+            reward = 1.0 if judge["verdict"] in ("pass", "off_leaf") else 0.0
         return self._respond(body, reward, result)
 
     @staticmethod

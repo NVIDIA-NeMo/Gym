@@ -21,6 +21,8 @@ tt_sdg_question_gen_resources_server:
         input: []
         max_output_tokens: 16384
       judge_call_timeout_s: 1800
+      # Unset: prompts/judge_question_gen.txt.
+      judge_prompt_fpath: ${oc.select:tt_sdg_question_gen_judge_prompt,null}
       # Full judge outputs are written here and never returned by verify.
       audit_dir: ${oc.select:tt_sdg_audit_dir,null}
 

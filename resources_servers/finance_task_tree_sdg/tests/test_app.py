@@ -37,7 +37,10 @@ from resources_servers.finance_task_tree_sdg.app import (
     SdgVerifyRequest,
     accepted_submission,
     validate_eligibility,
+    validate_leaf_profile,
     validate_leak_proposal,
+    validate_match,
+    validate_probe,
     validate_revised_question,
     validate_verdict,
 )
@@ -50,7 +53,17 @@ from resources_servers.finance_task_tree_sdg.sec_tools import (
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_STAGES = ("eligibility", "question_gen", "leak_proposal", "leak_removal", "answer_gen", "adjudicate")
+_STAGES = (
+    "eligibility",
+    "leaf_profile",
+    "probe",
+    "doc_match",
+    "question_gen",
+    "leak_proposal",
+    "leak_removal",
+    "answer_gen",
+    "adjudicate",
+)
 _QUESTION = (
     "For Apple Inc., using the fiscal 2023 Form 10-K as originally filed, what was the ratio of "
     "operating income to net sales, in percent rounded to one decimal place?"
@@ -491,6 +504,166 @@ async def test_judge_fail_reason_stays_in_the_audit_file(tmp_path: Path) -> None
     audit = json.loads(next((tmp_path / "audit" / "question_gen").rglob("*.json")).read_text())
     assert audit["failed_criteria"] == [3]
     assert audit["reason"] == _JUDGE_SECRET
+
+
+@pytest.mark.parametrize(("failed", "status", "reward"), [([2], "judge_off_leaf", 1.0), ([2, 3], "judge_fail", 0.0)])
+async def test_question_failing_only_faithfulness_is_kept_off_leaf(
+    tmp_path: Path, failed: list[int], status: str, reward: float
+) -> None:
+    server = _server("question_gen", tmp_path)
+    reply = json.dumps({"verdict": "fail", "failed_criteria": failed, "reason": _JUDGE_SECRET})
+    server.server_client.post = AsyncMock(return_value=_judge_reply(reply))
+    result = await server.verify(
+        MagicMock(session={}), _request(_response(_call("submit_question", {"question": _QUESTION})))
+    )
+    assert result.sdg_result["status"] == status
+    assert result.reward == reward
+    assert _JUDGE_SECRET not in result.model_dump_json()
+
+
+async def test_off_leaf_applies_only_to_question_gen(tmp_path: Path) -> None:
+    server = _server("leak_proposal", tmp_path)
+    reply = json.dumps({"verdict": "fail", "failed_criteria": [2], "reason": "x"})
+    server.server_client.post = AsyncMock(return_value=_judge_reply(reply))
+    proposal = {"items": [{"span": "Form 10-K", "action": "delete", "reason": "form"}]}
+    result = await server.verify(
+        MagicMock(session={}),
+        _request(_response(_call("submit_leak_proposal", proposal)), {"question": _QUESTION}),
+    )
+    assert result.sdg_result["status"] == "judge_fail"
+
+
+def test_judge_prompt_path_overrides_the_packaged_prompt(tmp_path: Path) -> None:
+    prompt = tmp_path / "judge.txt"
+    prompt.write_text("custom judge prompt")
+    assert _server("question_gen", judge_prompt_fpath=str(prompt))._judge_system == "custom judge prompt"
+
+
+_PROFILE_VARIANTS = {
+    "F01.T01.001:SC_MD": {"company_scope": "single_company", "role_ids": ["d1", "d2"]},
+    "F01.T01.001:MC_SD": {"company_scope": "cross_company", "role_ids": ["d1"]},
+}
+
+
+def _profile(**changes) -> dict:
+    profile = {
+        "variants": [
+            {
+                "variant_id": "F01.T01.001:SC_MD",
+                "sec_obtainable": True,
+                "company_relation": "none",
+                "roles": [
+                    {"role_id": "d1", "filing_kinds": ["8-K:2.02", "10-Q"], "timing": "target_fiscal_year"},
+                    {"role_id": "d2", "filing_kinds": ["10-K"], "timing": "target_fiscal_year"},
+                ],
+            },
+            {"variant_id": "F01.T01.001:MC_SD", "sec_obtainable": False, "company_relation": "peer", "roles": []},
+        ],
+        "reason": "capacity is in the 10-K, output in the earnings release",
+    }
+    profile.update(changes)
+    return profile
+
+
+def test_leaf_profile_covers_every_variant_and_role() -> None:
+    result = validate_leaf_profile(_profile(), _PROFILE_VARIANTS)
+    assert result["variants"]["F01.T01.001:SC_MD"]["roles"]["d1"] == {
+        "filing_kinds": ["10-Q", "8-K:2.02"],
+        "timing": "target_fiscal_year",
+        "company": "first",
+    }
+    second_on_single = _profile()
+    second_on_single["variants"][0]["roles"][0]["company"] = "second"
+    with pytest.raises(ToolError, match="company must be"):
+        validate_leaf_profile(second_on_single, _PROFILE_VARIANTS)
+    multi = _profile()
+    multi["variants"][1] = {
+        "variant_id": "F01.T01.001:MC_SD",
+        "sec_obtainable": True,
+        "company_relation": "counterparty",
+        "roles": [{"role_id": "d1", "filing_kinds": ["8-K:1.01"], "timing": "any_before_as_of", "company": "either"}],
+    }
+    assert validate_leaf_profile(multi, _PROFILE_VARIANTS)["variants"]["F01.T01.001:MC_SD"]["roles"]["d1"][
+        "company"
+    ] == "either"
+    assert result["variants"]["F01.T01.001:MC_SD"] == {
+        "sec_obtainable": False,
+        "company_relation": "peer",
+        "roles": {},
+    }
+    with pytest.raises(ToolError, match="exactly once"):
+        validate_leaf_profile(_profile(variants=_profile()["variants"][:1]), _PROFILE_VARIANTS)
+    single_as_peer = _profile()
+    single_as_peer["variants"][0]["company_relation"] = "peer"
+    with pytest.raises(ToolError, match="company_relation"):
+        validate_leaf_profile(single_as_peer, _PROFILE_VARIANTS)
+    missing_role = _profile()
+    missing_role["variants"][0]["roles"] = missing_role["variants"][0]["roles"][:1]
+    with pytest.raises(ToolError, match="role ids"):
+        validate_leaf_profile(missing_role, _PROFILE_VARIANTS)
+    bad_kind = _profile()
+    bad_kind["variants"][0]["roles"][0]["filing_kinds"] = ["press release"]
+    with pytest.raises(ToolError, match="filing_kinds"):
+        validate_leaf_profile(bad_kind, _PROFILE_VARIANTS)
+
+
+def test_probe_documents_come_from_the_candidates() -> None:
+    roles = {"d1": ["https://sec/a.htm", "https://sec/b.htm"], "d2": ["https://sec/k.htm"]}
+    documents = [{"role_id": "d1", "url": "https://sec/b.htm"}, {"role_id": "d2", "url": "https://sec/k.htm"}]
+    assert validate_probe({"feasible": True, "documents": documents, "reason": "both hold it"}, roles) == {
+        "feasible": True,
+        "documents": {"d1": ["https://sec/b.htm"], "d2": ["https://sec/k.htm"]},
+        "reason": "both hold it",
+    }
+    with pytest.raises(ToolError, match="missing"):
+        validate_probe({"feasible": True, "documents": documents[:1], "reason": "x"}, roles)
+    with pytest.raises(ToolError, match="not a candidate"):
+        validate_probe(
+            {"feasible": True, "documents": [{"role_id": "d1", "url": "https://sec/k.htm"}], "reason": "x"}, roles
+        )
+    infeasible = validate_probe({"feasible": False, "documents": [], "reason": "no capacity data"}, roles)
+    assert infeasible["documents"] == {}
+
+
+def test_match_leaf_and_mode_come_from_the_choices() -> None:
+    choices = {"F01.T01.001": ["SC_SD", "SC_MD"]}
+    assert validate_match({"leaf_id": "F01.T01.001", "variant_mode": "SC_MD", "reason": "x"}, choices)[
+        "variant_mode"
+    ] == "SC_MD"
+    assert validate_match({"leaf_id": "none", "reason": "nothing fits"}, choices)["leaf_id"] == "none"
+    with pytest.raises(ToolError, match="leaf_id"):
+        validate_match({"leaf_id": "F99", "variant_mode": "SC_SD", "reason": "x"}, choices)
+    with pytest.raises(ToolError, match="variant_mode"):
+        validate_match({"leaf_id": "F01.T01.001", "variant_mode": "MC_SD", "reason": "x"}, choices)
+
+
+async def test_profile_probe_and_match_verify_have_no_judge() -> None:
+    cases = [
+        ("leaf_profile", "submit_leaf_profile", _profile(), {"variants": _PROFILE_VARIANTS}, "profiled", 1.0),
+        (
+            "probe",
+            "submit_probe",
+            {"feasible": False, "documents": [], "reason": "no data"},
+            {"roles": {"d1": ["https://sec/a.htm"]}},
+            "probed",
+            0.0,
+        ),
+        (
+            "doc_match",
+            "submit_match",
+            {"leaf_id": "F01.T01.001", "variant_mode": "SC_SD", "reason": "fits"},
+            {"choices": {"F01.T01.001": ["SC_SD"]}},
+            "matched",
+            1.0,
+        ),
+    ]
+    for stage, tool, args, sdg, status, reward in cases:
+        server = _server(stage)
+        server.server_client.post = AsyncMock()
+        result = await server.verify(MagicMock(session={}), _request(_response(_call(tool, args)), sdg))
+        assert result.sdg_result["status"] == status
+        assert result.reward == reward
+        server.server_client.post.assert_not_awaited()
 
 
 async def test_unparseable_judge_reply_fails_closed(tmp_path: Path) -> None:
