@@ -168,6 +168,9 @@ Stirrup's per-request `enable_thinking`. The `openai_model` adapter forwards the
 use an endpoint that accepts them, or a provider adapter that translates them into its supported reasoning controls.
 Validate the resolved request on each model endpoint before collecting results.
 
+Gym sizes each call's output budget from estimated prompt tokens and context capacity, with the configured
+completion buffer, minimum and cap. This is a per-call budget; it does not impose a cumulative episode token limit.
+
 Start the synthetic example after supplying a model overlay and the provider connection variables:
 
 ```bash
@@ -218,6 +221,14 @@ the dataset's `prompt_config` when running through registered datasets). Use the
 `src/critpt/generation/prompts.py`. Keep that system text unchanged. The external user template should describe the
 problem, code template, installed packages, actual execution limits and `finish` fields; the included user template
 provides those operational instructions. Preserve the selected prompt's contents and hash with the run.
+
+Gym's adapter retains partial responses with `finish_reason=length` or `max_tokens` and may continue within the
+50-turn limit. `truncation_recovery: false` disables the thinking-off recovery instruction; it does not terminate
+the episode on those responses. Each such solver response consumes a turn, and a terminal no-answer still scores zero.
+Upstream Stirrup 0.1.12 instead [raises `ContextOverflowError`](https://github.com/ArtificialAnalysis/Stirrup/blob/c7edc996f13e953dff477fd1082e61ca989e871c/src/stirrup/clients/chat_completions_client.py#L174),
+which can [rewind context and retry or end with an error](https://github.com/ArtificialAnalysis/Stirrup/blob/c7edc996f13e953dff477fd1082e61ca989e871c/src/stirrup/core/agent.py#L1152).
+AA specifies zero for terminal no-answer outcomes, including output consumed by reasoning, but does not disclose
+its precise per-call overflow or partial-tool handling. Equivalence of this adapter behavior to AA is unverified.
 
 AA does not publish its exact image digest, package versions, Stirrup revision, full user prompt or all execution
 limits. AA names E2B as its primary provider for agentic benchmarks; this recipe uses Gym's OpenSandbox provider.
