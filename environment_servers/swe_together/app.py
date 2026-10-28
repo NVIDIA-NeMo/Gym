@@ -443,6 +443,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     files=proxy_files,
                     provider_options=options,
                     metadata=state.runtime.metadata()
+                    | dict(sandbox_config.get("metadata", {}))
                     | {
                         "benchmark": "swe-together",
                         "task_id": state.task.task_id,
