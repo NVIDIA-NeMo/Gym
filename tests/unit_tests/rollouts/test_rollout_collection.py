@@ -12092,7 +12092,7 @@ async def test_collection_persists_policy_alias_for_offline_failed_rollout_timin
 
     from nemo_gym.rollouts.model_calls import CaptureStore
     from nemo_gym.rollouts.rollout_health import health_check_run_dir
-    from tests.unit_tests.test_health_timeouts import exchange
+    from tests.unit_tests.rollouts.test_health_timeouts import exchange
 
     elapsed = [0.0]
 

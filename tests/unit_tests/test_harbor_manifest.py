@@ -18,8 +18,8 @@ import pytest
 import yaml
 
 import nemo_gym.rollouts.rollout_collection
+import tests.unit_tests.rollouts.test_rollout_collection as collection_tests
 import tests.unit_tests.test_harbor_package_store as test_harbor_package_store
-import tests.unit_tests.test_rollout_collection as collection_tests
 from nemo_gym.data.tasks.harbor.build_options import BuildOptions
 from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig, apply_dataset_config, read_dataset_config
 from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY, content_hash

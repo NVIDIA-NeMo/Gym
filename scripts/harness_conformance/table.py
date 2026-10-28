@@ -105,7 +105,7 @@ def regenerate(*, root: Path, commit: str, output: Path, harnesses: list[str], t
     output.mkdir(parents=True, exist_ok=False)
     test_paths = {"runner": "scripts/harness_conformance/tests"}
     test_paths.update({harness: f"responses_api_agents/{harness}_agent/tests" for harness in harnesses})
-    test_paths["checker"] = "tests/unit_tests/harness_capabilities"
+    test_paths["checker"] = "tests/unit_tests/rollouts/harness_capabilities"
     tests = {name: run_tests(root, output, name=name, path=path) for name, path in test_paths.items()}
     verify_revision(root, commit)
     probes = output / "probes"

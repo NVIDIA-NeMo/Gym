@@ -9,7 +9,7 @@ import pytest
 
 from nemo_gym.rollouts.harness_capabilities.checker import inspect_record
 from nemo_gym.rollouts.harness_capabilities.cli import main
-from tests.unit_tests.harness_capabilities.synthetic import evidence_record
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_record
 
 
 @pytest.fixture

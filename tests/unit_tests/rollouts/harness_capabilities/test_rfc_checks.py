@@ -13,7 +13,7 @@ from nemo_gym.rollouts.harness_capabilities.checker import EvidenceScope, Inspec
 from nemo_gym.rollouts.harness_capabilities.checks import Check, SchemaCheck
 from nemo_gym.rollouts.harness_capabilities.cli import inspect_bundle, main
 from nemo_gym.rollouts.harness_capabilities.results import Results
-from tests.unit_tests.harness_capabilities.synthetic import evidence_record
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_record
 
 
 def item_schema(check_id):

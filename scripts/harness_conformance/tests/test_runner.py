@@ -22,7 +22,7 @@ from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.rollouts.harness_capabilities.cli import json_rows
 from nemo_gym.rollouts.model_calls import build_model_call_record
-from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
 
 SCENARIO = {s.name: s for s in SCENARIOS}

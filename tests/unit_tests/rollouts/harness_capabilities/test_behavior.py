@@ -9,7 +9,7 @@ import json
 import pytest
 
 from nemo_gym.rollouts.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
-from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
 
 def fingerprint(request: dict, status: int, response: dict) -> str:

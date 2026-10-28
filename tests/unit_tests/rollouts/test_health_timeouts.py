@@ -49,14 +49,14 @@ from nemo_gym.rollouts.rollout_collection import (
 )
 from nemo_gym.rollouts.rollout_health import health_check_run_dir
 from nemo_gym.utils.path_utils import failures_path_for
-from tests.unit_tests.test_rollout_collection import (  # noqa: F401 - fixture
+from tests.unit_tests.rollouts.test_rollout_collection import (  # noqa: F401 - fixture
     FakeResponse,
     empty_global_config,
     install_fake_server_client,
 )
 
 
-REPO_ROOT = Path(__file__).parents[2]
+REPO_ROOT = Path(__file__).parents[3]
 T0 = 1_000_000.0  # Unix time at which a rollout's first call starts.
 
 

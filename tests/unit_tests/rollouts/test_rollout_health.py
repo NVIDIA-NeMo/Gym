@@ -2560,7 +2560,7 @@ cli_eval.collect_rollouts()
 """
     (tmp_path / "landed.jsonl").write_bytes(_write_fixture(tmp_path, [(_record(0, 0), [_call()])]).read_bytes())
     (tmp_path / "rollouts.jsonl").unlink()
-    process = subprocess.Popen([sys.executable, "-c", child], cwd=Path(__file__).parents[2])
+    process = subprocess.Popen([sys.executable, "-c", child], cwd=Path(__file__).parents[3])
     try:
         deadline = time.monotonic() + 60
         while not (tmp_path / "collecting").exists():

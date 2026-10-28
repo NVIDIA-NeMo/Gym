@@ -12,7 +12,7 @@ from scripts.harness_conformance.scenarios import SCENARIOS
 from nemo_gym.rollouts.harness_capabilities import health
 from nemo_gym.rollouts.harness_capabilities.results import gate_passes, render_matrices
 from nemo_gym.rollouts.health.types import CheckScope, CheckSpec, CheckSubject
-from tests.unit_tests.harness_capabilities.synthetic import evidence_record
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_record
 
 
 @pytest.fixture

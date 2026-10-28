@@ -650,7 +650,7 @@ def _install_recording_post(monkeypatch):
     from opentelemetry import trace as otel_trace
 
     from nemo_gym.telemetry.contrib import inject_trace_context
-    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     sent = []
 
