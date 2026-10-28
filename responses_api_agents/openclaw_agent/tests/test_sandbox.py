@@ -5,6 +5,8 @@ import asyncio
 import json
 import math
 import shlex
+import subprocess
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,6 +90,30 @@ def events(*, stop_reason="stop") -> str:
     )
 
 
+def staged(sandbox) -> dict:
+    """The harness runner's PARAMS as bash reads them, with the staged prompt."""
+    script = (
+        'source "$1"; printf "%s\\0" "$cwd" "$stdin" "$stdout" "$stderr" "${#command[@]}" "${command[@]}" "${env[@]}"'
+    )
+    params = sandbox.files[f"{sandbox.directory}/params.sh"]
+    with tempfile.NamedTemporaryFile("w", suffix=".sh") as file:
+        file.write(params)
+        file.flush()
+        values = subprocess.run(
+            ["bash", "-c", script, "_", file.name], capture_output=True, text=True, check=True
+        ).stdout.split("\0")[:-1]
+    cwd, stdin, stdout, stderr, count, rest = *values[:4], int(values[4]), values[5:]
+    return {
+        "prompt": sandbox.files[f"{sandbox.directory}/prompt.txt"],
+        "cwd": cwd,
+        "stdin": stdin,
+        "stdout": stdout,
+        "stderr": stderr,
+        "command": rest[:count],
+        "env": dict(item.split("=", 1) for item in rest[count:]),
+    }
+
+
 class Sandbox:
     def __init__(self):
         self.files = {}
@@ -116,7 +142,7 @@ class Sandbox:
         raise AssertionError("This provider supports exec only; no PTY API")
 
     async def run_exec(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
         if "stop.request" in command:
             await self.request_stop()
@@ -129,12 +155,10 @@ class Sandbox:
         Path(destination).write_text(self.files[source])
 
     async def create(self, **kwargs):
-        payload_path = next(path for path in self.files if path.endswith("/input.json"))
-        payload = json.loads(self.files[payload_path])
-        assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
+        self.directory = next(path for path in self.files if path.endswith("/params.sh")).rsplit("/", 1)[0]
+        assert staged(self)["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "sandbox_runner.py" in kwargs["command"]
-        self.directory = payload["directory"]
+        assert f"{self.directory}/harness_runner.sh {self.directory}/params.sh" in kwargs["command"]
         self.started.set()
         if not self.blocked:
             self.exited.set()
@@ -269,7 +293,7 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
             assert body["usage"]["output_tokens_details"]["reasoning_tokens"] is None
             assert body["metadata"]["harness_execution"] == "sandbox"
             assert "_ng_agent_observations" not in body
-            payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+            payload = staged(sandbox)
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
             assert "--timeout 900" in sandbox.launch.await_args.kwargs["command"]
@@ -693,7 +717,7 @@ def test_instructions_and_text_parts_reach_openclaw_without_other_provider_crede
             },
         )
         assert response.status_code == 200, response.text
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = staged(sandbox)
         assert payload["prompt"] == "config instruction\n\nrequest instruction\n\ninput instruction\n\ntask"
         models = json.loads(sandbox.files[f"{sandbox.directory}/home/.openclaw/openclaw.json"])
         assert list(models["models"]["providers"]) == ["nemo"]
@@ -1323,11 +1347,8 @@ async def test_sandbox_envelope_fallback_preserves_known_and_unknown_cache_detai
 
 
 @pytest.mark.parametrize("owned_root", ["sessions", "runtime"])
-@pytest.mark.parametrize("overlap", ["same", "ancestor", "descendant", "symlink", "dotdot"])
+@pytest.mark.parametrize("overlap", ["same", "ancestor", "descendant", "symlink", "dotdot", "root", "root_symlink"])
 def test_workdir_cannot_overlap_adapter_storage(tmp_path, owned_root, overlap):
-    import subprocess
-    import sys
-
     from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK
 
     sessions, runtime = tmp_path / "sessions", tmp_path / "runtime"
@@ -1344,10 +1365,16 @@ def test_workdir_cannot_overlap_adapter_storage(tmp_path, owned_root, overlap):
     elif overlap == "symlink":
         workdir = tmp_path / "task-alias"
         workdir.symlink_to(owned)
+    elif overlap == "root":
+        # Passes the seed's lexical rejection of "/", and resolves to it.
+        workdir = "/."
+    elif overlap == "root_symlink":
+        workdir = tmp_path / "root-alias"
+        workdir.symlink_to("/")
     else:
         workdir = owned / "repo" / ".."
     result = subprocess.run(
-        [sys.executable, "-c", _SANDBOX_PATH_CHECK, str(workdir), str(sessions), str(runtime)],
+        ["sh", "-c", _SANDBOX_PATH_CHECK, "_", str(workdir), str(sessions), str(runtime)],
         capture_output=True,
         text=True,
         errors="replace",
@@ -1357,17 +1384,30 @@ def test_workdir_cannot_overlap_adapter_storage(tmp_path, owned_root, overlap):
     assert "overlaps adapter-owned storage" in result.stderr
 
 
-def test_workdir_validation_accepts_separate_repository_and_rejects_missing(tmp_path):
-    import subprocess
-    import sys
+def test_adapter_storage_at_the_root_overlaps_any_workdir(tmp_path):
+    from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK
 
+    (tmp_path / "task").mkdir()
+    result = subprocess.run(
+        ["sh", "-c", _SANDBOX_PATH_CHECK, "_", str(tmp_path / "task"), "/", str(tmp_path / "runtime")],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert "overlaps adapter-owned storage: /" in result.stderr
+
+
+def test_workdir_validation_accepts_separate_repository_and_rejects_missing(tmp_path):
     from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK
 
     workdir = tmp_path / "task"
     command = [
-        sys.executable,
+        "sh",
         "-c",
         _SANDBOX_PATH_CHECK,
+        "_",
         str(workdir),
         str(tmp_path / "sessions"),
         str(tmp_path / "runtime"),
@@ -1380,6 +1420,17 @@ def test_workdir_validation_accepts_separate_repository_and_rejects_missing(tmp_
     assert valid.returncode == 0, valid.stderr
     assert not (tmp_path / "sessions").exists()
     assert not (tmp_path / "runtime").exists()
+    # A root that does not exist yet still resolves through its existing ancestors, symlinks included.
+    (tmp_path / "alias").symlink_to(workdir)
+    nested = subprocess.run(
+        [*command[:5], str(tmp_path / "alias/new/sessions"), command[6]],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=5,
+    )
+    assert nested.returncode != 0
+    assert f"overlaps adapter-owned storage: {workdir.resolve()}/new/sessions" in nested.stderr
 
 
 async def test_path_check_failure_never_uploads_or_installs(setup):
@@ -1897,11 +1948,11 @@ async def test_close_retains_capture_after_provider_release(setup, tmp_path, own
         await agent.seed_agent_session(request, body)
         state = agent._session_records[body.agent_session_id].state
         directory = state.session.session_dir
-        assert f"{directory}/process_supervisor.py" not in sandbox.files
+        assert f"{directory}/process_supervisor.sh" not in sandbox.files
         sandbox.blocked = True
         task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
         await asyncio.wait_for(sandbox.started.wait(), 2)
-        assert f"{directory}/process_supervisor.py" in sandbox.files
+        assert f"{directory}/process_supervisor.sh" in sandbox.files
 
         async def release():
             assert state.session.cleanup["cleanup_confirmed"] is True
@@ -1971,7 +2022,7 @@ def test_task_timeout_metadata_reaches_sandbox_supervisor(
         assert float(command[command.index("--timeout") + 1]) == expected
         assert agent.config.timeout == 1800
         assert response.json()["metadata"]["agent_timeout_sec"] == str(float(expected))
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = staged(sandbox)
         cli = payload["command"]
         assert cli[cli.index("--timeout") + 1] == str(math.ceil(expected))
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))

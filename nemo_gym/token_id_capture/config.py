@@ -84,6 +84,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from nemo_gym.token_id_capture.protocols import (
     LineageResolver,
+    ParentResolutionMode,
     TokenSink,
     installed_lineage_store,
     installed_token_sink,
@@ -150,6 +151,9 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
+    # Fingerprints match assistant content; source_history matches committed source
+    # prefixes and starts a root without a parent when no unique match exists.
+    parent_resolution: ParentResolutionMode = "fingerprint"
     # A custom sink normally needs a resolver over the same backend namespace.
     # Without one, every multi-call continuation is unresolved and masked.
     # This flag permits that degraded behavior explicitly.
@@ -206,6 +210,10 @@ class TokenIdCaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _validate(self) -> "TokenIdCaptureConfig":
         block = self.token_id_capture
+        if block.parent_resolution == "source_history" and (
+            not block.external_staging or block.external_staging_backend != "vllm_worker"
+        ):
+            raise ValueError("parent_resolution=source_history requires external vLLM staging")
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
         if block.external_staging and block.rebuild_response:
@@ -328,9 +336,19 @@ def token_id_capture_config(global_config_dict: Any) -> TokenIdCaptureConfig:
     return TokenIdCaptureConfig.model_validate(global_config_dict or {})
 
 
-def token_id_capture_enabled_for_agent(global_config_dict: Any, agent_name: str | None) -> bool:
-    """Return whether one configured agent participates in capture."""
-    config = token_id_capture_config(global_config_dict)
+def token_id_capture_enabled_for_agent(
+    global_config_dict: Any,
+    agent_name: str | None,
+    *,
+    config: TokenIdCaptureConfig | None = None,
+) -> bool:
+    """Return whether one configured agent participates in capture.
+
+    Pass ``config`` when the caller already validated ``global_config_dict``.
+    A caller that checks many rollouts then validates the global config once instead of once per check.
+    """
+    if config is None:
+        config = token_id_capture_config(global_config_dict)
     settings = config.token_id_capture
     if not settings.enabled:
         return False

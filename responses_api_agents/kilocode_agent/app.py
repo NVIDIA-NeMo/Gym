@@ -33,8 +33,8 @@ from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_COMMAND_NOT_STARTED, HARNESS_RUNNER_FAILED, SandboxSession
+from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -230,8 +230,12 @@ def _runtime_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -
         return "Kilo did not confirm its task-environment plugin"
     if cleanup["timed_out"]:
         return None
+    if cleanup["return_code"] == HARNESS_RUNNER_FAILED:
+        return f"Kilo runner failed before starting Kilo (exit {HARNESS_RUNNER_FAILED})"
+    if cleanup["return_code"] in HARNESS_COMMAND_NOT_STARTED:
+        return f"Kilo could not be started (exit {cleanup['return_code']})"
     if cleanup["return_code"] not in (0, None):
-        return f"Kilo runner exited {cleanup['return_code']}"
+        return f"Kilo exited {cleanup['return_code']}"
     if artifacts.exit_code not in (0, None):
         return f"Kilo exited {artifacts.exit_code}"
     if artifacts.exit_code is None:
@@ -482,7 +486,9 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             artifacts, state.session.cleanup, cancelled=state.task is not None and state.task.cancelled()
         )
         sandbox.outcome, sandbox.error_type = outcome, error_type
-        sandbox.exit_code, sandbox.wall_time_s = artifacts.exit_code, artifacts.wall_time_s
+        # A cancelled Kilo exits because the stop told it to; that status is not one Kilo chose.
+        sandbox.exit_code = None if outcome == "cancelled" else artifacts.exit_code
+        sandbox.wall_time_s = artifacts.wall_time_s
         _, length_stop = _scan_run_events(artifacts.stdout)
         if artifacts.observations is None:
             # The CLI stdout carries only the root session; without the database there is no session tree.

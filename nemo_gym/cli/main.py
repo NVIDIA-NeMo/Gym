@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
-from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
 from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
+from nemo_gym.run_exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 
 
 logger = logging.getLogger(__name__)
@@ -427,19 +427,6 @@ def _asset_config_path(flag: str, value: str) -> str:
     if matches:
         return str(matches[0])
 
-    if flag == "environment" and value in LEGACY_ENVIRONMENT_ALIASES:
-        canonical = LEGACY_ENVIRONMENT_ALIASES[value]
-        resolved = _asset_config_path(flag, canonical)
-        logger.warning(f"`--environment {value}` is deprecated; use `--environment {canonical}`.")
-        return resolved
-
-    if canonical_path := legacy_config_path_alias(path):
-        for root in roots:
-            candidate = root / canonical_path
-            if candidate.exists():
-                logger.warning(f"Config path `{path}` is deprecated; use `{canonical_path}`.")
-                return str(candidate.resolve())
-
     # No match: build a "did you mean?" hint and the roots searched
     if flag == "benchmark":
         # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
@@ -735,6 +722,31 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(target, overrides)
 
 
+# `gym eval export <exporter>`: which exporter handles the run. Register-only: `_eval_export` consumes it.
+EXPORTER = Flag(
+    register=lambda p: p.add_argument(
+        "exporter",
+        nargs="?",
+        metavar="EXPORTER",
+        help=f"Exporter to run: {', '.join(RUN_EXPORTERS)} (default: {DEFAULT_RUN_EXPORTER}). "
+        "Exporter settings are `+key=value` overrides, e.g. `+rollouts_jsonl_fpath=results/rollouts.jsonl`.",
+    ),
+)
+
+
+def _eval_export(args: argparse.Namespace, overrides: list[str]) -> None:
+    exporter = args.exporter
+    if args.format is not None:
+        logger.warning("`--format` is deprecated; pass the exporter name instead: `gym eval export <exporter>`.")
+        if exporter and exporter != args.format:
+            args._parser.error(f"conflicting exporter: {exporter!r} and --format {args.format!r}")
+        exporter = exporter or args.format
+    exporter = exporter or DEFAULT_RUN_EXPORTER
+    if exporter not in RUN_EXPORTERS:
+        args._parser.error(f"unknown exporter {exporter!r}; choose from: {', '.join(RUN_EXPORTERS)}")
+    dispatch("nemo_gym.cli.eval:export_run", [f"+exporter={exporter}", *overrides])
+
+
 # `gym eval run <target>`: a Harbor task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`.
 # Register-only: the target is consumed by `_eval_run`, not translated to a Hydra override.
 TASK_TARGET = Flag(
@@ -804,6 +816,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
             ignored_checks=args.ignore_checks or (),
             limits=RunHealthLimits(**given_limits),
             json_output=args.json,
+            model_call_capture_dir=args.model_call_capture_dir,
         )
     except (FileNotFoundError, ValueError) as exc:
         args._parser.error(str(exc))
@@ -1327,6 +1340,7 @@ COMMANDS = {
                 "input_glob",
                 "Glob (or comma-separated globs) matching the rollout shards to aggregate.",
                 aliases=("-i",),
+                quote=True,
             ),
             _value_flag(
                 "output",
@@ -1364,10 +1378,24 @@ COMMANDS = {
                     dest="rollout_file",
                     type=Path,
                     metavar="PATH",
-                    help="Rollout JSONL path; relative paths resolve under RUN_DIR (default: rollouts.jsonl).",
+                    help=(
+                        "Rollout JSONL path, checked alone; relative paths resolve under RUN_DIR (default: "
+                        "rollouts.jsonl, or the shards `gym eval aggregate` merged into it)."
+                    ),
                 )
             ),
             Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--model-call-capture-dir",
+                    type=Path,
+                    metavar="DIR",
+                    help=(
+                        "The run's model_call_capture_dir. With it, the captured calls of rollouts that failed "
+                        "without a row (an episode deadline, say) count in run.stats.timeouts' time split."
+                    ),
+                )
+            ),
             Flag(
                 register=lambda p: p.add_argument(
                     "--ignore-checks",
@@ -1407,10 +1435,15 @@ COMMANDS = {
         ),
     ),
     "eval export": Command(
-        target="nemo_gym.cli.eval:export_rollouts_as_atif",
-        summary="Export supported Gym trajectories as ATIF.",
+        target=_eval_export,
+        summary="Export a finished run with an exporter (default: atif).",
         flags=(
-            _value_flag("format", "format", "Output trajectory format.", choices=("atif",)),
+            EXPORTER,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--format", choices=tuple(RUN_EXPORTERS), help="Deprecated: pass the exporter name instead."
+                )
+            ),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Gym rollouts JSONL to export.", quote=True),
             _value_flag("output-dir", "output_dirpath", "New directory for exported trajectories.", quote=True),
             _value_flag("session-id", "session_id", "Stable identifier for the source evaluation run.", quote=True),
@@ -1830,6 +1863,12 @@ def main() -> None:
         if command.target is _eval_run and args.target and _is_positional_hydra_override(args.target):
             overrides = [args.target, *overrides]
             args.target = None
+
+        # Likewise for eval export's optional EXPORTER slot: restore the captured override ahead of the raw
+        # overrides but after the translated flags, so a flag and a raw override of one key keep their order.
+        if command.target is _eval_export and args.exporter and _is_positional_hydra_override(args.exporter):
+            overrides = [args.exporter, *overrides]
+            args.exporter = None
 
         # --config and the asset selectors all emit +config_paths; coalesce them into one token.
         overrides = _merge_config_paths(translated + overrides)

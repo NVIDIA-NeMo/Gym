@@ -89,6 +89,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
+    maybe_get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
@@ -129,6 +130,7 @@ except ImportError:  # the telemetry extra is optional; without the SDK there is
 logger = logging.getLogger(__name__)
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _GLOBAL_AIOHTTP_CLIENT_CONFIG: Optional["GlobalAIOHTTPAsyncClientConfig"] = None
 _GLOBAL_AIOHTTP_CONTROL_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
@@ -368,17 +370,27 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> ClientSession:  # pragma: no cover
+) -> ClientSession:
     global _GLOBAL_AIOHTTP_CLIENT
 
     if _GLOBAL_AIOHTTP_CLIENT is not None:
         return _GLOBAL_AIOHTTP_CLIENT
 
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=global_config_dict_parser_config,
-        global_config_dict_parser_cls=global_config_dict_parser_cls,
-    )
-    cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
+    # Read only a config this process already has, cached or injected through NEMO_GYM_CONFIG_DICT; never parse
+    # its argv here, which in a Ray task worker exits the process. A process with neither gets the default client
+    # limits: env.yaml and +global_aiohttp_* do not reach it. An explicit parser config or class still parses.
+    global_config_dict = maybe_get_global_config_dict()
+    if global_config_dict is None and (
+        global_config_dict_parser_config is not None or global_config_dict_parser_cls is not GlobalConfigDictParser
+    ):
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=global_config_dict_parser_config,
+            global_config_dict_parser_cls=global_config_dict_parser_cls,
+        )
+    if global_config_dict is None:
+        cfg = GlobalAIOHTTPAsyncClientConfig()
+    else:
+        cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
 
     return set_global_aiohttp_client(cfg)
 
@@ -458,9 +470,10 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         cookie_jar=DummyCookieJar(),
     )
 
-    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG, _GLOBAL_AIOHTTP_CLIENT_LOOP
     _GLOBAL_AIOHTTP_CLIENT = client_session
     _GLOBAL_AIOHTTP_CLIENT_CONFIG = cfg
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = asyncio.get_running_loop()
 
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
@@ -502,22 +515,58 @@ def is_global_aiohttp_client_request_debug_enabled() -> bool:
     return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
 
 
-def global_aiohttp_client_exit():  # pragma: no cover
-    if not is_global_aiohttp_client_setup():
-        return
+def _detach_global_aiohttp_clients() -> list[ClientSession]:
+    """Clear the process-wide data and control clients and return the ones still open."""
 
-    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CONTROL_CLIENT, _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
-
-    async def close() -> None:
-        await _GLOBAL_AIOHTTP_CLIENT.close()
-        if _GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
-            await _GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
-
-    asyncio.run(close())
-
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP, _GLOBAL_AIOHTTP_CONTROL_CLIENT
+    global _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
+    clients = [
+        client
+        for client in (_GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CONTROL_CLIENT)
+        if client is not None and not client.closed
+    ]
     _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = None
     _GLOBAL_AIOHTTP_CONTROL_CLIENT = None
     _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = False
+    return clients
+
+
+async def close_global_aiohttp_client() -> None:
+    """Close the process-wide data and control clients on their owning event loop."""
+
+    for client in _detach_global_aiohttp_clients():
+        await client.close()
+
+
+def global_aiohttp_client_exit():  # pragma: no cover
+    # The control pool is created on demand from requests running on the data client's loop.
+    owner_loop = _GLOBAL_AIOHTTP_CLIENT_LOOP
+    clients = _detach_global_aiohttp_clients()
+    if not clients:
+        return
+
+    async def close_client() -> None:
+        for client in clients:
+            await client.close()
+
+    if owner_loop is None or owner_loop.is_closed():
+        # aiohttp has no owner-loop work left once the loop is closed, but the
+        # coroutine must still run so the session transitions to closed.
+        asyncio.run(close_client())
+        return
+
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is owner_loop:
+        owner_loop.create_task(close_client())
+    elif owner_loop.is_running():
+        asyncio.run_coroutine_threadsafe(close_client(), owner_loop).result(timeout=5)
+    else:
+        owner_loop.run_until_complete(close_client())
 
 
 atexit.register(global_aiohttp_client_exit)
@@ -860,6 +909,16 @@ DEFAULT_HEAD_SERVER_PORT = 11000
 ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
 
 
+def _connectable_client_host(host: str) -> str:
+    """Return a connectable client host for a server bind address."""
+
+    if host == "0.0.0.0":
+        return "127.0.0.1"
+    if host in {"::", "[::]"}:
+        return "[::1]"
+    return host
+
+
 class ServerClient(BaseModel):
     head_server_config: BaseServerConfig
 
@@ -880,6 +939,17 @@ class ServerClient(BaseModel):
         if self._checkpoint_enabled is None:
             self._checkpoint_enabled = checkpoint_settings(self.global_config_dict) is not None
         return self._checkpoint_enabled
+
+    @staticmethod
+    def _client_host(host: str) -> str:
+        """Return a connectable host for a server bind address.
+
+        Wildcard addresses are valid for binding a server but are not valid
+        advertised client targets. In particular, proxy-aware HTTP clients can
+        route ``0.0.0.0`` through an external proxy instead of reaching the
+        local server.
+        """
+        return _connectable_client_host(host)
 
     def assistant_message_header(self, model_server_name: str) -> bytes | None:
         """Read the optional header property of harnesses using this model server.
@@ -927,7 +997,8 @@ class ServerClient(BaseModel):
             )
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
-        head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
+        head_server_host = _connectable_client_host(head_server_config.host)
+        head_server_url = f"http://{head_server_host}:{head_server_config.port}"
         try:
             response = requests.get(
                 f"{head_server_url}/global_config_dict_yaml",
@@ -957,6 +1028,7 @@ class ServerClient(BaseModel):
         method: str,
         *,
         _control: bool = False,
+        _resend_after_disconnect: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """Call another server. ``_control`` sends the call over the reserved control pool."""
@@ -1010,7 +1082,8 @@ class ServerClient(BaseModel):
             # Sending it again would run the attempt a second time,
             # and the first run's sessions on other servers would never be freed: the second run replies,
             # so the controller never retires the attempt.
-            _resend_after_disconnect=not (self.checkpoint_enabled() and url_path == "/run"),
+            _resend_after_disconnect=_resend_after_disconnect
+            and not (self.checkpoint_enabled() and url_path == "/run"),
             **kwargs,
         )
 
@@ -1083,7 +1156,10 @@ class ServerClient(BaseModel):
         return base_url
 
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
-        return f"http://{server_config_dict.host}:{server_config_dict.port}"
+        # Use the module helper so this method remains safe when borrowed by a
+        # duck-typed or mocked ServerClient.
+        host = _connectable_client_host(server_config_dict.host)
+        return f"http://{host}:{server_config_dict.port}"
 
 
 def _has_injected_global_config_env() -> bool:
@@ -1654,6 +1730,15 @@ def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
     return entrypoint_class_flag(entrypoint_fpath, "ray_enabled")
 
 
+def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
+    """Raise when the server asks for several workers but cannot run with them."""
+    if not server.config.num_workers or server.config.num_workers <= 1:
+        return
+    reason = server.multiple_workers_unsupported_reason()
+    if reason is not None:
+        raise ValueError(f"{server.config.name} needs num_workers=1: {reason}")
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
     # Servers that use Ray must declare `ray_enabled = True` on the class their entrypoint runs. Gym reads it
@@ -1674,6 +1759,17 @@ class SimpleServer(BaseServer):
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        """Why this server cannot run with `num_workers > 1`, or None when it can.
+
+        With several workers, uvicorn imports the entrypoint in each worker and serves its module-level `app`.
+        A server whose state or resources several workers cannot share overrides this and returns the reason,
+        and `run_webserver` refuses `num_workers > 1` with it before uvicorn starts.
+        The reason reads as the end of the sentence "<server> needs num_workers=1: <reason>".
+        It is a method rather than a class attribute so that a server can decide from its config.
+        """
+        return None
 
     def setup_checkpoint_participant(self, app: FastAPI) -> None:
         """Take part in partial-rollout checkpoints on the app ``setup_webserver`` built, if it does not yet.
@@ -1912,6 +2008,8 @@ repr(e): {repr(e)}"""
         )
         server = cls(config=server_config, server_client=server_client)
         startup.mark("init_server")
+        # Before the dry-run return, so a dry run reports the misconfiguration too.
+        refuse_unsupported_num_workers(server)
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
