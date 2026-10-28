@@ -7095,7 +7095,7 @@ async def test_generation_cut_reaches_each_owning_backend(
     async def fake_get_response_json(response: SimpleNamespace) -> dict[str, Any]:
         return response.payload
 
-    monkeypatch.setattr("nemo_gym.client.server_client.request", fake_request)
+    monkeypatch.setattr("nemo_gym.client.http_client.request", fake_request)
     monkeypatch.setattr("nemo_gym.client.http_client.raise_for_status", fake_raise_for_status)
     monkeypatch.setattr("nemo_gym.client.http_client.get_response_json", fake_get_response_json)
 

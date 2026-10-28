@@ -96,7 +96,7 @@ async def _lazy_client(monkeypatch, *, metrics_enabled: bool = True, workers: in
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: metrics_enabled)
     monkeypatch.setattr("nemo_gym.utils.server_process.get_nemo_gym_fastapi_num_workers", lambda: workers)
-    monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_nemo_gym_fastapi_worker", lambda: True)
     # A server worker reads the config its parent puts in its environment, and nothing is cached yet.
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv(
