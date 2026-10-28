@@ -60,7 +60,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxPtySession
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -204,10 +203,9 @@ class SearchSeedSessionRequest(BaseSeedSessionRequest):
 
 
 class SearchSeedSessionResponse(BaseSeedSessionResponse):
-    # Both fields are mandatory: the agent raises if only one is present, and silently falls
-    # back to a hardcoded SWE-bench image if neither is.
+    # The only field the agent reads. Without it opencode_sandboxed_agent silently creates its
+    # own sandbox from a hardcoded SWE-bench image instead of connecting to this one.
     sandbox_handle: str
-    pty_session_id: str
 
 
 class SearchVerifyRequest(SearchRunRequest, BaseVerifyRequest):
@@ -250,7 +248,7 @@ class SearchResourcesServer(SimpleResourcesServer):
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
-    _session_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = PrivateAttr(default_factory=dict)
+    _session_id_to_sandbox: Dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
     # Rollouts in a row whose judge never produced a verdict. Reset by any success.
     _judge_consecutive_failures: int = PrivateAttr(default=0)
     _exa_cache: Any = PrivateAttr(default=None)
@@ -290,13 +288,9 @@ class SearchResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: SearchSeedSessionRequest) -> SearchSeedSessionResponse:
         sandbox = await self._create_sandbox()
-        pty_session = await sandbox.pty.create()
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = (sandbox, pty_session)
+        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
-        return SearchSeedSessionResponse(
-            sandbox_handle=sandbox._handle.sandbox_id,
-            pty_session_id=pty_session.session_id,
-        )
+        return SearchSeedSessionResponse(sandbox_handle=sandbox._handle.sandbox_id)
 
     async def _call_judge(
         self,
@@ -421,16 +415,11 @@ class SearchResourcesServer(SimpleResourcesServer):
             )
 
     async def _release_sandbox(self, session_id: str) -> None:
-        entry = self._session_id_to_sandbox.pop(session_id, None)
-        if entry is None:
+        sandbox = self._session_id_to_sandbox.pop(session_id, None)
+        if sandbox is None:
             return
-        sandbox, pty_session = entry
-        # The agent also closes and stops these after verify returns; both sides tolerate the
-        # other having gone first. Releasing here keeps a crashed agent from leaking the pod.
-        try:
-            await pty_session.close()
-        except Exception as e:  # noqa: BLE001
-            print(f"[search] pty close failed (ignored): {type(e).__name__}: {e}", flush=True)
+        # The agent also stops the sandbox after verify returns; both sides tolerate the other
+        # having gone first. Releasing here keeps a crashed agent from leaking the pod.
         try:
             await sandbox.stop()
         except Exception as e:  # noqa: BLE001

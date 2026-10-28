@@ -574,10 +574,6 @@ def _terminal_reason(run_output: str) -> str:
     max_iteration, because a run that overflowed was cut off mid-thought by an infrastructure
     limit, which is the truer description than "spent its turn budget".
     """
-    # A PTY timeout is an ENDING, not a reason the model chose. It outranks nothing, so it is only
-    # reported when the plugin said nothing -- a row that hit the turn cap and was then killed by
-    # the wall is still a max_iteration row.
-    timed_out = "PTY command timed out" in run_output
     armed = 0
     max_iteration = False
     for line in run_output.splitlines():
@@ -595,7 +591,7 @@ def _terminal_reason(run_output: str) -> str:
         return "context_window"
     if max_iteration:
         return "max_iteration"
-    return "agent_timed_out" if timed_out else ""
+    return ""
 
 
 class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
@@ -1323,29 +1319,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # whose plugins never loaded is indistinguishable from a healthy one. Without this check
         # the contamination filter and the turn budget would be silently optional and we would
         # still score the row. The sentinel plugin prints this marker at import time.
-        # Both streams: opencode runs under a PTY, which has a single stream, so everything the
-        # plugins write to stderr arrives in stdout. Checking only stderr would always fail.
+        # Both streams: the plugins write to stderr, opencode's own progress to stdout, and which
+        # of the two a line lands in depends on the exec path -- the OpenSandbox background path
+        # returns one combined stream in stdout, the foreground path splits them. Concatenating
+        # makes the check independent of that.
         run_output = (result_stdout or "") + (result_stderr or "")
         plugins_loaded = "[nemo-gym-plugin] loaded" in run_output
-        # A PTY timeout replaces the transcript with its own error message -- the timeout string
-        # plus the echoed command, ~6.5KB -- so the sentinel marker is gone along with everything
-        # else the run produced. That is not a plugin failure, and treating it as one throws away a
-        # rollout we still have the full trajectory for.
-        #
-        # This was the real cause of every sentinel rejection, not the silent-plugin-load theory
-        # the gate was built around. In one run EVERY discarded row carried
-        # "PTY command timed out" with export_found=True and finished=False, and their captured
-        # output was the uniform size of that error message, against kilobytes-to-megabytes for
-        # rows that actually ran. Earlier runs' discards are the same thing. These rows ran the
-        # full sandbox budget; the plugins were never the problem.
-        #
-        # The export is already parsed into `output` above, so the row is scored on whatever the
-        # model had produced by the 3h mark -- the honest outcome for a run that did the research
-        # and never got to finish -- and is flagged agent_timed_out for anything that needs to
-        # exclude it.
-        pty_timed_out = "PTY command timed out" in run_output
-        if pty_timed_out and opencode_export_found:
-            plugins_loaded = True
         if self.config.opencode_plugins and not plugins_loaded and run_output.strip():
             # Hard-fail only when we actually captured a transcript and the marker is still absent
             # — that is a genuine silent plugin failure and must never be scored.
