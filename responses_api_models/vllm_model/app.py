@@ -29,7 +29,7 @@ from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import Field, PositiveFloat, PrivateAttr, model_validator
 
 from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
 from nemo_gym.base_responses_api_model import (
@@ -447,6 +447,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # sessions off it.
     endpoint_connection_retries: Optional[int] = 8
 
+    # Total time limit for each HTTP attempt to the engine, not for the whole call; None means no limit.
+    # A timed-out attempt is retried like any other transport error, so the call's attempt count is unchanged.
+    request_timeout_seconds: Optional[PositiveFloat] = None
+
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
     # schema, and strict OpenAI-compatible backends reject it, so this is off by default and
@@ -717,6 +721,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
                     else None
                 ),
+                request_timeout_seconds=self.config.request_timeout_seconds,
                 # The wait budget is for outside providers; a job must notice a down model server quickly.
                 max_rate_limit_wait_seconds=0,
             )
@@ -2143,6 +2148,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
                 max_rate_limit_wait_seconds=0,
+                request_timeout_seconds=self.config.request_timeout_seconds,
             )
         ]
         # Every session re-resolves onto the new host.

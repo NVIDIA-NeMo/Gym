@@ -261,6 +261,9 @@ def is_unstarted_rollout_row(row: Mapping[str, Any]) -> bool:
 
 
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+# Set by the producer of a final failure row that must be counted as a zero in the metrics, whatever
+# count_failure_classes_as_zero names (a rollout the evaluated model failed, for example).
+NG_FAILURE_COUNTS_AS_ZERO_KEY = "_ng_failure_counts_as_zero"
 # The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
 # instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
 NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
@@ -2422,18 +2425,21 @@ def _failure_rows_counted_as_zero(
     A row that already carries a ``reward`` is counted as it stands. A row that carries none
     records that no rollout happened, so it is counted as a zero here and only here: the score
     enters the metric input, never the sidecar or the rollouts jsonl, which keeps the artifacts
-    free of a verdict no verifier gave. A rollout that also succeeded is never counted.
+    free of a verdict no verifier gave. A rollout that also succeeded is never counted. A row its
+    producer marked with ``_ng_failure_counts_as_zero`` is counted whatever its class.
     """
-    if not failure_classes:
-        return []
-
     latest_by_key = _latest_failure_rows(failures_fpaths)
     wanted = set(failure_classes)
     return [
         _counted_failure_row(row)
         for key, row in latest_by_key.items()
-        if key not in scored_keys and row.get(NG_FAILURE_CLASS_KEY) in wanted
+        if key not in scored_keys and _counts_as_zero(row, wanted)
     ]
+
+
+def _counts_as_zero(row: Mapping[str, Any], wanted: set) -> bool:
+    """Whether a rollout's latest sidecar row enters the metrics as a zero: its class is wanted, or it is marked."""
+    return row.get(NG_FAILURE_CLASS_KEY) in wanted or row.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
 
 
 def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -5235,11 +5241,9 @@ class RolloutAggregationHelper(BaseModel):
         counted = [
             _counted_failure_row(row)
             for identity, row in latest_failures.items()
-            if identity not in result_ids
-            and row.get(NG_FAILURE_CLASS_KEY) in wanted
-            and _routing_identity(row) is not None
+            if identity not in result_ids and _counts_as_zero(row, wanted) and _routing_identity(row) is not None
         ]
-        if config.count_failure_classes_as_zero:
+        if config.count_failure_classes_as_zero or counted:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
         materialized_fpaths = [materialized_path_for(Path(path)) for path in input_paths]
         missing: List[Dict[str, Any]] = []

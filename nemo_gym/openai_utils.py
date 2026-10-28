@@ -33,7 +33,7 @@ from typing import (
     get_args,
 )
 
-from aiohttp import ClientTimeout
+from aiohttp import ClientTimeout, ConnectionTimeoutError
 from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAllowedToolChoiceParam,
@@ -193,7 +193,7 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
-from nemo_gym.episode_types import FailureBoundary
+from nemo_gym.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.failure_transport import FailureHeader, observe_failure
 from nemo_gym.rollout_correlation import current_rollout_id
@@ -206,7 +206,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     request,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
 
 
 class ChatCompletionModeration(TypedDict, total=False):
@@ -1581,8 +1581,34 @@ def _retry_after_seconds(response: ClientResponse) -> Optional[float]:
     return (retry_at.replace(tzinfo=retry_at.tzinfo or timezone.utc) - datetime.now(timezone.utc)).total_seconds()
 
 
+MODEL_RESPONSE_TIMEOUT_REASON = "Model request timed out waiting for the response"
+"""The ``failure_reason`` of a model attempt that was sent and whose response did not arrive in time."""
+
+
+def _timed_out_waiting_for_response(error: BaseException) -> bool:
+    """Whether ``error`` is a timeout that fired after the request was sent, while aiohttp awaited the response.
+
+    With only a total timeout, aiohttp raises the same ``TimeoutError`` while connecting or waiting for a pooled
+    connection, so where it fired decides. Any other shape is not a response timeout.
+    """
+    if not isinstance(error, TimeoutError) or isinstance(error, ConnectionTimeoutError):
+        return False
+    for raised in (error, error.__cause__):
+        traceback = getattr(raised, "__traceback__", None)
+        while traceback is not None:
+            if traceback.tb_frame.f_code is ClientResponse.start.__code__:
+                return True
+            traceback = traceback.tb_next
+    return False
+
+
 def _model_attempt_failure(
-    reason: str, *, operation_id: str, attempt_id: str, http_status: Optional[int] = None
+    reason: str,
+    *,
+    operation_id: str,
+    attempt_id: str,
+    http_status: Optional[int] = None,
+    foreign_error: Optional[SdkErrorDetails] = None,
 ) -> NgFailureEvent:
     """The model boundary's failure for one HTTP attempt of a model call (``operation_id``)."""
     return NgFailureEvent(
@@ -1593,6 +1619,7 @@ def _model_attempt_failure(
         operation_id=operation_id,
         attempt_id=attempt_id,
         http_status=http_status,
+        foreign_error=foreign_error,
     )
 
 
@@ -1816,24 +1843,34 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         # One logical model call; each HTTP attempt of it is observed under its own attempt id.
         operation_id = uuid.uuid4().hex
         transport_failures = 0
+        last_transport_failure: tuple[Exception, NgFailureEvent] | None = None
 
         def observe_transport_failure(error: Exception) -> None:
-            nonlocal transport_failures
+            nonlocal transport_failures, last_transport_failure
             transport_failures += 1
             failure = _model_attempt_failure(
-                "Model request transport failed",
+                MODEL_RESPONSE_TIMEOUT_REASON
+                if _timed_out_waiting_for_response(error)
+                else "Model request transport failed",
                 operation_id=operation_id,
                 attempt_id=f"{operation_id}-transport-{transport_failures}",
+                # The transport error is recorded by type only; its text may hold request data.
+                foreign_error=sdk_error_details(error),
             )
-            # The transport error is recorded by type only; its text may hold request data.
-            failure.__cause__ = error
+            last_transport_failure = (error, failure)
             observe_failure(failure)
 
         while tries < max_num_tries:
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
             tries += 1
-            response = await request(_on_transport_failure=observe_transport_failure, **request_kwargs)
+            try:
+                response = await request(_on_transport_failure=observe_transport_failure, **request_kwargs)
+            except Exception as error:
+                # As in _raise_exhausted, the raised error's explicit cause is the attempt it ended on.
+                if last_transport_failure is not None and last_transport_failure[0] is error:
+                    raise error from last_transport_failure[1]
+                raise
 
             if response.status in (401, 403):
                 content = await response.content.read()
