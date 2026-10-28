@@ -12,12 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the Anthropic Messages API boundary types in nemo_gym/anthropic_utils.py."""
+"""Tests for the Anthropic Messages API boundary types in nemo_gym/models/anthropic_utils.py."""
 
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.anthropic_utils import (
+from nemo_gym.models.anthropic_utils import (
     NeMoGymAnthropicMessage,
     NeMoGymAnthropicMessageCreateParamsNonStreaming,
 )

@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
 from responses_api_models.litellm_model.app import (
     LiteLLMModelServer,
     LiteLLMModelServerConfig,

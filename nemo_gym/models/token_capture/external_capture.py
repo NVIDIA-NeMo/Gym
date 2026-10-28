@@ -9,30 +9,30 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
-from nemo_gym.token_id_capture.completion import (
+from nemo_gym.models.token_capture.completion import (
     completion_items,
     completion_metadata,
     output_item_fingerprint,
     output_validation_item,
 )
-from nemo_gym.token_id_capture.config import ExternalStagingBackend
-from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
-from nemo_gym.token_id_capture.protocols import CaptureLedger
-from nemo_gym.token_id_capture.records import (
+from nemo_gym.models.token_capture.config import ExternalStagingBackend
+from nemo_gym.models.token_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.models.token_capture.protocols import CaptureLedger
+from nemo_gym.models.token_capture.records import (
     TOKEN_FIELDS,
     response_finish_reason,
     response_to_output_items,
     strip_token_fields,
 )
-from nemo_gym.token_id_capture.replay import render_options_digest, replay_context, summarize_replay
-from nemo_gym.token_id_capture.sink import (
+from nemo_gym.models.token_capture.replay import render_options_digest, replay_context, summarize_replay
+from nemo_gym.models.token_capture.sink import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
     CaptureContext,
     current_capture_context,
     mark_external_staging_committed,
 )
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
     WORKER_CAPTURE_FAILED_REASON,
     WORKER_MISSING_COMMIT_COORDS_REASON,

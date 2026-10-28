@@ -11,18 +11,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from nemo_gym.token_id_capture.staging.digest import (
+from nemo_gym.models.token_capture.staging.digest import (
     build_staging_delta,
     compute_chain_hash,
     compute_extras_digest,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.staging.protocols import (
+from nemo_gym.models.token_capture.staging.protocols import (
     CaptureAdapter,
     StagingSink,
     WeightVersionProvider,
 )
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     CaptureAdmission,
     CommitCoords,
     StagedCallBaseSnapshot,

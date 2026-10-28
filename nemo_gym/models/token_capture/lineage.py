@@ -53,28 +53,28 @@ from typing import TYPE_CHECKING, Any
 import orjson
 
 from nemo_gym.core.episode import EpisodeId
-from nemo_gym.token_id_capture.fingerprint import (
+from nemo_gym.models.token_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
     conversation_digest,
     tool_call_turn_fingerprint,
     trailing_assistant_turn,
 )
-from nemo_gym.token_id_capture.fingerprint import (
+from nemo_gym.models.token_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
 )
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     LineageMatch,
     LineageResolution,
     RolloutRemovalPayload,
     RolloutRetiredError,
 )
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
+from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
 
 
 if TYPE_CHECKING:
-    from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
+    from nemo_gym.models.token_capture.staging.records import CallRecord, CaptureLedgerCommit
 
 
 logger = logging.getLogger(__name__)
@@ -141,11 +141,11 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     columns and are not part of a capture manifest.
     """
     # Deferred: staging.records pulls in the digest module; lineage stays light.
-    from nemo_gym.token_id_capture.records import (
+    from nemo_gym.models.token_capture.records import (
         LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
         LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
     )
-    from nemo_gym.token_id_capture.staging.records import (
+    from nemo_gym.models.token_capture.staging.records import (
         CallRecord,
         ManifestFailure,
         RolloutManifest,
@@ -629,14 +629,14 @@ class InMemoryLineageStore:
         return bool(self.index.for_rollout(rollout_id).by_call_id)
 
     async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.token_id_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
         self._retired.update(rollout_ids)
         return self._remove(rollout_ids)
 
     async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.token_id_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
         self._retired.difference_update(rollout_ids)
@@ -657,7 +657,7 @@ class InMemoryLineageStore:
 
     async def delete_unstarted(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
         """Delete the rollouts no ``mark_started`` names; see ``FileLineageStore.delete_unstarted``."""
-        from nemo_gym.token_id_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_rollout_ids
 
         return await self.delete([key for key in validate_rollout_ids(rollout_ids) if key not in self._started])
 
@@ -801,7 +801,7 @@ class IncrementalLineageStore:
         Read the chain in one batch and append each token segment once.
         Digest verification makes stale references fail closed.
         """
-        from nemo_gym.token_id_capture.records import compute_digest
+        from nemo_gym.models.token_capture.records import compute_digest
 
         # Metadata carries enough lineage to collect every backend reference before loading tokens.
         cached = self._cached_materialized(rollout_id)
@@ -911,7 +911,7 @@ class FileLineageStore(IncrementalLineageStore):
         max_cached_rollouts: int = 65536,
         max_cached_tokens: int = 8_000_000,
     ) -> None:
-        from nemo_gym.token_id_capture.store import TokenCaptureStore
+        from nemo_gym.models.token_capture.store import TokenCaptureStore
 
         super().__init__(max_cached_rollouts=max_cached_rollouts, max_cached_tokens=max_cached_tokens)
         self._store = TokenCaptureStore(root)
@@ -970,20 +970,20 @@ class FileLineageStore(IncrementalLineageStore):
     # when the incremental entry index has no match.
 
     def _ledger_path(self, rollout_id: str) -> Path:
-        from nemo_gym.token_id_capture.store import validate_rollout_id
+        from nemo_gym.models.token_capture.store import validate_rollout_id
 
         return self._ledger_root / f"{validate_rollout_id(rollout_id)}{_LEDGER_SUFFIX}"
 
     def _retired_path(self, rollout_id: str) -> Path:
         # Present while the rollout is retired: its writes are discarded. ``delete`` removes it.
-        from nemo_gym.token_id_capture.store import validate_rollout_id
+        from nemo_gym.models.token_capture.store import validate_rollout_id
 
         return self._ledger_root / f"{validate_rollout_id(rollout_id)}.lineage.retired"
 
     def _started_path(self, rollout_id: str) -> Path:
         # Present once a restored attempt has started on any server sharing this ledger.
         # Removed with the ledger, by retire and delete alike.
-        from nemo_gym.token_id_capture.store import validate_rollout_id
+        from nemo_gym.models.token_capture.store import validate_rollout_id
 
         return self._ledger_root / f"{validate_rollout_id(rollout_id)}{_STARTED_SUFFIX}"
 
@@ -1233,7 +1233,7 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._retire, rollout_ids)
 
     def _retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.token_id_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_rollout_ids
 
         rollout_ids = validate_rollout_ids(rollout_ids)
         for rollout_id in rollout_ids:
@@ -1252,7 +1252,7 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._delete, rollout_ids)
 
     def _delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.token_id_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_rollout_ids
 
         return self._remove(validate_rollout_ids(rollout_ids), unretire=True)
 
@@ -1284,7 +1284,7 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._delete_unstarted, rollout_ids)
 
     def _delete_unstarted(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        from nemo_gym.token_id_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_rollout_ids
 
         return self._remove(validate_rollout_ids(rollout_ids), unretire=True, unless_started=True)
 

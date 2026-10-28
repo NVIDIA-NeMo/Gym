@@ -82,7 +82,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.protocols import (
     LineageResolver,
     ParentResolutionMode,
     TokenSink,

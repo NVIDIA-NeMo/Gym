@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests of the OpenAI-compatible client in `nemo_gym.openai_utils`."""
+"""Tests of the OpenAI-compatible client in `nemo_gym.models.openai_utils`."""
 
 import re
 from copy import deepcopy
@@ -23,9 +23,9 @@ import pytest
 from aiohttp import ClientResponseError, ClientTimeout
 from pydantic import ValidationError
 
-from nemo_gym import openai_utils as openai_utils_module
 from nemo_gym.core.episode import rollout_context
-from nemo_gym.openai_utils import (
+from nemo_gym.models import openai_utils as openai_utils_module
+from nemo_gym.models.openai_utils import (
     MAX_NUM_TRIES,
     NeMoGymAsyncOpenAI,
     PermanentEndpointError,
@@ -36,7 +36,7 @@ from nemo_gym.openai_utils import (
 
 @pytest.fixture(autouse=True)
 def _jitter_at_its_upper_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: high)
+    monkeypatch.setattr("nemo_gym.models.openai_utils.random.uniform", lambda low, high: high)
 
 
 class TestOpenAIUtils:
@@ -212,13 +212,13 @@ class TestOpenAIUtils:
     async def test_external_endpoint_retries_are_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         response = SimpleNamespace(status=504, content=SimpleNamespace(read=AsyncMock(return_value=b"")))
         request = AsyncMock(side_effect=[response] * MAX_NUM_TRIES + [SimpleNamespace(status=200)])
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", AsyncMock())
 
         async def raise_status(response, content=None):
             raise RuntimeError("bounded")
 
-        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.raise_for_status", raise_status)
 
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
         with pytest.raises(RuntimeError):
@@ -232,8 +232,8 @@ class TestOpenAIUtils:
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[failure, failure, success])
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
         payload = {"model": "judge", "input": [{"role": "user", "content": "preserved answer"}]}
         original = deepcopy(payload)
@@ -250,8 +250,8 @@ class TestOpenAIUtils:
         response = SimpleNamespace(status=400)
         request = AsyncMock(return_value=response)
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         assert await client._request_with_retry() is response
@@ -268,15 +268,15 @@ class TestOpenAIUtils:
         ]
         request = AsyncMock(side_effect=replies)
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
 
         async def raise_status(response, content=None):
             assert response is replies[-1]
             assert content == b"error body"
             raise RuntimeError("terminal error")
 
-        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.raise_for_status", raise_status)
         client = NeMoGymAsyncOpenAI(
             api_key="abc",
             base_url="https://example.com/v1",
@@ -331,8 +331,8 @@ class TestOpenAIUtils:
         response = SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=body)))
         request = AsyncMock(return_value=response)
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         with pytest.raises(PermanentEndpointError) as first:
@@ -356,8 +356,8 @@ class TestOpenAIUtils:
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[failure, success])
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         result = await client._request_with_retry(url="https://example.com/v1/responses")
@@ -374,8 +374,8 @@ class TestOpenAIUtils:
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[failure, success])
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         result = await client._request_with_retry(url="https://example.com/v1/responses")
@@ -394,8 +394,8 @@ class TestOpenAIUtils:
         ]
         request = AsyncMock(side_effect=replies)
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
         seen = {}
 
         async def raise_status(response, content=None):
@@ -403,7 +403,7 @@ class TestOpenAIUtils:
             seen["content"] = content
             raise RuntimeError("terminal 429")
 
-        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.raise_for_status", raise_status)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_rate_limit_wait_seconds=0)
 
         with pytest.raises(RuntimeError, match="terminal 429"):
@@ -423,8 +423,8 @@ class TestOpenAIUtils:
         )
         request = AsyncMock(return_value=response)
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         assert await client._request_with_retry() is response
@@ -438,8 +438,8 @@ class TestOpenAIUtils:
             content=SimpleNamespace(read=AsyncMock(return_value=b'{"error":{"code":"budget_exceeded"}}')),
         )
         request = AsyncMock(return_value=response)
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", AsyncMock())
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         with pytest.raises(PermanentEndpointError):
@@ -473,8 +473,8 @@ class TestOpenAIUtils:
         async def fake_sleep(_delay):
             await gate.wait()
 
-        monkeypatch.setattr("nemo_gym.openai_utils.request", fake_request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", fake_sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", fake_request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", fake_sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         first = asyncio.create_task(client._request_with_retry(url="https://example.com/v1/responses"))
@@ -489,8 +489,8 @@ class TestOpenAIUtils:
     async def test_create_chat_completion_surfaces_permanent_error_status(self, monkeypatch):
         body = b'{"error":{"code":"budget_exceeded"}}'
         response = SimpleNamespace(status=429, content=SimpleNamespace(read=AsyncMock(return_value=body)))
-        monkeypatch.setattr("nemo_gym.openai_utils.request", AsyncMock(return_value=response))
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", AsyncMock(return_value=response))
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", AsyncMock())
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         with pytest.raises(PermanentEndpointError) as exc_info:
@@ -515,7 +515,7 @@ class TestProviderBackoff:
     def test_waits_are_jittered_across_the_whole_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
         windows = []
         monkeypatch.setattr(
-            "nemo_gym.openai_utils.random.uniform", lambda low, high: windows.append((low, high)) or low
+            "nemo_gym.models.openai_utils.random.uniform", lambda low, high: windows.append((low, high)) or low
         )
         assert openai_utils_module._retry_wait_seconds(3, _busy()) == 0.0
         assert windows == [(0, 4.0)]
@@ -534,7 +534,7 @@ class TestProviderBackoff:
             def now(cls, tz=None):
                 return datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc)
 
-        monkeypatch.setattr("nemo_gym.openai_utils.datetime", _Now)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.datetime", _Now)
         for retry_after in ("Mon, 19 Oct 2026 12:00:20 GMT", "Mon, 19 Oct 2026 12:00:20 -0000"):
             assert openai_utils_module._retry_wait_seconds(1, _busy(retry_after=retry_after)) == 20.0
 
@@ -544,13 +544,13 @@ class TestProviderBackoff:
     ) -> None:
         request = AsyncMock(return_value=_busy(status))
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
 
         async def raise_status(response, content=None):
             raise RuntimeError("still busy")
 
-        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.raise_for_status", raise_status)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", max_rate_limit_wait_seconds=200)
 
         with pytest.raises(RuntimeError, match="still busy"):
@@ -566,7 +566,7 @@ class TestProviderBackoff:
     ) -> None:
         windows = []
         monkeypatch.setattr(
-            "nemo_gym.openai_utils.random.uniform", lambda low, high: windows.append((low, high)) or low
+            "nemo_gym.models.openai_utils.random.uniform", lambda low, high: windows.append((low, high)) or low
         )
         openai_utils_module._retry_wait_seconds(tries, _busy())
         assert windows == [(0, 60.0)]
@@ -576,8 +576,8 @@ class TestProviderBackoff:
     ) -> None:
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[_busy(429)] * 1025 + [success])
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", AsyncMock())
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://127.0.0.1:8000/v1", internal=True)
 
         assert await client._request_with_retry(url="http://127.0.0.1:8000/v1/responses") is success
@@ -589,13 +589,13 @@ class TestProviderBackoff:
     ) -> None:
         request = AsyncMock(return_value=_busy(status, retry_after="1"))
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
 
         async def raise_status(response, content=None):
             raise RuntimeError("still busy")
 
-        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.raise_for_status", raise_status)
         client = NeMoGymAsyncOpenAI(
             api_key="abc", base_url="https://example.com/v1", max_http_attempts=36, max_rate_limit_wait_seconds=2
         )
@@ -610,14 +610,14 @@ class TestProviderBackoff:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         request = AsyncMock(return_value=_busy(503))
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
-        monkeypatch.setattr("nemo_gym.openai_utils.random.uniform", lambda low, high: 0.0)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.models.openai_utils.random.uniform", lambda low, high: 0.0)
 
         async def raise_status(response, content=None):
             raise RuntimeError("still busy")
 
-        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", raise_status)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.raise_for_status", raise_status)
         client = NeMoGymAsyncOpenAI(
             api_key="abc", base_url="https://example.com/v1", max_http_attempts=3, max_rate_limit_wait_seconds=0
         )
@@ -631,8 +631,8 @@ class TestProviderBackoff:
         success = SimpleNamespace(status=200)
         request = AsyncMock(side_effect=[_busy(retry_after="3"), success])
         sleep = AsyncMock()
-        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", sleep)
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
 
         assert await client._request_with_retry(url="https://example.com/v1/responses") is success

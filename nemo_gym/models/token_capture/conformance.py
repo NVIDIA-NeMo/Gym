@@ -30,15 +30,15 @@ from __future__ import annotations
 import warnings
 from typing import Awaitable, Callable
 
-from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.lineage import stamp_continuation
+from nemo_gym.models.token_capture.protocols import (
     LineageResolver,
     TokenCaptureFrozenError,
     TokenCaptureRetiredError,
     TokenSink,
     TokenSource,
 )
-from nemo_gym.token_id_capture.records import (
+from nemo_gym.models.token_capture.records import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     ParentResolutionStatus,
     TokenEntry,

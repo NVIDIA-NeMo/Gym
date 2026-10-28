@@ -50,7 +50,7 @@ cannot change the sample that was already delivered, so it must not stale the re
 consumed snapshot. After the rollout is retired it must fail with ``TokenCaptureRetiredError``,
 like every other write.
 
-``nemo_gym.token_id_capture.conformance`` checks an external implementation against these contracts.
+``nemo_gym.models.token_capture.conformance`` checks an external implementation against these contracts.
 """
 
 from __future__ import annotations
@@ -59,8 +59,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, TypedDict, runtime_checkable
 
-from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
-from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+from nemo_gym.models.token_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
+from nemo_gym.models.token_capture.staging.records import CaptureLedgerCommit
 
 
 # Internal worker acknowledgement: this call was refused before generation or staging.
@@ -176,7 +176,7 @@ class LineageResolver(Protocol):
     ``resolve`` must return ``UNRESOLVED`` when it cannot prove one parent.
     The offline builder independently re-verifies every claimed link by digest.
     External implementations should embed Gym's ``RolloutLineage`` matcher rather than reimplement the hashing.
-    ``nemo_gym.token_id_capture.lineage`` is importable without the server stack.
+    ``nemo_gym.models.token_capture.lineage`` is importable without the server stack.
     Callers of ``commit_entry`` outside ``capture_tokens`` must run ``stamp_continuation`` themselves.
     Unstamped entries are invisible to resolution.
     """

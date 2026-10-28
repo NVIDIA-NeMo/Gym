@@ -34,9 +34,9 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
-from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
+from nemo_gym.models.token_capture.lineage import stamp_continuation
+from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
     CaptureLedger,
@@ -47,7 +47,7 @@ from nemo_gym.token_id_capture.protocols import (
     TokenCaptureFrozenError,
     TokenSink,
 )
-from nemo_gym.token_id_capture.records import (
+from nemo_gym.models.token_capture.records import (
     ENGINE_REFUSED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
@@ -63,7 +63,7 @@ from nemo_gym.token_id_capture.records import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, CaptureLedgerCommit
+    from nemo_gym.models.token_capture.staging.records import CaptureAdmission, CaptureLedgerCommit
 
 # Wire field names between the Gym model server and a framework inference
 # worker: the typed admission rides the engine-bound request under
@@ -282,7 +282,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         raise RuntimeError("external staging requires a CaptureLedger on the capture context")
 
     # Deferred: staging.records pulls in the digest module.
-    from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+    from nemo_gym.models.token_capture.staging.records import CaptureAdmission
 
     match = context.parent_resolution.match if context.parent_resolution is not None else None
     if match is not None:
@@ -352,8 +352,8 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
     RL still verifies the renderer and converted-message boundary.
     """
     # Deferred to avoid the staging records/sink import cycle.
-    from nemo_gym.token_id_capture.replay import replay_context, same_replay_source, summarize_replay
-    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, RolloutManifest, RootReason
+    from nemo_gym.models.token_capture.replay import replay_context, same_replay_source, summarize_replay
+    from nemo_gym.models.token_capture.staging.records import CaptureAdmission, RolloutManifest, RootReason
 
     if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
         raise ValueError("Source-history parent resolution requires an external capture ledger")

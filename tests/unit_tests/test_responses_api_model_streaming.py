@@ -48,8 +48,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputItem,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.responses_streaming import (
+from nemo_gym.models.chat_completions_converter import ResponsesConverter
+from nemo_gym.models.responses_streaming import (
     flatten_namespace_tools,
     is_responses_lifecycle_chunk,
     sanitize_streaming_responses_body,

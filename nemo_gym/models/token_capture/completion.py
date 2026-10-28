@@ -5,11 +5,11 @@
 
 from typing import Any
 
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
-from nemo_gym.token_id_capture.records import response_to_output_items, strip_token_fields
-from nemo_gym.token_id_capture.replay import replay_context
-from nemo_gym.token_id_capture.staging.records import CompletionStatus, OutputValidationItem
+from nemo_gym.models.chat_completions_converter import ResponsesConverter
+from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
+from nemo_gym.models.token_capture.records import response_to_output_items, strip_token_fields
+from nemo_gym.models.token_capture.replay import replay_context
+from nemo_gym.models.token_capture.staging.records import CompletionStatus, OutputValidationItem
 
 
 def completion_items(response: dict[str, Any]) -> list[dict]:

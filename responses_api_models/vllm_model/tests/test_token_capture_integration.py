@@ -9,11 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.base_responses_api_model import _CaptureMiddleware
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.anthropic_converter import AnthropicConverter
+from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models.token_capture import (
     CaptureContext,
     FileLineageStore,
     InMemoryLineageStore,
@@ -28,11 +28,11 @@ from nemo_gym.token_id_capture import (
     set_token_sink,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
-from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission, StageResult
+from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
+from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
+from nemo_gym.models.token_capture.staging.capture import RolloutTokenCapture
+from nemo_gym.models.token_capture.staging.records import CaptureAdmission, StageResult
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 

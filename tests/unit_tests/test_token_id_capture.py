@@ -54,8 +54,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.observability.model_calls import read_model_call_records
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.token_capture import (
     TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
@@ -80,26 +79,27 @@ from nemo_gym.token_id_capture import (
     stamp_continuation,
     stamp_lineage,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
-from nemo_gym.token_id_capture.lineage import (
+from nemo_gym.models.token_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
+from nemo_gym.models.token_capture.lineage import (
     FileLineageStore,
     LineageIndex,
     RolloutLineage,
 )
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.protocols import (
     LineageMatch,
     TokenCaptureFrozenError,
     TokenCaptureRetiredError,
     TokenSource,
 )
-from nemo_gym.token_id_capture.records import (
+from nemo_gym.models.token_capture.records import (
     ENGINE_REFUSED_CALL_REASON,
     UNCOMMITTED_CALL_REASON,
     UNSERVED_CALL_FAILURE_REASONS,
     response_finish_reason,
 )
-from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.models.token_capture.store import make_token_store
+from nemo_gym.observability.model_calls import read_model_call_records
 
 
 _ASSISTANT_TURN = {
@@ -502,8 +502,8 @@ def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_d
     context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
     token = set_token_sink(context)
     try:
-        with patch("nemo_gym.token_id_capture.sink._REFUSE_CALL_MISSING_NOTED", [False]):
-            with caplog.at_level(logging.WARNING, logger="nemo_gym.token_id_capture.sink"):
+        with patch("nemo_gym.models.token_capture.sink._REFUSE_CALL_MISSING_NOTED", [False]):
+            with caplog.at_level(logging.WARNING, logger="nemo_gym.models.token_capture.sink"):
                 asyncio.run(register_call_intent())
                 asyncio.run(capture_engine_refusal("context_length_exceeded"))
                 asyncio.run(capture_engine_refusal("context_length_exceeded"))
@@ -518,7 +518,7 @@ def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_d
 
 def test_the_unserved_call_reasons_are_the_refusal_and_the_uncommitted_call():
     """Pin the set a framework's receipt builder treats as off-chain rather than poisoning."""
-    import nemo_gym.token_id_capture as token_id_capture
+    import nemo_gym.models.token_capture as token_id_capture
 
     assert UNSERVED_CALL_FAILURE_REASONS == frozenset({UNCOMMITTED_CALL_REASON, ENGINE_REFUSED_CALL_REASON})
     # NeMo RL reads both names from the package root with a getattr fallback, so a dropped export
@@ -537,7 +537,7 @@ def test_record_refusal_never_raises(caplog):
     context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
     token = set_token_sink(context)
     try:
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.token_id_capture.sink"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.models.token_capture.sink"):
             asyncio.run(capture_engine_refusal("context_length_exceeded"))
     finally:
         reset_token_sink(token)
@@ -849,7 +849,7 @@ def test_token_store_sync_failure_after_an_error_does_not_hide_the_error(tmp_pat
 
 
 def test_a_late_build_failure_after_retire_is_not_counted_as_a_capture_failure(tmp_path, caplog):
-    from nemo_gym.token_id_capture import sink as sink_module
+    from nemo_gym.models.token_capture import sink as sink_module
 
     store = TokenCaptureStore(tmp_path)
     _store_entry(store, "abandoned")
@@ -1613,7 +1613,7 @@ def test_package_is_dependency_free_leaf():
     """
     heavy = ("ray", "fastapi", "uvicorn", "aiohttp", "requests", "torch")
     program = (
-        f"import sys; import nemo_gym.token_id_capture; print(','.join(m for m in {heavy!r} if m in sys.modules))"
+        f"import sys; import nemo_gym.models.token_capture; print(','.join(m for m in {heavy!r} if m in sys.modules))"
     )
     proc = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
@@ -1936,7 +1936,7 @@ def test_a_sink_without_mark_incomplete_is_refused_at_install():
         async def put(self, entry):
             raise RuntimeError("transport down")
 
-    from nemo_gym.token_id_capture import installed_token_sink
+    from nemo_gym.models.token_capture import installed_token_sink
 
     with pytest.raises(TypeError, match="mark_incomplete"):
         install_token_sink(_PutOnlySink())
@@ -1994,7 +1994,7 @@ def test_a_malformed_token_payload_does_not_fail_the_model_call(installed_sink):
         # Stand in for a payload that fails validation, e.g. token ids that are not integers.
         raise ValueError("prompt_token_ids: not a list of ints")
 
-    with patch("nemo_gym.token_id_capture.sink.TokenEntry", _bad_entry):
+    with patch("nemo_gym.models.token_capture.sink.TokenEntry", _bad_entry):
         client = TestClient(
             _server(
                 {
@@ -2960,7 +2960,7 @@ def test_a_sink_whose_protocol_member_is_not_callable_is_refused():
 
 @pytest.mark.parametrize(
     "target, expected",
-    [("no_colon", "module.path:ClassName"), ("nemo_gym.token_id_capture:Nope", "could not load")],
+    [("no_colon", "module.path:ClassName"), ("nemo_gym.models.token_capture:Nope", "could not load")],
 )
 def test_a_malformed_sink_path_is_refused_at_startup(target, expected):
     config = TokenIdCaptureConfig.model_validate(
@@ -2995,7 +2995,7 @@ def test_a_programmatically_installed_sink_does_not_reach_a_spawned_worker():
 
 def _report_installed_sink(queue) -> None:
     # Runs in the spawned process, which re-imports rather than inheriting.
-    from nemo_gym.token_id_capture import installed_token_sink
+    from nemo_gym.models.token_capture import installed_token_sink
 
     queue.put(repr(installed_token_sink()))
 

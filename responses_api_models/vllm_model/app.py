@@ -59,13 +59,13 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models._checkpoint import note_generation_backend, note_generation_request
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.responses_converter import (
+from nemo_gym.models.chat_completions_converter import (
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models.token_capture import (
     CaptureContext,
     capture_engine_refusal,
     current_capture_context,
@@ -73,13 +73,13 @@ from nemo_gym.token_id_capture import (
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_config
-from nemo_gym.token_id_capture.external_capture import (
+from nemo_gym.models.token_capture.config import token_id_capture_config
+from nemo_gym.models.token_capture.external_capture import (
     ExternalCaptureHandler,
     make_external_capture_handler,
     validate_framework_context_options,
 )
-from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureAdmissionError, CaptureInputError
+from nemo_gym.models.token_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureAdmissionError, CaptureInputError
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 

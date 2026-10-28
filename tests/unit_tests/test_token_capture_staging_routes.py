@@ -8,8 +8,8 @@ import struct
 
 import pytest
 
-from nemo_gym.token_id_capture.staging.digest import compute_extras_digest
-from nemo_gym.token_id_capture.staging.routes import (
+from nemo_gym.models.token_capture.staging.digest import compute_extras_digest
+from nemo_gym.models.token_capture.staging.routes import (
     RouteSpanMode,
     classify_route_span,
     decode_routed_experts,

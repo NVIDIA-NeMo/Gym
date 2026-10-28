@@ -18,10 +18,10 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.token_id_capture import stamp_lineage
-from nemo_gym.token_id_capture.lineage import RolloutLineage, stamp_continuation
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
-from nemo_gym.token_id_capture.terminal import resolve_terminal
+from nemo_gym.models.token_capture import stamp_lineage
+from nemo_gym.models.token_capture.lineage import RolloutLineage, stamp_continuation
+from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry
+from nemo_gym.models.token_capture.terminal import resolve_terminal
 
 
 def _tool(call_id: str, name: str, arguments: str) -> dict:

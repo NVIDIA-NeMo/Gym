@@ -20,15 +20,15 @@ This namespace is separate from Gym's complete-record ``TokenSink`` and
 framework storage without importing serving or framework dependencies.
 """
 
-from nemo_gym.token_id_capture.staging.capture import (
+from nemo_gym.models.token_capture.staging.capture import (
     ActiveCall,
     CaptureError,
     CaptureHost,
     RolloutTokenCapture,
     StreamingUnsupportedError,
 )
-from nemo_gym.token_id_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
-from nemo_gym.token_id_capture.staging.digest import (
+from nemo_gym.models.token_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
+from nemo_gym.models.token_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
@@ -40,14 +40,14 @@ from nemo_gym.token_id_capture.staging.digest import (
     encode_token_ids,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.staging.protocols import (
+from nemo_gym.models.token_capture.staging.protocols import (
     CaptureAdapter,
     StagingSink,
     StagingSource,
     WeightVersionProvider,
     install_capture,
 )
-from nemo_gym.token_id_capture.staging.rebuild import (
+from nemo_gym.models.token_capture.staging.rebuild import (
     ExtrasCommitment,
     LinearizedRow,
     RebuildError,
@@ -56,7 +56,7 @@ from nemo_gym.token_id_capture.staging.rebuild import (
     linearize,
     verify_and_linearize,
 )
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     CallRecord,
     CaptureAdmission,
     CaptureDisposition,
@@ -71,7 +71,7 @@ from nemo_gym.token_id_capture.staging.records import (
     StageResult,
     staging_key,
 )
-from nemo_gym.token_id_capture.staging.routes import (
+from nemo_gym.models.token_capture.staging.routes import (
     MISSING_ROUTE_SENTINEL,
     RoutedExpertsFragment,
     RouteSpanMode,
@@ -80,14 +80,14 @@ from nemo_gym.token_id_capture.staging.routes import (
     encode_routed_experts,
     routed_experts_token_count,
 )
-from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
+from nemo_gym.models.token_capture.staging.terminal import TerminalSelection, select_terminal_call
 
 # Terminal selection is shared with the existing capture path.
 # Rows with a ``staging_key`` use their recorded response and content fingerprints.
 # A supplied ``declared_response_id`` must match exactly one row.
 # Terminal selection does not read staged tokens.
 # ``verify_and_linearize`` validates the selected token chain afterward.
-from nemo_gym.token_id_capture.terminal import (
+from nemo_gym.models.token_capture.terminal import (
     TerminalAttribution,
     resolve_terminal,
 )

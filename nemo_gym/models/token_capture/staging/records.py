@@ -32,13 +32,13 @@ from pydantic import (
 )
 from typing_extensions import TypedDict
 
-from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
+from nemo_gym.models.token_capture.records import (  # noqa: F401  (re-exported for staging consumers)
     LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
     LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
     UNCOMMITTED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
 )
-from nemo_gym.token_id_capture.staging.digest import (
+from nemo_gym.models.token_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,

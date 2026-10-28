@@ -17,23 +17,23 @@ from unittest.mock import patch
 
 import pytest
 
-from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
-from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
-from nemo_gym.token_id_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, compute_digest
-from nemo_gym.token_id_capture.sink import (
+from nemo_gym.models.token_capture.fingerprint import FINGERPRINT_VERSION
+from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
+from nemo_gym.models.token_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
+from nemo_gym.models.token_capture.records import ParentResolutionStatus, compute_digest
+from nemo_gym.models.token_capture.sink import (
     UNRESOLVED_PARENT_REASON,
     CaptureContext,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.staging.digest import (
+from nemo_gym.models.token_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
     compute_chain_hash,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     CallRecord,
     CaptureLedgerCommit,
     RolloutManifest,
@@ -167,7 +167,7 @@ def test_capture_ledger_type_hints_resolve_at_runtime():
     """``CaptureLedgerCommit`` must not hide behind TYPE_CHECKING (get_type_hints resolves it)."""
     import typing
 
-    from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+    from nemo_gym.models.token_capture.staging.records import CaptureLedgerCommit
 
     assert typing.get_type_hints(CaptureLedger.record)["commit"] is CaptureLedgerCommit
 
@@ -259,7 +259,7 @@ async def test_ledger_row_round_trips_the_finish_reason(store):
 
 def test_a_custody_row_without_the_finish_reason_column_reads_an_unstated_reason():
     """A row written before the column existed is still a valid manifest row."""
-    from nemo_gym.token_id_capture.lineage import _manifest_from_rows
+    from nemo_gym.models.token_capture.lineage import _manifest_from_rows
 
     row = {"model_call_id": "c1", **_custody_columns(_call_record("c1"), ("r1/c1",))}
     del row["finish_reason"]
@@ -509,7 +509,7 @@ async def test_lineage_only_rows_do_not_enter_the_manifest(tmp_path):
     """Local-capture rows (no custody columns) resolve but are not manifest rows."""
     import json
 
-    from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
+    from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
 
     store = FileLineageStore(tmp_path)
     lineage_only_row = {
@@ -536,8 +536,8 @@ async def test_custody_row_missing_a_chain_digest_poisons_the_manifest(tmp_path,
     """A committed row without either chain digest cannot anchor verification."""
     import json
 
-    from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
-    from nemo_gym.token_id_capture.records import LEDGER_ROW_MISSING_CHAIN_HASH_REASON
+    from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
+    from nemo_gym.models.token_capture.records import LEDGER_ROW_MISSING_CHAIN_HASH_REASON
 
     store = FileLineageStore(tmp_path)
     row = {
@@ -559,7 +559,7 @@ async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_
     """Unversioned pre-chain external rows cannot supply a parent token prefix."""
     import json
 
-    from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
+    from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
 
     store = FileLineageStore(tmp_path)
     legacy_row = {
@@ -594,9 +594,9 @@ async def test_unversioned_legacy_token_carrying_row_cannot_resolve_or_anchor_a_
 async def test_persisted_replay_and_output_round_trip_without_nested_schema_versions(tmp_path):
     import json
 
-    from nemo_gym.token_id_capture.completion import output_item_fingerprint
-    from nemo_gym.token_id_capture.replay import replay_context, summarize_replay
-    from nemo_gym.token_id_capture.staging.records import OutputItemEvidence
+    from nemo_gym.models.token_capture.completion import output_item_fingerprint
+    from nemo_gym.models.token_capture.replay import replay_context, summarize_replay
+    from nemo_gym.models.token_capture.staging.records import OutputItemEvidence
 
     store = FileLineageStore(tmp_path)
     record = _call_record("c1").model_copy(
@@ -817,8 +817,8 @@ async def test_reading_a_retired_rollouts_manifest_fails(store):
 def test_retire_and_delete_declare_their_result_shape():
     import typing
 
-    from nemo_gym.token_id_capture.protocols import TokenSource
-    from nemo_gym.token_id_capture.store import TokenCaptureStore
+    from nemo_gym.models.token_capture.protocols import TokenSource
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
 
     for method in (
         CaptureLedger.retire,

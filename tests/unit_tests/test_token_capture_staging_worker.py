@@ -11,19 +11,19 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.token_id_capture.adapters.megatron import MegatronCaptureAdapter
-from nemo_gym.token_id_capture.adapters.vllm import (
+from nemo_gym.models.token_capture.adapters.megatron import MegatronCaptureAdapter
+from nemo_gym.models.token_capture.adapters.vllm import (
     VLLMCaptureAdapter,
     extract_generation_token_info,
 )
-from nemo_gym.token_id_capture.sink import (
+from nemo_gym.models.token_capture.sink import (
     CaptureContext,
     capture_tokens,
     mark_external_staging_committed,
     reset_token_sink,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.staging import (
+from nemo_gym.models.token_capture.staging import (
     CaptureAdmission,
     GenerationCutContinuation,
     StagedCallRecord,
@@ -31,7 +31,7 @@ from nemo_gym.token_id_capture.staging import (
     compute_chain_hash,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.staging.capture import (
+from nemo_gym.models.token_capture.staging.capture import (
     CaptureError,
     CaptureHost,
     RolloutTokenCapture,
@@ -737,7 +737,7 @@ def test_vllm_rejects_malformed_media_spans() -> None:
 
 
 def test_staging_package_no_longer_exports_the_media_summary_helpers() -> None:
-    import nemo_gym.token_id_capture.staging as staging
+    import nemo_gym.models.token_capture.staging as staging
 
     for name in (
         "MEDIA_FIELD",
@@ -887,12 +887,12 @@ def test_external_commit_marker_rejects_cross_request_acknowledgement() -> None:
 def test_complete_call_computes_staging_digest_once(child: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import Mock
 
-    from nemo_gym.token_id_capture.staging import records
+    from nemo_gym.models.token_capture.staging import records
 
     compute = Mock(wraps=records.compute_staging_digest)
     monkeypatch.setattr(records, "compute_staging_digest", compute)
     # Also count the former caller-side alias if duplicate hashing is reintroduced.
-    monkeypatch.setattr("nemo_gym.token_id_capture.staging.capture.compute_staging_digest", compute, raising=False)
+    monkeypatch.setattr("nemo_gym.models.token_capture.staging.capture.compute_staging_digest", compute, raising=False)
     capture, sink = _capture(weight_version=7)
     coords = capture.complete_call(
         capture.begin_call(_child() if child else _root()),
@@ -951,12 +951,12 @@ def test_generation_cut_resume_rejects_a_prefix_built_on_other_parent_tokens() -
 def test_generation_chunk_record_computes_staging_digest_once(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import Mock
 
-    from nemo_gym.token_id_capture.staging import records
+    from nemo_gym.models.token_capture.staging import records
 
     compute = Mock(wraps=records.compute_staging_digest)
     monkeypatch.setattr(records, "compute_staging_digest", compute)
     # Also count a caller-side digest if the builder computes its own again.
-    monkeypatch.setattr("nemo_gym.token_id_capture.staging.capture.compute_staging_digest", compute, raising=False)
+    monkeypatch.setattr("nemo_gym.models.token_capture.staging.capture.compute_staging_digest", compute, raising=False)
     capture, _ = _capture(weight_version=7)
     chunk = capture.build_generation_chunk_record(
         capture.begin_call(_root()), generated_token_ids=[21, 22], generated_logprobs=[-0.25, -0.5]

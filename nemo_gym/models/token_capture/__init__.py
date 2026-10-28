@@ -26,7 +26,7 @@ Framework transports may provide their own sink and source.
 This leaf package avoids imports from Gym's server stack.
 The rollout-record finalizer needs Gym's server stack.
 It is deliberately not re-exported here.
-Import ``nemo_gym.token_id_capture.delivery`` from server-side code.
+Import ``nemo_gym.models.token_capture.delivery`` from server-side code.
 The incomplete state prevents training on a rollout that lost a model call.
 Finalization freezes and rebuilds the rollout.
 Finalization does not retire the snapshot.
@@ -35,7 +35,7 @@ Retirement uses the frozen ``snapshot_id`` and version.
 Failed or masked builds retain their capture evidence.
 """
 
-from nemo_gym.token_id_capture.builder import (
+from nemo_gym.models.token_capture.builder import (
     Chain,
     assert_prefix_contiguity,
     prefix_merging,
@@ -43,16 +43,16 @@ from nemo_gym.token_id_capture.builder import (
     project_main_chain_response,
     run_builder,
 )
-from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
-from nemo_gym.token_id_capture.consumer import (
+from nemo_gym.models.token_capture.config import TokenIdCaptureConfig
+from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
     mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, canonicalize_tool_arguments
-from nemo_gym.token_id_capture.lineage import (
+from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, canonicalize_tool_arguments
+from nemo_gym.models.token_capture.lineage import (
     FileLineageStore,
     IncrementalLineageStore,
     InMemoryLineageStore,
@@ -60,7 +60,7 @@ from nemo_gym.token_id_capture.lineage import (
     RolloutLineage,
     stamp_continuation,
 )
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.protocols import (
     CaptureLedger,
     LineageMatch,
     LineageResolution,
@@ -77,7 +77,7 @@ from nemo_gym.token_id_capture.protocols import (
     installed_token_sink,
     installed_token_source,
 )
-from nemo_gym.token_id_capture.records import (
+from nemo_gym.models.token_capture.records import (
     ENGINE_REFUSED_CALL_REASON,
     TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
@@ -95,7 +95,7 @@ from nemo_gym.token_id_capture.records import (
     incomplete_reason_for_finish_reason,
     stamp_lineage,
 )
-from nemo_gym.token_id_capture.sink import (
+from nemo_gym.models.token_capture.sink import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
     CaptureContext,
@@ -110,11 +110,11 @@ from nemo_gym.token_id_capture.sink import (
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     CallRecord,
     CaptureLedgerCommit,
 )
-from nemo_gym.token_id_capture.store import TokenCaptureStore, make_token_store, validate_rollout_id
+from nemo_gym.models.token_capture.store import TokenCaptureStore, make_token_store, validate_rollout_id
 
 
 __all__ = [

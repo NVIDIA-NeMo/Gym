@@ -230,7 +230,7 @@ class GymResponsesChatModel(BaseChatModel):
         raise NotImplementedError("GymResponsesChatModel is async-only; use ainvoke/astream_events.")
 
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
-        # Gym's FunctionToolParam (nemo_gym/openai_utils.py, a passthrough of the real OpenAI Responses
+        # Gym's FunctionToolParam (nemo_gym/models/openai_utils.py, a passthrough of the real OpenAI Responses
         # API type) requires "strict" as a present-but-nullable field — omitting it entirely fails
         # request validation ("Field required"), confirmed by actually running this against a live
         # model server. convert_to_openai_tool()'s "function" dict doesn't include it by default.

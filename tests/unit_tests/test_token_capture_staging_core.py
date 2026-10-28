@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.token_id_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
-from nemo_gym.token_id_capture.staging.digest import (
+from nemo_gym.models.token_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
+from nemo_gym.models.token_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
     STAGING_DIGEST_VERSION,
     STAGING_SCHEMA_VERSION,
@@ -32,7 +32,7 @@ from nemo_gym.token_id_capture.staging.digest import (
     compute_staging_digest,
     encode_token_ids,
 )
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     CallRecord,
     CaptureAdmission,
     CaptureLedgerCommit,
@@ -426,15 +426,15 @@ def test_rollout_receipt_rejects_inconsistent_attribution_state(fields: dict, ma
 
 
 def test_staging_namespace_has_no_serving_or_framework_dependencies() -> None:
-    import nemo_gym.token_id_capture.staging as staging
+    import nemo_gym.models.token_capture.staging as staging
 
     root = Path(staging.__file__).parent
-    modules = ["nemo_gym.token_id_capture.staging"]
+    modules = ["nemo_gym.models.token_capture.staging"]
     for path in sorted(root.rglob("*.py")):
         relative = path.relative_to(root).with_suffix("")
         parts = [part for part in relative.parts if part != "__init__"]
         if parts:
-            modules.append(".".join(["nemo_gym.token_id_capture.staging", *parts]))
+            modules.append(".".join(["nemo_gym.models.token_capture.staging", *parts]))
     forbidden = ("fastapi", "ray", "torch", "transfer_queue", "aiohttp")
     for module in modules:
         code = (
@@ -450,7 +450,7 @@ def test_bulk_column_encodings_match_scalar_v2_bytes(length: int) -> None:
     import random
     import struct
 
-    from nemo_gym.token_id_capture.staging.digest import _encode_float32_values
+    from nemo_gym.models.token_capture.staging.digest import _encode_float32_values
 
     rng = random.Random(4319)
     tokens = [rng.randrange(2**64) for _ in range(length)]
@@ -475,7 +475,7 @@ def test_bulk_token_encoding_retains_strict_uint_validation(bad: object) -> None
 
 @pytest.mark.parametrize("bad", [True, 1, math.nan, math.inf, -math.inf, 1e39, -1e39])
 def test_bulk_float_encoding_retains_strict_finite_float32_validation(bad: object) -> None:
-    from nemo_gym.token_id_capture.staging.digest import _encode_float32_values
+    from nemo_gym.models.token_capture.staging.digest import _encode_float32_values
 
     with pytest.raises(ValueError, match="finite Python floats|float32"):
         _encode_float32_values([0.0, bad], field="test")
@@ -491,7 +491,7 @@ def _local_record_components() -> dict:
 def test_local_record_builder_hashes_once_and_preserves_wire_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import Mock
 
-    from nemo_gym.token_id_capture.staging import records
+    from nemo_gym.models.token_capture.staging import records
 
     expected = _record_payload()
     components = _local_record_components()

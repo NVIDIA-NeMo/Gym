@@ -44,7 +44,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.server_runtime.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,

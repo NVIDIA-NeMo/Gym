@@ -21,7 +21,7 @@ import json
 from importlib.resources import files
 from typing import Any
 
-from nemo_gym.token_id_capture.staging.digest import compute_extras_digest, compute_staging_digest
+from nemo_gym.models.token_capture.staging.digest import compute_extras_digest, compute_staging_digest
 
 
 def load_golden_vectors() -> dict[str, Any]:

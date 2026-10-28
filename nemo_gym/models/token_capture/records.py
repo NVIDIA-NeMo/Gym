@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Separator between a namespace tool's group name and a member tool's name when
 # the group is flattened into plain function tools for a chat-completions
-# engine (``nemo_gym.responses_streaming``). Defined here because terminal
+# engine (``nemo_gym.models.responses_streaming``). Defined here because terminal
 # attribution needs it to strip the group name from a recorded call, and this
 # package must not import the server stack.
 NAMESPACE_TOOL_DELIMITER = "__"
@@ -364,7 +364,7 @@ def response_to_output_items(payload: dict) -> list[dict]:
 # continued the terminal call for the context window (``builder.project_main_chain_response``).
 MAX_OUTPUT_TOKENS_INCOMPLETE_REASON = "max_output_tokens"
 # ``incomplete_details.reason`` values of a Responses payload, keyed to the chat finish
-# reasons that ``nemo_gym.responses_converter`` maps onto them.
+# reasons that ``nemo_gym.models.chat_completions_converter`` maps onto them.
 _INCOMPLETE_REASON_TO_FINISH_REASON = {
     MAX_OUTPUT_TOKENS_INCOMPLETE_REASON: "length",
     "content_filter": "content_filter",
@@ -377,7 +377,7 @@ _FINISH_REASON_TO_INCOMPLETE_REASON = {
 }
 
 # The Chat Completions finish reason behind each Anthropic Messages ``stop_reason``: the inverse of
-# the table ``nemo_gym.anthropic_converter`` applies when it serves a Responses payload as a
+# the table ``nemo_gym.models.anthropic_converter`` applies when it serves a Responses payload as a
 # Messages response.
 _STOP_REASON_TO_FINISH_REASON = {
     "end_turn": "stop",

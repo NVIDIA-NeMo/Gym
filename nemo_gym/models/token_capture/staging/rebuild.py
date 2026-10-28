@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from nemo_gym.core.episode import EpisodeId
-from nemo_gym.token_id_capture.records import FINISH_REASON_DISAGREEMENT_REASON, incomplete_reason_for_finish_reason
-from nemo_gym.token_id_capture.staging.digest import (
+from nemo_gym.models.token_capture.records import FINISH_REASON_DISAGREEMENT_REASON, incomplete_reason_for_finish_reason
+from nemo_gym.models.token_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
     STAGING_SCHEMA_VERSION,
@@ -24,7 +24,7 @@ from nemo_gym.token_id_capture.staging.digest import (
     compute_staging_digest,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     CallRecord,
     RolloutReceipt,
     StagedCallBaseSnapshot,
@@ -110,7 +110,7 @@ class LinearizedRow:
         no verdict rather than one that follows the call-id order of identical retries.
 
         A framework consumer puts this verdict on the harness response with
-        ``nemo_gym.token_id_capture.apply_capture_incomplete_verdict``, the precedence rule the
+        ``nemo_gym.models.token_capture.apply_capture_incomplete_verdict``, the precedence rule the
         local delivery applies as well: a harness that reported ``incomplete`` or ``failed``
         itself keeps its own verdict, and only a response that reported ``completed`` or no
         status takes this one.

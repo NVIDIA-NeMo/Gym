@@ -39,8 +39,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models.chat_completions_converter import ResponsesConverter
+from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 
 

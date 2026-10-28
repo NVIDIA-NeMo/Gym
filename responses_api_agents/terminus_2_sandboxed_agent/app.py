@@ -52,7 +52,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config

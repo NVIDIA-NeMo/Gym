@@ -9,14 +9,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from nemo_gym.token_id_capture import control_routes
-from nemo_gym.token_id_capture.control_routes import (
+from nemo_gym.models.token_capture import control_routes
+from nemo_gym.models.token_capture.control_routes import (
     CONTROL_ROUTE_PREFIX,
     RolloutControlClient,
     install_rollout_control_routes,
 )
-from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.protocols import RolloutRetiredError
+from nemo_gym.models.token_capture.lineage import FileLineageStore
+from nemo_gym.models.token_capture.protocols import RolloutRetiredError
 
 
 TOKEN = "secret"

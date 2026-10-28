@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     TERMINAL_AMBIGUOUS,
     TERMINAL_DUPLICATE_CALL_ID,
     TERMINAL_NO_RECORDS,

@@ -43,7 +43,7 @@ from openai.types.responses.response_create_params import ToolParam
 from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseInputItem
-from nemo_gym.token_id_capture.records import NAMESPACE_TOOL_DELIMITER
+from nemo_gym.models.token_capture.records import NAMESPACE_TOOL_DELIMITER
 
 
 LOG = logging.getLogger(__name__)

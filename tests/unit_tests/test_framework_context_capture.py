@@ -7,17 +7,17 @@ import asyncio
 
 import pytest
 
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.replay import replay_context, summarize_replay
-from nemo_gym.token_id_capture.sink import (
+from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
+from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.models.token_capture.replay import replay_context, summarize_replay
+from nemo_gym.models.token_capture.sink import (
     CaptureContext,
     register_call_intent,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+from nemo_gym.models.token_capture.staging.records import CaptureAdmission
 from tests.unit_tests.test_external_capture_handlers import _staged_coords
 
 
@@ -266,7 +266,7 @@ async def test_intent_is_atomic_and_unknown_ack_is_retained(ledger):
 async def test_commit_resolves_its_intent(ledger):
     await ledger.begin_call("rollout-1", "c1")
     # The HTTP admission normally precedes begin_call; finish this already admitted call directly.
-    from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
+    from nemo_gym.models.token_capture.staging.records import CallRecord, CaptureLedgerCommit
 
     coords = _staged_coords(model_call_id="c1", staging_key="rollout-1/c1")
     fields = {name: value for name, value in coords.items() if name in CallRecord.model_fields}

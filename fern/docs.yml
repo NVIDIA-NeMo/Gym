@@ -229,6 +229,21 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/server_runtime/runtime_dir"
   - source: "/nemo/gym/nemo-gym/nemo_gym/observability/verifiers"
     destination: "/nemo/gym/nemo-gym/nemo_gym/server_runtime/verifier_observability"
+  # Library reference pages of modules moved into nemo_gym/models (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/openai_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/openai_utils"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/anthropic_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/anthropic_utils"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/anthropic_converter"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/anthropic_converter"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/responses_converter"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/chat_completions_converter"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/chat_streaming"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/chat_streaming"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/responses_streaming"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/responses_streaming"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/token_id_capture"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/token_capture"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

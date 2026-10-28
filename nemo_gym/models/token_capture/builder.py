@@ -40,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nemo_gym.token_id_capture.records import (
+from nemo_gym.models.token_capture.records import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     MAX_OUTPUT_TOKENS_INCOMPLETE_REASON,
     EngineRefusalRecord,

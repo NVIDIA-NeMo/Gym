@@ -56,7 +56,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models.chat_completions_converter import ResponsesConverter
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.agent_tools import (
     restricted_network_policy,

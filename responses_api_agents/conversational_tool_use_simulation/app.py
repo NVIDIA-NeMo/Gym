@@ -44,7 +44,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.responses_converter import split_responses_input_output_items
+from nemo_gym.models.chat_completions_converter import split_responses_input_output_items
 from nemo_gym.server_runtime.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,

@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
-from nemo_gym.token_id_capture.staging.records import CallRecord
-from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
+from nemo_gym.models.token_capture.staging.digest import EMPTY_EXTRAS_DIGEST
+from nemo_gym.models.token_capture.staging.records import CallRecord
+from nemo_gym.models.token_capture.staging.terminal import TerminalSelection, select_terminal_call
 
 
 DIGEST = "b" * 64

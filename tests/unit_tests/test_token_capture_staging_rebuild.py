@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.token_id_capture.staging.digest import (
+from nemo_gym.models.token_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,
     STAGING_DIGEST_VERSION,
     STAGING_SCHEMA_VERSION,
@@ -16,11 +16,11 @@ from nemo_gym.token_id_capture.staging.digest import (
     compute_staging_digest,
     hash_token_ids,
 )
-from nemo_gym.token_id_capture.staging.rebuild import (
+from nemo_gym.models.token_capture.staging.rebuild import (
     ReceiptVerificationError,
     verify_and_linearize,
 )
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.staging.records import (
     CallRecord,
     RolloutReceipt,
     StagedCallBaseSnapshot,

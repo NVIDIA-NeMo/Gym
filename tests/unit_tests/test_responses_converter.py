@@ -47,8 +47,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymSummary,
     training_variant_of,
 )
-from nemo_gym.observability.model_calls import _cache_signal
-from nemo_gym.responses_converter import (
+from nemo_gym.models.chat_completions_converter import (
     ResponsesConverter,
     ResponsesConverterState,
     VLLMConverter,
@@ -57,6 +56,7 @@ from nemo_gym.responses_converter import (
     chat_completion_usage_to_response_usage,
     split_responses_input_output_items,
 )
+from nemo_gym.observability.model_calls import _cache_signal
 
 
 FIXED_UUID = "123"
@@ -109,7 +109,7 @@ def converter() -> ResponsesConverter:
 
 @pytest.fixture(autouse=True)
 def _fixed_uuid(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+    monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
 
 # ===========================================================================
@@ -617,7 +617,7 @@ def test_responses_to_chat_completion_renders_a_function_output_image_as_a_place
         ]
     )
 
-    with caplog.at_level(logging.DEBUG, logger="nemo_gym.responses_converter"):
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.models.chat_completions_converter"):
         params = converter.responses_to_chat_completion_create_params(
             responses_params, drop_unrepresentable_request_fields=True
         )
@@ -2140,7 +2140,7 @@ def test_downconverting_drops_a_reasoning_context_the_conversion_behaves_as_when
         reasoning={"effort": "high", "summary": "auto", "context": context},
     )
 
-    with caplog.at_level("DEBUG", logger="nemo_gym.responses_converter"):
+    with caplog.at_level("DEBUG", logger="nemo_gym.models.chat_completions_converter"):
         converted = converter.responses_to_chat_completion_create_params(
             params, drop_unrepresentable_request_fields=True
         )

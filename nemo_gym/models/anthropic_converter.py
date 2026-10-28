@@ -52,7 +52,6 @@ from uuid import uuid4
 # (response) is the BaseModel used to validate what we emit.
 from anthropic.types.message_create_params import MessageCreateParams
 
-from nemo_gym.anthropic_utils import NeMoGymAnthropicMessage
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -67,6 +66,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.models.anthropic_utils import NeMoGymAnthropicMessage
 
 
 SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}

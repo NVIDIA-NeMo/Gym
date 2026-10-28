@@ -14,7 +14,7 @@
 # limitations under the License.
 """NeMo Gym Pydantic types for the Anthropic Messages API boundary.
 
-This mirrors the wrapping strategy in ``nemo_gym/openai_utils.py``, but deliberately stays
+This mirrors the wrapping strategy in ``nemo_gym/models/openai_utils.py``, but deliberately stays
 small. Anthropic is only a *wire format* at the proxy boundary — the internal canonical
 representation is the Responses API (the ``NeMoGym*`` types in ``openai_utils``). So unlike
 ``openai_utils``, this module does not replicate the ``*ForTraining`` hierarchies or an async

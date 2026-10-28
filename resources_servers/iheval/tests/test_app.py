@@ -26,7 +26,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models.chat_completions_converter import ResponsesConverter
 from resources_servers.iheval.app import (
     IHEvalResourcesServer,
     IHEvalResourcesServerConfig,

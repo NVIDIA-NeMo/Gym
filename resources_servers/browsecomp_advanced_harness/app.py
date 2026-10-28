@@ -43,7 +43,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.openai_utils import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES
+from nemo_gym.models.openai_utils import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,

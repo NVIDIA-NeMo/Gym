@@ -79,7 +79,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from nemo_gym.token_id_capture.fingerprint import (
+from nemo_gym.models.token_capture.fingerprint import (
     FINGERPRINT_VERSION,
     _content_of,
     _is_assistant_authored,
@@ -88,7 +88,11 @@ from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments,
     tool_call_turn_fingerprint,
 )
-from nemo_gym.token_id_capture.records import FINISH_REASON_DISAGREEMENT_REASON, NAMESPACE_TOOL_DELIMITER, TokenEntry
+from nemo_gym.models.token_capture.records import (
+    FINISH_REASON_DISAGREEMENT_REASON,
+    NAMESPACE_TOOL_DELIMITER,
+    TokenEntry,
+)
 
 
 @dataclass(frozen=True)

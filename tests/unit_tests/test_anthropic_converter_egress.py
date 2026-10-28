@@ -21,8 +21,8 @@ import json
 
 import pytest
 
-from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.models.anthropic_converter import AnthropicConverter
 
 
 class TestAnthropicConverter:

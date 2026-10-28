@@ -19,8 +19,8 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.token_id_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
-from nemo_gym.token_id_capture.staging.records import RolloutManifest, RolloutRemoval
+from nemo_gym.models.token_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
+from nemo_gym.models.token_capture.staging.records import RolloutManifest, RolloutRemoval
 
 
 CONTROL_ROUTE_PREFIX = "/training-token-capture/control"
@@ -141,7 +141,7 @@ class RolloutControlClient:
 
     async def manifest(self, rollout_id: str) -> RolloutManifest:
         """Fetch a rollout's manifest. A retired rollout raises ``RolloutRetiredError``."""
-        from nemo_gym.token_id_capture.store import validate_rollout_id
+        from nemo_gym.models.token_capture.store import validate_rollout_id
 
         # Validate before building the URL: dot segments are normalized, so "../rollouts/r1" would fetch r1.
         validate_rollout_id(rollout_id)
@@ -166,7 +166,7 @@ class RolloutControlClient:
         return await self._remove("delete", rollout_ids)
 
     async def _remove(self, action: str, rollout_ids: Sequence[str]) -> RolloutRemoval:
-        from nemo_gym.token_id_capture.store import validate_rollout_ids
+        from nemo_gym.models.token_capture.store import validate_rollout_ids
 
         # Validate and deduplicate the whole list before the first request. Batch by batch, a bare string
         # would become one-character IDs, an invalid ID in a later batch would fail after earlier batches

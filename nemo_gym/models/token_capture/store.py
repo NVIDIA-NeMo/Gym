@@ -42,13 +42,13 @@ from uuid import uuid4
 
 import orjson
 
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.protocols import (
     RolloutRemovalPayload,
     TokenCaptureFrozenError,
     TokenCaptureRetiredError,
     TokenCaptureSnapshot,
 )
-from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
+from nemo_gym.models.token_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
 
 
 logger = logging.getLogger(__name__)
@@ -594,7 +594,7 @@ def make_token_store(global_config_dict: Any) -> TokenCaptureStore | None:
     Return ``None`` when no directory resolves.
     Return ``None`` when a custom sink owns the records.
     """
-    from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+    from nemo_gym.models.token_capture.config import TokenIdCaptureConfig
 
     config = TokenIdCaptureConfig.model_validate(global_config_dict)
     if not config.enabled or config.token_id_capture.sink is not None:

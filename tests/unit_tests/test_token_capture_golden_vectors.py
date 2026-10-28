@@ -11,12 +11,12 @@ Do not regenerate the vectors to hide an unintended change.
 
 import pytest
 
-from nemo_gym.token_id_capture.fingerprint import (
+from nemo_gym.models.token_capture.fingerprint import (
     assistant_fingerprint,
     canonicalize_tool_arguments,
     conversation_digest,
 )
-from nemo_gym.token_id_capture.records import compute_digest
+from nemo_gym.models.token_capture.records import compute_digest
 
 
 VECTORS = {

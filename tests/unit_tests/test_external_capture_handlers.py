@@ -10,15 +10,15 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.token_id_capture.external_capture import (
+from nemo_gym.models.token_capture.external_capture import (
     MegatronWorkerCaptureHandler,
     VLLMWorkerCaptureHandler,
     make_external_capture_handler,
 )
-from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.replay import replay_context
-from nemo_gym.token_id_capture.sink import CaptureContext, reset_token_sink, set_token_sink
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.models.token_capture.replay import replay_context
+from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
+from nemo_gym.models.token_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
     WORKER_CAPTURE_FAILED_REASON,
     WORKER_MISSING_COMMIT_COORDS_REASON,
@@ -470,7 +470,7 @@ async def test_handler_logs_and_continues_when_poisoning_also_fails(handler_cls,
     payload = _transport_payload()
     payload["ng_commit_coords"] = _staged_coords()
 
-    with caplog.at_level(logging.ERROR, logger="nemo_gym.token_id_capture.external_capture"):
+    with caplog.at_level(logging.ERROR, logger="nemo_gym.models.token_capture.external_capture"):
         # Must return normally: a valid completion is never turned into a harness failure.
         await _prepare_and_finalize(handler, context, payload)
 

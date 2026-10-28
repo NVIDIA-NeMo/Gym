@@ -40,7 +40,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_converter import VLLMConverter, _usage_detail
+from nemo_gym.models.chat_completions_converter import VLLMConverter, _usage_detail
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 

@@ -13,8 +13,8 @@ import hashlib
 import json
 from typing import Any
 
-from nemo_gym.token_id_capture.records import strip_token_fields
-from nemo_gym.token_id_capture.staging.records import ReplayContext, ReplayItem, ReplaySummary
+from nemo_gym.models.token_capture.records import strip_token_fields
+from nemo_gym.models.token_capture.staging.records import ReplayContext, ReplayItem, ReplaySummary
 
 
 def _digest(value: Any) -> str:

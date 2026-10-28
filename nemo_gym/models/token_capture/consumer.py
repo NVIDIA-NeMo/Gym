@@ -32,15 +32,15 @@ import asyncio
 import logging
 from pathlib import Path
 
-from nemo_gym.token_id_capture.builder import (
+from nemo_gym.models.token_capture.builder import (
     assert_prefix_contiguity,
     project_main_chain_response,
     run_builder,
 )
-from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot, TokenSource
-from nemo_gym.token_id_capture.records import EngineRefusalRecord, TokenEntry
-from nemo_gym.token_id_capture.store import TokenCaptureStore
-from nemo_gym.token_id_capture.terminal import TerminalAttribution, resolve_terminal
+from nemo_gym.models.token_capture.protocols import TokenCaptureSnapshot, TokenSource
+from nemo_gym.models.token_capture.records import EngineRefusalRecord, TokenEntry
+from nemo_gym.models.token_capture.store import TokenCaptureStore
+from nemo_gym.models.token_capture.terminal import TerminalAttribution, resolve_terminal
 
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def _failed_build(rollout_id: str, builder: str, error: str, *, n_calls: int = 0
 
 def token_id_capture_dirs_from_config(global_config_dict) -> list[Path]:
     """Return the enabled token store directory or an empty list."""
-    from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+    from nemo_gym.models.token_capture.config import TokenIdCaptureConfig
 
     config = TokenIdCaptureConfig.model_validate(global_config_dict)
     directory = config.resolved_dir()
@@ -248,7 +248,7 @@ def mask_incomplete_when_attributed_from_config(global_config_dict) -> bool:
     A caller that holds the Gym global config reads the setting here and passes
     it to the build functions below, which default to the strict behavior.
     """
-    from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+    from nemo_gym.models.token_capture.config import TokenIdCaptureConfig
 
     return TokenIdCaptureConfig.model_validate(global_config_dict).token_id_capture.mask_incomplete_when_attributed
 

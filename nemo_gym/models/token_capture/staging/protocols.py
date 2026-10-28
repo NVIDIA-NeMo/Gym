@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
-from nemo_gym.token_id_capture.staging.records import StagedCallBaseSnapshot, StagedCallRecord, StageResult
+from nemo_gym.models.token_capture.staging.records import StagedCallBaseSnapshot, StagedCallRecord, StageResult
 
 
 @runtime_checkable
@@ -116,7 +116,7 @@ def install_capture(
 ) -> Any:
     """Install worker-owned staging without importing serving dependencies."""
     # Deferred to avoid the protocol/capture implementation import cycle.
-    from nemo_gym.token_id_capture.staging.capture import install_capture as _install
+    from nemo_gym.models.token_capture.staging.capture import install_capture as _install
 
     return _install(
         serving_layer,
