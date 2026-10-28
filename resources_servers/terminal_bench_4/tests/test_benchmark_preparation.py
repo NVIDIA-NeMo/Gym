@@ -87,15 +87,20 @@ def test_explicit_names_and_invalid_selections(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "overrides,steps,timeout", [({}, 500, 30), ({"tb4_max_steps": 0, "tb4_step_timeout_sec": 45}, 0, 45)]
+    "overrides,steps,timeout,format_errors",
+    [
+        ({}, 500, 30, 3),
+        ({"tb4_max_steps": 0, "tb4_step_timeout_sec": 45, "tb4_max_consecutive_format_errors": 1}, 0, 45, 1),
+    ],
 )
-def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps, timeout):
+def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps, timeout, format_errors):
     root = Path(preparation.__file__).resolve().parents[2]
     config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe.yaml"), overrides)
     agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
     harness = agent.harness
     assert harness.step_limit == steps
     assert harness.step_timeout_sec == timeout
+    assert harness.max_consecutive_format_errors == format_errors
     assert agent.datasets[0].num_repeats == 1
 
 

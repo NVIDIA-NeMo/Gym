@@ -115,6 +115,8 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
 class MiniSWEConfig(BaseModel):
     step_limit: int = Field(default=0, ge=0)
     step_timeout_sec: int = Field(default=600, gt=0)
+    # mini-SWE ends a run with RepeatedFormatError after this many format errors in a row (its default 3; 0 never).
+    max_consecutive_format_errors: int = Field(default=3, ge=0)
 
 
 class HarnessOutcome(BaseModel):
@@ -328,6 +330,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 "agent_class": "default",
                 "step_limit": self.config.step_limit,
                 "cost_limit": 0,
+                "max_consecutive_format_errors": self.config.max_consecutive_format_errors,
             },
             "environment": {
                 "environment_class": "local",

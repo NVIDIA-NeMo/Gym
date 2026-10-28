@@ -11,10 +11,10 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
 
-async def make_harness(tmp_path, query, runner_factory):
+async def make_harness(tmp_path, query, runner_factory, config=None):
     harness = await runner_factory(
         context=HarnessContext(session_id="limit-test", instruction="Inspect and submit"),
-        config=MiniSWEConfig(),
+        config=config or MiniSWEConfig(),
         params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         query=query,
         model_name="model",
@@ -116,6 +116,32 @@ async def test_length_limit_recovery_and_terminal_classification(
     if not recover:
         assert outcome.detail == expected
     assert len(extra["ng_trajectory"]["turns"]) == len(requests)
+
+
+async def test_one_format_error_try_ends_the_run_at_the_first_cut_call(tmp_path, runner_factory):
+    requests = []
+
+    async def query(params):
+        requests.append(params)
+        return NeMoGymResponse(
+            id=f"response-{len(requests)}",
+            created_at=0,
+            object="response",
+            model="model",
+            tools=[],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            status="incomplete",
+            incomplete_details={"reason": "max_output_tokens"},
+            output=[],
+        )
+
+    harness = await make_harness(tmp_path, query, runner_factory, MiniSWEConfig(max_consecutive_format_errors=1))
+    _, outcome, extra = await harness.execute(15)
+    assert len(requests) == 1
+    assert extra["mini_swe_trajectory"]["info"]["exit_status"] == "RepeatedFormatError"
+    assert outcome.reason == "nonzero_exit"
+    assert json.loads((tmp_path / "config.yaml").read_text())["agent"]["max_consecutive_format_errors"] == 1
 
 
 @pytest.mark.parametrize(

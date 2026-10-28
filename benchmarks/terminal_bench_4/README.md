@@ -34,8 +34,10 @@ Task MCP schemas and CLI invocation instructions are added to the prompt; MCP
 calls run through native bash. These adaptations mean this profile is not an
 exact reproduction of AA's evaluation.
 
-The benchmark defaults can be overridden with `++tb4_max_steps=...` and
-`++tb4_step_timeout_sec=...`. An explicit `++tb4_max_steps=0` disables the step cap.
+The benchmark defaults can be overridden with `++tb4_max_steps=...`,
+`++tb4_step_timeout_sec=...` and `++tb4_max_consecutive_format_errors=...` (mini-SWE's default 3; with 1, the first
+format error, such as a call cut at max_output_tokens, ends the run as `RepeatedFormatError`). An explicit
+`++tb4_max_steps=0` disables the step cap.
 The generic Python adapter retains its 600-second command timeout default; the
 benchmark supplies 30 seconds. Task-specific overall deadlines remain separate.
 

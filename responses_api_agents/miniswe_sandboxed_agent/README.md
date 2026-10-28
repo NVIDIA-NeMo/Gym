@@ -50,7 +50,8 @@ The CLI loads `mini.yaml` from the pinned package and overlays the task/model
 configuration. Defaults remain unlimited steps, a 600-second command timeout,
 and disabled cost limits. TB4 selects 500 steps and a 30-second command timeout;
 `++tb4_max_steps`, `++tb4_step_timeout_sec`, and `++tb4_agent_max_timeout_sec`
-override those values. Completion follows mini-SWE's
+override those values, and `++tb4_max_consecutive_format_errors` sets how many format errors in a row end a run
+(mini-SWE's default 3). Completion follows mini-SWE's
 `COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT` convention. Native observations use the
 package's first/last 5,000-character bounds and preserve raw output in trajectories.
 There is no context compaction. Native format-error recovery and exception names
