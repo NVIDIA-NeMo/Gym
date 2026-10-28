@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from omegaconf import DictConfig
+from pytest import approx
 
 import resources_servers.genrm_compare.app as genrm
 from nemo_gym._checkpoint.control import CheckpointRequest, next_attempt
@@ -167,6 +168,37 @@ async def test_a_member_that_has_not_recorded_its_judge_failure_gets_it_back_aft
     restored, _ = await restore(config, records)
     with pytest.raises(JudgeError, match="judge is down"):
         await asyncio.wait_for(verify_as(restored, SESSIONS[1], member(1)), timeout=0.5)
+    restored._run_single_comparison.assert_not_awaited()
+    await restored.aclose()
+
+
+async def test_a_cohort_scored_after_a_dropped_comparison_restores_its_rewards(config):
+    """A dropped judge failure leaves a completed cohort, saved and restored like any other."""
+    config.num_rollouts_per_prompt = 3
+    sessions = [f"session-{index}" for index in range(3)]
+
+    def judge(*_args, pair_idx, **_kwargs):
+        if pair_idx == (0, 1):
+            raise JudgeError("judge is down for one pair")
+        return member_0_wins(pair_idx=pair_idx)
+
+    server, participant = participant_server(config, judge=AsyncMock(side_effect=judge))
+    for index, session_id in enumerate(sessions):
+        participant.seeded(session_id, EpisodeId(rollout_id=f"group_g{index}"))
+    outcomes = await asyncio.gather(*(verify_as(server, sessions[index], member(index)) for index in range(3)))
+    assert not any(outcome.mask_sample for outcome in outcomes)
+    assert all(outcome.genrm_failed_comparison_rate_per_group == approx(1 / 3) for outcome in outcomes)
+    participant.ended(sessions[0])
+    records = await participant.export(None)
+    assert [record.session_id for record in records] == sessions[1:]
+    assert all("result" in record.state and "judge_failure" not in record.state for record in records)
+    await server.aclose()
+
+    restored, _ = await restore(config, records)
+    for index in (1, 2):
+        replayed = await asyncio.wait_for(verify_as(restored, sessions[index], member(index)), timeout=0.5)
+        assert replayed.reward == outcomes[index].reward
+        assert replayed.genrm_failed_comparison_rate_per_group == approx(1 / 3)
     restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 

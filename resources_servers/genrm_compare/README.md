@@ -207,6 +207,7 @@ All score aggregates include the existing tiebreaker. `/verify` returns:
 | `reward_overall_score_raw`, `reward_overall_score` | Overall aggregates before and after length/style adjustments. |
 | `genrm_parse_failure_rate_per_group` | Fraction of final comparison verdicts that failed overall parsing. |
 | `genrm_rubric_parse_failure_rate_per_group` | Fraction that failed rubric parsing; zero in overall mode. |
+| `genrm_failed_comparison_rate_per_group` | Fraction of the group's comparisons dropped after judge failures; see [Failed comparisons](#failed-comparisons). |
 | `reasoning_text`, `answer_text` | Reasoning and final answer extracted from the rollout. |
 
 ### Token-usage metrics
@@ -298,8 +299,9 @@ genrm_compare/
 
 ### POST `/compare`
 
-Compare multiple candidate responses. Judge transport failures or exhausted retries without a completed
-answer return HTTP 503 instead of ordinary rewards. Empty input returns an empty reward list.
+Compare multiple candidate responses. A comparison that fails as a judge failure is dropped, as described in
+[Failed comparisons](#failed-comparisons). If a response is left without a successful comparison, the request
+returns HTTP 503 instead of ordinary rewards. Empty input returns an empty reward list.
 
 **Request Body** (`GenRMCompareRequest`):
 - `conversation_history`: List of `{"role": str, "content": str}` messages
@@ -392,8 +394,9 @@ HTTP retries, and retry sleeps together; each retry does not receive a fresh eva
 deadline. The supplied YAML uses 16 members, so it requires 16 slots and enough concurrency to admit them together.
 
 If D never arrives, the server fails the group and releases A, B, and C without rewards. Judge HTTP errors,
-connection failures, expired deadlines, or exhausted retries for empty/unsuccessful judge responses also
-fail the group. Each comparison shares one `genrm_parse_retries` budget across malformed/empty/truncated
+connection failures, expired request deadlines, or exhausted retries for empty/unsuccessful judge responses
+fail that comparison, which is dropped; the group fails only when a member is left without a successful
+comparison (see [Failed comparisons](#failed-comparisons)). Each comparison shares one `genrm_parse_retries` budget across malformed/empty/truncated
 answers, HTTP 408, 429, or 5xx responses, and interrupted response bodies, with
 `genrm_parse_retry_sleep_s` between attempts. The default
 budget permits four attempts in total, not four attempts for each failure type. Other HTTP errors fail
@@ -441,7 +444,8 @@ zero policy loss or correct advantage statistics in a downstream trainer.
 A late request to a retained failed explicit-ID group receives its original failure, even if it contains a
 regenerated answer. To judge again, advance the group attempt for every member. Preserving answers does
 not enable individual judge-only reverification: reconstructing and retrying a full group remains the
-caller's responsibility. The batch `/compare` endpoint returns HTTP 503 for judge failures.
+caller's responsibility. The batch `/compare` endpoint returns HTTP 503 when a response keeps no
+successful comparison.
 
 Failure and server shutdown release waiters and discard stored response bodies. Owned judge tasks are
 cancelled and drained. During HTTP-server shutdown, requests may receive an upstream error or lose their
@@ -451,6 +455,38 @@ transport diagnostics include the model server, path, pair, deadline, and bounde
 Connection retries retain the existing HTTP-client policy. The bounded comparison retry loop described
 above additionally handles transient HTTP statuses and response-body transport errors; it does not
 restart the entire cohort.
+
+### Failed comparisons
+
+A failed comparison is dropped instead of failing the group. The group fails only when a member is left
+without a successful comparison. With 16 members and a long judge answer, one comparison that exhausts
+`max_output_tokens` on every attempt then costs two members one comparison each, instead of masking all 16.
+There is no configuration key for this.
+
+- **What counts as failed:** a comparison that raises a `JudgeError`:
+  - no completed answer within the retry budget;
+  - a judge HTTP error that is non-retryable or exhausts its retries;
+  - a `judge_request_timeout_s` expiry.
+
+  A completed but malformed answer keeps the default-score fallback. Any other error still fails the group
+  with HTTP 503, and `cohort_evaluation_timeout_s` still bounds the whole group.
+- **Scoring:** while every member keeps at least one successful comparison, each member is scored from the
+  comparisons it has left, and nothing is masked. Under `circular`, a member that lost one of its two
+  comparisons is scored from the other. In `fixed_baseline` mode, a member is scored from its remaining judge
+  passes against the baseline. Bonuses and length and style adjustments apply as usual.
+- **When the group fails:** as soon as a member has no comparison left that could still succeed, the group
+  fails as a judge failure, and the comparisons still running are cancelled. Every member is then masked
+  through the failsafe described above. Under `circular`, only two failures next to each other, such as
+  (4, 5) and (5, 6), leave a member uncovered. If the judge is down, the group fails as soon as one member's
+  comparisons have all failed, without waiting for the rest.
+- **Reporting:**
+  - `/verify` reports `genrm_failed_comparison_rate_per_group` on each member, and `/compare` reports it in
+    `metrics`.
+  - `/compare` leaves dropped comparisons out of `comparison_results`.
+  - Token-usage metrics count completed comparisons only.
+  - Each dropped comparison is logged with its failure.
+- **Trade-off:** the two members next to a dropped comparison are scored from fewer comparisons, so their
+  scores are noisier.
 
 ### Replacement attempts and retention
 

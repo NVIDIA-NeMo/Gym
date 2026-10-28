@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -339,6 +340,7 @@ class GenRMCompareVerifyResponse(BaseVerifyResponse):
     reward_length_adjustment: float
     genrm_parse_failure_rate_per_group: float = 0.0
     genrm_rubric_parse_failure_rate_per_group: float = 0.0
+    genrm_failed_comparison_rate_per_group: float = 0.0
     genrm_input_tokens_per_comparison_mean: Optional[float] = None
     genrm_input_tokens_per_comparison_p50: Optional[float] = None
     genrm_input_tokens_per_comparison_p95: Optional[float] = None
@@ -1211,11 +1213,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     def _aggregate_results(
         self,
         response_objs: List[Dict[str, Any]],
-        raw_results: List[ComparisonResult],
+        raw_results: List[Optional[ComparisonResult]],
         metadata: List[Tuple[int, int, int]],
         trainable_count: Optional[int] = None,
     ) -> tuple:
         cfg = self.config
+        # Dropped judge failures arrive as None; score every response from the comparisons that remain.
+        failed_rate = sum(result is None for result in raw_results) / max(1, len(raw_results))
+        kept = [(result, item) for result, item in zip(raw_results, metadata) if result is not None]
+        raw_results = [result for result, _ in kept]
+        metadata = [item for _, item in kept]
         # Train on the configured score source while retaining overall scores as diagnostics.
         comparisons = [result[:3] for result in raw_results]
         overall_comparisons = [result[3:6] for result in raw_results]
@@ -1268,6 +1275,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             "genrm_rubric_parse_failure_rate_per_group": (
                 sum(result[-1] for result in raw_results) / total if cfg.score_source == "rubric_mean" else 0.0
             ),
+            "genrm_failed_comparison_rate_per_group": failed_rate,
         }
         token_usage = [result[6:9] for result in raw_results if result[6] >= 0 and result[7] >= 0]
         if token_usage:
@@ -1312,7 +1320,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         response_objs: List[Dict[str, Any]],
         principle: Optional[str] = None,
         expected_rubric_ids: Optional[Tuple[int, ...]] = None,
-    ) -> Tuple[List[ComparisonResult], List[Tuple[int, int, int]]]:
+    ) -> Tuple[List[Optional[ComparisonResult]], List[Tuple[int, int, int]]]:
         cfg = self.config
         comparison_pairs = generate_comparison_pairs(cfg.comparison_strategy, len(response_objs))
         tasks = []
@@ -1332,13 +1340,59 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     )
                 )
                 metadata.append((i, j, judge_idx))
+        return await self._gather_comparisons(tasks, metadata, len(response_objs)), metadata
+
+    async def _gather_comparisons(
+        self,
+        tasks: List[asyncio.Task],
+        metadata: List[Tuple[int, int, int]],
+        num_rollouts: int,
+    ) -> List[Optional[ComparisonResult]]:
+        """Await every comparison, returning None in place of each one that failed with a JudgeError.
+
+        Raises the first non-judge error, or a JudgeError as soon as a response among the first ``num_rollouts``
+        indices has no comparison left that could succeed. Either way the comparisons still running are cancelled.
+        """
+        positions = {task: position for position, task in enumerate(tasks)}
+        # Comparisons per response that have not failed yet; a response reaching zero cannot be scored.
+        remaining = Counter(index for item in metadata for index in item[:2] if index < num_rollouts)
+        failed: Dict[int, JudgeError] = {}
         try:
-            return list(await asyncio.gather(*tasks)), metadata
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_EXCEPTION)
+                for task in sorted(done, key=positions.__getitem__):
+                    error = task.exception()
+                    if error is None:
+                        continue
+                    if not isinstance(error, JudgeError):
+                        raise error
+                    position = positions[task]
+                    failed[position] = error
+                    for index in metadata[position][:2]:
+                        if index not in remaining:
+                            continue
+                        remaining[index] -= 1
+                        if remaining[index] == 0:
+                            raise JudgeError(
+                                f"GenRM rollout_index={index} has no successful comparison after {len(failed)} of "
+                                f"{len(tasks)} comparisons failed: {error}"
+                            ) from error
         finally:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+        for position in sorted(failed):
+            logger.warning(
+                "GenRM dropped comparison %s (judge %s) of %s after a judge failure: %s",
+                metadata[position][:2],
+                metadata[position][2],
+                len(tasks),
+                str(failed[position])[:500],
+            )
+        return [None if position in failed else task.result() for position, task in enumerate(tasks)]
 
     async def _run_compare(
         self,
@@ -1361,6 +1415,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         )
         aggregate_result = self._aggregate_results(response_objs, raw_results, comparison_metadata)
         rewards, _, _, metrics, comparison_results, _, _, _ = aggregate_result
+        # The aggregated comparisons omit dropped judge failures; keep their metadata aligned.
+        comparison_metadata = [item for result, item in zip(raw_results, comparison_metadata) if result is not None]
         return rewards, metrics, comparison_results, comparison_metadata
 
     async def _run_fixed_baseline_compare(
@@ -1410,13 +1466,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             for judge_index in range(cfg.num_judges_per_comparison):
                 tasks.append(asyncio.create_task(compare_one(response_index, response, judge_index)))
                 metadata.append((response_index, baseline_index, judge_index))
-        try:
-            raw_results = list(await asyncio.gather(*tasks))
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        raw_results = await self._gather_comparisons(tasks, metadata, len(response_objs))
         # The appended baseline is diagnostic only; adjustments apply to the trainable prefix.
         return self._aggregate_results(
             response_objs + [baseline_obj], raw_results, metadata, trainable_count=len(response_objs)

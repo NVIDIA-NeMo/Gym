@@ -36,6 +36,7 @@ import nemo_gym.server_utils as http
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.reward_profile import RewardProfiler
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
@@ -229,6 +230,36 @@ async def test_judge_failure_preserves_answer_and_diagnostics_through_run(servic
         assert "judge /v1/responses pair=" in error and "500" in error and "deadline=" in error
     assert len({body["response"]["id"] for _, body in results}) == 4
     assert all(c.phase == "failed" and not c.results for c in services.resource._verify_cohorts.values())
+
+
+@pytest.mark.parametrize("failing_pairs", [{(0, 1)}, {(0, 1), (1, 2)}], ids=["one_failure", "uncovered_rollout"])
+async def test_failed_comparisons_through_run(services, monkeypatch, failing_pairs):
+    services.resource.config.num_rollouts_per_prompt = 16
+    judge = services.resource._run_single_comparison
+
+    async def judge_fails_for_pairs(*args, pair_idx, **kwargs):
+        if pair_idx in failing_pairs:
+            raise JudgeError("judge unavailable for this pair")
+        return await judge(*args, pair_idx=pair_idx, **kwargs)
+
+    monkeypatch.setattr(services.resource, "_run_single_comparison", judge_fails_for_pairs)
+    results = await asyncio.gather(*(run(services, i) for i in range(16)))
+
+    if len(failing_pairs) == 2:
+        # Rollout 1 lost both comparisons, so the whole group is masked as a judge failure.
+        for status, body in results:
+            assert_judge_failure(status, body, "rollout_index=1 has no successful comparison")
+            assert "judge unavailable for this pair" in body["failure_reason"]
+        return
+    # Every rollout scores 4 as response_1 and 2 as response_2. Without (0, 1), rollout 0 keeps only its 2
+    # from (15, 0) and rollout 1 only its 4 from (1, 2); the others keep both comparisons.
+    assert [body["reward"] for _, body in results] == [2.0, 4.0] + [3.0] * 14
+    for status, body in results:
+        assert status == 200 and "_ng_failure_class" not in body
+        assert not body["mask_sample"] and not (body.get("instance_config") or {}).get("mask_sample")
+        assert body.get("failure_kind") is None
+        assert body["genrm_failed_comparison_rate_per_group"] == 1 / 16
+    assert services.policy_calls == 16 and services.judge_calls == 15
 
 
 async def test_empty_http_200_judge_retries_then_fails_through_run(services):
