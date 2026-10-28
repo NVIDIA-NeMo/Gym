@@ -22,7 +22,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
+from nemo_gym.data.tasks.harbor.dockerfile import RECORD_VERSION
 
 
 # The fields Compose would read from the image to start it, plus the build-time state (environment,

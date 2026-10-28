@@ -88,7 +88,7 @@ class BaseImageConfig:
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> "BaseImageConfig":
-        """Read a ``compose-images.json`` entry (see ``nemo_gym.tasks.harbor.image_configs``).
+        """Read a ``compose-images.json`` entry (see ``nemo_gym.data.tasks.harbor.image_configs``).
 
         Raises :class:`ValueError` for an entry written before :data:`RECORD_VERSION`: it lacks fields
         this resolver reads (an absent ``Env`` would read as a known, empty environment), so the

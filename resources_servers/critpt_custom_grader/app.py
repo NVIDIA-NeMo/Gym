@@ -39,6 +39,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import failure_kinds
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.data.task_data import normalize_task_fields
 from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
@@ -53,7 +54,6 @@ from nemo_gym.server_runtime.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader.execution import (
     CLEANUP_STATUSES,
     FAILED_CATEGORIES,
@@ -78,7 +78,7 @@ _RESOLVED = frozenset({"deleted", "not_created"})
 # Candidate-code extraction: first ```python fence, else first bare ``` fence, else the whole response text.
 _PYTHON_FENCE = re.compile(r"```python[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
 _BARE_FENCE = re.compile(r"```[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
-# Framework-owned row keys that are never task data: the routing keys nemo_gym/task_materialization.py strips
+# Framework-owned row keys that are never task data: the routing keys nemo_gym/data/task_materialization.py strips
 # (agent_ref, task_source, skills_ref) and the keys rollout collection and reverify attach to a row. Every _ng_* key
 # is dropped too.
 _FRAMEWORK_ROW_KEYS = frozenset(

@@ -9,7 +9,7 @@ folder digest (the value rows carry as
 ``_ng_digest``) with its upstream pin. The dataset's name and version live only in ``dataset.toml``, so nothing
 appears in both files; what a fetch records besides is the hub reference it was made from (``ref``), a fact of the
 fetch like the pins, which is what a committed entry's declared ``source`` is checked against without the hub
-(:func:`nemo_gym.tasks.harbor.cli._check_fetch_record`). Nobody edits the manifest by hand.
+(:func:`nemo_gym.data.tasks.harbor.cli._check_fetch_record`). Nobody edits the manifest by hand.
 
 The output is deterministic: a fixed key order, sorted tasks and no timestamps, so equal manifests
 mean identical inputs and two runs compare by ``[dataset].digest``. The dataset digest is a hash over
@@ -21,7 +21,7 @@ dataset without them hashes and reads as before). Two datasets that differ only 
 change a score. Like ``dataset.toml``, those files are Gym's layer, not fetched content: an edit rewrites the
 manifest and is reported, while an edited task folder of a fetched dataset is refused.
 
-Fetchers write the manifest (:mod:`nemo_gym.tasks.harbor.hub`, :mod:`nemo_gym.tasks.harbor.package_store`)
+Fetchers write the manifest (:mod:`nemo_gym.data.tasks.harbor.hub`, :mod:`nemo_gym.data.tasks.harbor.package_store`)
 and record only the tasks they fetched, so a folder nobody fetched is never blessed; prepare writes it for a
 local folder, unless git tracks the folder (the repository's own example datasets), whose identity is
 computed in memory. Prepare recomputes the per-task digests from the folders and refuses to run a fetched
@@ -45,12 +45,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from nemo_gym.tasks.harbor import task as harbor_task
-from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
-from nemo_gym.tasks.harbor.digest import content_hash
-from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE
-from nemo_gym.tasks.harbor.task import iter_task_folders
-from nemo_gym.tasks.harbor.task_data import TASK_DATA_MODULE
+from nemo_gym.data.tasks.harbor import task as harbor_task
+from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE
+from nemo_gym.data.tasks.harbor.digest import content_hash
+from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE
+from nemo_gym.data.tasks.harbor.task import iter_task_folders
+from nemo_gym.data.tasks.harbor.task_data import TASK_DATA_MODULE
 
 
 logger = logging.getLogger(__name__)
@@ -669,7 +669,7 @@ def refresh_gym_layer(folder: Path) -> Manifest | None:
     A fetch records ``dataset.toml`` and the dataset-level Gym files as it found them, and
     rewrites the manifest only when it fetches something: a registry fetch with every folder in place, or a
     pull that only replaced the copy of an entry's ``dataset.toml`` beside the tasks
-    (:func:`nemo_gym.tasks.harbor.entries.prepare_destination`), leaves ``dataset_toml_digest`` and the dataset
+    (:func:`nemo_gym.data.tasks.harbor.entries.prepare_destination`), leaves ``dataset_toml_digest`` and the dataset
     digest describing a file that is no longer there. This recomputes those digests from disk and keeps every
     task's recorded digest and pin, and the fetch's reference, as they are (nothing is hashed, so a hand-edited
     folder is still caught by :func:`check_manifest`, which rehashes), then writes the manifest when its text

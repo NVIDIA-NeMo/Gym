@@ -15,7 +15,7 @@
 
 """Shared prompt and image input construction for HLE datasets."""
 
-from nemo_gym.prompt import PromptConfig, fill_prompt
+from nemo_gym.data.prompt import PromptConfig, fill_prompt
 
 
 def _to_data_uri(image: str) -> str:

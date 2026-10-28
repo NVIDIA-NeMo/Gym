@@ -13,14 +13,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.tasks.harbor.dataset_config import (
+from nemo_gym.data.tasks.harbor.dataset_config import (
     GymDatasetConfig,
     GymTaskOverride,
     apply_dataset_config,
     read_dataset_config,
 )
-from nemo_gym.tasks.harbor.digest import content_hash, context_digest
-from nemo_gym.tasks.harbor.dockerfile import (
+from nemo_gym.data.tasks.harbor.digest import content_hash, context_digest
+from nemo_gym.data.tasks.harbor.dockerfile import (
     BaseImageConfig,
     DockerfileNeedsBuild,
     ImageConfigRequired,
@@ -29,10 +29,10 @@ from nemo_gym.tasks.harbor.dockerfile import (
     parse_dockerfile,
     resolve_dockerfile,
 )
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HARBOR_STEP_VERIFIER_TIMEOUT_SEC, HarborTaskConfig, HarborTaskStep
-from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE, python_verifier_for
-from nemo_gym.tasks.harbor.records import (
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.models import HARBOR_STEP_VERIFIER_TIMEOUT_SEC, HarborTaskConfig, HarborTaskStep
+from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE, python_verifier_for
+from nemo_gym.data.tasks.harbor.records import (
     BUILT_IMAGES_FILE,
     IMAGE_CONFIGS_FILE,
     MAIN_SERVICE,
@@ -42,8 +42,8 @@ from nemo_gym.tasks.harbor.records import (
     recorded_forced_tasks,
     recorded_service_images,
 )
-from nemo_gym.tasks.harbor.task_data import read_task_fields
-from nemo_gym.tasks.harbor.verifier_env import (
+from nemo_gym.data.tasks.harbor.task_data import read_task_fields
+from nemo_gym.data.tasks.harbor.verifier_env import (
     TESTS_COMPOSE_FILE,
     TESTS_DOCKERFILE,
     _verifier_build_required,
@@ -80,7 +80,7 @@ STEP_SETUP_SCRIPT = "setup.sh"
 LEGACY_AGGREGATE_REWARD_MODE = "aggregate"
 DOCKERFILE = Path("environment") / "Dockerfile"
 # The names the loader accepts for a task's Compose overlay under ``environment/``, first match wins
-# (``nemo_gym.tasks.harbor.image_configs.compose_file``); Harbor's Docker environment reads the first one only.
+# (``nemo_gym.data.tasks.harbor.image_configs.compose_file``); Harbor's Docker environment reads the first one only.
 COMPOSE_FILE_NAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
 
 
@@ -146,20 +146,20 @@ class HarborTask:
 
     ``task_id`` is the folder name: ``[task].name`` is an ``org/name`` label that is
     not unique across a dataset. ``folder_digest`` is the folder's content hash alone
-    (:func:`~nemo_gym.tasks.harbor.digest.content_hash`, what ``manifest.toml`` records per task and
+    (:func:`~nemo_gym.data.tasks.harbor.digest.content_hash`, what ``manifest.toml`` records per task and
     a fetch verifies); ``digest`` is the one rows carry and the server checks, that hash plus the
     ``dataset.toml`` settings applied to the task (:func:`task_digest`), equal to ``folder_digest``
     when the dataset has no ``[gym]`` table. ``image`` is the prebuilt image when the task
     declares one, else the base image of a pull-mode or overlay-mode Dockerfile pinned to
     the digest its recorded configuration was read at (the multi-arch index behind the
-    written tag, see :mod:`nemo_gym.tasks.harbor.image_configs`; the written reference
+    written tag, see :mod:`nemo_gym.data.tasks.harbor.image_configs`; the written reference
     when nothing is recorded), else ``None`` (a build is required). ``workdir``, ``env``
     and ``user`` merge ``task.toml`` with what the Dockerfile recorded; ``task.toml`` wins.
 
     Dockerfile ``ENV``, ``WORKDIR`` and ``USER`` are resolved to literals as ``docker build``
     resolves them, starting from the base image's configuration recorded in
     :data:`IMAGE_CONFIGS_FILE` next to the task folders (see
-    :mod:`nemo_gym.tasks.harbor.dockerfile`).
+    :mod:`nemo_gym.data.tasks.harbor.dockerfile`).
 
     ``overlay`` is Gym-derived data, not a Harbor field: the Dockerfile's ``RUN`` lines
     (with the ``WORKDIR``, ``ENV`` and ``USER`` in effect for each) that the server runs
@@ -191,7 +191,7 @@ class HarborTask:
     Harbor refuses it, and one whose ``tests/Dockerfile`` has no recorded build is refused like an unrecorded
     ``environment/`` build (:func:`load_task`).
 
-    ``context_id`` is Harbor's environment id of ``environment/`` (:func:`~nemo_gym.tasks.harbor.digest.context_digest`,
+    ``context_id`` is Harbor's environment id of ``environment/`` (:func:`~nemo_gym.data.tasks.harbor.digest.context_digest`,
     the key of ``built-images.json`` and the body of the ``hb__<hash>`` image names), computed once here for every
     task with an ``environment/`` folder (the build-mode branches read it, and the Compose loader needs it at every
     seed, for a Compose file or for the one-service group a job-level overlay extends) and ``None`` for a task
@@ -231,7 +231,7 @@ class HarborTask:
     ``task_data`` is the task's own field values, read from ``task_data.json`` in its folder (a
     parameterized task's rendered row), ``{}`` for a task without one. Materialize writes them into the
     row's ``task_data`` beside the reserved ``_ng_*`` keys, and the dataset's ``task_data.py`` validates
-    them when it ships one (:mod:`nemo_gym.tasks.harbor.task_data`).
+    them when it ships one (:mod:`nemo_gym.data.tasks.harbor.task_data`).
 
     ``seed_trajectory`` is Harbor's seed trajectory when the task ships one, relative to the task folder:
     ``steps/<first step>/trajectory.json`` for a multi-step task, else ``trajectory.json`` (one or the other, as
@@ -825,7 +825,7 @@ def _seed_trajectory(path: Path, turns: tuple[HarborTurn, ...]) -> Path | None:
     environment spend. This server hands no prior context to a harness yet, so running the task for a model would
     grade it without the context the task was written for: the task loads, the oracle runs it as Harbor's does,
     and the environment server refuses it at seed for any other agent, naming the file. The file stays part of
-    the task's identity and its package (:func:`~nemo_gym.tasks.harbor.digest.content_hash` covers it), so a
+    the task's identity and its package (:func:`~nemo_gym.data.tasks.harbor.digest.content_hash` covers it), so a
     fetched task verifies against its advertised hash.
     """
     seed = path / STEPS_DIR / turns[0].name / TRAJECTORY_FILE if turns else path / TRAJECTORY_FILE

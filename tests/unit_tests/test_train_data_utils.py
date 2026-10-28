@@ -22,11 +22,11 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
 import nemo_gym.config.global_config
-import nemo_gym.train_data_utils
+import nemo_gym.data.dataset_preparation
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.config.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.config.global_config import DictConfig, GlobalConfigDictParser
-from nemo_gym.train_data_utils import (
+from nemo_gym.data.dataset_preparation import (
     AvgMinMax,
     CategoricalMetrics,
     DatasetMetrics,
@@ -355,7 +355,7 @@ class TestLoadDatasets:
             )
 
     def test_load_datasets_missing_credentials(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.train_data_utils, "get_global_config_dict", lambda: DictConfig({}))
+        monkeypatch.setattr(nemo_gym.data.dataset_preparation, "get_global_config_dict", lambda: DictConfig({}))
 
         config = TrainDataProcessorConfig(
             output_dirpath="",
@@ -444,7 +444,7 @@ class TestLoadDatasets:
         )
         nested_config_path.write_text("resources: {}\n")
         monkeypatch.setattr(
-            nemo_gym.train_data_utils,
+            nemo_gym.data.dataset_preparation,
             "get_global_config_dict",
             lambda: DictConfig({"config_paths": [str(config_path), str(nested_config_path)]}),
         )
@@ -466,7 +466,7 @@ class TestLoadDatasets:
 
     def test_validate_backend_credentials_missing(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(
-            nemo_gym.train_data_utils,
+            nemo_gym.data.dataset_preparation,
             "get_global_config_dict",
             lambda: DictConfig({}),
         )
@@ -484,7 +484,7 @@ class TestLoadDatasets:
 
     def test_validate_backend_credentials_valid(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(
-            nemo_gym.train_data_utils,
+            nemo_gym.data.dataset_preparation,
             "get_global_config_dict",
             lambda: DictConfig(
                 {
@@ -936,15 +936,15 @@ class TestValidateSamplesAndAggregateMetrics:
 
     def test_categorical_metrics_caps_labels_with_other_bucket(self) -> None:
         metrics = CategoricalMetrics()
-        for index in range(nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 2):
+        for index in range(nemo_gym.data.dataset_preparation.MAX_CATEGORICAL_LABELS + 2):
             metrics.observe(f"label-{index}")
 
         aggregated = metrics.aggregate()
 
-        assert len(aggregated.counts) == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 1
+        assert len(aggregated.counts) == nemo_gym.data.dataset_preparation.MAX_CATEGORICAL_LABELS + 1
         assert aggregated.counts["Other"] == 2
-        assert aggregated.unique_count == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 1
-        assert aggregated.total_count == nemo_gym.train_data_utils.MAX_CATEGORICAL_LABELS + 2
+        assert aggregated.unique_count == nemo_gym.data.dataset_preparation.MAX_CATEGORICAL_LABELS + 1
+        assert aggregated.total_count == nemo_gym.data.dataset_preparation.MAX_CATEGORICAL_LABELS + 2
 
     def test_numeric_close_tolerance_validation(self, monkeypatch: MonkeyPatch) -> None:
         """Test numeric_close with various numeric values to validate tolerance thresholds"""
@@ -1416,7 +1416,7 @@ class TestCollateSamples:
 
         monkeypatch.setattr("builtins.open", custom_open)
 
-        monkeypatch.setattr(nemo_gym.train_data_utils.Path, "exists", lambda *args, **kwargs: True)
+        monkeypatch.setattr(nemo_gym.data.dataset_preparation.Path, "exists", lambda *args, **kwargs: True)
 
         processor = TrainDataProcessor()
 

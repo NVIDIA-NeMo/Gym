@@ -38,11 +38,11 @@ from nemo_gym.agents.base_responses_api_agent import AGENT_ACTIVATION_HEADER, Ag
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.data.tasks.harbor import DIGEST_KEY, load_task
+from nemo_gym.data.tasks.harbor.digest import context_digest
+from nemo_gym.data.tasks.harbor.dockerfile import RECORD_VERSION
+from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
-from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 
 
 TASK_TOML = """

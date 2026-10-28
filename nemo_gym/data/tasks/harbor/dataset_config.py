@@ -11,7 +11,7 @@ is pulled from), defaults that scale every task or set how many rollouts an
 evaluation takes per task, and per-task overrides expressed with Harbor's own ``[environment]``
 fields. The loader applies the task-shaping settings before anything else sees a task, so servers,
 agents and rows only ever see the effective ``task.toml``; the other keys flow into the generated
-run config's ``datasets:`` entry (:func:`nemo_gym.tasks.harbor.materialize.run_config`).
+run config's ``datasets:`` entry (:func:`nemo_gym.data.tasks.harbor.materialize.run_config`).
 Harbor's own tables in the same file (``[dataset]`` and friends) are left to Harbor.
 
 Deployment settings (which sandbox provider, registry credentials, image mirrors) do not belong
@@ -26,7 +26,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.config.config_types import DatasetLicense, Domain
-from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment, HarborTaskConfig, HarborVerifier
+from nemo_gym.data.tasks.harbor.models import HarborArtifact, HarborEnvironment, HarborTaskConfig, HarborVerifier
 
 
 DATASET_FILE = "dataset.toml"
@@ -89,7 +89,7 @@ class GymDatasetConfig(BaseModel):
     domain: Domain | None = None
     verified: bool = Field(default=False, strict=True)
     # Where a committed entry's tasks come from: a `harbor:<org>/<name>@<tag | sha256:digest>` or
-    # `harbor:<dataset>@<version>` hub reference (:mod:`nemo_gym.tasks.harbor.hub`). `gym dataset pull <entry>`
+    # `harbor:<dataset>@<version>` hub reference (:mod:`nemo_gym.data.tasks.harbor.hub`). `gym dataset pull <entry>`
     # fetches it into the entry's folder, and a pull of the reference itself lands there too, so one dataset never
     # lives in two sibling folders. Unset for a dataset whose task folders are its own (the usual authored dataset).
     source: str | None = None
@@ -119,7 +119,10 @@ class GymDatasetConfig(BaseModel):
         """Refuse a source that is not a well-formed ``harbor:`` reference, in the hub's own words."""
         if value is None:
             return value
-        from nemo_gym.tasks.harbor.hub import HubError, HubRef  # hub imports the manifest, which imports this module
+        from nemo_gym.data.tasks.harbor.hub import (  # hub imports the manifest, which imports this module
+            HubError,
+            HubRef,
+        )
 
         try:
             HubRef.parse(value)

@@ -10,6 +10,9 @@ from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationEr
 
 from nemo_gym.config.global_config import GlobalConfigDictParser
 from nemo_gym.core.episode import EpisodeId
+from nemo_gym.data.dataset_preparation import TrainDataProcessor
+from nemo_gym.data.task_data import TaskDataValidator
+from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
     RolloutCollectionHelper,
@@ -17,9 +20,6 @@ from nemo_gym.rollout_collection import (
     _episode_request_body,
 )
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
-from nemo_gym.task_data import TaskDataValidator
-from nemo_gym.task_materialization import materialize_task
-from nemo_gym.train_data_utils import TrainDataProcessor
 
 
 @pytest.mark.parametrize(

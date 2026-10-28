@@ -15,9 +15,9 @@ from environment_servers.harbor.app import ComposeVariable
 from environment_servers.harbor.tests import test_app
 from environment_servers.harbor.tests.conftest import run_episode
 from environment_servers.harbor.users import HarborUserError
-from nemo_gym.tasks.harbor import load_task
-from nemo_gym.tasks.harbor.image_configs import load_compose_document
-from nemo_gym.tasks.harbor.registry import ImageConfigError
+from nemo_gym.data.tasks.harbor import load_task
+from nemo_gym.data.tasks.harbor.image_configs import load_compose_document
+from nemo_gym.data.tasks.harbor.registry import ImageConfigError
 
 
 # The shape of SWE-Interact's sidecar: its model endpoint, key and model come from the operator's shell.

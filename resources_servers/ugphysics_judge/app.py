@@ -59,12 +59,12 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
 )
+from nemo_gym.data.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.metrics.reward_profile import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.verification.judge import call_judge
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,

@@ -22,8 +22,8 @@ from nemo_gym.agents.utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.data.tasks.harbor.materialize import materialize_task
+from nemo_gym.data.tasks.harbor.task import load_task
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 
 

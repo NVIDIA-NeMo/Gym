@@ -176,7 +176,7 @@ def init_dataset(
     ``<org>/<task_id>`` in every rendered task, the name Harbor keys a task on), ``instruction.template.md``,
     ``tasks.jsonl`` with two rows, ``task_data.py``, a Python verifier that reads ``answer.md`` and the reference
     answer as ``solution/answer.template.md``, which prepare renders into one task folder per row
-    (:mod:`nemo_gym.tasks.harbor.parameterized`).
+    (:mod:`nemo_gym.data.tasks.harbor.parameterized`).
     """
     org, short = split_dataset_name(name)
     folder = Path(root) / short

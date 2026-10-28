@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.tasks.harbor.manifest as manifest_module
-from nemo_gym.tasks.harbor import content_hash, discover_tasks
+import nemo_gym.data.tasks.harbor.manifest as manifest_module
+from nemo_gym.data.tasks.harbor import content_hash, discover_tasks
 from tests.unit_tests.test_harbor_tasks import (
     no_real_registry,  # noqa: F401 (autouse fixture)
     write_task,
@@ -71,7 +71,7 @@ class TestPackageStore:
         equals Gym's folder digest unless the folder holds a name Gym's digest skips). ``task_org`` is the org the
         tasks are published under: the requested dataset's own org when ``None``, another org (or a per-task
         mapping) for a dataset that collects tasks across orgs, as Harbor's ``dataset.toml`` lets it."""
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         digests = {name: publish(folder) for name, folder in task_folders.items()}
         calls = []
@@ -201,7 +201,7 @@ class TestPackageStore:
         """A server that closes the connection before sending its advertised Content-Length makes
         ``response.read()`` raise ``http.client.IncompleteRead``, which is not an OSError: the store reports it
         as a PackageStoreError naming the request, like any other transport failure."""
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         store = module.PackageStore(base_url=short_reply_server, api_key="public", timeout_s=5)
         with pytest.raises(module.PackageStoreError) as info:
@@ -224,7 +224,7 @@ class TestPackageStore:
         """An HTML error page, a JSON reply cut short by a close-delimited connection, or bytes that are not UTF-8
         where the REST API's JSON should be: the resolution and archive lookups report a PackageStoreError naming
         the request and the start of the body, not a JSONDecodeError."""
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         monkeypatch.setattr(
             module.PackageStore, "_request", lambda self, method, path, *, params=None, body=None: reply
@@ -257,7 +257,7 @@ class TestPackageStore:
         from nemo_gym.cli.main import main
 
         folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         real_request = module.PackageStore._request
         module, _, _ = self.fake_store(tmp_path, monkeypatch, folders)
@@ -369,7 +369,7 @@ class TestPackageStore:
         assert not any(c[1].startswith("/storage/") for c in calls)
 
     def test_duplicate_task_names_are_refused_before_writing(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor import package_store as module
+        from nemo_gym.data.tasks.harbor import package_store as module
 
         ref = module.PackageRef("terminal-bench", "terminal-bench", "4.0.0")
         dataset = module.ResolvedDataset(
@@ -559,8 +559,8 @@ class TestPackageStore:
         Fetch after fetch keeps refusing the edit, prepare refuses the folder, and the one download is alpha's."""
         import tomllib
 
-        from nemo_gym.tasks.harbor.cli import prepare_target
-        from nemo_gym.tasks.harbor.manifest import ManifestError
+        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.manifest import ManifestError
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)
@@ -618,7 +618,7 @@ class TestPackageStore:
         assert sum(1 for c in calls if c[1].startswith("/storage/")) == downloads_before + 1
 
     def test_folder_names_and_digest_refs(self):
-        from nemo_gym.tasks.harbor.package_store import PackageRef
+        from nemo_gym.data.tasks.harbor.package_store import PackageRef
 
         assert PackageRef("o", "n", "4.0.0").folder_name("f" * 64) == "n-4.0.0"
         assert PackageRef("o", "n", "v1/rc 2").folder_name("f" * 64) == "n-v1-rc-2"
@@ -628,7 +628,7 @@ class TestPackageStore:
         assert pinned.digest == "e" * 64 and pinned.folder_name("e" * 64) == "n-eeeeeeeeeeee"
 
     def test_fetch_ref_dispatches_package_references(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor import hub, package_store
+        from nemo_gym.data.tasks.harbor import hub, package_store
 
         seen = {}
 
@@ -679,7 +679,7 @@ class TestPackageStore:
         import os
         import tomllib
 
-        from nemo_gym.tasks.harbor.digest import archive_hash
+        from nemo_gym.data.tasks.harbor.digest import archive_hash
 
         # Harbor's packager applies the task's own .gitignore instead of its defaults when there is one, so a
         # published archive can hold a name Gym's folder digest skips (here an editor backup the task's .gitignore
@@ -791,8 +791,8 @@ class TestPackageStore:
     def test_the_recorded_reference_reads_a_reference_as_the_store_does(self, target, reference):
         """What a manifest records for a package-store fetch: ``latest`` spelled out, a digest in its ``sha256:`` form,
         so the same dataset declared either way reads as one reference (round 32)."""
-        from nemo_gym.tasks.harbor.hub import HubRef
-        from nemo_gym.tasks.harbor.package_store import PackageRef
+        from nemo_gym.data.tasks.harbor.hub import HubRef
+        from nemo_gym.data.tasks.harbor.package_store import PackageRef
 
         ref = PackageRef.of(HubRef.parse(target))
         assert ref.package == "org/ds" and ref.reference == reference
@@ -846,8 +846,8 @@ class TestPackageStore:
         orgs (a curated suite of upstream tasks). Its pins name those packages, not <dataset org>/<task>: the folder
         is this dataset's on every later fetch, with one download per task, prepare takes it, and a same-named
         dataset whose tasks are someone else's packages is still refused before anything is touched."""
-        from nemo_gym.tasks.harbor.cli import prepare_target
-        from nemo_gym.tasks.harbor.hub import fetch_ref
+        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.hub import fetch_ref
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders, task_org="upstream")
@@ -1114,8 +1114,8 @@ class TestPackageStore:
         with nothing downloaded and its manifest is upgraded with the recorded digests kept, an edited folder is
         refused by fetch and prepare alike with the manifest untouched, and a task the earlier fetch never landed
         is unfinished business until it is fetched."""
-        from nemo_gym.tasks.harbor.cli import prepare_target
-        from nemo_gym.tasks.harbor.manifest import ManifestError, check_manifest
+        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.manifest import ManifestError, check_manifest
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pytest import raises
 
-from nemo_gym.dataset_metrics import DatasetMetricsHookError, load_dataset_metrics_hook
+from nemo_gym.data.dataset_metrics import DatasetMetricsHookError, load_dataset_metrics_hook
 
 
 def test_load_dataset_metrics_hook_returns_none_when_module_is_absent(tmp_path: Path) -> None:

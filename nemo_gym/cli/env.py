@@ -1961,8 +1961,8 @@ class SchemaConfig(RunConfig):
 
 @exit_cleanly_on_config_error
 def show_schema():  # pragma: no cover
-    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/task_data.py``)."""
-    from nemo_gym.task_data import TaskDataSchemaError, load_task_data_schema
+    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/data/task_data.py``)."""
+    from nemo_gym.data.task_data import TaskDataSchemaError, load_task_data_schema
 
     global_config_dict = get_global_config_dict()
     config = SchemaConfig.model_validate(global_config_dict)
@@ -1976,7 +1976,7 @@ def show_schema():  # pragma: no cover
     if adapter is None:
         print(
             f"{config.entrypoint} does not ship a task_data.py schema yet. "
-            "Add one exporting `TaskData` (see nemo_gym/task_data.py for the protocol)."
+            "Add one exporting `TaskData` (see nemo_gym/data/task_data.py for the protocol)."
         )
         exit(1)
     print(json.dumps(adapter.json_schema(), indent=2))

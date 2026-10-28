@@ -68,10 +68,10 @@ keeping the Gym paraphrase for consistency with the other HLE benchmarks loses t
 - `prompts/default.yaml`: the verbatim text as the system message with the bare question as the user
   message, the placement upstream uses (upstream moves the instruction into the user role only for
   `o1` models; this benchmark always sends it as the system message). The braces are doubled in the
-  file because `nemo_gym.prompt` fills `{placeholders}` with `str.format_map`; the rendered message
+  file because `nemo_gym.data.prompt` fills `{placeholders}` with `str.format_map`; the rendered message
   carries the single braces, and `tests/unit_tests/test_hle_diamond.py` asserts that the rendered
   string and the prepared rows equal the upstream text. The default set bakes it into
-  `responses_create_params.input` at prepare time (`nemo_gym.vision_input.build_image_input`); the
+  `responses_create_params.input` at prepare time (`nemo_gym.data.vision_input.build_image_input`); the
   text variant applies the same file at rollout time.
 - `prompts/opencode.yaml`: the same verbatim instruction folded after the question into the single
   user message the OpenCode and Pi adapters accept; the harnesses' native system prompts stay intact.
@@ -88,7 +88,7 @@ keeping the Gym paraphrase for consistency with the other HLE benchmarks loses t
 Image questions: upstream attaches the image as `image_url` with no `detail` setting (the provider
 default); Gym's shared builder requests `detail: high`, which changes image tiling and token counts
 on the 272 image rows for OpenAI-family models. Making `detail` configurable would be a change to
-`nemo_gym.vision_input`, not to this benchmark.
+`nemo_gym.data.vision_input`, not to this benchmark.
 
 Upstream calls the chat-completions API directly (`client.chat.completions.create`); this benchmark
 sends a Responses API request through the gateway, which translates it per provider (system-role

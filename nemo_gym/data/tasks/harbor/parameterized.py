@@ -10,13 +10,13 @@ beside ``task_id``). Files named ``<stem>.template<suffix>`` (``instruction.temp
 ``{{ task_data.question }}`` or ``{{ question }}``, into ``<stem><suffix>``; every other task file is copied,
 hidden files under ``environment/``, ``tests/``, ``solution/`` and ``steps/`` included (``environment/.env``,
 ``environment/.dockerignore``: the task digest and the sandbox uploads see them, so the render must carry them).
-Left out: the editor leftovers and byte-code caches the digest skips (:func:`~nemo_gym.tasks.harbor.digest.is_ignored`)
+Left out: the editor leftovers and byte-code caches the digest skips (:func:`~nemo_gym.data.tasks.harbor.digest.is_ignored`)
 at any depth, and at the template root the hidden entries (``.git``, ``.venv``), ``tasks.jsonl``, the dataset-level
 files and prepare's records, plus ``README.md``, which describes the template, not a task (a per-task README is
 ``README.template.md``). A rendered name that collides with another file of its folder (``instruction.md`` beside
 ``instruction.template.md``) is refused, naming both.
 Each rendered folder gets the row's fields as ``task_data.json``, which the loader reads and the dataset's
-``task_data.py`` validates (:mod:`nemo_gym.tasks.harbor.task_data`). The rendered ``task.toml`` is the template's
+``task_data.py`` validates (:mod:`nemo_gym.data.tasks.harbor.task_data`). The rendered ``task.toml`` is the template's
 with ``[task].name`` rewritten to ``<org>/<task_id>`` (the template's org): Harbor keys a dataset on that name
 (``Task.name``, ``harbor add`` merges folders that share one, trial results and the viewer label by it), so every
 rendered task needs its own; a template without a ``[task]`` table renders without one (Harbor then names the task
@@ -54,15 +54,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
-from nemo_gym.tasks.harbor.digest import GITIGNORE, is_ignored
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.hub import validate_task_name
-from nemo_gym.tasks.harbor.manifest import MANIFEST_FILE
-from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, RECORD_LOCK_SUFFIX, record_lock
-from nemo_gym.tasks.harbor.task import TASK_FILE, is_task_folder
-from nemo_gym.tasks.harbor.task_data import TASK_DATA_FILE, TASK_DATA_MODULE, is_reserved_key
+from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE
+from nemo_gym.data.tasks.harbor.digest import GITIGNORE, is_ignored
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.hub import validate_task_name
+from nemo_gym.data.tasks.harbor.manifest import MANIFEST_FILE
+from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE
+from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, RECORD_LOCK_SUFFIX, record_lock
+from nemo_gym.data.tasks.harbor.task import TASK_FILE, is_task_folder
+from nemo_gym.data.tasks.harbor.task_data import TASK_DATA_FILE, TASK_DATA_MODULE, is_reserved_key
 
 
 TASKS_FILE = "tasks.jsonl"
@@ -346,7 +346,7 @@ def is_record_file(name: str) -> bool:
     the rendered folder is replaced.
 
     The temporaries are the hidden ``*.tmp`` names the writers use (``.<record>.<pid>.tmp`` from
-    :func:`~nemo_gym.tasks.harbor.records.write_json_record`, ``.manifest-<pid>-<thread>-<hex>.tmp`` from the
+    :func:`~nemo_gym.data.tasks.harbor.records.write_json_record`, ``.manifest-<pid>-<thread>-<hex>.tmp`` from the
     manifest's writer); the renderer writes no such name itself. A writer in another process ``fsync``\\ s and then
     ``os.replace``\\ s its temporary over the record, and loses the file to an overlapping render otherwise.
     """

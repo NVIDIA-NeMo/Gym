@@ -18,8 +18,8 @@ from nemo_gym.config.config_types import (
     UploadJsonlDatasetHuggingFaceConfig,
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )
-from nemo_gym.gitlab_utils import delete_model_from_gitlab, is_model_in_gitlab
-from nemo_gym.hf_utils import upload_jsonl_dataset as upload_jsonl_dataset_to_hf
+from nemo_gym.data.gitlab_utils import delete_model_from_gitlab, is_model_in_gitlab
+from nemo_gym.data.hf_utils import upload_jsonl_dataset as upload_jsonl_dataset_to_hf
 
 
 def delete_jsonl_dataset_from_gitlab(gitlab_model_name: str) -> None:  # pragma: no cover

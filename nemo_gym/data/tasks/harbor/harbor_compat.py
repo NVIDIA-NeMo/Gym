@@ -4,7 +4,7 @@
 """Environment content hashing and image naming vendored from Harbor v0.22.0 (Apache-2.0).
 
 Gym builds the images of Harbor tasks with its own tools (buildah, podman or docker; see
-``nemo_gym.tasks.harbor.image_build``) but hashes the task's ``environment/`` folder and names the image
+``nemo_gym.data.tasks.harbor.image_build``) but hashes the task's ``environment/`` folder and names the image
 the way Harbor does, so a task prepared by either framework resolves to the same image name. Kept
 byte-for-byte so Gym and Harbor compute the same image names for the same build context.
 

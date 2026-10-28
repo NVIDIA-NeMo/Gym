@@ -15,21 +15,30 @@ from pathlib import Path
 
 import yaml
 
-from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM, unsupported_compose_fields
-from nemo_gym.tasks.harbor.build_options import BUILDS_KEY, BuildOptions
-from nemo_gym.tasks.harbor.build_plan import DOCKERFILE_NAME, BuildError, BuildPlanEntry, plan_builds
-from nemo_gym.tasks.harbor.build_records import build_inputs_mismatch, record_forced_tasks, recorded_image_mismatch
-from nemo_gym.tasks.harbor.build_tools import ImageBuilder
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.image_build import build_images
-from nemo_gym.tasks.harbor.image_configs import (
+from nemo_gym.data.tasks.harbor.build_options import BUILDS_KEY, BuildOptions
+from nemo_gym.data.tasks.harbor.build_plan import DOCKERFILE_NAME, BuildError, BuildPlanEntry, plan_builds
+from nemo_gym.data.tasks.harbor.build_records import (
+    build_inputs_mismatch,
+    record_forced_tasks,
+    recorded_image_mismatch,
+)
+from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.image_build import build_images
+from nemo_gym.data.tasks.harbor.image_configs import (
     COMPOSE_FILE_NAMES,
     restated_main_build_reason,
     with_built_images,
     without_pull_policy,
 )
-from nemo_gym.tasks.harbor.records import MAIN_SERVICE, read_built_images, read_image_configs, recorded_service_images
-from nemo_gym.tasks.harbor.task import is_task_folder
+from nemo_gym.data.tasks.harbor.records import (
+    MAIN_SERVICE,
+    read_built_images,
+    read_image_configs,
+    recorded_service_images,
+)
+from nemo_gym.data.tasks.harbor.task import is_task_folder
+from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM, unsupported_compose_fields
 
 
 def refused_before_build(plan: list[BuildPlanEntry]) -> dict[str, HarborTaskError]:

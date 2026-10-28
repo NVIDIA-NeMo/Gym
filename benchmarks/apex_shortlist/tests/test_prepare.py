@@ -6,7 +6,7 @@ import json
 from pydantic import TypeAdapter
 
 from benchmarks.apex_shortlist import prepare
-from nemo_gym.task_data import validate_jsonl_rows
+from nemo_gym.data.task_data import validate_jsonl_rows
 from resources_servers.math_with_judge.task_data import TaskData
 
 

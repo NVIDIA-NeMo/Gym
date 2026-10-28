@@ -5,14 +5,14 @@
 
 One server instance serves one or more tasksets. Each taskset maps to a folder of
 task folders in Gym's shared datasets folder plus the digest every task had when its
-rows were materialized (see ``nemo_gym.tasks.harbor``).
+rows were materialized (see ``nemo_gym.data.tasks.harbor``).
 
 ``/run`` owns one whole episode, in this order:
 
 - seed: check the row's digest against the mapping and the folder, start the task's
   image as a sandbox through the configured provider, run the ``RUN`` lines of an
   overlay-mode Dockerfile with the ``ENV``, ``WORKDIR`` and ``USER`` the loader resolved for
-  each (see ``nemo_gym.tasks.harbor.dockerfile``), create the working directory, start the
+  each (see ``nemo_gym.data.tasks.harbor.dockerfile``), create the working directory, start the
   image's recorded ``ENTRYPOINT`` beside the provider's keepalive the way Harbor's Compose files
   leave it running (with ``sh -c "sleep infinity"`` as its arguments), then wait for the image's
   healthcheck and the task's. A ``RUN`` line that fails, or an entrypoint that exits non-zero
@@ -106,6 +106,27 @@ from nemo_gym.config.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_serv
 from nemo_gym.core import failure_kinds
 from nemo_gym.core.episode import TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.data.tasks.harbor import DIGEST_KEY, HarborTask, load_task
+from nemo_gym.data.tasks.harbor.cli import ORACLE_AGENT
+from nemo_gym.data.tasks.harbor.compose_overlay import (
+    ComposeOverlayError,
+    HarborComposeOverlay,
+    wrap_first_instruction,
+)
+from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.materialize import STEP_METADATA_KEY, HarborTaskInput
+from nemo_gym.data.tasks.harbor.models import HarborMCPServer
+from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE
+from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE
+from nemo_gym.data.tasks.harbor.task import HarborTurn
+from nemo_gym.data.tasks.harbor.task_data import (
+    TaskDataError,
+    TaskDataSchema,
+    check_row_matches_folder,
+    load_task_data_schema,
+)
+from nemo_gym.data.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.sandbox.access import SandboxAccess
@@ -119,23 +140,6 @@ from nemo_gym.server_runtime.base_environment_server import (
 from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 from nemo_gym.server_runtime.tool_access import MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
-from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
-from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
-from nemo_gym.tasks.harbor.compose_overlay import ComposeOverlayError, HarborComposeOverlay, wrap_first_instruction
-from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, HarborTaskInput
-from nemo_gym.tasks.harbor.models import HarborMCPServer
-from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
-from nemo_gym.tasks.harbor.task import HarborTurn
-from nemo_gym.tasks.harbor.task_data import (
-    TaskDataError,
-    TaskDataSchema,
-    check_row_matches_folder,
-    load_task_data_schema,
-)
-from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 from nemo_gym.trajectory.atif_export import AtifExportError
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint

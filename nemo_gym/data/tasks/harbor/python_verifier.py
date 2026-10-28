@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import nemo_gym.verifiers as verifiers_package
-from nemo_gym.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 
 
 logger = logging.getLogger(__name__)

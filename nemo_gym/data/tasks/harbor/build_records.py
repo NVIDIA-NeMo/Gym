@@ -19,16 +19,16 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable
 
-from nemo_gym.tasks.harbor.build_compose import (
+from nemo_gym.data.tasks.harbor.build_compose import (
     build_section,
     compose_build_env,
     image_name,
     service_build_settings,
     validate_task_compose,
 )
-from nemo_gym.tasks.harbor.build_plan import BuildError, BuildPlanEntry, BuildResult
-from nemo_gym.tasks.harbor.digest import inputs_digest
-from nemo_gym.tasks.harbor.records import (
+from nemo_gym.data.tasks.harbor.build_plan import BuildError, BuildPlanEntry, BuildResult
+from nemo_gym.data.tasks.harbor.digest import inputs_digest
+from nemo_gym.data.tasks.harbor.records import (
     BUILT_IMAGES_FILE,
     IMAGE_CONFIGS_FILE,
     MAIN_SERVICE,
@@ -98,7 +98,7 @@ def _dependency_digests(
 
 
 def build_inputs_digest(entry: BuildPlanEntry) -> str:
-    """The inputs digest of a settled entry (:func:`settle_entry`): :func:`~nemo_gym.tasks.harbor.digest.inputs_digest`
+    """The inputs digest of a settled entry (:func:`settle_entry`): :func:`~nemo_gym.data.tasks.harbor.digest.inputs_digest`
     of its context (every entry of the tree with its mode, content or link target, nothing skipped) plus what the
     build reads outside the tree: the service's ``build`` section of the task's Compose file as a whole, as it
     stands after interpolation (Compose interpolates every string of the file against the build's environment, so

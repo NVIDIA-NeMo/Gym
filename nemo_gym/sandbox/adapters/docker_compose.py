@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from nemo_gym.data.tasks.harbor.digest import is_ignored
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.compose_fields import (
     ComposeFieldError,
@@ -51,7 +52,6 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxServiceOptions,
     SupportsSandboxSharedStorage,
 )
-from nemo_gym.tasks.harbor.digest import is_ignored
 
 
 LOGGER = logging.getLogger(__name__)
@@ -201,7 +201,7 @@ class AsyncSandboxCompose:
             if not isinstance(service, Mapping):
                 raise ValueError(f"Service {name!r} requires a mapping")
         try:
-            # The one field check, shared with prepare (``nemo_gym.tasks.harbor.image_configs``), which reports a
+            # The one field check, shared with prepare (``nemo_gym.data.tasks.harbor.image_configs``), which reports a
             # refused field per task before any sandbox exists; here it is the last line before provisioning. A key
             # the group does not start is refused first, then every M28 field takes its normalized shape, so the
             # checks below read one form each.
@@ -716,7 +716,7 @@ class AsyncSandboxCompose:
         included (a program that expects the output or cache folder the task supplies finds it, as under
         a bind mount), over whatever the image already has there (a merge, where a bind mount would hide
         the image's folder). The names the task digest skips (``__pycache__``, ``*.pyc``, editor leftovers:
-        :func:`nemo_gym.tasks.harbor.digest.is_ignored`) are left out, so what reaches the service is what
+        :func:`nemo_gym.data.tasks.harbor.digest.is_ignored`) are left out, so what reaches the service is what
         the digest covers, and a link inside the folder is refused, naming it, rather than read through.
         """
         sandbox = self.services[name]

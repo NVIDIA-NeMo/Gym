@@ -10,8 +10,8 @@ import json
 
 import nemo_gym.cli.main as main_module
 import nemo_gym.config.global_config as global_config
-from nemo_gym.tasks.harbor.cli import prepare_target
-from nemo_gym.tasks.harbor.validation_report import _validation_key
+from nemo_gym.data.tasks.harbor.cli import prepare_target
+from nemo_gym.data.tasks.harbor.validation_report import _validation_key
 from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
 from tests.unit_tests.test_harbor_validation import oracle_collection, result, validation_cli  # noqa: F401 (fixtures)
 

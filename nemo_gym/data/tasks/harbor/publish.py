@@ -4,7 +4,7 @@
 """``gym dataset publish --harbor``: a Gym-authored dataset as plain Harbor task folders.
 
 Expands a parameterized template into its task folders, writes the ``tests/test.sh`` shim for every task
-graded by a Python verifier (:mod:`nemo_gym.tasks.harbor.python_verifier`) and a ``solution/solve.sh`` for
+graded by a Python verifier (:mod:`nemo_gym.data.tasks.harbor.python_verifier`) and a ``solution/solve.sh`` for
 every ``solution/answer.md``, writes ``dataset.toml`` without its ``[gym]`` table (Harbor's own tables byte for
 byte, as the RFC has it: the published file is Harbor's artifact, Gym's license, defaults and overrides stay with the
 source), and runs Harbor's own format check on each staged folder when the ``harbor`` package is importable (it is not
@@ -81,19 +81,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE
-from nemo_gym.tasks.harbor.digest import GITIGNORE, is_covered
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.parameterized import is_harbor_name, is_template_folder, render_template_folder
-from nemo_gym.tasks.harbor.python_verifier import (
+from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE
+from nemo_gym.data.tasks.harbor.digest import GITIGNORE, is_covered
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.parameterized import is_harbor_name, is_template_folder, render_template_folder
+from nemo_gym.data.tasks.harbor.python_verifier import (
     PythonVerifierError,
     VerifierShim,
     python_verifier_for,
     reads_response,
     write_shim,
 )
-from nemo_gym.tasks.harbor.task import is_task_folder, iter_task_folders
-from nemo_gym.tasks.harbor.task_data import TASK_DATA_FILE, TaskDataError, load_task_data_schema, read_task_fields
+from nemo_gym.data.tasks.harbor.task import is_task_folder, iter_task_folders
+from nemo_gym.data.tasks.harbor.task_data import TASK_DATA_FILE, TaskDataError, load_task_data_schema, read_task_fields
 
 
 ANSWER_FILE = "answer.md"

@@ -13,11 +13,11 @@ from typing_extensions import Self
 
 from nemo_gym.core.episode import TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig
+from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.task import HarborTask, is_task_folder
 from nemo_gym.server_runtime.episode_types import MaterializedTask
-from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
-from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.task import HarborTask, is_task_folder
 
 
 AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
@@ -122,7 +122,7 @@ def materialize_task(
     ``task_data`` holds the task's own field values (``task_data.json`` in its folder, validated against
     the dataset's ``task_data.py`` before any row is written) under the reserved ``_ng_*`` keys. The values
     are the file's as written, not the validated model's dump: the model validates strictly, as JSON, so an
-    accepted value already has its field's type (:meth:`~nemo_gym.tasks.harbor.task_data.TaskDataSchema.validate`),
+    accepted value already has its field's type (:meth:`~nemo_gym.data.tasks.harbor.task_data.TaskDataSchema.validate`),
     and the same fields are what the seed compares with the folder's file and what the in-sandbox verifier
     reads as ``task_data.json``. A dump would drift from both (defaults filled in, aliases and ``AliasPath``
     shapes rewritten) without changing what any verifier sees.
@@ -204,7 +204,7 @@ def write_rows(
 
 def rows_metrics_sidecars(rows_path: Path) -> tuple[Path, Path]:
     """The data processor's per-dataset metrics beside the rows and the conflict file it writes on a mismatch:
-    ``<rows stem>_metrics.json`` and ``<rows stem>_metrics_conflict.json`` (``nemo_gym.train_data_utils``)."""
+    ``<rows stem>_metrics.json`` and ``<rows stem>_metrics_conflict.json`` (``nemo_gym.data.dataset_preparation``)."""
     metrics = rows_path.with_name(f"{rows_path.stem}_metrics.json")
     return metrics, metrics.with_name(f"{metrics.stem}_conflict.json")
 
@@ -213,7 +213,7 @@ def taskset_mapping(tasks: list[HarborTask], folder: Path) -> dict[str, Any]:
     """Where a taskset's folders live and which digest each task had at materialization.
 
     Servers resolve a task as ``<folder>/<task_id>``, or ``<folder>/<paths[task_id]>`` for a task
-    found below the first level (see :func:`nemo_gym.tasks.harbor.task.discover_tasks`). For a
+    found below the first level (see :func:`nemo_gym.data.tasks.harbor.task.discover_tasks`). For a
     folder of task folders ``folder`` is the folder itself; for a single task folder it is the
     task's parent, so ``folder`` is always the root the tasks were discovered under.
     """
@@ -247,7 +247,7 @@ def dataset_entry(taskset: str, rows_path: Path, dataset: GymDatasetConfig | Non
     the rows by it and the collector's run-level count would multiply on top, and the metrics sidecar beside
     the rows records the entry, so a count that moved with the command line would conflict run to run.
     ``[gym.defaults].num_repeats`` is the run config's top-level ``num_repeats`` instead (see
-    ``nemo_gym.tasks.harbor.cli.build_run``). A benchmark entry names no ``prepare_script``: the rows are
+    ``nemo_gym.data.tasks.harbor.cli.build_run``). A benchmark entry names no ``prepare_script``: the rows are
     written by the preparation that generates this entry.
     """
     dataset = dataset or GymDatasetConfig()

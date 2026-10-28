@@ -23,18 +23,18 @@ from typing import Any
 
 import yaml
 
-from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-from nemo_gym.tasks.harbor.build_plan import DOCKERFILE_NAME, HARBOR_COMPOSE_FILE, BuildError, BuildPlanEntry
-from nemo_gym.tasks.harbor.compose_variables import (
+from nemo_gym.data.tasks.harbor.build_plan import DOCKERFILE_NAME, HARBOR_COMPOSE_FILE, BuildError, BuildPlanEntry
+from nemo_gym.data.tasks.harbor.compose_variables import (
     LOG_MOUNT_PATHS,
     TEST_DIR,
     env_file_entries,
     substitute_compose,
     substitute_with_empty,
 )
-from nemo_gym.tasks.harbor.harbor_compat import sanitize_docker_image_name
-from nemo_gym.tasks.harbor.image_configs import COMPOSE_FILE_NAMES
-from nemo_gym.tasks.harbor.records import MAIN_SERVICE
+from nemo_gym.data.tasks.harbor.harbor_compat import sanitize_docker_image_name
+from nemo_gym.data.tasks.harbor.image_configs import COMPOSE_FILE_NAMES
+from nemo_gym.data.tasks.harbor.records import MAIN_SERVICE
+from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -494,7 +494,7 @@ def compose_build_env(entry: BuildPlanEntry, image: str, platform: str | None) -
     the process environment, then the task's ``[environment].env`` (:func:`resolve_task_env`), then Harbor's
     infrastructure variables, which win: ``MAIN_IMAGE_NAME``, ``CONTEXT_DIR``, ``CPUS`` and ``MEMORY`` (as
     ``<n>M``) from the task's resources, and the legacy ``HOST_*_PATH`` / ``ENV_*_PATH`` log mounts, plus the
-    two the loader defines for the same file (``nemo_gym.tasks.harbor.image_configs.compose_variables``):
+    two the loader defines for the same file (``nemo_gym.data.tasks.harbor.image_configs.compose_variables``):
     ``TEST_DIR`` and ``COMPOSE_PROJECT_NAME`` (``hb__<hash>``, the image name; a stable stand-in, not Harbor's
     per-trial project name), so the build and the seed interpolate a task's file from the same set. A task
     variable named like an infrastructure one is ignored with a warning, as ``merge_compose_env`` does.

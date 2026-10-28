@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.tasks.harbor.build_plan import BUILD_TOOLS, REPOSITORY_ENV
-from nemo_gym.tasks.harbor.registry import ImageConfigError, platform_pair
+from nemo_gym.data.tasks.harbor.build_plan import BUILD_TOOLS, REPOSITORY_ENV
+from nemo_gym.data.tasks.harbor.registry import ImageConfigError, platform_pair
 
 
 # The top-level configuration block that sets Dockerfile builds up, and the settings it takes.
@@ -37,7 +37,7 @@ class BuildOptions:
     """How prepare treats Dockerfiles outside pull and overlay mode: the ``builds:`` configuration block.
 
     ``tool`` builds them (buildah, podman or docker; default: the first one on PATH that fits, see
-    :func:`nemo_gym.tasks.harbor.image_build.detect_tool`). ``repository`` is the registry path built
+    :func:`nemo_gym.data.tasks.harbor.image_build.detect_tool`). ``repository`` is the registry path built
     images are pushed under (default: the ``NEMO_GYM_BUILD_REPOSITORY`` variable; unset keeps them local
     in the Docker daemon). ``platform`` is passed to the tool (default ``linux/amd64``). With ``enabled``
     false nothing is built, and the tasks that need a build are skipped with the loader's message. With
@@ -97,7 +97,7 @@ def _build_setting(block: Mapping[str, Any], name: str) -> str | None:
 
 
 def _check_platform(block: Mapping[str, Any]) -> None:
-    """Refuse a ``platform`` setting :func:`~nemo_gym.tasks.harbor.registry.platform_pair` refuses, where it enters.
+    """Refuse a ``platform`` setting :func:`~nemo_gym.data.tasks.harbor.registry.platform_pair` refuses, where it enters.
 
     An amd64 micro-architecture level above the baseline (``linux/amd64/v3``) is another platform to docker, but
     the records keep an image's os and architecture only, so a sidecar built for it (of a task whose ``main`` is

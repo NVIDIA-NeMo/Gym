@@ -22,14 +22,14 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.tasks.harbor.build_compose import (
+from nemo_gym.data.tasks.harbor.build_compose import (
     build_section,
     compose_build_env,
     task_compose_file,
     validate_task_compose,
     write_compose_files,
 )
-from nemo_gym.tasks.harbor.build_plan import (
+from nemo_gym.data.tasks.harbor.build_plan import (
     BUILD_TOOLS,
     DEFAULT_PLATFORM,
     HARBOR_COMPOSE_FILE,
@@ -40,12 +40,12 @@ from nemo_gym.tasks.harbor.build_plan import (
     default_storage_root,
     detect_tool,
 )
-from nemo_gym.tasks.harbor.build_records import build_inputs_digest, platform_key, settle_with_document
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION, dockerfile_has_heredoc
-from nemo_gym.tasks.harbor.harbor_compat import sanitize_docker_image_name
-from nemo_gym.tasks.harbor.records import MAIN_SERVICE
-from nemo_gym.tasks.harbor.registry import RECORDED_CONFIG_KEYS, ImageConfigError, platform_pair
-from nemo_gym.tasks.harbor.verifier_env import (
+from nemo_gym.data.tasks.harbor.build_records import build_inputs_digest, platform_key, settle_with_document
+from nemo_gym.data.tasks.harbor.dockerfile import RECORD_VERSION, dockerfile_has_heredoc
+from nemo_gym.data.tasks.harbor.harbor_compat import sanitize_docker_image_name
+from nemo_gym.data.tasks.harbor.records import MAIN_SERVICE
+from nemo_gym.data.tasks.harbor.registry import RECORDED_CONFIG_KEYS, ImageConfigError, platform_pair
+from nemo_gym.data.tasks.harbor.verifier_env import (
     verifier_compose_main_overrides,
     verifier_compose_refusal,
     verifier_compose_sidecars,

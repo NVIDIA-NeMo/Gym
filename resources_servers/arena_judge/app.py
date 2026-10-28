@@ -53,12 +53,12 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
 )
+from nemo_gym.data.prompt import PromptConfig, load_prompt_config
 from nemo_gym.metrics.reward_profile import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
-from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,

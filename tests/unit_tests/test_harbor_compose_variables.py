@@ -11,7 +11,7 @@ import pytest
 
 
 def test_substitute_compose_covers_the_interpolation_forms():
-    from nemo_gym.tasks.harbor.compose_variables import substitute_compose
+    from nemo_gym.data.tasks.harbor.compose_variables import substitute_compose
 
     variables = {"A": "x", "E": ""}
     document = {
@@ -31,8 +31,8 @@ def test_substitute_compose_covers_the_interpolation_forms():
 
 
 def test_substitute_compose_names_the_unresolved_variable_and_never_reads_the_process_env(monkeypatch):
+    from nemo_gym.data.tasks.harbor.compose_variables import substitute_compose
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import substitute_compose
 
     monkeypatch.setenv("LEAK", "from-the-shell")
     with pytest.raises(ComposeSubstitutionError, match=r"\$\{LEAK\}") as info:
@@ -43,7 +43,7 @@ def test_substitute_compose_names_the_unresolved_variable_and_never_reads_the_pr
 
 
 def test_parse_env_file_and_inline_env_files(tmp_path):
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files, parse_env_file
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files, parse_env_file
 
     (tmp_path / "service.env").write_text("# comment\n\nexport TOKEN='abc=1'\nMODE=\"fast\"\nPLAIN=value\nEMPTY=\n")
     assert parse_env_file((tmp_path / "service.env").read_text()) == {
@@ -69,8 +69,8 @@ def test_parse_env_file_and_inline_env_files(tmp_path):
 
 
 def test_inline_env_files_rejects_a_missing_required_file_and_malformed_lines_without_echoing_them(tmp_path):
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files
 
     with pytest.raises(ComposeSubstitutionError, match="env_file 'nope.env' not found"):
         inline_env_files({"services": {"api": {"env_file": "nope.env"}}}, tmp_path)
@@ -88,7 +88,7 @@ def test_inline_env_files_rejects_a_missing_required_file_and_malformed_lines_wi
 
 
 def test_inline_env_files_bare_environment_names_take_the_task_variable_or_are_dropped(tmp_path):
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files
 
     (tmp_path / "ok.env").write_text("A=1\n")
     document = {
@@ -112,7 +112,7 @@ def test_inline_env_files_bare_environment_names_take_the_task_variable_or_are_d
 def test_an_unset_service_environment_entry_removes_the_env_file_value(tmp_path, environment):
     """Compose: a service ``environment`` entry overrides ``env_file`` even when it resolves to nothing, so the
     variable is unset in the container rather than taking the file's value."""
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files
 
     (tmp_path / "mode.env").write_text("MODE=from-file\nKEEP=1\n")
 
@@ -126,7 +126,7 @@ def test_an_unset_service_environment_entry_removes_the_env_file_value(tmp_path,
 
 @pytest.mark.parametrize("environment", [["MODE="], {"MODE": ""}])
 def test_an_explicitly_empty_service_environment_entry_stays_empty(tmp_path, environment):
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files
 
     (tmp_path / "mode.env").write_text("MODE=from-file\n")
     document = {"services": {"api": {"env_file": "mode.env", "environment": environment}}}
@@ -134,8 +134,8 @@ def test_an_explicitly_empty_service_environment_entry_stays_empty(tmp_path, env
 
 
 def test_quoted_env_file_values_keep_escaped_quotes_backslashes_and_newlines():
+    from nemo_gym.data.tasks.harbor.compose_variables import env_file_entries, parse_env_file
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import env_file_entries, parse_env_file
 
     text = (
         "A='Let\\'s go!'\n"  # an escaped quote inside single quotes does not end the value
@@ -165,8 +165,8 @@ def test_quoted_env_file_values_keep_escaped_quotes_backslashes_and_newlines():
 
 
 def test_env_file_parse_errors_name_the_service_the_file_and_the_line(tmp_path):
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files
 
     (tmp_path / "a.env").write_text("A=1\n")
     (tmp_path / "b.env").write_text("B=1\nsk-live-abcdef is not a pair\n")
@@ -183,8 +183,8 @@ def test_env_file_parse_errors_name_the_service_the_file_and_the_line(tmp_path):
 def test_an_env_file_the_task_digest_skips_is_refused(tmp_path):
     """``content_hash`` ignores editor leftovers, so such a file could change the document without changing the
     identity the server checks at seed."""
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files
 
     base = tmp_path / "task" / "environment"
     (base / "__pycache__").mkdir(parents=True)
@@ -199,8 +199,8 @@ def test_an_env_file_the_task_digest_skips_is_refused(tmp_path):
 
 
 def test_an_env_file_format_is_refused(tmp_path):
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files
 
     (tmp_path / "a.env").write_text("A=1\n")
     document = {"services": {"api": {"env_file": [{"path": "a.env", "format": "raw"}]}}}
@@ -209,8 +209,8 @@ def test_an_env_file_format_is_refused(tmp_path):
 
 
 def test_restore_compose_types_gives_healthcheck_fields_their_types_back():
+    from nemo_gym.data.tasks.harbor.compose_variables import restore_compose_types
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import restore_compose_types
 
     document = {
         "services": {
@@ -233,8 +233,8 @@ def test_restore_compose_types_gives_healthcheck_fields_their_types_back():
 
 
 def test_env_file_paths_stay_under_the_task_folder(tmp_path):
+    from nemo_gym.data.tasks.harbor.compose_variables import inline_env_files
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import inline_env_files
 
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -252,8 +252,8 @@ def test_env_file_paths_stay_under_the_task_folder(tmp_path):
 
 
 def test_substitute_compose_nests_defaults_the_way_compose_documents():
+    from nemo_gym.data.tasks.harbor.compose_variables import substitute_compose
     from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError
-    from nemo_gym.tasks.harbor.compose_variables import substitute_compose
 
     variables = {"A": "x", "B": "y"}
     assert substitute_compose("${U:-${B}}", variables) == "y"
@@ -271,8 +271,8 @@ def test_substitute_compose_nests_defaults_the_way_compose_documents():
 
 
 def test_env_file_values_are_literal_with_compose_quoting_and_inline_comments():
+    from nemo_gym.data.tasks.harbor.compose_variables import parse_env_file, substitute_compose
     from nemo_gym.sandbox.compose_config import _compose_literals
-    from nemo_gym.tasks.harbor.compose_variables import parse_env_file, substitute_compose
 
     parsed = parse_env_file(
         "\ufeffexport PW='ab$cd' # not part of it\n"
@@ -293,7 +293,7 @@ def test_env_file_values_are_literal_with_compose_quoting_and_inline_comments():
 
 
 def test_env_file_entries_report_the_quoting_compose_decides_interpolation_by():
-    from nemo_gym.tasks.harbor.compose_variables import env_file_entries
+    from nemo_gym.data.tasks.harbor.compose_variables import env_file_entries
 
     text = "A='$x'\nB=\"\\$x $$y\"\nexport C=$x # c\n"
     assert env_file_entries(text) == [("A", "$x", "'"), ("B", "$x $$y", '"'), ("C", "$x", "")]
@@ -302,7 +302,7 @@ def test_env_file_entries_report_the_quoting_compose_decides_interpolation_by():
 
 
 def test_residual_interpolation_reports_where_it_is_left_not_the_value():
-    from nemo_gym.tasks.harbor.compose_variables import residual_interpolation
+    from nemo_gym.data.tasks.harbor.compose_variables import residual_interpolation
 
     assert residual_interpolation({"services": {"a": {"environment": ["X=1", "Y=$$lit"]}}}) is None
     assert residual_interpolation({"services": {"a": {"image": "${LEFT}"}}}) == "services.a.image"

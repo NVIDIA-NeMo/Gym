@@ -11,7 +11,7 @@ committed entry under ``environments/harbor/`` (resolved to the folder its pull 
 - ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
 - ``run_config_<agent>.yaml``: the agent and environment server blocks.
 
-Beside the task folders it reconciles ``manifest.toml`` (:mod:`nemo_gym.tasks.harbor.manifest`) before
+Beside the task folders it reconciles ``manifest.toml`` (:mod:`nemo_gym.data.tasks.harbor.manifest`) before
 anything is built or pushed: a fetched dataset whose folders no longer match the manifest is refused, a
 local folder gets one. The dataset digest goes into the rows and the run config.
 
@@ -36,22 +36,19 @@ from pydantic import ValidationError
 from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.sandbox.compose_config import deployment_platform
-from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
-from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
-from nemo_gym.tasks.harbor.build_options import (
+from nemo_gym.data.tasks.harbor.build_options import (
     BuildOptions,
     _block_from_overrides,
     _merged_cli_config,
     build_options_from_overrides,
 )
-from nemo_gym.tasks.harbor.build_plan import (
+from nemo_gym.data.tasks.harbor.build_plan import (
     DEFAULT_PLATFORM,
     BuildError,
 )
-from nemo_gym.tasks.harbor.compose_overlay import HarborComposeOverlay
-from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, GymDatasetConfig, read_dataset_config
-from nemo_gym.tasks.harbor.entries import (
+from nemo_gym.data.tasks.harbor.compose_overlay import HarborComposeOverlay
+from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE, GymDatasetConfig, read_dataset_config
+from nemo_gym.data.tasks.harbor.entries import (
     DatasetEntry,
     PullPlan,
     entry_at,
@@ -59,8 +56,8 @@ from nemo_gym.tasks.harbor.entries import (
     plan_pull,
     prepare_destination,
 )
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.hub import (
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.hub import (
     REGISTRY_SOURCE,
     HubError,
     HubRef,
@@ -71,12 +68,12 @@ from nemo_gym.tasks.harbor.hub import (
     is_hub_ref,
     resolved_folder,
 )
-from nemo_gym.tasks.harbor.image_configs import (
+from nemo_gym.data.tasks.harbor.image_configs import (
     load_compose_document,
     record_base_images,
     record_compose_images,
 )
-from nemo_gym.tasks.harbor.manifest import (
+from nemo_gym.data.tasks.harbor.manifest import (
     LOCAL_SOURCE,
     MANIFEST_FILE,
     Manifest,
@@ -90,31 +87,34 @@ from nemo_gym.tasks.harbor.manifest import (
     refresh_gym_layer,
     report_rewrite,
 )
-from nemo_gym.tasks.harbor.materialize import (
+from nemo_gym.data.tasks.harbor.materialize import (
     ENVIRONMENT_SERVER_IMPL,
     ENVIRONMENT_SERVER_INSTANCE,
     run_config,
     write_rows,
 )
-from nemo_gym.tasks.harbor.package_store import PACKAGE_STORE_SOURCE
-from nemo_gym.tasks.harbor.parameterized import is_template_folder, render_template_folder
-from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles
-from nemo_gym.tasks.harbor.records import read_image_configs
-from nemo_gym.tasks.harbor.registry import (
+from nemo_gym.data.tasks.harbor.package_store import PACKAGE_STORE_SOURCE
+from nemo_gym.data.tasks.harbor.parameterized import is_template_folder, render_template_folder
+from nemo_gym.data.tasks.harbor.prepare_builds import _build_dockerfiles
+from nemo_gym.data.tasks.harbor.records import read_image_configs
+from nemo_gym.data.tasks.harbor.registry import (
     ImageConfigError,
     RegistryClient,
     credentials_for_image_prefixes,
     platform_pair,
 )
-from nemo_gym.tasks.harbor.run_summary import NO_REFERENCE_SOLUTION, output_signatures, write_run_summary
-from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder, iter_task_folders
-from nemo_gym.tasks.harbor.task_data import check_task_folders, check_tasks, load_task_data_schema
-from nemo_gym.tasks.harbor.validation_report import (
+from nemo_gym.data.tasks.harbor.run_summary import NO_REFERENCE_SOLUTION, output_signatures, write_run_summary
+from nemo_gym.data.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder, iter_task_folders
+from nemo_gym.data.tasks.harbor.task_data import check_task_folders, check_tasks, load_task_data_schema
+from nemo_gym.data.tasks.harbor.validation_report import (
     _task_digests,
     _validation_key,
     _validation_rows,
     summarize_validation,
 )
+from nemo_gym.sandbox.compose_config import deployment_platform
+from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
+from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
 from nemo_gym.utils.path_utils import materialized_path_for
 
 
@@ -204,7 +204,7 @@ SANDBOX_IMAGES_AUTH_KEY = "images.auth"
 def registry_credentials_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, tuple[str, str]]:
     """The registry credentials prepare records private images with: the ``sandbox:`` block's ``images.auth``
     (what the provider pulls those images with at seed), turned into the registry client's prefix-keyed form
-    (:func:`~nemo_gym.tasks.harbor.registry.credentials_for_image_prefixes`), so each image is read with the
+    (:func:`~nemo_gym.data.tasks.harbor.registry.credentials_for_image_prefixes`), so each image is read with the
     credentials of its longest matching prefix, as the provider pulls it.
 
     Read from the ``--sandbox`` provider file and the configuration the command names, resolved against them
@@ -417,7 +417,7 @@ def prepare_target(
     image fails to build or whose Compose file does not resolve, with the build's or the
     resolver's reason. A dataset that ships ``task_data.py`` is refused as a whole, with the task
     named, when a task's ``task_data.json`` does not satisfy its ``TaskData`` or when the module does
-    not import (:mod:`nemo_gym.tasks.harbor.task_data`); both are checked before any image is
+    not import (:mod:`nemo_gym.data.tasks.harbor.task_data`); both are checked before any image is
     recorded or built, and the loaded tasks are checked again before a row is written.
 
     Tasks matching an ``exclude`` glob, or not matching an ``only`` glob, are left out of the
@@ -427,7 +427,7 @@ def prepare_target(
     is named. Compose service fields are checked against ``sandbox_provider`` and ``gpu_sandbox_provider``,
     the provider names of the ``sandbox:`` and GPU blocks, which decide the ``tmpfs``, ``ulimits``, ``sysctls``
     and ``security_opt`` each service's provider can apply, and against ``compose_platform``, the deployment's (see
-    ``nemo_gym.tasks.harbor.image_configs.check_task_compose_fields``). Compose ``volumes`` are checked against ``volume_sources``, the deployment's mapping of
+    ``nemo_gym.data.tasks.harbor.image_configs.check_task_compose_fields``). Compose ``volumes`` are checked against ``volume_sources``, the deployment's mapping of
     external volumes and foreign bind sources to shared storage (see ``nemo_gym.sandbox.config``); a task that
     declares GPUs is checked against ``gpu_volume_sources`` when given, the mapping of the block the server runs
     such tasks on; ``shared_storage`` and ``gpu_shared_storage`` say whether each block's provider has the shared
@@ -439,7 +439,7 @@ def prepare_target(
     (registry host or image prefix to username and password, :func:`registry_credentials_from_overrides`) are what the base images
     and the Compose images are read from their registries with; without them a private image stops the
     preparation with the registry's refusal.
-    A template target (:func:`~nemo_gym.tasks.harbor.parameterized.is_template_folder`) is rendered into
+    A template target (:func:`~nemo_gym.data.tasks.harbor.parameterized.is_template_folder`) is rendered into
     ``<render_root>/<taskset>/rendered/`` first, ``output_root`` when ``render_root`` is not given. The rendered
     folder is the dataset root (its ``manifest.toml``, ``compose-images.json`` and ``built-images.json`` live in it),
     so every command that prepares one template must render it into one place: ``gym dataset validate`` keeps its
@@ -447,7 +447,7 @@ def prepare_target(
     for the template under one command is reused, not rebuilt and pushed, under the other.
 
     Before any image is recorded, built or pushed, ``manifest.toml`` beside the task folders is
-    reconciled with their digests (:func:`~nemo_gym.tasks.harbor.manifest.check_manifest`): a fetched
+    reconciled with their digests (:func:`~nemo_gym.data.tasks.harbor.manifest.check_manifest`): a fetched
     dataset whose folders changed is refused, a local folder gets a manifest. The digests hashed for
     that check are reused for the tasks that do not load; the loader's own folder digests are checked
     against them. Selection does not enter the dataset digest; it covers every task folder, so two runs of
@@ -670,7 +670,7 @@ def entry_folder(entry: DatasetEntry) -> Path:
     store, and re-records the reference when only that changed; the registry fetch says in its own words what to move
     aside). When the pull lands elsewhere than the entry's folder (``NEMO_GYM_DATASETS_DIR``, or an entry committed
     outside the working root) the copy of the entry's Gym layer beside the tasks is brought up to date, or refused,
-    exactly as the pull would (:func:`~nemo_gym.tasks.harbor.entries.prepare_destination`), so the two commands never
+    exactly as the pull would (:func:`~nemo_gym.data.tasks.harbor.entries.prepare_destination`), so the two commands never
     disagree about one folder. A folder without a pulled task names the pull to run (or, for an entry that declares
     no source, says the
     task folder path is the target). Tasks are looked for as the loader finds them (:func:`iter_task_folders`:
@@ -696,7 +696,7 @@ def _check_fetch_record(entry: DatasetEntry, folder: Path) -> None:
     """Refuse ``folder``'s task folders as ``entry``'s pull unless its manifest records a fetch of the entry's source.
 
     The manifest's ``source`` says which fetcher wrote it and its ``ref`` which reference the fetch was made from
-    (:func:`~nemo_gym.tasks.harbor.hub.declares_recorded_fetch` reads the declaration against it); both are checked
+    (:func:`~nemo_gym.data.tasks.harbor.hub.declares_recorded_fetch` reads the declaration against it); both are checked
     offline, so an entry whose ``source`` moved to another tag since the pull names the pull instead of running the
     tasks of the tag it had. A manifest that records no reference (written before it was recorded) names the pull
     too, and the pull records it without fetching a folder that still matches.
@@ -729,7 +729,7 @@ def _check_fetch_record(entry: DatasetEntry, folder: Path) -> None:
         )
 
 
-# How check_manifest's refusal of an interrupted fetch ends (nemo_gym.tasks.harbor.manifest).
+# How check_manifest's refusal of an interrupted fetch ends (nemo_gym.data.tasks.harbor.manifest).
 _FETCH_AGAIN = "run the fetch again"
 
 
@@ -805,19 +805,19 @@ class PulledDataset:
 def pull_dataset(target: str, *, refresh_registry: bool = False) -> PulledDataset:
     """Fetch ``target`` (a ``harbor:`` reference or a committed entry's name) and report where it landed.
 
-    The destination comes from :func:`~nemo_gym.tasks.harbor.entries.plan_pull`: the entry that declares the
+    The destination comes from :func:`~nemo_gym.data.tasks.harbor.entries.plan_pull`: the entry that declares the
     reference as its source (its own folder, or ``<datasets dir>/<entry>/`` with its ``dataset.toml`` placed first
     when ``NEMO_GYM_DATASETS_DIR`` or an entry committed outside the working root moved the destination,
-    :attr:`~nemo_gym.tasks.harbor.entries.DatasetEntry.destination`), else the hub's own folder under the datasets
+    :attr:`~nemo_gym.data.tasks.harbor.entries.DatasetEntry.destination`), else the hub's own folder under the datasets
     dir. The fetch is the one every
     ``gym eval run harbor:...`` makes, so a stale, edited or foreign folder is refused in the same words (a refusal
     naming a committed entry's own folder says what to delete there, :func:`with_entry_hint`); nothing is prepared,
     built or run. The manifest left after the fetch gives the task count and the dataset digest; its Gym-layer
-    digests are first brought up to date with the folder (:func:`~nemo_gym.tasks.harbor.manifest.refresh_gym_layer`),
+    digests are first brought up to date with the folder (:func:`~nemo_gym.data.tasks.harbor.manifest.refresh_gym_layer`),
     since a fetch that downloads nothing rewrites nothing and would otherwise report the digest of a ``dataset.toml``
     that changed since the last pull, which the next prepare would then rewrite. ``unchanged`` compares the manifest
     on disk before anything was touched with the one reported; a registry reference whose version the registry picks
-    is resolved first (:func:`~nemo_gym.tasks.harbor.hub.resolved_folder`) so that folder is known. When the Gym
+    is resolved first (:func:`~nemo_gym.data.tasks.harbor.hub.resolved_folder`) so that folder is known. When the Gym
     layer's digests moved while the task record stayed (the entry's ``dataset.toml`` changed, or one written by hand
     into a hub folder), the rewrite is announced in the manifest check's words whichever step applied it: the
     refresh above, or the fetch itself, which rewrites the manifest without a word when every folder is in place
@@ -1376,7 +1376,7 @@ def _clear_collector_metrics(rollouts: Path, *, split: str | None) -> None:
     to clear.
     """
     from nemo_gym.config.global_config import get_global_config_dict
-    from nemo_gym.tasks.harbor.run_summary import PREPROCESSED_SUBDIR
+    from nemo_gym.data.tasks.harbor.run_summary import PREPROCESSED_SUBDIR
 
     if not split:
         return
@@ -1392,7 +1392,7 @@ def _clear_collector_metrics(rollouts: Path, *, split: str | None) -> None:
 def _write_summary(
     rollouts: Path, *, expected: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]] | None, **kwargs: Any
 ) -> None:
-    """Write the run summary beside ``rollouts`` (:mod:`nemo_gym.tasks.harbor.run_summary`) and say where.
+    """Write the run summary beside ``rollouts`` (:mod:`nemo_gym.data.tasks.harbor.run_summary`) and say where.
 
     Runs after collection whatever it did, so a run that stopped early still leaves a summary of what it
     wrote; a summary that cannot be written is logged and never displaces the run's own outcome. ``expected``

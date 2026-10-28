@@ -12,7 +12,7 @@ folder changed after materialization. :func:`content_hash` refuses directory sym
 this file-content format does not represent their targets.
 
 Beside it, :data:`DATASET_DIGEST_KEY` carries the digest of
-the whole dataset (``manifest.toml``'s ``[dataset].digest``, see :mod:`nemo_gym.tasks.harbor.manifest`). Rollout
+the whole dataset (``manifest.toml``'s ``[dataset].digest``, see :mod:`nemo_gym.data.tasks.harbor.manifest`). Rollout
 collection copies both ``_ng_*`` keys from the row onto the results row it writes, so every
 ``rollouts.jsonl`` row says which task folder and which dataset it ran. :func:`context_digest` is the second
 digest here: Harbor's environment id of a Dockerfile build context, which keys and names the images prepare
@@ -29,7 +29,7 @@ import stat
 from collections.abc import Mapping
 from pathlib import Path
 
-from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
+from nemo_gym.data.tasks.harbor.harbor_compat import environment_content_hash
 
 
 DIGEST_KEY = "_ng_digest"
@@ -139,14 +139,14 @@ def content_hash(path: Path) -> str:
 def context_digest(path: Path) -> str:
     """Harbor's environment id of a Dockerfile build context (a task's ``environment/`` folder).
 
-    :func:`~nemo_gym.tasks.harbor.harbor_compat.environment_content_hash` over the folder: 32 hex
+    :func:`~nemo_gym.data.tasks.harbor.harbor_compat.environment_content_hash` over the folder: 32 hex
     characters of SHA-256 over the sorted (relative path, bytes) of its regular files. Symbolic links and
-    anything under a :data:`~nemo_gym.tasks.harbor.harbor_compat._CONTENT_HASH_IGNORE_NAMES` member
+    anything under a :data:`~nemo_gym.data.tasks.harbor.harbor_compat._CONTENT_HASH_IGNORE_NAMES` member
     (``__pycache__``, ``.git``, ``.DS_Store``) are skipped, and file modes are not part of it: parity with
     Harbor's image name is the contract, not a complete cache identity. An empty folder hashes to its
     name, as Harbor hashes it when the task declares no ``docker_image`` (one that does never reaches a
     build). Two contexts with the same files get the same id, so it keys the build record (see
-    ``nemo_gym.tasks.harbor.image_build``); whether a recorded image is reused is :func:`inputs_digest`'s call.
+    ``nemo_gym.data.tasks.harbor.image_build``); whether a recorded image is reused is :func:`inputs_digest`'s call.
     """
     path = Path(path)
     if not path.is_dir():

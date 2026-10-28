@@ -21,7 +21,7 @@ import yaml
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR, _resolve_under_cwd_or_install
 from nemo_gym.config.config_types import ConfigPathNotFoundError, PromptConfigMalformedError
-from nemo_gym.prompt import (
+from nemo_gym.data.prompt import (
     PromptConfig,
     apply_prompt_to_row,
     fill_prompt,

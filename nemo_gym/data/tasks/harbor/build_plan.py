@@ -25,20 +25,20 @@ from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
-from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
-from nemo_gym.tasks.harbor.digest import context_digest, inputs_differences, inputs_digest
-from nemo_gym.tasks.harbor.dockerfile import (
+from nemo_gym.data.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
+from nemo_gym.data.tasks.harbor.digest import context_digest, inputs_differences, inputs_digest
+from nemo_gym.data.tasks.harbor.dockerfile import (
     BaseImageConfig,
     DockerfileNeedsBuild,
     ImageConfigRequired,
     parse_dockerfile,
     resolve_dockerfile,
 )
-from nemo_gym.tasks.harbor.models import HarborEnvironment
-from nemo_gym.tasks.harbor.records import MAIN_SERVICE, VERIFIER_SERVICE, read_image_configs
-from nemo_gym.tasks.harbor.registry import PLATFORM
-from nemo_gym.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTaskConfig, is_task_folder, iter_task_folders
-from nemo_gym.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
+from nemo_gym.data.tasks.harbor.models import HarborEnvironment
+from nemo_gym.data.tasks.harbor.records import MAIN_SERVICE, VERIFIER_SERVICE, read_image_configs
+from nemo_gym.data.tasks.harbor.registry import PLATFORM
+from nemo_gym.data.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTaskConfig, is_task_folder, iter_task_folders
+from nemo_gym.data.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
 
 
 if TYPE_CHECKING:
@@ -244,7 +244,7 @@ def plan_builds(
     tasks whose folder name it accepts. ``conflicts``, when given, receives by task id the :class:`BuildConflict` of
     each task planned for nothing: one of its folders (``environment/`` or ``tests/``) has the Harbor hash of a task
     planned before it (the same file names and contents, so the same ``hb__<hash>`` image names and build record) but
-    not the same build inputs (:func:`~nemo_gym.tasks.harbor.digest.inputs_digest`: a mode, a symbolic link, an empty
+    not the same build inputs (:func:`~nemo_gym.data.tasks.harbor.digest.inputs_digest`: a mode, a symbolic link, an empty
     folder or a name the hash skips differs). One image cannot be built from both folders under the one name, so the
     entry keeps the first task's folder and tasks, and the task is in no entry at all, its other folder's included,
     since all of its folders are checked before any is added: prepare leaves it out with the reason, as it leaves out
@@ -262,7 +262,7 @@ def plan_builds(
     (:meth:`ImageBuilder.build_many`), so a file one task gets wrong fails that task's build and nothing else.
 
     A task in separate verifier mode whose effective verifier environment declares no ``docker_image`` and that ships
-    ``tests/Dockerfile`` (:func:`~nemo_gym.tasks.harbor.task.verifier_build_context`) plans one more entry, service
+    ``tests/Dockerfile`` (:func:`~nemo_gym.data.tasks.harbor.task.verifier_build_context`) plans one more entry, service
     ``verifier`` with ``tests/`` as its context and digest (its own group, after the task's ``environment/`` entries),
     whatever the file holds, as Harbor builds it whatever it holds. A shared verifier, a declared or inherited
     ``docker_image`` or a task without the file plans none (the loader refuses the last shape when no image is
@@ -424,7 +424,7 @@ def _plan_context(
 
 def _conflict_reason(task_id: str, context: Path, first: str, first_context: Path, digest: str) -> str:
     """Why ``task_id``'s ``context`` is left out of the entry ``first``'s ``first_context`` holds under ``digest``:
-    the differences :func:`~nemo_gym.tasks.harbor.digest.inputs_differences` finds, the first three spelled out."""
+    the differences :func:`~nemo_gym.data.tasks.harbor.digest.inputs_differences` finds, the first three spelled out."""
     differences = inputs_differences(context, first_context)
     described = []
     for relative, ours, theirs in differences[:3]:

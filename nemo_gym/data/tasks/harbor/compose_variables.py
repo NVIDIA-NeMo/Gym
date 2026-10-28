@@ -22,10 +22,10 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.data.tasks.harbor.digest import context_digest, is_ignored
+from nemo_gym.data.tasks.harbor.registry import ImageConfigError
+from nemo_gym.data.tasks.harbor.task import HarborTask
 from nemo_gym.sandbox.compose_fields import ComposeSubstitutionError, _environment_mapping
-from nemo_gym.tasks.harbor.digest import context_digest, is_ignored
-from nemo_gym.tasks.harbor.registry import ImageConfigError
-from nemo_gym.tasks.harbor.task import HarborTask
 
 
 LOGGER = logging.getLogger(__name__)
@@ -225,7 +225,7 @@ def _env_file_path(base_dir: Path, path: str, service: str) -> Path:
     """``path`` resolved under ``base_dir`` (Harbor's ``${CONTEXT_DIR}/x.env`` is absolute and lands there too).
     A path that resolves outside, or a symlink, is refused: task folders are third-party content and the
     file must be part of what prepare digested. So is a file the task digest skips (``*~``, ``*.swp``,
-    ``__pycache__`` and the like, see :func:`nemo_gym.tasks.harbor.digest.is_ignored`): it would change the
+    ``__pycache__`` and the like, see :func:`nemo_gym.data.tasks.harbor.digest.is_ignored`): it would change the
     document without changing the identity the server checks at seed."""
     base = Path(base_dir).resolve()
     file = Path(path) if Path(path).is_absolute() else base / path
@@ -568,7 +568,7 @@ def substitute_with_empty(value: Any, variables: Mapping[str, str], unset: set[s
     """:func:`substitute_compose` with Compose's rule for a bare ``${VAR}`` or ``$VAR`` nobody sets: an empty
     string, the name added to ``unset`` for the caller to warn about once. Only the bare form raises the resolver's
     default message; ``${VAR:-x}`` keeps its default, ``${VAR:?msg}`` its refusal, and every other failure passes
-    through unchanged. The loader and the Dockerfile build (``nemo_gym.tasks.harbor.image_build``) interpolate a
+    through unchanged. The loader and the Dockerfile build (``nemo_gym.data.tasks.harbor.image_build``) interpolate a
     task's Compose file through this one rule, so the two never disagree on the same file."""
     if isinstance(value, list):
         return [substitute_with_empty(item, variables, unset) for item in value]

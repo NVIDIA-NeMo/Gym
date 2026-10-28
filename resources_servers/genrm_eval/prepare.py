@@ -55,7 +55,7 @@ def download_prepared_dataset(
 ) -> Path:
     """Fetch preprocessed Gym tasks from the private GitLab registry."""
     from nemo_gym.config.config_types import DownloadJsonlDatasetGitlabConfig
-    from nemo_gym.gitlab_utils import download_jsonl_dataset
+    from nemo_gym.data.gitlab_utils import download_jsonl_dataset
 
     output = Path(output_fpath)
     with TemporaryDirectory() as directory:

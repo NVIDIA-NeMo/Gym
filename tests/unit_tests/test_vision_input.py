@@ -16,8 +16,8 @@
 from pytest import mark
 
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.prompt import PromptConfig
-from nemo_gym.vision_input import build_image_input
+from nemo_gym.data.prompt import PromptConfig
+from nemo_gym.data.vision_input import build_image_input
 
 
 @mark.parametrize("system", [None, "Answer carefully."])

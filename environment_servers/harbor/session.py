@@ -27,15 +27,15 @@ from fastapi import HTTPException
 from environment_servers.harbor.entrypoint import EntrypointLaunch, _cancel_entrypoint
 from environment_servers.harbor.users import _is_root
 from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.data.tasks.harbor import HarborTask
+from nemo_gym.data.tasks.harbor.cli import ORACLE_AGENT
+from nemo_gym.data.tasks.harbor.compose_overlay import merged_mcp_servers
+from nemo_gym.data.tasks.harbor.digest import is_ignored
+from nemo_gym.data.tasks.harbor.models import HarborMCPServer
+from nemo_gym.data.tasks.harbor.task import HarborTurn
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
-from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
-from nemo_gym.tasks.harbor.compose_overlay import merged_mcp_servers
-from nemo_gym.tasks.harbor.digest import is_ignored
-from nemo_gym.tasks.harbor.models import HarborMCPServer
-from nemo_gym.tasks.harbor.task import HarborTurn
 
 
 LOGGER = logging.getLogger(__name__)
@@ -284,7 +284,7 @@ class HarborSessionMixin:
     def _task_mcp_servers(self, task: HarborTask) -> list[HarborMCPServer]:
         """The MCP servers the harness gets for ``task``: its ``[[environment.mcp_servers]]`` with the job-level
         overlay's ``mcp_servers`` merged in by name, the overlay's winning, as Harbor merges the task's with the
-        job's ``agents[].mcp_servers`` (:func:`~nemo_gym.tasks.harbor.compose_overlay.merged_mcp_servers`)."""
+        job's ``agents[].mcp_servers`` (:func:`~nemo_gym.data.tasks.harbor.compose_overlay.merged_mcp_servers`)."""
         return merged_mcp_servers(task.config.environment.mcp_servers, self.config.compose_overlay)
 
     async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask) -> None:

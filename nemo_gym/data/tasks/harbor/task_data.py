@@ -43,9 +43,9 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
+from nemo_gym.data.task_data import TaskDataValidationReport, TaskDataValidator
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 from nemo_gym.server_runtime.episode_types import is_materialized_task_row
-from nemo_gym.task_data import TaskDataValidationReport, TaskDataValidator
-from nemo_gym.tasks.harbor.errors import HarborTaskError
 
 
 # Beside dataset.toml at the dataset root: the module exporting ``TaskData``.
@@ -239,7 +239,7 @@ def check_task_folders(schema: TaskDataSchema | None, task_folders: Any) -> None
 def check_tasks(schema: TaskDataSchema | None, tasks: Any) -> None:
     """Validate every loaded task's fields against ``schema``; the first violation refuses the dataset.
 
-    ``tasks`` are :class:`~nemo_gym.tasks.harbor.task.HarborTask` instances, checked in order. Without a
+    ``tasks`` are :class:`~nemo_gym.data.tasks.harbor.task.HarborTask` instances, checked in order. Without a
     schema nothing is checked: a dataset that ships no ``task_data.py`` behaves as before.
     """
     if schema is None:
@@ -283,7 +283,7 @@ class DatasetRowValidator(TaskDataValidator):
     alone, and the dataset's model, if any, the whole ``task_data`` (:func:`task_fields` drops the reserved
     keys for it). Fed the whole mapping, the server's validator would report every task field of an untyped
     dataset as unknown and splice a task's own ``verifier_metadata`` mapping apart as the legacy row format
-    (:func:`nemo_gym.task_data.normalize_task_fields`). A dataset without ``task_data.py`` is checked for the
+    (:func:`nemo_gym.data.task_data.normalize_task_fields`). A dataset without ``task_data.py`` is checked for the
     reserved keys only.
     """
 

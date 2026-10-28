@@ -18,7 +18,7 @@ the Gym checkout of an editable install, the working directory of a package inst
 installed entry, one a package install ships under ``site-packages`` or another Python installation prefix
 (:func:`_installed_entry`; shared, often read-only, and under the working root too when the project keeps its venv
 there), and an entry committed outside the working root (one a ``NEMO_GYM_EXTRA_ROOTS`` root commits) are pulled
-into ``<datasets dir>/<entry>/`` (:func:`~nemo_gym.tasks.harbor.hub.datasets_dir`, the writable default every other
+into ``<datasets dir>/<entry>/`` (:func:`~nemo_gym.data.tasks.harbor.hub.datasets_dir`, the writable default every other
 pull uses), and ``NEMO_GYM_DATASETS_DIR`` moves every pulled dataset there (an entry without a source is never
 pulled, so it stays at its folder). An entry's tasks then live in ``<datasets dir>/<entry>/`` with a copy of the
 entry's Gym layer beside them, its ``dataset.toml`` and whatever dataset-level ``task_data.py`` or ``verifier.py`` it
@@ -41,8 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nemo_gym import WORKING_DIR, component_search_roots
-from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, read_dataset_config
-from nemo_gym.tasks.harbor.hub import (
+from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE, read_dataset_config
+from nemo_gym.data.tasks.harbor.hub import (
     DATASETS_DIR_ENV,
     REGISTRY_SOURCE,
     HubError,
@@ -50,8 +50,14 @@ from nemo_gym.tasks.harbor.hub import (
     datasets_dir,
     is_hub_ref,
 )
-from nemo_gym.tasks.harbor.manifest import DATASET_FILES, MANIFEST_FILE, Manifest, ManifestError, refresh_gym_layer
-from nemo_gym.tasks.harbor.package_store import PACKAGE_STORE_SOURCE
+from nemo_gym.data.tasks.harbor.manifest import (
+    DATASET_FILES,
+    MANIFEST_FILE,
+    Manifest,
+    ManifestError,
+    refresh_gym_layer,
+)
+from nemo_gym.data.tasks.harbor.package_store import PACKAGE_STORE_SOURCE
 
 
 ENTRIES_SUBDIR = Path("environments") / "harbor"
@@ -82,7 +88,7 @@ class DatasetEntry:
     def destination(self) -> Path:
         """Where the entry's tasks are pulled to and read from: the entry's own folder when it is under the working
         root (:data:`nemo_gym.WORKING_DIR`) and not installed, else ``<datasets dir>/<name>/``
-        (:func:`nemo_gym.tasks.harbor.hub.datasets_dir`). An installed entry, one a package install ships under
+        (:func:`nemo_gym.data.tasks.harbor.hub.datasets_dir`). An installed entry, one a package install ships under
         ``site-packages`` or another installation prefix (:func:`_installed_entry`), falls back to the datasets dir
         wherever the working root is, a project-local ``.venv`` under it included, since the installation may be
         shared or read-only and is in any case not where the user's pulls go; so does an entry committed outside the
@@ -233,7 +239,7 @@ def committed_entries() -> list[DatasetEntry]:
 def entry_for_ref(target: str) -> DatasetEntry | None:
     """The entry whose source names the same dataset and version as the ``harbor:`` reference ``target``, or ``None``.
 
-    The two are compared as the fetchers record them (:func:`~nemo_gym.tasks.harbor.hub.canonical_reference`), so a
+    The two are compared as the fetchers record them (:func:`~nemo_gym.data.tasks.harbor.hub.canonical_reference`), so a
     digest with or without its ``sha256:`` prefix, or ``harbor:org/name`` with or without ``@latest``, finds the entry
     that declares the other spelling instead of landing beside it in the hub's own folder. ``harbor:org/name`` (the
     store's ``latest``) and ``harbor:org/name@4.0.0`` are different references, so a plain reference never lands in
@@ -341,7 +347,7 @@ def prepare_destination(entry: DatasetEntry, *, create: bool = True) -> Path:
     ``NEMO_GYM_DATASETS_DIR``, which cannot know the folder is an entry's pull, and were once what the copies were
     checked against, so such a prepare absorbed an edit of the copy and the next pull overwrote it.
     Whenever the copies are replaced the manifest is brought up to date with them
-    (:func:`~nemo_gym.tasks.harbor.manifest.refresh_gym_layer`), so its digests follow the copies even when nothing
+    (:func:`~nemo_gym.data.tasks.harbor.manifest.refresh_gym_layer`), so its digests follow the copies even when nothing
     rewrites the manifest afterwards (a registry fetch with every folder in place, a fetch that fails, a prepare
     refused before its manifest check). A copy that matches neither the entry's file nor the record was edited in
     place and is refused, never overwritten, whatever the folder's manifest says: the entry's files are where the

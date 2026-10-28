@@ -50,6 +50,11 @@ from environment_servers.harbor.session import (
 from nemo_gym import __version__
 from nemo_gym.core import failure_kinds
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.data.tasks.harbor import HarborTask
+from nemo_gym.data.tasks.harbor.digest import is_ignored
+from nemo_gym.data.tasks.harbor.models import HarborArtifact, HarborTaskStep, HarborVerifier
+from nemo_gym.data.tasks.harbor.python_verifier import VerifierShim, write_shim
+from nemo_gym.data.tasks.harbor.task import HarborTurn
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.sandbox.transfer import (
     SandboxProbeError,
@@ -63,11 +68,6 @@ from nemo_gym.sandbox.transfer import (
     upload_path,
 )
 from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest
-from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.digest import is_ignored
-from nemo_gym.tasks.harbor.models import HarborArtifact, HarborTaskStep, HarborVerifier
-from nemo_gym.tasks.harbor.python_verifier import VerifierShim, write_shim
-from nemo_gym.tasks.harbor.task import HarborTurn
 from nemo_gym.trajectory.atif_export import encode_atif_trajectory, transcript_to_atif
 
 
@@ -471,7 +471,7 @@ class HarborVerificationMixin:
 
         It holds the ``test.sh`` that runs ``verify()`` inside the sandbox with the workspace path, the runner,
         a vendored ``nemo_gym.verifiers``, the task's fields and the agent's final response; no verifier code
-        runs on this host (:mod:`nemo_gym.tasks.harbor.python_verifier`). The shim is per episode (it embeds the
+        runs on this host (:mod:`nemo_gym.data.tasks.harbor.python_verifier`). The shim is per episode (it embeds the
         response), so it is written to a folder that lives only for the upload. ``False`` for a ``test.sh`` task.
         """
         task = session.task

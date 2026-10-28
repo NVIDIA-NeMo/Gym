@@ -578,7 +578,7 @@ def test_the_sandboxed_example_runs_the_example_backend_on_the_example_tasks():
 
 
 def test_the_sandboxed_example_config_starts_and_gym_validates_its_rows(monkeypatch):
-    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+    from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
 
     monkeypatch.setattr(tool_sandbox, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
     config = api.MockToolsServerConfig.model_validate(

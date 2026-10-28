@@ -67,6 +67,16 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.prompt": MovedPath(new="nemo_gym.data.prompt", since="0.8.0"),
+    "nemo_gym.vision_input": MovedPath(new="nemo_gym.data.vision_input", since="0.8.0"),
+    "nemo_gym.task_data": MovedPath(new="nemo_gym.data.task_data", since="0.8.0"),
+    "nemo_gym.task_materialization": MovedPath(new="nemo_gym.data.task_materialization", since="0.8.0"),
+    "nemo_gym.tasks": MovedPath(new="nemo_gym.data.tasks", since="0.8.0"),
+    "nemo_gym.dataset_metrics": MovedPath(new="nemo_gym.data.dataset_metrics", since="0.8.0"),
+    "nemo_gym.dataset_orchestrator": MovedPath(new="nemo_gym.data.dataset_orchestrator", since="0.8.0"),
+    "nemo_gym.train_data_utils": MovedPath(new="nemo_gym.data.dataset_preparation", since="0.8.0"),
+    "nemo_gym.hf_utils": MovedPath(new="nemo_gym.data.hf_utils", since="0.8.0"),
+    "nemo_gym.gitlab_utils": MovedPath(new="nemo_gym.data.gitlab_utils", since="0.8.0"),
     "nemo_gym.base_responses_api_agent": MovedPath(new="nemo_gym.agents.base_responses_api_agent", since="0.8.0"),
     "nemo_gym.agent_utils": MovedPath(new="nemo_gym.agents.utils", since="0.8.0"),
     "nemo_gym.agent_outcome": MovedPath(new="nemo_gym.agents.agent_outcome", since="0.8.0"),

@@ -7,7 +7,7 @@ Harbor publishes some datasets (Terminal Bench 4 among them) as packages rather 
 git checkouts. A dataset version is a list of task packages, each pinned by the
 content hash Gym also uses as its task digest. Fetching a dataset resolves the version,
 downloads every task archive, checks each against Harbor's published hash and writes
-``manifest.toml`` with the per-task digests and package pins (see :mod:`nemo_gym.tasks.harbor.manifest`):
+``manifest.toml`` with the per-task digests and package pins (see :mod:`nemo_gym.data.tasks.harbor.manifest`):
 per task the store's hash and Gym's digest of the folder as fetched. The manifest is also the folder's
 claim: it is written with the task pins and no digests before the first task lands, so a folder an
 interrupted fetch leaves behind still says which package and version it belongs to. A later fetch into
@@ -33,9 +33,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.tasks.harbor.digest import archive_hash, content_hash
-from nemo_gym.tasks.harbor.hub import REF_PREFIX, HubRef, contained_path, refuse_unrecorded_folders, validate_task_name
-from nemo_gym.tasks.harbor.manifest import MANIFEST_FILE, Manifest, ManifestError, UnsupportedManifestError
+from nemo_gym.data.tasks.harbor.digest import archive_hash, content_hash
+from nemo_gym.data.tasks.harbor.hub import (
+    REF_PREFIX,
+    HubRef,
+    contained_path,
+    refuse_unrecorded_folders,
+    validate_task_name,
+)
+from nemo_gym.data.tasks.harbor.manifest import MANIFEST_FILE, Manifest, ManifestError, UnsupportedManifestError
 
 
 logger = logging.getLogger(__name__)
@@ -263,7 +269,7 @@ class PackageStore:
     def download_task(self, task: PackageTask, target: Path) -> None:
         """Download and unpack one task package into ``target``, checking its digest.
 
-        The unpacked archive is checked with :func:`~nemo_gym.tasks.harbor.digest.archive_hash`, the
+        The unpacked archive is checked with :func:`~nemo_gym.data.tasks.harbor.digest.archive_hash`, the
         exclusion-free digest Harbor publishes: the archive holds exactly the files Harbor's packager
         kept, so a file Gym's folder digest would skip (a ``.pyc`` the task ships on purpose) still
         counts, and a file the packager never put there is a mismatch. The folder digest of what was
@@ -511,7 +517,7 @@ def fetch_package_dataset(
 
     The dataset folder is ``root/<name>[-<tag | 12 digest chars>]/`` (:meth:`PackageRef.folder_name`) unless
     ``folder`` names it: the folder of a committed entry under ``environments/harbor/`` that declares this
-    dataset as its ``[gym] source`` (:mod:`nemo_gym.tasks.harbor.entries`). The entry's own files there (README,
+    dataset as its ``[gym] source`` (:mod:`nemo_gym.data.tasks.harbor.entries`). The entry's own files there (README,
     YAML overlays, ``dataset.toml``) are not task folders and are left alone; the manifest's claim and the
     per-task checks below are the same whichever folder the tasks land in.
 

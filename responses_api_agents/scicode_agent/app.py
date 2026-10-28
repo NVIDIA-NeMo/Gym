@@ -57,8 +57,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.data.prompt import PromptConfig, load_prompt_config
 from nemo_gym.metrics.metrics_config import Stat
-from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, BaseRunRequest
 from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,

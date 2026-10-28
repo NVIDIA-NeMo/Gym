@@ -49,13 +49,13 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from nemo_gym.tasks.harbor.compose_variables import EnvFileResolver
-from nemo_gym.tasks.harbor.models import HarborMCPServer
-from nemo_gym.tasks.harbor.records import MAIN_SERVICE
+from nemo_gym.data.tasks.harbor.compose_variables import EnvFileResolver
+from nemo_gym.data.tasks.harbor.models import HarborMCPServer
+from nemo_gym.data.tasks.harbor.records import MAIN_SERVICE
 
 
 if TYPE_CHECKING:
-    from nemo_gym.tasks.harbor.task import HarborTask
+    from nemo_gym.data.tasks.harbor.task import HarborTask
 
 
 # The Jinja variable Harbor's prompt template renders the instruction into (``render_prompt_template``).
@@ -375,7 +375,7 @@ def overlay_env_file_resolver(project_dir: Path) -> EnvFileResolver:
     ``-f`` file's relative paths against it, not against the file that wrote them), an absolute path as written, any
     readable file accepted. The overlay files are the operator's own, named in the run config, so the containment rule
     of a task's entries (third-party content that prepare digested,
-    :func:`~nemo_gym.tasks.harbor.compose_variables.under_task_folder`) does not apply, as it does not under Harbor,
+    :func:`~nemo_gym.data.tasks.harbor.compose_variables.under_task_folder`) does not apply, as it does not under Harbor,
     where Compose reads an extra file's env files from wherever they are."""
 
     def resolve(path: str, service: str) -> Path:
@@ -388,7 +388,7 @@ def overlay_env_file_resolver(project_dir: Path) -> EnvFileResolver:
 def absolute_env_files(document: Any, project_dir: Path) -> Any:
     """Each overlay service's ``env_file`` entries replaced by the absolute paths they resolve to against
     ``project_dir`` (:func:`overlay_env_file_resolver`,
-    :func:`~nemo_gym.tasks.harbor.compose_variables.resolve_env_file_entries`), the files neither read nor checked to
+    :func:`~nemo_gym.data.tasks.harbor.compose_variables.resolve_env_file_entries`), the files neither read nor checked to
     exist yet: Compose resolves each file's paths before the merge and reads the env files of the merged document once
     after it, the merged ``environment`` winning, so a file a later overlay file drops (``env_file: !reset []``) is
     never required to exist and a missing one that survives the merge is reported at that reading. The markers are
@@ -398,7 +398,7 @@ def absolute_env_files(document: Any, project_dir: Path) -> Any:
     markers, and its normalization, are the merge's and the final reading's). Bind sources are not rewritten: the
     volume planner resolves a relative source of any file against the same project directory, which is where Compose
     puts it."""
-    from nemo_gym.tasks.harbor.compose_variables import resolve_env_file_entries
+    from nemo_gym.data.tasks.harbor.compose_variables import resolve_env_file_entries
 
     services = document.get("services") if isinstance(document, dict) else None
     if not isinstance(services, dict):

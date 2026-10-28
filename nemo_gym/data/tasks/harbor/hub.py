@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from nemo_gym import WORKING_DIR
-from nemo_gym.tasks.harbor.digest import content_hash
-from nemo_gym.tasks.harbor.manifest import (
+from nemo_gym.data.tasks.harbor.digest import content_hash
+from nemo_gym.data.tasks.harbor.manifest import (
     MANIFEST_FILE,
     Manifest,
     ManifestError,
@@ -76,7 +76,7 @@ def datasets_dir() -> Path:
     An entry that declares a ``[gym] source`` is pulled into its own folder when that folder is under the working
     root and not installed, else (an entry a package install ships under ``site-packages``, a project-local ``.venv``
     included, or one an extra search root commits, or any entry when ``NEMO_GYM_DATASETS_DIR`` is set) into
-    ``<datasets dir>/<entry>/`` (:mod:`nemo_gym.tasks.harbor.entries`).
+    ``<datasets dir>/<entry>/`` (:mod:`nemo_gym.data.tasks.harbor.entries`).
     """
     return Path(os.environ.get(DATASETS_DIR_ENV) or WORKING_DIR / "environments" / "harbor").expanduser().resolve()
 
@@ -422,7 +422,7 @@ def _refuse_dropped_folders(
     holds another version's task (a committed entry's ``source`` moved to a version with fewer tasks, the registry
     revised this one, or ``harbor:<dataset>`` now resolves to such a version), so it is refused here, named, with
     what to move aside, before anything is cloned or rewritten: the registry's counterpart of the store's refusal of
-    a manifest written for another version (``tasks removed``, :mod:`nemo_gym.tasks.harbor.package_store`).
+    a manifest written for another version (``tasks removed``, :mod:`nemo_gym.data.tasks.harbor.package_store`).
     """
     dropped = sorted(name for name in previous if name not in names and (folder / name / "task.toml").is_file())
     if dropped:
@@ -489,7 +489,7 @@ def fetch_dataset(dataset: RegistryDataset, root: Path, *, folder: Path | None =
 
     The tasks land in ``root/<name>-<version>/`` (:attr:`RegistryDataset.folder_name`) unless ``folder``
     names the dataset folder itself: a committed entry under ``environments/harbor/`` whose ``dataset.toml``
-    declares this dataset as its ``[gym] source`` (:mod:`nemo_gym.tasks.harbor.entries`). The folder's other
+    declares this dataset as its ``[gym] source`` (:mod:`nemo_gym.data.tasks.harbor.entries`). The folder's other
     files (the entry's README, YAML overlays and ``dataset.toml``) are not task folders and stay as they are.
     A folder holding a task of another version (the entry's source moved to a version that no longer lists it, or
     that pins it at another commit, a ``HEAD`` pin that moved since included) is refused with the folder named, as
@@ -565,7 +565,7 @@ def fetch_dataset(dataset: RegistryDataset, root: Path, *, folder: Path | None =
     _refuse_repinned_folders(folder, repinned, dataset)
     # A manifest that records another reference for these pins (one written before the reference was recorded, or a
     # version the registry lists with the same tasks) is rewritten with this fetch's, so a run by the entry's name
-    # finds the fetch it declares on record (nemo_gym.tasks.harbor.cli._check_fetch_record).
+    # finds the fetch it declares on record (nemo_gym.data.tasks.harbor.cli._check_fetch_record).
     rerecord = manifest is not None and manifest.ref != dataset.reference
     if by_repo or not dataset.tasks or rerecord:
         # The manifest is about to be rewritten: a folder it would not pin must not be there (one a previous fetch
@@ -613,7 +613,7 @@ def expected_folder(target: str, root: Path | None = None) -> Path | None:
     root = Path(root) if root is not None else datasets_dir()
     ref = HubRef.parse(target)
     if ref.is_package:
-        from nemo_gym.tasks.harbor.package_store import PackageRef
+        from nemo_gym.data.tasks.harbor.package_store import PackageRef
 
         package = PackageRef.of(ref)
         return root / package.folder_name(package.digest or "")
@@ -641,14 +641,14 @@ def resolved_folder(target: str, root: Path | None = None, *, refresh_registry: 
 def canonical_reference(target: str) -> str:
     """The ``harbor:`` reference ``target`` as the fetchers record it, so two spellings of one reference compare equal.
 
-    A package-store reference is read as the store reads it (:attr:`~nemo_gym.tasks.harbor.package_store.PackageRef.reference`:
+    A package-store reference is read as the store reads it (:attr:`~nemo_gym.data.tasks.harbor.package_store.PackageRef.reference`:
     ``harbor:org/name`` is ``@latest``, a digest is its ``sha256:`` form). A registry reference is itself: a version it
     names is the version, and ``harbor:<dataset>`` without one is the registry's pick, another reference than any
     version it may resolve to. A malformed reference raises :class:`HubError`, as :meth:`HubRef.parse` does.
     """
     ref = HubRef.parse(target)
     if ref.is_package:
-        from nemo_gym.tasks.harbor.package_store import PackageRef
+        from nemo_gym.data.tasks.harbor.package_store import PackageRef
 
         return PackageRef.of(ref).reference
     return f"{REF_PREFIX}{ref.name}@{ref.version}" if ref.version else f"{REF_PREFIX}{ref.name}"
@@ -656,10 +656,10 @@ def canonical_reference(target: str) -> str:
 
 def declares_recorded_fetch(declared: str, recorded: str) -> bool:
     """Whether the ``harbor:`` reference ``declared`` (a committed entry's ``[gym] source``) names the fetch a manifest
-    records as ``recorded`` (:attr:`~nemo_gym.tasks.harbor.manifest.Manifest.ref`), without asking the hub.
+    records as ``recorded`` (:attr:`~nemo_gym.data.tasks.harbor.manifest.Manifest.ref`), without asking the hub.
 
     A package-store reference matches by package and by tag, ``latest`` or digest, read as the store reads them
-    (:attr:`~nemo_gym.tasks.harbor.package_store.PackageRef.reference`: ``harbor:org/name`` is ``@latest``, a digest is
+    (:attr:`~nemo_gym.data.tasks.harbor.package_store.PackageRef.reference`: ``harbor:org/name`` is ``@latest``, a digest is
     its ``sha256:`` form). A registry reference matches by dataset and, when it pins one, by version: the version an
     unpinned ``harbor:<dataset>`` gets is the registry's pick, which the record holds and only a pull can revise.
     A record that does not parse as a reference matches nothing.
@@ -671,7 +671,7 @@ def declares_recorded_fetch(declared: str, recorded: str) -> bool:
     if wanted.is_package != found.is_package or wanted.name != found.name:
         return False
     if wanted.is_package:
-        from nemo_gym.tasks.harbor.package_store import PackageRef
+        from nemo_gym.data.tasks.harbor.package_store import PackageRef
 
         return PackageRef.of(wanted).reference == PackageRef.of(found).reference
     return wanted.version is None or wanted.version == found.version
@@ -684,18 +684,18 @@ def fetch_ref(
 
     The dataset lands in its own folder under ``root`` (:func:`datasets_dir` unless given), named after the
     dataset and its version, or in ``folder`` when a caller names the destination: the folder of a committed
-    entry that declares the reference as its ``[gym] source`` (:func:`nemo_gym.tasks.harbor.entries.plan_pull`
+    entry that declares the reference as its ``[gym] source`` (:func:`nemo_gym.data.tasks.harbor.entries.plan_pull`
     decides that; this function does not read entries). The registry cache stays under ``root/.harbor/``.
 
     A package-store fetch refuses a task folder whose content no longer matches the store
-    (see :func:`nemo_gym.tasks.harbor.package_store.fetch_package_dataset`). Whatever the store fetch
+    (see :func:`nemo_gym.data.tasks.harbor.package_store.fetch_package_dataset`). Whatever the store fetch
     refuses or cannot read (a ``PackageStoreError``) is raised as a :class:`HubError`, so a caller handles
     one error type for a ``harbor:`` reference of either source.
     """
     root = Path(root) if root is not None else datasets_dir()
     ref = HubRef.parse(target)
     if ref.is_package:
-        from nemo_gym.tasks.harbor.package_store import PackageRef, PackageStoreError, fetch_package_dataset
+        from nemo_gym.data.tasks.harbor.package_store import PackageRef, PackageStoreError, fetch_package_dataset
 
         try:
             return fetch_package_dataset(PackageRef.of(ref), root, folder=folder)

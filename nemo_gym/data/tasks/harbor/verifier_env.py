@@ -15,9 +15,9 @@ from typing import Any
 
 import yaml
 
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborEnvironment, HarborTaskConfig, HarborTaskStep
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, MAIN_SERVICE
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.models import HarborEnvironment, HarborTaskConfig, HarborTaskStep
+from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, MAIN_SERVICE
 
 
 # The Dockerfile Harbor builds the separate verifier's image from, with ``tests/`` as its build context
@@ -107,7 +107,7 @@ def verifier_build_context(task_folder: Path, config: HarborTaskConfig) -> Path 
     shared mode, a declared or inherited ``docker_image``, or no ``tests/Dockerfile`` means no build. Without the file
     and without an image Harbor refuses the task (``require_agent_environment_definition`` on ``tests/``, which is
     always its verifier environment dir: there is no fallback to ``environment/``), and so does :func:`load_task`.
-    Prepare plans one build entry per returned context (``nemo_gym.tasks.harbor.image_build.plan_builds``) and the
+    Prepare plans one build entry per returned context (``nemo_gym.data.tasks.harbor.image_build.plan_builds``) and the
     loader reads its record. A multi-step task whose steps verify separately builds ``tests/`` for the steps that
     declare no image and start from it (:func:`verifier_build_environment`), whatever the task's own mode.
     """

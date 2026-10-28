@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
+from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.verification.judge import JudgeError, judge_failsafe
 from resources_servers.sciknoweval.app import (
     SciKnowEvalResourcesServer,

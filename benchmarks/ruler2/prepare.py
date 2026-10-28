@@ -370,7 +370,7 @@ def _convert_row_to_gym(row: dict, task: str) -> dict:
     return {
         # No `responses_create_params.input` here on purpose: the benchmark dataset
         # declares `prompt_config: benchmarks/ruler2/prompts/default.yaml`, and the two
-        # are mutually exclusive (see `nemo_gym.prompt.validate_prompt_compatibility`).
+        # are mutually exclusive (see `nemo_gym.data.prompt.validate_prompt_compatibility`).
         # The template is `user: "{question}"`, so the input messages are baked from the
         # plain `question` field at collation time.
         "question": row["question"],

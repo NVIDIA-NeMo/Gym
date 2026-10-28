@@ -273,7 +273,7 @@ ray = [
 ]
 
 # MLflow is used both by the rollout exporter (nemo_gym/artifacts/exporters/mlflow.py) and by the
-# GitLab dataset/model-registry integration (nemo_gym/gitlab_utils.py). Without this extra,
+# GitLab dataset/model-registry integration (nemo_gym/data/gitlab_utils.py). Without this extra,
 # both call paths report an actionable error instead of failing on unrelated imports.
 mlflow = [
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
@@ -872,7 +872,7 @@ layers = [
     # rollouts/
     "nemo_gym.batch_status : nemo_gym.health : nemo_gym.observability.model_calls : nemo_gym.omitted_rollouts : nemo_gym.rollout_collection : nemo_gym.rollout_health : nemo_gym.rollout_outcomes",
     # data/
-    "nemo_gym.dataset_metrics : nemo_gym.dataset_orchestrator : nemo_gym.gitlab_utils : nemo_gym.hf_utils : nemo_gym.prompt : nemo_gym.task_data : nemo_gym.task_materialization : nemo_gym.tasks.harbor : nemo_gym.train_data_utils : nemo_gym.vision_input",
+    "nemo_gym.data",
     # agents/
     "nemo_gym.agents",
     # models/
@@ -909,11 +909,11 @@ ignore_imports = [
     "nemo_gym.config.global_config -> nemo_gym.h2_ping_sidecar.config",
     "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
-    "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.tasks.harbor.digest",
-    "nemo_gym.sandbox.compose_config -> nemo_gym.tasks.harbor.digest",
-    "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.main",
-    "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.utils",
-    "nemo_gym.tasks.harbor.cli -> nemo_gym.rollout_collection",
+    "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",
+    "nemo_gym.sandbox.compose_config -> nemo_gym.data.tasks.harbor.digest",
+    "nemo_gym.data.tasks.harbor.cli -> nemo_gym.cli.main",
+    "nemo_gym.data.tasks.harbor.cli -> nemo_gym.cli.utils",
+    "nemo_gym.data.tasks.harbor.cli -> nemo_gym.rollout_collection",
     "nemo_gym.telemetry.setup -> nemo_gym.sandbox.observability",
     "nemo_gym.trajectory.trajectory_record -> nemo_gym.observability.model_calls",
 ]

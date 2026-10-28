@@ -58,8 +58,8 @@ from nemo_gym.artifacts.run_files import (
     ROLLOUT_VERDICTS_FILENAME,
 )
 from nemo_gym.config.global_config import TASK_SOURCE_KEY_NAME
-from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
-from nemo_gym.tasks.harbor.validation_report import _iter_validation_rows, _validation_key
+from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
+from nemo_gym.data.tasks.harbor.validation_report import _iter_validation_rows, _validation_key
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -70,7 +70,7 @@ from nemo_gym.utils.path_utils import (
 
 
 if TYPE_CHECKING:
-    from nemo_gym.tasks.harbor.cli import AgentSelection, PreparedTaskset
+    from nemo_gym.data.tasks.harbor.cli import AgentSelection, PreparedTaskset
 
 RUN_SUMMARY_SCHEMA_VERSION = 1
 # What a verification leaves in its log folder, by the name the summary reports it under.

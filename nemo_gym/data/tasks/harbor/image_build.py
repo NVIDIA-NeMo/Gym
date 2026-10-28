@@ -5,7 +5,7 @@
 
 Prepare decides one of three modes per distinct Dockerfile. Pull, for a base-image-only file.
 Overlay, for a pullable ``FROM`` plus ``RUN``, ``WORKDIR``, ``ENV`` and ``USER`` lines the
-server applies at seed (see ``nemo_gym.tasks.harbor.dockerfile``). Build, for everything else
+server applies at seed (see ``nemo_gym.data.tasks.harbor.dockerfile``). Build, for everything else
 (``COPY``, ``ADD``, heredocs, BuildKit flags, multi-stage files): the task's ``environment/``
 folder is the build context, built once with docker, buildah or podman, pushed to a registry
 when one is named, and recorded in ``built-images.json`` next to the task folders, keyed by
@@ -13,7 +13,7 @@ Harbor's content hash of the build context. The loader then runs the task in pul
 recorded image, with ``WORKDIR``, ``ENV`` and ``USER`` read from the image's recorded configuration
 in ``compose-images.json`` like any other pulled image.
 
-The hash and the image name are Harbor's (``nemo_gym.tasks.harbor.harbor_compat``, vendored from
+The hash and the image name are Harbor's (``nemo_gym.data.tasks.harbor.harbor_compat``, vendored from
 Harbor v0.22.0): the hash is Harbor's environment id of the folder and the image is ``hb__<hash>``, the
 value Harbor exports to every Compose command as ``MAIN_IMAGE_NAME``, under the repository's registry
 path when one is named. Harbor's own build template sets no ``image`` (Compose then tags
@@ -56,7 +56,7 @@ no service argument) builds it: ``main`` from ``environment/Dockerfile`` and eac
 named ``hb__<hash>-<service>`` (Compose's own ``<project>-<service>`` form under the project name Gym passes, with
 Harbor's hash as the project) and recorded next to ``main``'s under the same digest. At seed the loader substitutes
 the recorded image for every built service and drops their ``build:`` and a ``pull_policy: build``
-(``nemo_gym.tasks.harbor.image_configs.with_built_images``), so prepare and the resources server read one document.
+(``nemo_gym.data.tasks.harbor.image_configs.with_built_images``), so prepare and the resources server read one document.
 ``docker build`` is never called. Harbor serialises concurrent builds of one environment with an
 in-process lock; prepare builds each distinct context once, sequentially, so no lock is needed here.
 buildah and podman are the OpenSandbox path: they build each service's Dockerfile directly and push it to a registry.
@@ -67,7 +67,7 @@ else a copy of ``[environment]``; ``_separate_verifier_env`` and ``_verifier_env
 ``resolve_effective_verifier_env_config`` in verifier_mode.py at v0.22.0), so without a ``docker_image`` it runs the
 same ``docker compose build`` over its template with ``CONTEXT_DIR`` = ``tests/`` and builds ``tests/Dockerfile``,
 and it uploads no ``tests/`` into that image (``skip_tests_upload``). Prepare plans that build as one entry per task
-with ``tests/`` as its context (``nemo_gym.tasks.harbor.task.verifier_build_context``), the verifier config's env and
+with ``tests/`` as its context (``nemo_gym.data.tasks.harbor.task.verifier_build_context``), the verifier config's env and
 resources, and service name ``verifier``: the context is hashed on its own, as Harbor's ``environment_id`` hashes the
 verifier environment's dir, so the digest is Harbor's and ``hb__<digest>`` is the ``MAIN_IMAGE_NAME`` Harbor exports
 for the verifier env; Gym tags the image ``hb__<digest>-verifier`` (its sidecar form, naming the role; Harbor's own
@@ -81,7 +81,7 @@ build ``tests/Dockerfile`` directly. A verifier build that fails leaves its task
 A build is cancel-safe: nothing is recorded until the tool has built, pushed and inspected the
 image, and each image is recorded as soon as it is done, so an interrupted prepare resumes
 where it stopped. The record files are replaced atomically under a sidecar lock
-(``nemo_gym.tasks.harbor.task.record_lock``), so two Gym processes recording into one datasets
+(``nemo_gym.data.tasks.harbor.task.record_lock``), so two Gym processes recording into one datasets
 folder keep each other's entries and a reader never sees a half-written file.
 
 The hash names the image; it is not the whole build. Harbor's hash covers file names and bytes only, so the
@@ -103,20 +103,20 @@ from collections.abc import Collection
 from pathlib import Path
 from typing import Callable
 
-from nemo_gym.tasks.harbor.build_plan import BuildConflict, BuildPlanEntry, BuildResult, plan_builds
-from nemo_gym.tasks.harbor.build_records import (
+from nemo_gym.data.tasks.harbor.build_plan import BuildConflict, BuildPlanEntry, BuildResult, plan_builds
+from nemo_gym.data.tasks.harbor.build_records import (
     build_inputs_mismatch,
     record_built_image,
     record_forced_tasks,
     recorded_image_mismatch,
 )
-from nemo_gym.tasks.harbor.build_tools import ImageBuilder
-from nemo_gym.tasks.harbor.records import (
+from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
+from nemo_gym.data.tasks.harbor.records import (
     read_built_images,
     read_image_configs,
     recorded_service_images,
 )
-from nemo_gym.tasks.harbor.task import is_task_folder
+from nemo_gym.data.tasks.harbor.task import is_task_folder
 
 
 LOGGER = logging.getLogger(__name__)

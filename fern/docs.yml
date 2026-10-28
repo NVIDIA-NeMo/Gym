@@ -269,6 +269,27 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/agents/agent_tools"
   - source: "/nemo/gym/nemo-gym/nemo_gym/skills"
     destination: "/nemo/gym/nemo-gym/nemo_gym/agents/skills"
+  # Library reference pages of modules moved into nemo_gym/data (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/prompt"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/prompt"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/vision_input"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/vision_input"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/task_data"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/task_data"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/task_materialization"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/task_materialization"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/tasks"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/tasks"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/dataset_metrics"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/dataset_metrics"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/dataset_orchestrator"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/dataset_orchestrator"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/train_data_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/dataset_preparation"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/hf_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/hf_utils"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/gitlab_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/gitlab_utils"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

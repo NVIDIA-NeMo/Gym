@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the per-server task-data schema protocol (nemo_gym/task_data.py)."""
+"""Tests for the per-server task-data schema protocol (nemo_gym/data/task_data.py)."""
 
 import ast
 import json
@@ -17,7 +17,8 @@ from nemo_gym.config.config_types import (
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
 )
-from nemo_gym.task_data import (
+from nemo_gym.data.dataset_preparation import TrainDataProcessor
+from nemo_gym.data.task_data import (
     RESERVED_ROW_KEYS,
     TaskDataSchemaError,
     TaskDataValidator,
@@ -26,7 +27,6 @@ from nemo_gym.task_data import (
     normalize_task_fields,
     validate_jsonl_rows,
 )
-from nemo_gym.train_data_utils import TrainDataProcessor
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -321,7 +321,7 @@ class TestOwningResourcesServerImpl:
 class TestShippedSchemas:
     """CI enforcement for every committed task_data.py (resources servers and agents)."""
 
-    ALLOWED_IMPORT_PREFIXES = ("pydantic", "nemo_gym.task_data")
+    ALLOWED_IMPORT_PREFIXES = ("pydantic", "nemo_gym.data.task_data")
 
     def test_at_least_the_example_schemas_ship(self):
         names = {p.parent.name for p in SCHEMA_FILES}
@@ -345,7 +345,7 @@ class TestShippedSchemas:
                 )
                 assert allowed, (
                     f"{schema_file}: import of {module!r} is not allowed in task_data.py "
-                    "(stdlib, pydantic, nemo_gym.task_data, and other servers' task_data only)"
+                    "(stdlib, pydantic, nemo_gym.data.task_data, and other servers' task_data only)"
                 )
 
     @pytest.mark.parametrize("schema_file", SCHEMA_FILES, ids=lambda p: p.parent.name)
@@ -538,7 +538,7 @@ class TestMisplacedLegacyFields:
 
 class TestAutoValidationMode:
     def _config(self, mode, task_data_validation="auto"):
-        from nemo_gym.train_data_utils import TrainDataProcessorConfig
+        from nemo_gym.data.dataset_preparation import TrainDataProcessorConfig
 
         return TrainDataProcessorConfig(output_dirpath="out", mode=mode, task_data_validation=task_data_validation)
 
@@ -562,7 +562,7 @@ class TestSchemaPresence:
         )
         assert not missing, (
             f"resources servers without a task_data.py schema: {missing}. Every server must "
-            "describe its dataset rows (see nemo_gym/task_data.py for the protocol)."
+            "describe its dataset rows (see nemo_gym/data/task_data.py for the protocol)."
         )
 
 
@@ -680,7 +680,7 @@ class TestHarborLayoutThroughTheProcessor:
         from omegaconf import DictConfig
 
         from nemo_gym.config.global_config import GlobalConfigDictParser
-        from nemo_gym.train_data_utils import TrainDataProcessorConfig
+        from nemo_gym.data.dataset_preparation import TrainDataProcessorConfig
 
         env_dir = tmp_path / "environment_servers" / "harbor"
         env_dir.mkdir(parents=True)
@@ -769,7 +769,7 @@ class TestLegacyWrapperLayoutThroughTheProcessor:
         from omegaconf import DictConfig
 
         from nemo_gym.config.global_config import GlobalConfigDictParser
-        from nemo_gym.train_data_utils import TrainDataProcessorConfig
+        from nemo_gym.data.dataset_preparation import TrainDataProcessorConfig
 
         agent_dir = tmp_path / "responses_api_agents" / "tau2"
         agent_dir.mkdir(parents=True)

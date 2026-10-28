@@ -14,7 +14,7 @@ the reference named (see below), with the configuration read for the platform th
   ``nemo_gym.sandbox.compose_config.resolve_compose``);
 - the task loader, for the base image of a pull-mode or overlay-mode Dockerfile, whose
   ``ENV``, ``WORKDIR`` and ``USER`` lines resolve from the base image's own configuration
-  the way ``docker build`` resolves them (see ``nemo_gym.tasks.harbor.dockerfile``).
+  the way ``docker build`` resolves them (see ``nemo_gym.data.tasks.harbor.dockerfile``).
 
 The ``image`` an entry pins is the digest of the manifest the written reference named: the
 multi-arch index behind a tag, from which a sandbox of any platform selects its own manifest,
@@ -33,16 +33,7 @@ from typing import Any, Callable
 
 import yaml
 
-from nemo_gym.sandbox.compose_config import check_sidecar_extra_hosts, plan_compose_volumes
-from nemo_gym.sandbox.compose_fields import (
-    DEFAULT_PLATFORM,
-    ComposeFieldError,
-    ComposeSubstitutionError,
-    check_compose_fields,
-)
-from nemo_gym.sandbox.compose_volumes import ComposeVolumeError
-from nemo_gym.sandbox.providers.registry import provider_service_option_fields
-from nemo_gym.tasks.harbor.compose_overlay import (
+from nemo_gym.data.tasks.harbor.compose_overlay import (
     RESET,
     ComposeOverlayError,
     HarborComposeOverlay,
@@ -55,7 +46,7 @@ from nemo_gym.tasks.harbor.compose_overlay import (
     resolve_passthrough_environment,
     synthesized_group,
 )
-from nemo_gym.tasks.harbor.compose_variables import (
+from nemo_gym.data.tasks.harbor.compose_variables import (
     _warn_unset,
     compose_variables,
     infrastructure_variables,
@@ -68,18 +59,18 @@ from nemo_gym.tasks.harbor.compose_variables import (
     substitute_with_empty,
     under_task_folder,
 )
-from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.models import HarborTaskConfig
-from nemo_gym.tasks.harbor.records import (
+from nemo_gym.data.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
+from nemo_gym.data.tasks.harbor.dockerfile import RECORD_VERSION
+from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
+from nemo_gym.data.tasks.harbor.records import (
     IMAGE_CONFIGS_FILE,
     MAIN_SERVICE,
     read_image_configs,
     record_lock,
     write_json_record,
 )
-from nemo_gym.tasks.harbor.registry import ImageConfigError, PlatformMismatchError, RegistryClient, platform_pair
-from nemo_gym.tasks.harbor.task import (
+from nemo_gym.data.tasks.harbor.registry import ImageConfigError, PlatformMismatchError, RegistryClient, platform_pair
+from nemo_gym.data.tasks.harbor.task import (
     COMPOSE_FILE_NAMES,
     DOCKERFILE,
     TASK_FILE,
@@ -88,6 +79,15 @@ from nemo_gym.tasks.harbor.task import (
     is_task_folder,
     iter_task_folders,
 )
+from nemo_gym.sandbox.compose_config import check_sidecar_extra_hosts, plan_compose_volumes
+from nemo_gym.sandbox.compose_fields import (
+    DEFAULT_PLATFORM,
+    ComposeFieldError,
+    ComposeSubstitutionError,
+    check_compose_fields,
+)
+from nemo_gym.sandbox.compose_volumes import ComposeVolumeError
+from nemo_gym.sandbox.providers.registry import provider_service_option_fields
 
 
 LOGGER = logging.getLogger(__name__)
@@ -200,10 +200,10 @@ def load_compose_document(
     resolved the task to its built image.
 
     Returns ``None`` for a task without a Compose file, unless the job-level ``overlay`` names Compose files
-    (:class:`~nemo_gym.tasks.harbor.compose_overlay.HarborComposeOverlay`): then a task without a file gets
-    Harbor's one-service group (``main`` alone, :func:`~nemo_gym.tasks.harbor.compose_overlay.synthesized_group`)
+    (:class:`~nemo_gym.data.tasks.harbor.compose_overlay.HarborComposeOverlay`): then a task without a file gets
+    Harbor's one-service group (``main`` alone, :func:`~nemo_gym.data.tasks.harbor.compose_overlay.synthesized_group`)
     and every task's document takes the overlay files merged onto it, in order, as Compose merges the extra
-    ``-f`` files Harbor passes after the task's (:func:`~nemo_gym.tasks.harbor.compose_overlay.merge_compose`).
+    ``-f`` files Harbor passes after the task's (:func:`~nemo_gym.data.tasks.harbor.compose_overlay.merge_compose`).
     Each overlay file is interpolated with the task's variables (the deployment's, when given, above the task's own:
     see ``operator_variables`` below); its relative paths resolve against the project directory, the task's
     ``environment`` folder, as Compose resolves every ``-f`` file's and Harbor's ``--project-directory`` names it,
@@ -221,7 +221,7 @@ def load_compose_document(
     both run with the same process environment (see :func:`compose_variables`). A required variable
     (``${VAR:?msg}``) without a value, a task variable the host does not set or a missing ``env_file``
     raises :class:`ImageConfigError` naming it; a variable nobody sets is an empty string, with a warning.
-    The record is the one :func:`~nemo_gym.tasks.harbor.task.load_task` read (``task.built_images``): nothing is
+    The record is the one :func:`~nemo_gym.data.tasks.harbor.task.load_task` read (``task.built_images``): nothing is
     hashed here, which runs once per episode on the server.
 
     ``operator_variables`` are the deployment's values (the environment server's ``compose_variables``), which
@@ -232,7 +232,7 @@ def load_compose_document(
     cannot redirect what they do with the deployment's values by setting one of their names itself. The pass-through
     spellings of an overlay service's ``environment`` (a bare ``NAME`` in the list form, ``NAME:`` with no value in
     the mapping form) follow the same order as its ``${NAME}``: they are resolved before the merge
-    (:func:`~nemo_gym.tasks.harbor.compose_overlay.resolve_passthrough_environment`), where the task's own are read
+    (:func:`~nemo_gym.data.tasks.harbor.compose_overlay.resolve_passthrough_environment`), where the task's own are read
     after it, in the task's order. With them a name
     still unset fails here, before anything is provisioned; without them, as at prepare, it is an empty string
     with a warning, the images and structure being all prepare reads.

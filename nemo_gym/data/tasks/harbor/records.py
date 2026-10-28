@@ -18,15 +18,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from nemo_gym.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 
 
 # The OCI configurations recorded at prepare next to the task folders, keyed by image reference as the
-# tasks wrote it (see ``nemo_gym.tasks.harbor.image_configs``): Compose sidecar images and the base image
+# tasks wrote it (see ``nemo_gym.data.tasks.harbor.image_configs``): Compose sidecar images and the base image
 # of every Dockerfile the loader resolves.
 IMAGE_CONFIGS_FILE = "compose-images.json"
 # The images prepare built, next to the task folders, keyed by Harbor's content hash of the task's ``environment/``
-# build context (see ``nemo_gym.tasks.harbor.image_build``). An entry records one image per built Compose service
+# build context (see ``nemo_gym.data.tasks.harbor.image_build``). An entry records one image per built Compose service
 # under ``services`` (``main`` for the Dockerfile outside pull and overlay mode, each sidecar with a ``build:``
 # section under its own name) and keeps ``main``'s image at the top level as ``image`` for older readers; an entry
 # with ``image`` and no ``services`` is a record of ``main`` alone.

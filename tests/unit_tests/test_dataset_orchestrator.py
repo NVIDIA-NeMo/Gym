@@ -21,7 +21,10 @@ from nemo_gym.config.config_types import (
     UploadJsonlDatasetHuggingFaceConfig,
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )
-from nemo_gym.dataset_orchestrator import delete_jsonl_dataset_from_gitlab, upload_jsonl_dataset_to_hf_maybe_delete
+from nemo_gym.data.dataset_orchestrator import (
+    delete_jsonl_dataset_from_gitlab,
+    upload_jsonl_dataset_to_hf_maybe_delete,
+)
 
 
 def make_base_config(
@@ -51,7 +54,7 @@ class TestDatasetOrchestrator:
         mock_mlflow_client = MagicMock()
 
         monkeypatch.setattr("builtins.input", mock_input)
-        monkeypatch.setattr("nemo_gym.gitlab_utils.create_mlflow_client", lambda: mock_mlflow_client)
+        monkeypatch.setattr("nemo_gym.data.gitlab_utils.create_mlflow_client", lambda: mock_mlflow_client)
 
         delete_jsonl_dataset_from_gitlab("test_dataset")
 
@@ -67,8 +70,8 @@ class TestDatasetOrchestrator:
         mock_upload = MagicMock()
         mock_delete = MagicMock()
 
-        monkeypatch.setattr("nemo_gym.dataset_orchestrator.upload_jsonl_dataset_to_hf", mock_upload)
-        monkeypatch.setattr("nemo_gym.gitlab_utils.delete_model_from_gitlab", mock_delete)
+        monkeypatch.setattr("nemo_gym.data.dataset_orchestrator.upload_jsonl_dataset_to_hf", mock_upload)
+        monkeypatch.setattr("nemo_gym.data.gitlab_utils.delete_model_from_gitlab", mock_delete)
 
         config = make_base_config()
 
@@ -84,8 +87,8 @@ class TestDatasetOrchestrator:
         mock_input = MagicMock(return_value="y")
 
         monkeypatch.setattr("builtins.input", mock_input)
-        monkeypatch.setattr("nemo_gym.gitlab_utils.create_mlflow_client", lambda: mock_mlflow_client)
-        monkeypatch.setattr("nemo_gym.dataset_orchestrator.upload_jsonl_dataset_to_hf", mock_upload)
+        monkeypatch.setattr("nemo_gym.data.gitlab_utils.create_mlflow_client", lambda: mock_mlflow_client)
+        monkeypatch.setattr("nemo_gym.data.dataset_orchestrator.upload_jsonl_dataset_to_hf", mock_upload)
 
         config = make_base_config(config_class=UploadJsonlDatasetHuggingFaceMaybeDeleteConfig, delete_from_gitlab=True)
 
@@ -102,8 +105,8 @@ class TestDatasetOrchestrator:
         """Test Uploading to HF with no delete param"""
         mock_upload = MagicMock()
         mock_delete = MagicMock()
-        monkeypatch.setattr("nemo_gym.dataset_orchestrator.upload_jsonl_dataset_to_hf", mock_upload)
-        monkeypatch.setattr("nemo_gym.gitlab_utils.delete_model_from_gitlab", mock_delete)
+        monkeypatch.setattr("nemo_gym.data.dataset_orchestrator.upload_jsonl_dataset_to_hf", mock_upload)
+        monkeypatch.setattr("nemo_gym.data.gitlab_utils.delete_model_from_gitlab", mock_delete)
 
         config = make_base_config(config_class=UploadJsonlDatasetHuggingFaceMaybeDeleteConfig)
 
@@ -116,8 +119,8 @@ class TestDatasetOrchestrator:
         """Test Uploading to HF and deleting from Gitlab with delete param"""
         mock_upload = MagicMock()
         mock_delete = MagicMock()
-        monkeypatch.setattr("nemo_gym.dataset_orchestrator.upload_jsonl_dataset_to_hf", mock_upload)
-        monkeypatch.setattr("nemo_gym.gitlab_utils.delete_model_from_gitlab", mock_delete)
+        monkeypatch.setattr("nemo_gym.data.dataset_orchestrator.upload_jsonl_dataset_to_hf", mock_upload)
+        monkeypatch.setattr("nemo_gym.data.gitlab_utils.delete_model_from_gitlab", mock_delete)
 
         config = make_base_config(
             config_class=UploadJsonlDatasetHuggingFaceMaybeDeleteConfig, delete_from_gitlab=False

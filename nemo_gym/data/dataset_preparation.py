@@ -51,26 +51,26 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.core.episode import TaskId
-from nemo_gym.dataset_metrics import (
+from nemo_gym.data.dataset_metrics import (
     DatasetMetricHook,
     DatasetMetricsHookError,
     DatasetMetricValue,
     load_dataset_metrics_hook,
 )
-from nemo_gym.gitlab_utils import download_jsonl_dataset
-from nemo_gym.hf_utils import (
+from nemo_gym.data.gitlab_utils import download_jsonl_dataset
+from nemo_gym.data.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
-from nemo_gym.server_runtime.episode_types import is_materialized_task_row
-from nemo_gym.task_data import (
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.data.task_data import (
     TaskDataSchemaError,
     TaskDataValidator,
     find_server_dir,
     load_task_data_schema,
 )
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.data.task_materialization import materialize_task
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 
 
 def _ref_name(ref: Any) -> Optional[str]:
@@ -1176,8 +1176,8 @@ This could be due to a change in how metrics are calculated, leading to outdated
             # server's schema checks the reserved keys alone, the dataset's TaskData, when it ships one, the fields.
             folder = cls._taskset_folder(c, d, server_instance_configs)
             if folder is not None:
-                from nemo_gym.tasks.harbor.task_data import DatasetRowValidator, TaskDataError
-                from nemo_gym.tasks.harbor.task_data import load_task_data_schema as load_dataset_schema
+                from nemo_gym.data.tasks.harbor.task_data import DatasetRowValidator, TaskDataError
+                from nemo_gym.data.tasks.harbor.task_data import load_task_data_schema as load_dataset_schema
 
                 try:
                     schema = load_dataset_schema(folder)

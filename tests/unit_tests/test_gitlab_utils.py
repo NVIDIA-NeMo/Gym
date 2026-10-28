@@ -20,7 +20,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from nemo_gym.config.config_types import ConfigError, DownloadJsonlDatasetGitlabConfig, MLFlowConfig
-from nemo_gym.gitlab_utils import create_mlflow_client, download_jsonl_dataset
+from nemo_gym.data.gitlab_utils import create_mlflow_client, download_jsonl_dataset
 
 
 # TODO: Eventually we want to add more tests to ensure that the Gitlab flow does not break
@@ -51,7 +51,7 @@ class TestGitlabUtils:
             get_model_version=lambda name, version: SimpleNamespace(run_id="run"),
         )
         repository = SimpleNamespace(repo=SimpleNamespace(artifact_uri="https://gitlab.invalid/artifacts/"))
-        monkeypatch.setattr("nemo_gym.gitlab_utils.create_mlflow_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.data.gitlab_utils.create_mlflow_client", lambda: client)
         monkeypatch.setitem(sys.modules, "mlflow", ModuleType("mlflow"))
         monkeypatch.setitem(
             sys.modules, "mlflow.artifacts", SimpleNamespace(get_artifact_repository=lambda **_: repository)
@@ -67,7 +67,7 @@ class TestGitlabUtils:
             requested.append(url)
             return SimpleNamespace(content=b'{"question": "q"}\n')
 
-        monkeypatch.setattr("nemo_gym.gitlab_utils.requests.get", fake_get)
+        monkeypatch.setattr("nemo_gym.data.gitlab_utils.requests.get", fake_get)
         output = tmp_path / "data" / "nested" / "rows.jsonl"
 
         download_jsonl_dataset(
