@@ -536,7 +536,9 @@ class LocalFiles:
         shutil.copyfile(source, destination)
 
 
-async def stage_locally(directory: Path, workdir: Path, command: list[str]) -> list[str]:
+async def stage_locally(
+    directory: Path, workdir: Path, command: list[str], *, output_token_max: int | None = None
+) -> list[str]:
     """Stage an activation into ``directory`` as the sandbox would receive it; return the runner argv."""
     session = KiloSandboxSession(
         request=seed(workdir=str(workdir)),
@@ -545,7 +547,7 @@ async def stage_locally(directory: Path, workdir: Path, command: list[str]) -> l
         ),
     )
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
-    return (await session.stage_activation(command=command, config="{}")).argv
+    return (await session.stage_activation(command=command, config="{}", output_token_max=output_token_max)).argv
 
 
 @pytest.mark.parametrize("exit_code", [0, 3])
@@ -559,15 +561,17 @@ async def test_runner_executes_in_task_directory(tmp_path: Path, exit_code: int)
         "print(json.dumps({'cwd':os.getcwd(),'config':os.environ['KILO_CONFIG'],"
         "'home':os.environ['HOME'],'db':os.environ['KILO_DB'],"
         "'project':os.environ['KILO_DISABLE_PROJECT_CONFIG'],'key':os.getenv('OPENAI_API_KEY'),"
+        "'output_limit':os.getenv('KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX'),"
         "'kilo':os.getenv('KILO_MODEL'),'kept':os.getenv('KEPT'),'stdin':sys.stdin.read()})); "
         "sys.stderr.buffer.write(b'diagnostic\\xff'); "
         f"sys.exit({exit_code})"
     )
-    argv = await stage_locally(directory, repo, [sys.executable, "-c", script])
+    argv = await stage_locally(directory, repo, [sys.executable, "-c", script], output_token_max=65536)
     assert argv == ["bash", f"{directory}/harness_runner.sh", f"{directory}/params.sh"]
     task_home = str(tmp_path / 'task "home" \\')
     env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
     inherited = {"OPENAI_API_KEY": "test-credential", "KILO_MODEL": "other", "KEPT": "yes", "HOME": task_home}
+    inherited["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = "1"
     result = subprocess.run(argv, env=env | inherited, input=b"unexpected inherited input", capture_output=True)
     assert result.returncode == exit_code, result.stderr
     output = json.loads((directory / "stdout.jsonl").read_text())
@@ -580,6 +584,7 @@ async def test_runner_executes_in_task_directory(tmp_path: Path, exit_code: int)
         "key": None,
         "kilo": None,
         "kept": "yes",
+        "output_limit": "65536",
         "stdin": "",
     }
     assert (repo / "patch.txt").read_text() == "changed"

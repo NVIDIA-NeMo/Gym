@@ -164,7 +164,9 @@ class KiloSandboxSession(AgentSessionState):
             Path(__file__).with_name(TASK_ENVIRONMENT_PLUGIN), f"{directory}/{TASK_ENVIRONMENT_PLUGIN}"
         )
 
-    async def stage_activation(self, *, command: list[str], config: str) -> SandboxCommand:
+    async def stage_activation(
+        self, *, command: list[str], config: str, output_token_max: int | None = None
+    ) -> SandboxCommand:
         """Stage the isolated provider config and CLI argv without altering task files."""
         directory = self.session.session_dir
         await upload_text(self.session.sandbox, path=f"{directory}/kilo.json", text=config)
@@ -176,6 +178,11 @@ class KiloSandboxSession(AgentSessionState):
                 "XDG_DATA_HOME": f"{directory}/data",
                 "XDG_CONFIG_HOME": f"{directory}/config",
                 "XDG_CACHE_HOME": f"{directory}/cache",
+                **(
+                    {"KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(output_token_max)}
+                    if output_token_max is not None
+                    else {}
+                ),
                 "KILO_NO_DAEMON": "1",
                 "KILO_DB": f"{directory}/kilo.db",
                 "KILO_CONFIG": f"{directory}/kilo.json",
