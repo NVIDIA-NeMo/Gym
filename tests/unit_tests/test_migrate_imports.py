@@ -198,6 +198,11 @@ class TestRewriteText:
             "See [ServerClient](/main/nemo-gym/nemo_gym/server_utils) in nemo_gym/server_runtime/server_utils.py.\n"
         )
 
+    def test_links_pinned_to_a_commit_keep_the_path_of_that_commit(self, migrator) -> None:
+        pinned = "https://github.com/NVIDIA-NeMo/Gym/blob/c74ffddb3d8190cd717508b0830916b19a26e6cd/nemo_gym/server_utils.py#L495"
+        text = f"Example: {pinned}, see nemo_gym/server_utils.py.\n"
+        assert migrator.rewrite_dotted(text) == f"Example: {pinned}, see nemo_gym/server_runtime/server_utils.py.\n"
+
     def test_code_sample_in_docs(self, migrator) -> None:
         text = "```python\nfrom nemo_gym.server_utils import ServerClient, SESSION_ID_KEY\nfrom nemo_gym.openai_utils import (\n```\n"
         assert migrator.rewrite_dotted(text) == (

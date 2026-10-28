@@ -82,6 +82,10 @@ def _chars(line: str, byte_offset: int) -> int:
     return len(line.encode()[:byte_offset].decode(errors="ignore"))
 
 
+# Ends at a path in a link pinned to a commit, such as `github.com/<org>/<repo>/blob/<sha>/`.
+_PINNED_LINK_PREFIX_RE = re.compile(r"/(?:blob|tree|raw)/[0-9a-f]{7,40}/\Z")
+
+
 class Migrator:
     """Rewrites old paths given module moves (`old -> new`) and name moves (`module -> {name -> (module, name)}`)."""
 
@@ -136,8 +140,14 @@ class Migrator:
         if self._dotted_re is not None:
             text = self._dotted_re.sub(lambda match: self._dotted[match.group(1)], text)
         if self._slashed_re is not None:
-            text = self._slashed_re.sub(lambda match: self._slashed[match.group(1)], text)
+            text = self._slashed_re.sub(lambda match: self._rewrite_slashed(match, text), text)
         return text
+
+    def _rewrite_slashed(self, match: re.Match[str], text: str) -> str:
+        # A link pinned to a commit (`.../blob/<sha>/nemo_gym/old.py`) names the file as it was then.
+        if _PINNED_LINK_PREFIX_RE.search(text, 0, match.start()):
+            return match.group(0)
+        return self._slashed[match.group(1)]
 
     def _destinations(self, module: str, names: list[tuple[str, Optional[str]]]) -> dict[str, list[str]]:
         """Group `(name, asname)` pairs imported from `module` by the module each now lives in."""
