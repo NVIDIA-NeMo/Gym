@@ -25,10 +25,10 @@ from app import (
 from fastapi import FastAPI
 from nemo_skills.mcp.tool_manager import ToolManager
 
-from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config.config_types import ResourcesServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer
 
 
 class TestApp:

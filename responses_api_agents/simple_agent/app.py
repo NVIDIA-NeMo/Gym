@@ -28,25 +28,7 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter, ValidationError
 
-from nemo_gym._checkpoint.agent import (
-    Activation,
-    ActivationOutOfOrderError,
-    LegacyRun,
-    RestoredAgentSession,
-    require_rollout,
-)
-from nemo_gym._checkpoint.errors import RolloutIdRequiredError
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.base_environment_server import is_retryable_dependency_status
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ResourcesCloseSessionRequest,
-)
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionResponse,
@@ -74,8 +56,31 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.session_routing import SESSION_OWNER_HEADER
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.server_runtime._checkpoint.agent import (
+    Activation,
+    ActivationOutOfOrderError,
+    LegacyRun,
+    RestoredAgentSession,
+    require_rollout,
+)
+from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
+from nemo_gym.server_runtime._checkpoint.steps import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    StepType,
+    seed_restarts,
+    seed_verify_step_type,
+)
+from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
+from nemo_gym.server_runtime.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+)
+from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER
+from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,

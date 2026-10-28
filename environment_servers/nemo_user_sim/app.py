@@ -22,22 +22,6 @@ from environment_servers.nemo_user_sim.episode_contracts import (
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
 )
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    CleanupHandle,
-    HandledEpisodeError,
-    dependency_failure,
-    is_retryable_dependency_error,
-    is_retryable_dependency_status,
-)
-from nemo_gym.base_resources_server import (
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
-    ResourcesSeedSessionRequest,
-)
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
@@ -62,6 +46,22 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
+)
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
+from nemo_gym.server_runtime.base_environment_server import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    CleanupHandle,
+    HandledEpisodeError,
+    dependency_failure,
+    is_retryable_dependency_error,
+    is_retryable_dependency_status,
+)
+from nemo_gym.server_runtime.base_resources_server import (
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
 )
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from resources_servers.nemo_user_sim.episode_contracts import (

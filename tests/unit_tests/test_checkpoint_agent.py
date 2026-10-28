@@ -14,22 +14,6 @@ import pytest
 from fastapi import Body, FastAPI
 from pydantic import JsonValue
 
-from nemo_gym._checkpoint.agent import (
-    AgentSessionParticipant,
-    AgentSessionRecord,
-    RestartOnlyTrackingMiddleware,
-    RestoredAgentSession,
-)
-from nemo_gym._checkpoint.control import (
-    CheckpointRequest,
-    CommitRequest,
-    ParticipantControlPlane,
-    RestoreRequest,
-    RetireRequest,
-)
-from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
-from nemo_gym._checkpoint.participant_workers import COORDINATOR_SOCKET_ENV
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -39,6 +23,22 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.agent import (
+    AgentSessionParticipant,
+    AgentSessionRecord,
+    RestartOnlyTrackingMiddleware,
+    RestoredAgentSession,
+)
+from nemo_gym.server_runtime._checkpoint.control import (
+    CheckpointRequest,
+    CommitRequest,
+    ParticipantControlPlane,
+    RestoreRequest,
+    RetireRequest,
+)
+from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.participant_workers import COORDINATOR_SOCKET_ENV
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.server_utils import BaseServerConfig
 from tests.unit_tests.test_checkpoint_resources import SEED
 
@@ -1090,8 +1090,8 @@ def test_the_checkpoint_participant_is_installed_once_per_app() -> None:
 
 
 async def test_after_a_restore_a_late_request_of_the_replaced_attempt_is_refused(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.agent import RestartOnlyAgentParticipant
-    from nemo_gym._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime._checkpoint.agent import RestartOnlyAgentParticipant
+    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     record = AgentSessionRecord(
         episode_id=EpisodeId(rollout_id="r"), session_key="s", session={}, boundary={"step": 1}
@@ -1218,7 +1218,7 @@ async def test_an_activation_of_a_restart_an_earlier_stage_reported_neither_bloc
     It is not exported, even by a commit without a scope.
     The restarts last for the checkpoint they were named in: the next checkpoint waits for r again.
     """
-    from nemo_gym._checkpoint.control import PrepareRequest
+    from nemo_gym.server_runtime._checkpoint.control import PrepareRequest
 
     participant = AgentSessionParticipant(Hooks())
     controller = ParticipantControlPlane(participant, instance_name="agent", lease_grace_seconds=60)
@@ -1337,13 +1337,13 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
         SingleAgentTurnEnvironmentServer,
         SingleAgentTurnEnvironmentServerConfig,
     )
-    from nemo_gym._checkpoint import coordination
-    from nemo_gym._checkpoint.control import install_participant
-    from nemo_gym._checkpoint.environment import EnvironmentParticipant
     from nemo_gym.config.config_types import AgentServerRef, ResourcesServerRef
     from nemo_gym.core.episode import TaskId
-    from nemo_gym.episode_types import MaterializedTask
-    from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
+    from nemo_gym.server_runtime._checkpoint import coordination
+    from nemo_gym.server_runtime._checkpoint.control import install_participant
+    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime.episode_types import MaterializedTask
+    from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
     from tests.unit_tests.test_checkpoint_coordination import InProcessClient, Recorder
     from tests.unit_tests.test_checkpoint_resources import RestartOnlyServer, make_server, until
 

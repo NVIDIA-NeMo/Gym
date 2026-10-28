@@ -17,7 +17,8 @@ from fastapi import FastAPI
 from pydantic import BaseModel, ValidationError, model_validator
 
 import nemo_gym.client.http_client
-from nemo_gym._checkpoint.control import (
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -27,10 +28,9 @@ from nemo_gym._checkpoint.control import (
     StaleAttemptError,
     install_participant,
 )
-from nemo_gym._checkpoint.errors import CheckpointStateError
-from nemo_gym._checkpoint.steps import EpisodeSteps
-from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.errors import CheckpointStateError
+from nemo_gym.server_runtime._checkpoint.steps import EpisodeSteps
+from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_participant_state, write_participant_state
 
 
 TOKEN = "secret"
@@ -536,7 +536,7 @@ async def test_restored_state_can_be_retired_after_resume(tmp_path: Path) -> Non
 async def test_commit_io_past_the_deadline_fails_and_a_retry_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     real_write = control.write_participant_state
     slow = {"on": True}
@@ -572,7 +572,7 @@ def test_prepare_report_caps_listed_blockers_but_counts_all() -> None:
 def test_seed_reply_reports_the_verify_step_type_and_defaults_to_wait() -> None:
     from multidict import CIMultiDict
 
-    from nemo_gym._checkpoint.steps import seed_verify_step_type
+    from nemo_gym.server_runtime._checkpoint.steps import seed_verify_step_type
 
     assert seed_verify_step_type(CIMultiDict({"X-NG-Checkpoint-Verify": "replay"})) == "replay"
     assert seed_verify_step_type({"x-ng-checkpoint-verify": "wait"}) == "wait"
@@ -669,7 +669,7 @@ async def test_control_calls_use_a_reserved_pool_when_data_calls_fill_theirs() -
 
 def test_stored_records_keep_their_key_order(tmp_path: Path) -> None:
     """A restored episode must see its state exactly as exported, including the order of every dict's keys."""
-    from nemo_gym._checkpoint.store import read_participant_state, write_participant_state
+    from nemo_gym.server_runtime._checkpoint.store import read_participant_state, write_participant_state
 
     state = {"zeta": 1, "alpha": {"tools": [{"name": "b", "args": {"y": 2, "x": 1}}], "beta": None}, "mid": "m"}
     record = {"episode_id": {"rollout_id": "r", "attempt": 0}, "state": state}
@@ -862,8 +862,12 @@ async def test_blockers_are_counted_in_full_and_listed_up_to_a_limit() -> None:
 
 
 def test_records_stream_to_disk_and_a_retried_commit_leaves_no_temporary_file(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.errors import CheckpointStateError
-    from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
+    from nemo_gym.server_runtime._checkpoint.errors import CheckpointStateError
+    from nemo_gym.server_runtime._checkpoint.store import (
+        participant_dir,
+        read_participant_state,
+        write_participant_state,
+    )
 
     def records(value: int):
         for attempt in range(3):
@@ -883,8 +887,12 @@ def test_records_stream_to_disk_and_a_retried_commit_leaves_no_temporary_file(tm
 
 
 def test_a_corrupt_records_file_is_a_checkpoint_state_error(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.errors import CheckpointStateError
-    from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
+    from nemo_gym.server_runtime._checkpoint.errors import CheckpointStateError
+    from nemo_gym.server_runtime._checkpoint.store import (
+        participant_dir,
+        read_participant_state,
+        write_participant_state,
+    )
 
     manifest, _ = write_participant_state(
         tmp_path, kind="fake", instance="f", checkpoint_id="c1", records=[{"episode_id": {"rollout_id": "r"}}]
@@ -897,7 +905,7 @@ def test_a_corrupt_records_file_is_a_checkpoint_state_error(tmp_path: Path) -> N
 
 def _gated_write(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, list[None], list[None]]:
     """Make every write wait for the returned gate; count the writes started and finished."""
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     real_write = control.write_participant_state
     gate, started, finished = threading.Event(), [], []
@@ -1098,7 +1106,7 @@ async def test_an_episode_whose_retire_was_cut_short_blocks_the_next_checkpoint_
 async def test_a_commit_retried_after_its_write_failed_stores_the_same_records(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     real_write = control.write_participant_state
     failures = [OSError("disk full")]
@@ -1131,7 +1139,7 @@ async def test_a_commit_retried_after_its_write_failed_stores_the_same_records(
 async def test_resume_waits_for_a_publication_under_way_so_none_appears_after_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym._checkpoint.store as store
+    import nemo_gym.server_runtime._checkpoint.store as store
 
     real_create = store._create
     publishing, release = threading.Event(), threading.Event()
@@ -1428,7 +1436,7 @@ async def test_a_commit_refuses_a_scope_naming_a_restart_and_commits_one_without
 
 
 def test_a_seed_reply_says_whether_its_session_restarts() -> None:
-    from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER, seed_restarts
+    from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_RESTART_HEADER, seed_restarts
 
     assert seed_restarts({CHECKPOINT_RESTART_HEADER: "1"})
     assert not seed_restarts({}) and not seed_restarts(None)
@@ -1857,7 +1865,7 @@ async def test_a_retire_past_its_deadline_still_refuses_its_attempts() -> None:
 
 
 async def test_the_lease_recovery_retries_a_reopen_that_failed(monkeypatch: pytest.MonkeyPatch) -> None:
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     monkeypatch.setattr(control, "_LEASE_REOPEN_WAIT_SECONDS", 0.05)
 
@@ -1883,7 +1891,7 @@ async def test_the_lease_recovery_retries_a_reopen_that_failed(monkeypatch: pyte
 
 
 async def test_a_retire_stops_its_episodes_concurrently_and_a_cut_short_one_cancels_each_once() -> None:
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     episodes = 40
     started: Counter[str] = Counter()
@@ -2001,7 +2009,7 @@ async def test_restore_does_not_check_payloads_read_back_from_storage_again(
 
 
 async def test_a_control_route_validates_its_request_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     validations: list[None] = []
 
@@ -2024,7 +2032,7 @@ async def test_a_control_route_validates_its_request_once(monkeypatch: pytest.Mo
 def test_participant_directories_are_durable_before_the_manifest_is_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, left_by_a_failed_write: bool
 ) -> None:
-    from nemo_gym._checkpoint import store
+    from nemo_gym.server_runtime._checkpoint import store
 
     directory = participant_dir(tmp_path, kind="fake", instance="fake-1")
     if left_by_a_failed_write:
@@ -2057,7 +2065,7 @@ def test_participant_directories_are_durable_before_the_manifest_is_published(
 def test_a_retried_write_syncs_the_participant_directory_of_the_manifest_it_finds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from nemo_gym._checkpoint import store
+    from nemo_gym.server_runtime._checkpoint import store
 
     directory = participant_dir(tmp_path, kind="fake", instance="fake-1")
     synced: list[Path] = []
@@ -2173,10 +2181,10 @@ async def test_an_export_that_outlives_its_commit_and_then_fails_is_final_for_it
 def _participants_by_mode() -> list:
     from unittest.mock import AsyncMock, MagicMock
 
-    from nemo_gym._checkpoint.agent import AgentSessionParticipant, RestartOnlyAgentParticipant
-    from nemo_gym._checkpoint.environment import EnvironmentParticipant
-    from nemo_gym._checkpoint.model import PolicyModelParticipant
-    from nemo_gym._checkpoint.resources import ResourcesParticipant
+    from nemo_gym.models._checkpoint import PolicyModelParticipant
+    from nemo_gym.server_runtime._checkpoint.agent import AgentSessionParticipant, RestartOnlyAgentParticipant
+    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
 
     return [
         pytest.param(lambda: AgentSessionParticipant(MagicMock()), "agent", "exported", id="session-agent"),

@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
 from nemo_gym.client.http_client import raise_for_status, request
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess
 
 
 if TYPE_CHECKING:

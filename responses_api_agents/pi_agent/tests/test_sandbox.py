@@ -1203,8 +1203,8 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
     )
     from nemo_gym.config.global_config import GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest
     from nemo_gym.server_utils import BaseServerConfig
-    from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 
     agent, sandbox = setup
     root = Path(__file__).parents[3]

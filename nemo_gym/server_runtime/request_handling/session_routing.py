@@ -103,7 +103,7 @@ from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
 from nemo_gym.config.config_types import DEFAULT_UVICORN_BACKLOG, ROLLOUT_PATH_PREFIX
-from nemo_gym.runtime_dir import server_runtime_dir
+from nemo_gym.server_runtime.runtime_dir import server_runtime_dir
 
 
 LOG = logging.getLogger(__name__)

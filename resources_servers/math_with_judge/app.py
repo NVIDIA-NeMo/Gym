@@ -28,14 +28,6 @@ from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
 from pydantic import BaseModel, PositiveFloat, PositiveInt
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -43,6 +35,14 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ReverifyMode,
+    SimpleResourcesServer,
+)
 from nemo_gym.telemetry.resources_operations import resources_operation
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification.judge import call_judge, normalize_math_judge_verdict

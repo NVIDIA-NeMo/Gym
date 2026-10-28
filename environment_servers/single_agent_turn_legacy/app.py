@@ -22,7 +22,7 @@ from nemo_gym.core.episode import (
     EpisodeId,
     maybe_rollout_id_from_run_body,
 )
-from nemo_gym.single_agent_turn_types import (
+from nemo_gym.server_runtime.single_agent_turn_types import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
 )

@@ -99,16 +99,16 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client.http_client import get_response_json, raise_for_status
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
 LOG = logging.getLogger(__name__)

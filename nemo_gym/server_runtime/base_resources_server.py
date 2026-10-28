@@ -33,17 +33,8 @@ if TYPE_CHECKING:
 
     # Type-only: importing MCPTool at runtime would be circular (mcp_auto_exposure imports this
     # module) and would pull the mcp SDK into agent/model processes that never need it.
-    from nemo_gym.mcp_auto_exposure import MCPTool
+    from nemo_gym.server_runtime.mcp_auto_exposure import MCPTool
 
-from nemo_gym._checkpoint.control import CheckpointMode
-from nemo_gym._checkpoint.participant_workers import install_server_participant
-from nemo_gym._checkpoint.resources import (
-    MCPTokenClaims,
-    ResourcesCheckpointMiddleware,
-    ResourcesParticipant,
-)
-from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core.episode import EpisodeId, TaskId
@@ -53,11 +44,20 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.observability.verifiers import observe_verifier
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.sandbox.access import SandboxAccess
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
+from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
+from nemo_gym.server_runtime._checkpoint.resources import (
+    MCPTokenClaims,
+    ResourcesCheckpointMiddleware,
+    ResourcesParticipant,
+)
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
+from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
+from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
-from nemo_gym.session_routing import SessionKind
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
 from nemo_gym.verification.judge import judge_failsafe
@@ -367,7 +367,7 @@ def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) 
 
 
 # A resources session is the cookie session: a typed seed or close names it by resources_session_id,
-# which the cookie then carries as its SESSION_ID_KEY (see nemo_gym.session_routing).
+# which the cookie then carries as its SESSION_ID_KEY (see nemo_gym.server_runtime.request_handling.session_routing).
 RESOURCES_SESSIONS = SessionKind(
     cookie_key=SESSION_ID_KEY,
     id_field="resources_session_id",
@@ -387,7 +387,7 @@ class ClosedResourcesSessionRecords(Generic[ClosedRecordT]):
     Construct it with the server's ``session_close_retry_window_seconds``.
     With several workers, the routing claim on the ID ends that long after the last request for the session,
     and the close is recorded before its reply is sent.
-    So the claim never ends before the record (see ``nemo_gym.session_routing.ResourcesSessionLifetimes``).
+    So the claim never ends before the record (see ``nemo_gym.server_runtime.request_handling.session_routing.ResourcesSessionLifetimes``).
     While the claim lasts, a late seed reaches the worker that remembers the close and is refused.
     After it ends, every worker treats the ID as new, so the answer does not depend on which worker gets it.
     """
@@ -730,7 +730,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         - release the session's state by ``resources_session_id`` even when the request carries no session cookie;
         - raise when releasing fails rather than recording the session as closed, so the caller can retry.
 
-        A served resources server routes sessions (see ``nemo_gym.session_routing``): a typed seed's session cookie
+        A served resources server routes sessions (see ``nemo_gym.server_runtime.request_handling.session_routing``): a typed seed's session cookie
         carries ``resources_session_id`` as its ``SESSION_ID_KEY``, and a typed close that carries no cookie, as when
         the seed's reply was lost, is given that ID too, so a server may key state by either; they name the same
         session. An app built without session routing, such as one under ``TestClient``, gives a new session a random

@@ -11,9 +11,9 @@ import pytest
 from fastapi import Request
 from omegaconf import OmegaConf
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
+from nemo_gym.server_runtime.base_resources_server import ResourcesCloseSessionRequest
 from resources_servers.swe_atlas_qa import app as module
 
 

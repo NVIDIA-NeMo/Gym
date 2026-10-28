@@ -50,13 +50,6 @@ from typing import List
 from fastapi import Request, Response
 from pydantic import ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -71,6 +64,13 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     accumulate_response_usage,
+)
+from nemo_gym.server_runtime.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
 )
 
 

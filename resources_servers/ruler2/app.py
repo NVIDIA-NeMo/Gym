@@ -47,17 +47,17 @@ from typing import Any, Dict, List, Optional
 
 import editdistance
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics.reward_profile import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
-)
-from nemo_gym.metrics.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-    highest_k_metrics,
 )
 
 

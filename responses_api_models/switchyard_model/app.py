@@ -77,7 +77,7 @@ _ROLLOUT_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "switchyard_model_rollout_id", default=None
 )
 
-# Charset kept in step with nemo_gym.rollout_correlation.RolloutContextMiddleware and the
+# Charset kept in step with nemo_gym.server_runtime.request_handling.rollout_context.RolloutContextMiddleware and the
 # _validate_rollout_id check on the capture path. It matters more here than it does there: this id
 # leaves the process as an HTTP header value, so anything outside the contract's alphabet is
 # dropped rather than forwarded.

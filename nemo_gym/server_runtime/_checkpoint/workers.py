@@ -42,7 +42,8 @@ from typing import Any, ClassVar, Generic, Optional, TypeVar
 
 from pydantic import BaseModel
 
-from nemo_gym._checkpoint.control import (
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRequest,
     ParticipantControlPlane,
@@ -50,9 +51,8 @@ from nemo_gym._checkpoint.control import (
     RetiredAttempts,
     dispatch_control,
 )
-from nemo_gym._checkpoint.errors import ControlError
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.runtime_dir import server_runtime_dir
+from nemo_gym.server_runtime._checkpoint.errors import ControlError
+from nemo_gym.server_runtime.runtime_dir import server_runtime_dir
 
 
 LOGGER = logging.getLogger(__name__)

@@ -34,7 +34,6 @@ from harbor.models.trial.result import TrialResult
 from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, ValidationInfo, field_validator, model_validator
 
 from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -58,6 +57,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymSummary,
 )
 from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry.setup import init_telemetry
 
 

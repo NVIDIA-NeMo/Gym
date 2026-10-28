@@ -28,7 +28,6 @@ from fastapi import Body, Request
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef
@@ -41,6 +40,7 @@ from nemo_gym.core.responses_api_types import (
     accumulate_response_usage,
 )
 from nemo_gym.responses_converter import ResponsesConverter, chat_completion_usage_to_response_usage
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from responses_api_agents.conversational_tool_use_scenario_generation.assets import (
     ScenarioAssets,
     load_assets,

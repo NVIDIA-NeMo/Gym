@@ -26,13 +26,6 @@ from lcb_integration.extraction_utils import LMStyle, extract_code
 from pydantic import BaseModel, Field, model_validator
 from sandbox_execution import check_correctness_in_sandbox
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.metrics.reward_profile import (
     add_avg_sample_std_dev,
@@ -41,6 +34,13 @@ from nemo_gym.metrics.reward_profile import (
     highest_k_metrics,
 )
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
 from nemo_gym.verification.sandbox_verification import SandboxVerificationConfig, SandboxVerificationError
 
 

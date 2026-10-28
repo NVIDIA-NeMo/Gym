@@ -8,9 +8,9 @@ from omegaconf import DictConfig
 from pydantic import ValidationError
 
 import nemo_gym.server_utils
-from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import EpisodeId, current_episode_id, rollout_context
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_utils import BaseServerConfig
 
 

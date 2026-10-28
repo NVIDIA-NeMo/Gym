@@ -32,11 +32,6 @@ from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -71,6 +66,11 @@ from nemo_gym.sandbox.agent_tools import (
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
 from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,

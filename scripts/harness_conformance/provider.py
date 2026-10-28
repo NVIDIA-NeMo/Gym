@@ -14,7 +14,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.chat_streaming import synthesize_chat_completion_sse
 from nemo_gym.responses_streaming import (
@@ -22,6 +21,7 @@ from nemo_gym.responses_streaming import (
     restore_namespace_tool_calls,
     synthesize_responses_sse,
 )
+from nemo_gym.server_runtime.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 
 from .scenarios import Scenario
 

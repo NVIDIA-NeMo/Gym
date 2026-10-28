@@ -12,14 +12,14 @@ from unittest.mock import MagicMock
 import httpx
 from omegaconf import DictConfig
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime.base_resources_server import (
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     BaseResourcesServerConfig,
     mcp_session_token_serializer,
 )
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 from tests.unit_tests.test_checkpoint_resources import AUTH, SEED, CounterServer, control, signal_waits, until
 
 

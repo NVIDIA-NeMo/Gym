@@ -34,7 +34,6 @@ from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
@@ -75,7 +74,8 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.tool_access import MCPToolAccess
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime.tool_access import MCPToolAccess
 from nemo_gym.trajectory.trajectory_record import (
     AgentEpisode,
     AgentInvocation,

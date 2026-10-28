@@ -13,7 +13,6 @@ from typing import Any
 from fastapi import Body, Request
 from pydantic import ConfigDict, Field, SecretStr
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import trace_context_path_segment
@@ -29,6 +28,7 @@ from nemo_gym.sandbox import (
     create_provider,
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
 
 

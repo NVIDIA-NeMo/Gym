@@ -34,14 +34,14 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.verification.judge import JudgeError
 
 

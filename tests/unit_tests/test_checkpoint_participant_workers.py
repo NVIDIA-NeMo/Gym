@@ -23,34 +23,8 @@ import pytest
 from fastapi import FastAPI, Request
 from pydantic import Field, JsonValue
 
-import nemo_gym._checkpoint.participant_workers as participant_workers_module
-import nemo_gym._checkpoint.workers as workers_module
-from nemo_gym._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord, RestoredAgentSession
-from nemo_gym._checkpoint.control import (
-    CheckpointParticipant,
-    CheckpointRecord,
-    CheckpointRequest,
-    CommitRequest,
-    ForgetRequest,
-    RestoreRequest,
-    RetireRequest,
-    dispatch_control,
-)
-from nemo_gym._checkpoint.environment import EnvironmentParticipant, task_digest
-from nemo_gym._checkpoint.errors import (
-    AdmissionClosedError,
-    ControlError,
-    ExportFailedError,
-    RestartInScopeError,
-    StaleAttemptError,
-)
-from nemo_gym._checkpoint.participant_workers import (
-    COORDINATOR_SOCKET_ENV,
-    CoordinatedServerParticipant,
-    ParticipantWorkerLink,
-)
-from nemo_gym._checkpoint.resources import ResourcesParticipant, ResourcesSessionRecord
-from nemo_gym._checkpoint.workers import WorkerCoordinator
+import nemo_gym.server_runtime._checkpoint.participant_workers as participant_workers_module
+import nemo_gym.server_runtime._checkpoint.workers as workers_module
 from nemo_gym.base_responses_api_agent import (
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionResponse,
@@ -61,8 +35,34 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import EpisodeId
-from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
-from nemo_gym.session_routing import (
+from nemo_gym.server_runtime._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord, RestoredAgentSession
+from nemo_gym.server_runtime._checkpoint.control import (
+    CheckpointParticipant,
+    CheckpointRecord,
+    CheckpointRequest,
+    CommitRequest,
+    ForgetRequest,
+    RestoreRequest,
+    RetireRequest,
+    dispatch_control,
+)
+from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, task_digest
+from nemo_gym.server_runtime._checkpoint.errors import (
+    AdmissionClosedError,
+    ControlError,
+    ExportFailedError,
+    RestartInScopeError,
+    StaleAttemptError,
+)
+from nemo_gym.server_runtime._checkpoint.participant_workers import (
+    COORDINATOR_SOCKET_ENV,
+    CoordinatedServerParticipant,
+    ParticipantWorkerLink,
+)
+from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant, ResourcesSessionRecord
+from nemo_gym.server_runtime._checkpoint.workers import WorkerCoordinator
+from nemo_gym.server_runtime.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
+from nemo_gym.server_runtime.request_handling.session_routing import (
     ResourcesSessionLifetimes,
     SessionClaims,
     install_session_routing,
@@ -1277,7 +1277,7 @@ async def test_every_worker_leaves_out_the_restarts_an_earlier_stage_reported_un
     Every worker gets the restarts, one that joins while the checkpoint is open included,
     so the coordinator is ready without waiting for r, and every worker forgets them at resume.
     """
-    from nemo_gym._checkpoint.control import PrepareRequest
+    from nemo_gym.server_runtime._checkpoint.control import PrepareRequest
 
     async with coordinated(socket_dir, agent_worker, expected=3) as deployment:
         _, second = deployment.links

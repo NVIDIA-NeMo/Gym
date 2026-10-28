@@ -17,17 +17,17 @@ from fastapi import Body, FastAPI
 from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
-from nemo_gym._checkpoint.control import CheckpointMode
-from nemo_gym._checkpoint.environment import EnvironmentParticipant
-from nemo_gym._checkpoint.errors import ControlError
-from nemo_gym._checkpoint.participant_workers import install_server_participant
-from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import StepType
 from nemo_gym.client.http_client import format_exception_with_response_body
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.core.episode import EpisodeId, rollout_context
 from nemo_gym.core.failure_kinds import FailureStage
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
+from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+from nemo_gym.server_runtime._checkpoint.errors import ControlError
+from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime._checkpoint.steps import StepType
+from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
 from nemo_gym.server_utils import SimpleServer
 
 
@@ -389,7 +389,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     async def checkpoint_restart(self, request: EpisodeRequestT) -> None:
         """Mark this episode as a restart: a server it uses cannot capture its part, such as a restart-only agent.
 
-        Call it when a seed reply says so (``nemo_gym._checkpoint.steps.seed_restarts``).
+        Call it when a seed reply says so (``nemo_gym.server_runtime._checkpoint.steps.seed_restarts``).
         The episode then never holds up a checkpoint and is never exported; after a crash,
         the controller starts it over from its input.
         """
@@ -397,7 +397,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             await self._checkpoint.mark_restart(request.episode_id)
 
     def checkpoint_step(self, request: EpisodeRequestT, step_type: StepType) -> AbstractAsyncContextManager[None]:
-        """Run one protocol step as a ``wait`` or ``replay`` step (see ``nemo_gym._checkpoint.steps``).
+        """Run one protocol step as a ``wait`` or ``replay`` step (see ``nemo_gym.server_runtime._checkpoint.steps``).
 
         Use ``replay`` only for a step that is safe to run again after a crash
         and does not change checkpointed state; everything else waits.

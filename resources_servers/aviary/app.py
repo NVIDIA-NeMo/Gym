@@ -33,8 +33,8 @@ from aviary.core import (
     ToolRequestMessage,
     ToolResponseMessage,
 )
-from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.core.responses_api_types import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
+from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer
 
 from .schemas import (
     AviaryAgentVerifyRequest,

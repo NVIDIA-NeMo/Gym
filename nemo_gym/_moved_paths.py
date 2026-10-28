@@ -67,6 +67,28 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym._checkpoint.model": MovedPath(new="nemo_gym.models._checkpoint", since="0.8.0"),
+    "nemo_gym._checkpoint.model_workers": MovedPath(new="nemo_gym.models._checkpoint_workers", since="0.8.0"),
+    "nemo_gym._checkpoint": MovedPath(new="nemo_gym.server_runtime._checkpoint", since="0.8.0"),
+    "nemo_gym.base_resources_server": MovedPath(new="nemo_gym.server_runtime.base_resources_server", since="0.8.0"),
+    "nemo_gym.base_environment_server": MovedPath(
+        new="nemo_gym.server_runtime.base_environment_server", since="0.8.0"
+    ),
+    "nemo_gym.session_routing": MovedPath(
+        new="nemo_gym.server_runtime.request_handling.session_routing", since="0.8.0"
+    ),
+    "nemo_gym.rollout_correlation": MovedPath(
+        new="nemo_gym.server_runtime.request_handling.rollout_context", since="0.8.0"
+    ),
+    "nemo_gym.mcp_auto_exposure": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure", since="0.8.0"),
+    "nemo_gym.server_status": MovedPath(new="nemo_gym.server_runtime.server_status", since="0.8.0"),
+    "nemo_gym.episode_types": MovedPath(new="nemo_gym.server_runtime.episode_types", since="0.8.0"),
+    "nemo_gym.single_agent_turn_types": MovedPath(
+        new="nemo_gym.server_runtime.single_agent_turn_types", since="0.8.0"
+    ),
+    "nemo_gym.tool_access": MovedPath(new="nemo_gym.server_runtime.tool_access", since="0.8.0"),
+    "nemo_gym.runtime_dir": MovedPath(new="nemo_gym.server_runtime.runtime_dir", since="0.8.0"),
+    "nemo_gym.observability.verifiers": MovedPath(new="nemo_gym.server_runtime.verifier_observability", since="0.8.0"),
     "nemo_gym.resolved_config": MovedPath(new="nemo_gym.artifacts.resolved_config", since="0.8.0"),
     "nemo_gym.run_artifacts": MovedPath(new="nemo_gym.artifacts.run_artifacts", since="0.8.0"),
     "nemo_gym.run_exporter_registry": MovedPath(new="nemo_gym.artifacts.exporter_registry", since="0.8.0"),

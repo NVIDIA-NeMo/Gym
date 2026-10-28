@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym._checkpoint.errors import CheckpointStateError
+from nemo_gym.server_runtime._checkpoint.errors import CheckpointStateError
 
 
 STATE_SCHEMA_VERSION = 1

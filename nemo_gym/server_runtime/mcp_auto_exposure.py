@@ -94,8 +94,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 
-from nemo_gym._checkpoint.errors import RolloutIdRequiredError
-from nemo_gym.base_resources_server import (
+from nemo_gym.client.server_client import SESSION_ID_KEY
+from nemo_gym.core.episode import current_episode_id
+from nemo_gym.server_runtime._checkpoint.errors import RolloutIdRequiredError
+from nemo_gym.server_runtime.base_resources_server import (
     MCP_TOKEN_EPISODE_CLAIM,
     NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
@@ -105,8 +107,6 @@ from nemo_gym.base_resources_server import (
     mcp_session_token_payload,
     mcp_session_token_serializer,
 )
-from nemo_gym.client.server_client import SESSION_ID_KEY
-from nemo_gym.core.episode import current_episode_id
 
 
 LOG = logging.getLogger(__name__)

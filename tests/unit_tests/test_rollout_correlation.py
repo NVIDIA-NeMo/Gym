@@ -22,13 +22,6 @@ from omegaconf import OmegaConf
 from pydantic import ConfigDict
 from starlette.testclient import TestClient
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -46,6 +39,13 @@ from nemo_gym.core.episode import (
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
 
 
 def _model_response(model: str, text: str = "") -> dict:

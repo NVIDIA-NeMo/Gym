@@ -5,7 +5,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.episode_types import (
+from nemo_gym.server_runtime.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     EpisodeFailure,
@@ -65,7 +65,7 @@ def test_failure_reason_length_limit() -> None:
 
 @pytest.mark.parametrize("stage", ["admission", "seed", "agent", "verification", "cleanup"])
 def test_single_agent_protocol_inherits_shared_failure_metadata(stage: str) -> None:
-    from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure
+    from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnFailure
 
     failure = SingleAgentTurnFailure(
         failure_reason="Participant unavailable",

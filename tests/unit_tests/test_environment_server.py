@@ -13,7 +13,10 @@ from fastapi import Body
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from nemo_gym.base_environment_server import (
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
@@ -21,10 +24,12 @@ from nemo_gym.base_environment_server import (
     is_retryable_dependency_error,
     is_retryable_dependency_status,
 )
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, MaterializedTask
+from nemo_gym.server_runtime.episode_types import (
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    EpisodeFailure,
+    MaterializedTask,
+)
 
 
 class _TaskInput(BaseModel):
@@ -444,7 +449,7 @@ def test_admission_timeout_reports_its_stage_before_running_the_episode() -> Non
 
 @pytest.mark.parametrize("records_boundaries", [False, True])
 async def test_the_episodes_of_a_protocol_without_boundaries_are_restarts(records_boundaries: bool) -> None:
-    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -473,8 +478,8 @@ async def test_the_episodes_of_a_protocol_without_boundaries_are_restarts(record
 
 
 async def test_a_refused_duplicate_run_leaves_the_live_episode_tracked() -> None:
-    from nemo_gym._checkpoint.environment import EnvironmentParticipant
-    from nemo_gym._checkpoint.errors import ControlError
+    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime._checkpoint.errors import ControlError
 
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -503,7 +508,7 @@ async def test_a_refused_duplicate_run_leaves_the_live_episode_tracked() -> None
 
 
 async def test_an_episode_is_untracked_even_if_its_cleanup_is_cancelled() -> None:
-    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 
     class _CancelledCleanup(_EnvironmentServer):
         checkpoint_mode = "exported"

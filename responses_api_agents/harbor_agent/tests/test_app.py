@@ -23,8 +23,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime.base_resources_server import AggregateMetricsRequest
 from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,

@@ -17,17 +17,17 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics.reward_profile import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
-)
-from nemo_gym.metrics.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-    highest_k_metrics,
 )
 from resources_servers.bird_sql.eval_utils import execute_and_compare
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql

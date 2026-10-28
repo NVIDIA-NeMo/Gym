@@ -10,8 +10,10 @@ import pytest
 from fastapi import FastAPI
 from omegaconf import OmegaConf
 
-from nemo_gym._checkpoint import coordination
-from nemo_gym._checkpoint.control import (
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint import coordination
+from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -19,9 +21,7 @@ from nemo_gym._checkpoint.control import (
     install_participant,
     next_attempt,
 )
-from nemo_gym._checkpoint.coordination import CoordinationError
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.coordination import CoordinationError
 from nemo_gym.server_utils import BaseServerConfig
 
 
@@ -441,7 +441,7 @@ async def test_discover_reports_a_participant_of_an_unknown_kind() -> None:
 
 
 def test_the_commit_scope_leaves_out_every_restart_any_participant_reports() -> None:
-    from nemo_gym._checkpoint.coordination import PrepareResult
+    from nemo_gym.server_runtime._checkpoint.coordination import PrepareResult
 
     prepared = PrepareResult(
         prepared=True,

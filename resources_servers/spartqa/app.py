@@ -41,14 +41,14 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.core.responses_api_types import NeMoGymResponse
 
 
 PROMPT = """\

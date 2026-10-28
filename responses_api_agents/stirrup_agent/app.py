@@ -28,7 +28,6 @@ from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -54,7 +53,8 @@ from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,

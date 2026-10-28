@@ -3,8 +3,8 @@
 
 from pathlib import Path
 
-from nemo_gym.episode_types import MaterializedTask
-from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
+from nemo_gym.server_runtime.episode_types import MaterializedTask
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
 ROOT = Path(__file__).resolve().parents[3]

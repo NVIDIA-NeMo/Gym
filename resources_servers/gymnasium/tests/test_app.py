@@ -25,9 +25,9 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from omegaconf import DictConfig
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 from resources_servers.gymnasium import EnvResetRequest, EnvStepRequest, GymnasiumServer, extract_text
 
 

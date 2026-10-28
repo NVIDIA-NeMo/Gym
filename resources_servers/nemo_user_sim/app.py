@@ -18,14 +18,6 @@ from typing import Any
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
-    ResourcesSeedSessionRequest,
-    SimpleResourcesServer,
-    lost_session_verification,
-)
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef
@@ -36,6 +28,14 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
+)
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    SimpleResourcesServer,
+    lost_session_verification,
 )
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSeedResponse,

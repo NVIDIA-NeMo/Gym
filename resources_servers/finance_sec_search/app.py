@@ -40,15 +40,6 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.client.http_client import get_response_json
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef
@@ -56,6 +47,15 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 from nemo_gym.verification.judge import JudgeError, call_judge, reraise_judge_errors
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService

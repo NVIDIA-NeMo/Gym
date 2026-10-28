@@ -20,8 +20,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.base_resources_server import NeMoGymResponse
 from nemo_gym.client.server_client import ServerClient
+from nemo_gym.server_runtime.base_resources_server import NeMoGymResponse
 from nemo_gym.verification.judge import JudgeError
 from resources_servers.verifif.app import (
     LLMJudgeItem,
@@ -615,7 +615,7 @@ class TestAgentPipelineFlow:
         """Test that the seed_session endpoint works."""
         server = self._create_server()
         # The default seed_session should return successfully
-        from nemo_gym.base_resources_server import BaseSeedSessionRequest
+        from nemo_gym.server_runtime.base_resources_server import BaseSeedSessionRequest
 
         request = BaseSeedSessionRequest()
         result = asyncio.run(server.seed_session(request))

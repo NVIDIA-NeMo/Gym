@@ -20,7 +20,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.metrics.reward_profile import select_measured
+from nemo_gym.server_runtime.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -39,13 +44,8 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.metrics.reward_profile import select_measured
-from nemo_gym.session_routing import ResourcesSessionLifetimes
-from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
+from nemo_gym.server_runtime.request_handling.session_routing import ResourcesSessionLifetimes
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnResult
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
@@ -236,7 +236,7 @@ EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
 class TestResourcesSessionFence:
     def test_a_closed_session_is_refused_until_its_record_expires(self, monkeypatch) -> None:
         clock = [100.0]
-        monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
         fence = ResourcesSessionFence(window_seconds=10.0)
         fence.mark_closed("closed", EPISODE)
 
@@ -252,7 +252,7 @@ class TestResourcesSessionFence:
 
     def test_records_stay_bounded_by_the_window(self, monkeypatch) -> None:
         clock = [0.0]
-        monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
         fence = ResourcesSessionFence(window_seconds=5.0)
         for index in range(1000):
             fence.mark_closed(f"session-{index}", EPISODE)
@@ -265,7 +265,7 @@ class TestResourcesSessionFence:
 
     def test_a_retried_close_keeps_the_first_episode_and_expiry(self, monkeypatch) -> None:
         clock = [0.0]
-        monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
         fence = ResourcesSessionFence(window_seconds=10.0)
         fence.mark_closed("session", EPISODE)
         clock[0] = 8.0
@@ -538,7 +538,7 @@ class TestRefusalsAndLostSessions:
 
         # A request model that allows extra fields can already carry verify fields, such as on a reverify.
         body = ExtraVerifyRequest.model_validate(VERIFY_BODY | {"reward": 1.0, "mask_sample": False})
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_resources_server"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.base_resources_server"):
             verified = BaseVerifyResponse(**(body.model_dump() | lost_session_verification("sandbox gone")))
 
         assert verified.reward == 0.0
@@ -602,7 +602,7 @@ class TestRefusalsAndLostSessions:
 class TestClosedResourcesSessionRecords:
     def test_a_record_lasts_the_window_after_the_first_close(self, monkeypatch) -> None:
         clock = [100.0]
-        monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
         records = ClosedResourcesSessionRecords[str](window_seconds=10)
 
         records.remember("a", "first close")
@@ -622,8 +622,8 @@ class TestClosedResourcesSessionRecords:
 
     def test_a_record_never_outlives_the_routing_claim(self, monkeypatch) -> None:
         clock = [0.0]
-        monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
-        monkeypatch.setattr("nemo_gym.session_routing.monotonic", lambda: clock[0])
+        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+        monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
         window = 300.0
         records = ClosedResourcesSessionRecords[bool](window_seconds=window)
         claims = ResourcesSessionLifetimes(window, starts=("/seed_session",), ends=("/close_session",))

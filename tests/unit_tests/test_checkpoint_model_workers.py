@@ -16,7 +16,10 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from nemo_gym._checkpoint.control import (
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.models._checkpoint import GenerationCutRecord, ModelRecord, PolicyGate, _Ticket
+from nemo_gym.models._checkpoint_workers import PolicyCoordinator, PolicyWorkerLink
+from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointRequest,
     CommitRequest,
     ForgetRequest,
@@ -24,10 +27,7 @@ from nemo_gym._checkpoint.control import (
     RetireRequest,
     install_control_routes,
 )
-from nemo_gym._checkpoint.errors import ControlError, ExportFailedError, StaleAttemptError
-from nemo_gym._checkpoint.model import GenerationCutRecord, ModelRecord, PolicyGate, _Ticket
-from nemo_gym._checkpoint.model_workers import PolicyCoordinator, PolicyWorkerLink
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.errors import ControlError, ExportFailedError, StaleAttemptError
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.sink import CaptureContext
 from nemo_gym.token_id_capture.staging.records import GenerationCutContinuation
@@ -392,8 +392,8 @@ async def test_restore_refuses_workers_that_have_served_calls(tmp_path: Path) ->
 async def test_a_message_that_cannot_be_sent_or_is_never_answered_is_a_typed_unavailable_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from nemo_gym._checkpoint import workers
-    from nemo_gym._checkpoint.workers import Channel, CoordinatorUnavailableError
+    from nemo_gym.server_runtime._checkpoint import workers
+    from nemo_gym.server_runtime._checkpoint.workers import Channel, CoordinatorUnavailableError
 
     # The call also cancels its handler on the other side, and gives up on a side that never answers.
     monkeypatch.setattr(workers, "CANCEL_GRACE_SECONDS", 0.2)
@@ -484,7 +484,7 @@ async def test_a_reopen_does_not_make_a_started_restored_attempt_unclaimed_again
 async def test_after_a_restore_every_worker_refuses_the_replaced_attempt_even_one_that_joins_later(
     tmp_path: Path,
 ) -> None:
-    from nemo_gym._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     write_participant_state(tmp_path / "ckpt", kind="model", instance="policy", checkpoint_id="c0", records=[])
     async with deployment(ledger=FileLineageStore(tmp_path / "ledger")) as (coordinator, links):
@@ -607,14 +607,14 @@ def worker_logs(caplog: pytest.LogCaptureFixture) -> list[tuple[str, str]]:
     return [
         (record.levelname, record.getMessage())
         for record in caplog.records
-        if record.name == "nemo_gym._checkpoint.workers" and "policy worker" in record.getMessage()
+        if record.name == "nemo_gym.server_runtime._checkpoint.workers" and "policy worker" in record.getMessage()
     ]
 
 
 async def test_workers_are_logged_by_pid_as_they_join_and_a_lost_one_as_a_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level("INFO", logger="nemo_gym._checkpoint.workers")
+    caplog.set_level("INFO", logger="nemo_gym.server_runtime._checkpoint.workers")
     async with deployment() as (coordinator, (_, second)):
         await crash(second)
         await wait_for_workers(coordinator, 1)
@@ -638,7 +638,7 @@ async def test_workers_are_logged_by_pid_as_they_join_and_a_lost_one_as_a_warnin
 async def test_a_worker_lost_during_a_checkpoint_is_logged_as_blocking_its_commit(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level("INFO", logger="nemo_gym._checkpoint.workers")
+    caplog.set_level("INFO", logger="nemo_gym.server_runtime._checkpoint.workers")
     async with deployment() as (coordinator, (_, second)):
         await coordinator.controller.prepare(CheckpointRequest(**control()))
         await crash(second)
@@ -650,7 +650,7 @@ async def test_a_worker_lost_during_a_checkpoint_is_logged_as_blocking_its_commi
 
 
 async def test_a_worker_that_stops_cleanly_is_not_reported_as_lost(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level("INFO", logger="nemo_gym._checkpoint.workers")
+    caplog.set_level("INFO", logger="nemo_gym.server_runtime._checkpoint.workers")
     async with deployment() as (coordinator, (_, second)):
         await second.disconnect()
         await wait_for_workers(coordinator, 1)

@@ -39,16 +39,21 @@ from fastapi import FastAPI
 from omegaconf import OmegaConf
 from pydantic import JsonValue
 
-from nemo_gym._checkpoint import coordination
-from nemo_gym._checkpoint.agent import AgentSessionParticipant, RestoredAgentSession
-from nemo_gym._checkpoint.control import CheckpointParticipant, CheckpointRecord, install_participant
-from nemo_gym._checkpoint.coordination import PREPARE_ORDER, RETIRE_ORDER, CoordinationError, Participants
-from nemo_gym._checkpoint.environment import EnvironmentParticipant
-from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
-from nemo_gym._checkpoint.model import PolicyModelParticipant
-from nemo_gym._checkpoint.resources import ResourcesParticipant
-from nemo_gym._checkpoint.store import participant_dir, read_participant_state
 from nemo_gym.core.episode import EpisodeId
+from nemo_gym.models._checkpoint import PolicyModelParticipant
+from nemo_gym.server_runtime._checkpoint import coordination
+from nemo_gym.server_runtime._checkpoint.agent import AgentSessionParticipant, RestoredAgentSession
+from nemo_gym.server_runtime._checkpoint.control import CheckpointParticipant, CheckpointRecord, install_participant
+from nemo_gym.server_runtime._checkpoint.coordination import (
+    PREPARE_ORDER,
+    RETIRE_ORDER,
+    CoordinationError,
+    Participants,
+)
+from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
+from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_participant_state
 from nemo_gym.server_utils import BaseServerConfig
 from tests.unit_tests.test_checkpoint_coordination import InProcessClient
 from tests.unit_tests.test_checkpoint_sequences import GatedWrites

@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 from pytest import approx, fixture
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
@@ -26,6 +25,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from resources_servers.simpleqa.app import (
     SimpleQAConfig,
     SimpleQAServer,

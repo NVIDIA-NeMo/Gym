@@ -91,14 +91,14 @@ import regex  # noqa: F401
 from fastapi import FastAPI
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.core.responses_api_types import NeMoGymResponse
 
 
 LOG = logging.getLogger(__name__)

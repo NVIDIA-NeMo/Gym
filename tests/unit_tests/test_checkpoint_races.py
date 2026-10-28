@@ -16,9 +16,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from nemo_gym._checkpoint.control import StaleAttemptError
-from nemo_gym._checkpoint.store import read_participant_state, write_participant_state
 from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.control import StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.store import read_participant_state, write_participant_state
 from tests.unit_tests.test_checkpoint_control import (
     FakeParticipant,
     _gated_write,
@@ -114,7 +114,7 @@ async def test_a_lease_expiry_while_prepare_waits_for_readiness_aborts_the_check
 async def test_a_lease_expiry_during_a_commits_cleanup_reopens_only_once_the_cleanup_finished(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     monkeypatch.setattr(control, "_LEASE_REOPEN_WAIT_SECONDS", 0.05)
     release = asyncio.Event()
@@ -165,7 +165,7 @@ async def test_a_lease_expiry_during_a_commits_cleanup_reopens_only_once_the_cle
 async def test_a_commit_retried_while_its_timed_out_write_still_runs_stores_the_first_export_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     gate, started, finished = _gated_write(monkeypatch)
     calls: list[None] = []
@@ -217,7 +217,7 @@ async def test_a_commit_retried_while_its_timed_out_write_still_runs_stores_the_
 async def test_a_restore_that_fails_while_its_install_runs_then_races_a_resume_leaves_the_attempts_retired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym._checkpoint.control as control
+    import nemo_gym.server_runtime._checkpoint.control as control
 
     resume_waiting = asyncio.Event()
     real_retry = control.ParticipantControlPlane._retry_pending_reopen

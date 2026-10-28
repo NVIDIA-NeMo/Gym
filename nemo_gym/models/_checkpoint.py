@@ -31,7 +31,7 @@ The data plane of one server process is a ``PolicyGate``.
 With one uvicorn worker, a ``PolicyModelParticipant`` owns the gate directly.
 With several,
 each worker runs a gate and one coordinator in the main process owns the participant
-(``nemo_gym._checkpoint.model_workers``).
+(``nemo_gym.models._checkpoint_workers``).
 """
 
 import asyncio
@@ -47,7 +47,11 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym._checkpoint.control import (
+from nemo_gym.chat_streaming import SSE_KEEPALIVE
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
+from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
     CheckpointRequest,
@@ -57,19 +61,15 @@ from nemo_gym._checkpoint.control import (
     RetiredAttempts,
     next_attempt,
 )
-from nemo_gym._checkpoint.errors import InvalidRolloutIdError, StaleAttemptError
-from nemo_gym._checkpoint.generation_cut import (
+from nemo_gym.server_runtime._checkpoint.errors import InvalidRolloutIdError, StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GENERATION_CUT_ROUTE,
     GenerationCutInventory,
     GenerationCutPrefix,
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
-from nemo_gym._checkpoint.telemetry import checkpoint_span
-from nemo_gym.chat_streaming import SSE_KEEPALIVE
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
+from nemo_gym.server_runtime._checkpoint.telemetry import checkpoint_span
 from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.external_capture import publish_deferred_commit

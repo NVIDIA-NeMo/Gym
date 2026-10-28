@@ -12,13 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.session_routing import install_session_routing
+from nemo_gym.server_runtime.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.request_handling.session_routing import install_session_routing
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest

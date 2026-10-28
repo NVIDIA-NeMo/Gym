@@ -31,12 +31,6 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    SimpleResourcesServer,
-)
 from nemo_gym.client.http_client import request
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef
@@ -46,6 +40,12 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.openai_utils import RETRY_ERROR_CODES
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    SimpleResourcesServer,
+)
 from nemo_gym.verification.judge import JudgeError, call_judge
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 

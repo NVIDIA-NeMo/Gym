@@ -19,9 +19,9 @@ from app import (
     Ether0VerifyRequest,
 )
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 
 
 def _make_server() -> Ether0ResourcesServer:

@@ -10,19 +10,19 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
-from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.rollout_collection import _build_trajectory_record
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.verification.judge import JudgeError, call_judge, judge_failsafe
 
 

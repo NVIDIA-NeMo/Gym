@@ -42,9 +42,17 @@ from fastapi.testclient import TestClient
 from httpx import Response
 from pydantic import BaseModel, Field
 
-from nemo_gym import session_routing
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
-from nemo_gym.base_resources_server import (
+from nemo_gym.base_responses_api_agent import (
+    AGENT_SESSION_COOKIE_KEY,
+    AgentCloseSessionResponse,
+    AgentSessionSetupError,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
+from nemo_gym.server_runtime.base_resources_server import (
     RESOURCES_SESSIONS,
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -55,17 +63,9 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.base_responses_api_agent import (
-    AGENT_SESSION_COOKIE_KEY,
-    AgentCloseSessionResponse,
-    AgentSessionSetupError,
-    AgentSessionState,
-    BaseResponsesAPIAgentConfig,
-    SimpleResponsesAPIAgent,
-)
-from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
-from nemo_gym.session_routing import (
+from nemo_gym.server_runtime.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
+from nemo_gym.server_runtime.request_handling import session_routing
+from nemo_gym.server_runtime.request_handling.session_routing import (
     SESSION_CLAIMS_DIR,
     SESSION_OWNER_HEADER,
     ResourcesSessionLifetimes,
@@ -572,7 +572,7 @@ class TestClaimCreation:
         self, workers, socket_dir: str, monkeypatch
     ) -> None:
         a, b = workers
-        monkeypatch.setattr("nemo_gym.session_routing.uuid4", lambda: "taken-id")
+        monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.uuid4", lambda: "taken-id")
         assert a.app.state.nemo_gym_session_claims.claim("taken-id") == a.routing_id
 
         response = b.post("/store", json={"value": 5})
@@ -747,7 +747,7 @@ class TestClaimLifetime:
 
     def test_lifetimes_keep_one_heap_entry_per_session(self, monkeypatch) -> None:
         clock = [0.0]
-        monkeypatch.setattr("nemo_gym.session_routing.monotonic", lambda: clock[0])
+        monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
         lifetimes = ResourcesSessionLifetimes(10, starts=("/seed_session",), ends=("/close_session",))
 
         for step in range(1000):

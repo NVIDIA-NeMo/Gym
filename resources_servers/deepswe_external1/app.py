@@ -18,19 +18,19 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from pydantic import Field, model_validator
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    BaseVerifyRequest,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.failure_kinds import VERIFIER_ERROR
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseVerifyRequest,
+    ReverifyMode,
+    SimpleResourcesServer,
+)
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.app import (
     AgentSandboxSession,

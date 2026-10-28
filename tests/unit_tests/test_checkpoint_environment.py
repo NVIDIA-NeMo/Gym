@@ -6,16 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym._checkpoint.control import (
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointRequest,
     CommitRequest,
     ParticipantControlPlane,
     RestoreRequest,
     RetireRequest,
 )
-from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
-from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
 
 
 TASK = {"task_id": "t"}
@@ -246,7 +246,7 @@ async def test_a_restored_episode_not_yet_restarted_survives_the_next_checkpoint
 
 
 async def test_a_retire_during_final_cleanup_does_not_interrupt_it() -> None:
-    from nemo_gym.base_environment_server import CleanupContext
+    from nemo_gym.server_runtime.base_environment_server import CleanupContext
     from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
 
     cleanup_started, cleanup_finished = asyncio.Event(), asyncio.Event()
@@ -316,7 +316,7 @@ async def test_a_commit_that_no_longer_continues_a_restored_episode_retires_it(t
 
 
 async def test_a_retire_replies_only_after_the_episode_and_its_cleanup_have_ended() -> None:
-    from nemo_gym.base_environment_server import CleanupContext
+    from nemo_gym.server_runtime.base_environment_server import CleanupContext
     from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
 
     sessions_closed = asyncio.Event()
@@ -431,7 +431,7 @@ async def test_readiness_is_answered_by_the_blocker_count_without_listing_episod
 
 
 async def test_an_episode_marked_restart_never_holds_up_prepare_and_is_left_out_of_the_commit(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.errors import RestartInScopeError
+    from nemo_gym.server_runtime._checkpoint.errors import RestartInScopeError
 
     participant = EnvironmentParticipant(mode="exported")
     controller = controller_for(participant)
@@ -574,7 +574,7 @@ async def test_live_records_outside_the_commit_scope_are_not_exported() -> None:
 
 
 async def test_after_a_restore_a_late_start_of_the_replaced_attempt_is_refused(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     record = EpisodeRecord(episode_id=EpisodeId(rollout_id="r"), task_digest=task_digest(TASK), boundary={"step": 1})
     write_participant_state(

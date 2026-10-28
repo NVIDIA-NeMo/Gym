@@ -13,14 +13,14 @@ from typing import Literal
 
 from pydantic import PositiveFloat, PositiveInt
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core.failure_kinds import VERIFIER_ERROR
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.core.failure_kinds import VERIFIER_ERROR
 from resources_servers.frontiermath.grading import GradeResult
 
 

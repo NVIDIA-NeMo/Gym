@@ -22,8 +22,8 @@ from typing import Dict, Optional
 from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseFunctionToolCall
+from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig
 from resources_servers.gymnasium import GymnasiumServer
 
 

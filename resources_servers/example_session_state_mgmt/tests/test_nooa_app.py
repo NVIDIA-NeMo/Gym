@@ -38,7 +38,7 @@ def test_resource_session_preserves_retries_and_cleans_counter_state() -> None:
 
 def test_closed_sessions_are_remembered_for_the_close_retry_window(monkeypatch) -> None:
     clock = [0.0]
-    monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
     config = StatefulCounterResourcesServerConfig(
         host="0.0.0.0", port=8080, entrypoint="", name="counter", session_close_retry_window_seconds=60
     )

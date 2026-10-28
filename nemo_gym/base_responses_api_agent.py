@@ -39,30 +39,12 @@ from pydantic import (
     model_serializer,
 )
 
-from nemo_gym._checkpoint.agent import (
-    ActivationOutOfOrderError,
-    AgentSessionParticipant,
-    RestartOnlyAgentParticipant,
-    RestartOnlyTrackingMiddleware,
-    RestoredAgentSession,
-)
-from nemo_gym._checkpoint.control import CheckpointMode
-from nemo_gym._checkpoint.errors import StaleAttemptError
-from nemo_gym._checkpoint.participant_workers import install_server_participant
-from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER
 from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.config.global_config import (
@@ -77,11 +59,29 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.sandbox.access import SandboxAccess
+from nemo_gym.server_runtime._checkpoint.agent import (
+    ActivationOutOfOrderError,
+    AgentSessionParticipant,
+    RestartOnlyAgentParticipant,
+    RestartOnlyTrackingMiddleware,
+    RestoredAgentSession,
+)
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
+from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_RESTART_HEADER
+from nemo_gym.server_runtime.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims, SessionKind
+from nemo_gym.server_runtime.tool_access import ToolAccess
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
-from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.tool_access import ToolAccess
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
 
 
@@ -91,7 +91,7 @@ LOG = logging.getLogger(__name__)
 # Session cookie key that binds later activation and close requests to their agent session.
 AGENT_SESSION_COOKIE_KEY = "agent_session_id"
 # An agent session is named by agent_session_id, in its seed and close bodies and in the cookie after its seed
-# (see nemo_gym.session_routing).
+# (see nemo_gym.server_runtime.request_handling.session_routing).
 AGENT_SESSIONS = SessionKind(
     cookie_key=AGENT_SESSION_COOKIE_KEY,
     id_field="agent_session_id",
@@ -410,7 +410,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # Seeds whose setup failed, kept for the caller's close until session_close_retry_window_seconds passes.
     _failed_seed_records: OrderedDict[str, _AgentSessionRecord] = PrivateAttr(default_factory=OrderedDict)
     _failed_seed_releases: set[asyncio.Task] = PrivateAttr(default_factory=set)
-    # With several workers, which worker claimed each agent_session_id (see nemo_gym.session_routing).
+    # With several workers, which worker claimed each agent_session_id (see nemo_gym.server_runtime.request_handling.session_routing).
     _agent_session_claims: Optional[SessionClaims] = PrivateAttr(default=None)
 
     def claimed_session_routing(self) -> dict[str, Any]:
@@ -421,7 +421,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return agent_session_id in self._session_records
 
     def use_agent_session_claims(self, claims: SessionClaims) -> None:
-        """Release a session's claim when this worker drops its last record (see nemo_gym.session_routing)."""
+        """Release a session's claim when this worker drops its last record (see nemo_gym.server_runtime.request_handling.session_routing)."""
         self._agent_session_claims = claims
 
     def _release_agent_session_claim(self, agent_session_id: str) -> None:

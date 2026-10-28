@@ -40,9 +40,10 @@ from typing import Any, Optional
 import pytest
 from fastapi import FastAPI
 
-import nemo_gym._checkpoint.control as control
-import nemo_gym._checkpoint.store as store
-from nemo_gym._checkpoint.control import (
+import nemo_gym.server_runtime._checkpoint.control as control
+import nemo_gym.server_runtime._checkpoint.store as store
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointPhase,
     CheckpointRecord,
     CheckpointRequest,
@@ -52,12 +53,11 @@ from nemo_gym._checkpoint.control import (
     RestoreRequest,
     RetireRequest,
 )
-from nemo_gym._checkpoint.environment import EnvironmentParticipant
-from nemo_gym._checkpoint.errors import CheckpointStateError, ControlError, StaleAttemptError
-from nemo_gym._checkpoint.participant_workers import CoordinatedServerParticipant, ParticipantWorkerLink
-from nemo_gym._checkpoint.store import participant_dir, read_participant_state
-from nemo_gym._checkpoint.workers import WorkerCoordinator
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+from nemo_gym.server_runtime._checkpoint.errors import CheckpointStateError, ControlError, StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.participant_workers import CoordinatedServerParticipant, ParticipantWorkerLink
+from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_participant_state
+from nemo_gym.server_runtime._checkpoint.workers import WorkerCoordinator
 
 
 SEEDS = int(os.environ.get("NEMO_GYM_CHECKPOINT_SEQUENCE_SEEDS", "150"))
@@ -625,7 +625,7 @@ def socket_dir() -> Any:
 async def test_random_sequences_keep_checkpoints_safe_with_workers(
     seed: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, socket_dir: str
 ) -> None:
-    logger = logging.getLogger("nemo_gym._checkpoint.workers")
+    logger = logging.getLogger("nemo_gym.server_runtime._checkpoint.workers")
     hide = _HideInjectedCloseFailures()
     logger.addFilter(hide)
     deployment = await Workers.start(socket_dir, random.Random(seed).randint(2, 3))

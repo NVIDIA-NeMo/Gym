@@ -32,19 +32,19 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.core.responses_api_types import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
-)
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.verification.judge import call_judge
 from nemo_gym.verification.verifier_fixture import VerifierFixture

@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym._checkpoint import coordination
-from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
+from nemo_gym.server_runtime._checkpoint import coordination
+from nemo_gym.server_runtime._checkpoint.store import participant_dir, read_participant_state, write_participant_state
 from nemo_gym.telemetry import gym_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -254,7 +254,7 @@ async def test_a_resume_that_fails_on_a_participant_records_an_error_and_ends_it
 async def test_a_lease_expiry_is_counted_once_and_each_reopen_attempt_with_its_outcome(
     tmp_path: Path, monkeypatch, metrics
 ) -> None:
-    import nemo_gym._checkpoint.control as control_module
+    import nemo_gym.server_runtime._checkpoint.control as control_module
     from nemo_gym.core.episode import EpisodeId
     from tests.unit_tests.test_checkpoint_control import _past_deadline, _until
 
@@ -415,7 +415,7 @@ async def test_commit_and_restore_measure_their_records_without_a_stat_on_the_ev
 
 
 async def test_a_prepare_span_counts_every_blocker_not_only_the_listed_ones(spans) -> None:
-    from nemo_gym._checkpoint.control import MAX_REPORTED_BLOCKERS
+    from nemo_gym.server_runtime._checkpoint.control import MAX_REPORTED_BLOCKERS
 
     participant = FakeParticipant()
     for index in range(MAX_REPORTED_BLOCKERS + 50):
@@ -454,7 +454,7 @@ async def test_each_failed_control_call_counts_its_error_code_once(tmp_path: Pat
 
 
 def test_building_an_error_reply_records_nothing(metrics) -> None:
-    from nemo_gym._checkpoint.errors import InvalidPhaseError
+    from nemo_gym.server_runtime._checkpoint.errors import InvalidPhaseError
 
     error = InvalidPhaseError("not valid in phase idle")
     first, second = error.response(), error.response()

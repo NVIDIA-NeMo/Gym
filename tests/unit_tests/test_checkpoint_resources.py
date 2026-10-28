@@ -13,9 +13,11 @@ from fastapi import FastAPI, HTTPException, Request
 from omegaconf import DictConfig
 from pydantic import JsonValue
 
-from nemo_gym._checkpoint.control import CheckpointRequest
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
-from nemo_gym.base_resources_server import (
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -25,8 +27,6 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core.episode import EpisodeId
 
 
 AUTH = {"authorization": "Bearer t"}
@@ -1002,7 +1002,7 @@ async def test_forget_is_refused_while_a_retire_has_not_freed_its_sessions() -> 
 
 
 async def test_a_request_cancelled_while_notifying_is_no_longer_counted() -> None:
-    from nemo_gym._checkpoint.resources import ResourcesCheckpointMiddleware
+    from nemo_gym.server_runtime._checkpoint.resources import ResourcesCheckpointMiddleware
 
     server, _ = make_server()
     participant = server._checkpoint
@@ -1074,7 +1074,7 @@ async def test_deleting_an_unclaimed_restored_session_refuses_nothing_later(tmp_
 
 
 def test_resources_admission_refusals_are_the_shared_admission_closed_error() -> None:
-    from nemo_gym._checkpoint.errors import AdmissionClosedError
+    from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError
 
     server, _ = make_server()
     server._checkpoint.accepting = False
@@ -1085,8 +1085,8 @@ def test_resources_admission_refusals_are_the_shared_admission_closed_error() ->
 def test_mcp_session_tokens_are_decoded_with_one_serializer_per_server(monkeypatch: pytest.MonkeyPatch) -> None:
     import itsdangerous
 
-    from nemo_gym._checkpoint.resources import MCPTokenClaims
-    from nemo_gym.base_resources_server import mcp_session_token_serializer
+    from nemo_gym.server_runtime._checkpoint.resources import MCPTokenClaims
+    from nemo_gym.server_runtime.base_resources_server import mcp_session_token_serializer
 
     server, _ = make_server()
     signer = mcp_session_token_serializer(server.get_session_middleware_key())
@@ -1413,8 +1413,8 @@ async def test_a_restart_only_seed_waits_again_when_a_new_checkpoint_closes_befo
 
 @pytest.mark.parametrize("path", ["/ng-rollout/r/seed_session", "/close_session", "/verify"])
 async def test_a_session_change_survives_a_disconnect_once_the_reply_has_started(path: str) -> None:
-    from nemo_gym._checkpoint.resources import ResourcesCheckpointMiddleware
     from nemo_gym.core.episode import rollout_context
+    from nemo_gym.server_runtime._checkpoint.resources import ResourcesCheckpointMiddleware
 
     server, _ = make_server()
     participant = server._checkpoint

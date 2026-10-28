@@ -17,10 +17,10 @@ from app import (
     strip_inline_reasoning,
 )
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.verification.judge import JudgeError
 from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
 

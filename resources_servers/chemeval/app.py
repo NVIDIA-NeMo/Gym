@@ -12,15 +12,15 @@ from typing import Any, ClassVar
 
 from pydantic import Field, JsonValue, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.verification.judge import JudgeError, call_judge
 from nemo_gym.verification.verifier_fixture import VerifierFixture
 from resources_servers.chemeval.english_judge import build_judge_messages, parse_judge_verdict

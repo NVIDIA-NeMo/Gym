@@ -59,7 +59,8 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym._checkpoint.errors import (
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.errors import (
     CheckpointConflictError,
     CheckpointStateError,
     ControlError,
@@ -72,10 +73,9 @@ from nemo_gym._checkpoint.errors import (
     StaleCheckpointError,
     UnauthorizedError,
 )
-from nemo_gym._checkpoint.store import WriteStop, read_participant_state, write_participant_state
-from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
-from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.store import WriteStop, read_participant_state, write_participant_state
+from nemo_gym.server_runtime._checkpoint.telemetry import OperationSpan, checkpoint_span
+from nemo_gym.server_runtime._checkpoint.telemetry import operation as checkpoint_operation
 from nemo_gym.telemetry.gym_metrics import (
     record_checkpoint_control_error,
     record_checkpoint_event,

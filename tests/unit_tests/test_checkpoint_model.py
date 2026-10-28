@@ -14,17 +14,10 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from nemo_gym._checkpoint.control import (
-    CheckpointRequest,
-    CommitRequest,
-    ParticipantControlPlane,
-    RestoreRequest,
-    RetireRequest,
-    install_participant,
-)
-from nemo_gym._checkpoint.errors import ControlError
-from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
-from nemo_gym._checkpoint.model import (
+from nemo_gym.base_responses_api_model import _CaptureMiddleware
+from nemo_gym.chat_streaming import SSE_KEEPALIVE
+from nemo_gym.core.episode import EpisodeId, current_rollout_id
+from nemo_gym.models._checkpoint import (
     ModelRecord,
     PolicyAdmissionMiddleware,
     PolicyGate,
@@ -34,11 +27,22 @@ from nemo_gym._checkpoint.model import (
     ledger_removal_refusal,
     note_generation_backend,
 )
-from nemo_gym.base_responses_api_model import _CaptureMiddleware
-from nemo_gym.chat_streaming import SSE_KEEPALIVE
-from nemo_gym.core.episode import EpisodeId, current_rollout_id
 from nemo_gym.responses_streaming import synthesize_responses_keepalive_sse
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.server_runtime._checkpoint.control import (
+    CheckpointRequest,
+    CommitRequest,
+    ParticipantControlPlane,
+    RestoreRequest,
+    RetireRequest,
+    install_participant,
+)
+from nemo_gym.server_runtime._checkpoint.errors import ControlError
+from nemo_gym.server_runtime._checkpoint.generation_cut import (
+    GenerationCutInventory,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
+from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.lineage import FileLineageStore
@@ -652,7 +656,7 @@ async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
         prefix_digest="d" * 64,
         effective_output_limit=10,
     )
-    from nemo_gym._checkpoint.model import GenerationCutRecord
+    from nemo_gym.models._checkpoint import GenerationCutRecord
     from nemo_gym.token_id_capture.fingerprint import conversation_digest
 
     first._restored_cuts["r"] = GenerationCutRecord(
@@ -678,7 +682,7 @@ async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
 
 
 async def test_a_restored_cut_not_yet_reused_survives_the_next_checkpoint(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.model import GenerationCutRecord
+    from nemo_gym.models._checkpoint import GenerationCutRecord
 
     continuation = GenerationCutContinuation(
         source_capture_key="r",
@@ -702,7 +706,7 @@ async def test_a_restored_cut_not_yet_reused_survives_the_next_checkpoint(tmp_pa
 
 
 async def test_a_newer_cut_replaces_the_restored_cut_a_resumed_call_keeps_for_its_retry(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.model import GenerationCutRecord
+    from nemo_gym.models._checkpoint import GenerationCutRecord
     from nemo_gym.token_id_capture.fingerprint import conversation_digest
 
     request_items = [USER_1, ASSISTANT_1, USER_2]
@@ -758,7 +762,7 @@ async def test_a_newer_cut_replaces_the_restored_cut_a_resumed_call_keeps_for_it
     ],
 )
 def test_constrained_decoding_must_regenerate_instead_of_continuing_a_cut(body: dict, reason: str | None) -> None:
-    from nemo_gym._checkpoint.model import generation_cut_regenerate_reason
+    from nemo_gym.models._checkpoint import generation_cut_regenerate_reason
 
     assert generation_cut_regenerate_reason(body) == reason
 
@@ -952,7 +956,7 @@ async def test_a_ledger_import_deletes_dead_executions_and_fences_of_the_target_
 async def test_readiness_stays_cheap_while_many_cut_calls_are_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym._checkpoint.model as model
+    import nemo_gym.models._checkpoint as model
 
     request_cut, _ = _cutting_worker()
     participant = PolicyModelParticipant(FileLineageStore(tmp_path / "ledger"), cut_requester=request_cut)
@@ -1092,8 +1096,8 @@ def test_a_chain_of_restores_keeps_each_row_staged_under_its_own_attempt() -> No
 
 def _restored_cut_checkpoint(directory: Path) -> None:
     """A checkpoint of rollout r with one delivered call and an undelivered call that was cut."""
-    from nemo_gym._checkpoint.model import GenerationCutRecord, ModelRecord
-    from nemo_gym._checkpoint.store import write_participant_state
+    from nemo_gym.models._checkpoint import GenerationCutRecord, ModelRecord
+    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     continuation = GenerationCutContinuation(
         source_capture_key="r",
@@ -1219,7 +1223,7 @@ async def test_a_hung_cut_leaves_the_rest_of_the_prepare_deadline_for_the_stages
 
 
 async def test_after_a_restore_a_late_call_of_the_replaced_attempt_is_refused(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     # This model server holds no record of the rollout; the restore continues it all the same.
     write_participant_state(tmp_path, kind="model", instance="policy", checkpoint_id="c0", records=[])
@@ -1243,7 +1247,7 @@ async def _restored_servers_sharing_one_ledger(
 ) -> tuple[FileLineageStore, list[tuple[PolicyModelParticipant, ParticipantControlPlane]]]:
     """Two policy servers capturing into one ledger, as policy_model and policy_model_reasoning_off do,
     restored from a checkpoint that continues rollout r from its call c1."""
-    from nemo_gym._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     record = ModelRecord(episode_id=EpisodeId(rollout_id="r"), rows=[{"model_call_id": "c1"}])
     servers = []
@@ -1826,7 +1830,7 @@ def test_a_model_server_outside_the_checkpoint_gate_that_writes_the_policy_ledge
 
 
 async def test_a_restore_after_a_crash_removes_the_started_markers_the_dead_execution_left(tmp_path: Path) -> None:
-    from nemo_gym._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     # Restoring the checkpoint again, and restoring a later one that continues the restored attempt.
     for checkpoint_id, episode in (("c0", {"rollout_id": "r"}), ("c1", {"rollout_id": "r", "attempt": 1})):

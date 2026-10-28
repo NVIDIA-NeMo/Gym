@@ -18,7 +18,13 @@ from typing import ClassVar
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, JsonValue, PrivateAttr, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client.server_client import SESSION_ID_KEY
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.failure_kinds import SESSION_LOST
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_runtime.base_resources_server import (
     ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
@@ -26,12 +32,6 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionResponse,
     ReverifyMode,
 )
-from nemo_gym.client.server_client import SESSION_ID_KEY
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.core.failure_kinds import SESSION_LOST
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification.verifier_fixture import VerifierFixture
 from resources_servers.partner_if.app import (

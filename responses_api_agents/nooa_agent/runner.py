@@ -32,7 +32,7 @@ from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
 
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess
 from nemo_gym.trajectory.trajectory_record import AgentEpisode, TrajectoryRecord
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import (

@@ -47,10 +47,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -69,6 +65,10 @@ from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseRunRequest,
+    BaseVerifyResponse,
 )
 from nemo_gym.server_utils import get_first_server_config_dict
 from nemo_gym.telemetry.profiling import Profiler

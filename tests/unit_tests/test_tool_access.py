@@ -4,7 +4,7 @@
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.tool_access import (
+from nemo_gym.server_runtime.tool_access import (
     DirectHTTPToolAccess,
     MCPStreamableHTTPConnection,
     MCPToolAccess,

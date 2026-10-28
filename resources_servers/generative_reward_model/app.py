@@ -14,7 +14,7 @@
 # limitations under the License.
 from typing import Dict, List, Optional, Union
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

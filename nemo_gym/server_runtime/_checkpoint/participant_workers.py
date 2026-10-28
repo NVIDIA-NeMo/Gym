@@ -3,7 +3,7 @@
 """Environment, agent, and resources servers with several uvicorn workers.
 
 Each worker runs the same participant a single-process server runs, for the episodes and sessions it
-holds, linked to one coordinator in the main process (see ``nemo_gym._checkpoint.workers``). The
+holds, linked to one coordinator in the main process (see ``nemo_gym.server_runtime._checkpoint.workers``). The
 coordinator is the server's participant:
 
 - **prepare** closes every worker and is ready once every worker reports ready.
@@ -15,7 +15,7 @@ coordinator is the server's participant:
 
   - State that spans requests (resources sessions, agent sessions) is installed on a live worker,
     spread evenly one session at a time.
-    That worker rewrites the session's routing claim to name itself (see ``nemo_gym.session_routing``),
+    That worker rewrites the session's routing claim to name itself (see ``nemo_gym.server_runtime.request_handling.session_routing``),
     and every other worker drops any claim it held on the session.
     Cookies and MCP tokens name only the session ID, so one from before the crash,
     or from a single-process server, reaches the worker that holds the session now.
@@ -65,7 +65,8 @@ from uuid import uuid4
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from nemo_gym._checkpoint.control import (
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.control import (
     PARSED_JSON_CONTEXT,
     CheckpointParticipant,
     CheckpointRecord,
@@ -75,8 +76,8 @@ from nemo_gym._checkpoint.control import (
     install_participant,
     next_attempt,
 )
-from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, InvalidPhaseError
-from nemo_gym._checkpoint.workers import (
+from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, InvalidPhaseError
+from nemo_gym.server_runtime._checkpoint.workers import (
     EXPORT_CHUNK_BYTES,
     MESSAGE_TIMEOUT_SECONDS,
     CoordinatedParticipant,
@@ -88,8 +89,11 @@ from nemo_gym._checkpoint.workers import (
     coordinator_socket_path,
     encode_records,
 )
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.session_routing import ROUTED_LIFESPANS_STATE, ResourcesSessionLifetimes, SessionClaims
+from nemo_gym.server_runtime.request_handling.session_routing import (
+    ROUTED_LIFESPANS_STATE,
+    ResourcesSessionLifetimes,
+    SessionClaims,
+)
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
@@ -637,7 +641,7 @@ def _merge_status(first: Any, second: Any) -> Any:
 class ParticipantWorkerLink(WorkerLink):
     """One worker's participant, driven by the server's coordinator.
 
-    ``app`` is the worker's app, whose session claims a restore rewrites (see ``nemo_gym.session_routing``).
+    ``app`` is the worker's app, whose session claims a restore rewrites (see ``nemo_gym.server_runtime.request_handling.session_routing``).
     """
 
     def __init__(

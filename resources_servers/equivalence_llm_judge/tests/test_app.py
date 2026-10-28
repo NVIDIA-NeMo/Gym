@@ -21,7 +21,6 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core.responses_api_types import (
@@ -31,6 +30,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.verification.judge import judge_failsafe
 from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
 from resources_servers.equivalence_llm_judge.app import (

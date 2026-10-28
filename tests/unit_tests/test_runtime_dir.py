@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym import runtime_dir
+from nemo_gym.server_runtime import runtime_dir
 
 
 @pytest.fixture

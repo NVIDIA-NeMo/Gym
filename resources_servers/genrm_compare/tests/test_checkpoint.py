@@ -12,12 +12,12 @@ import pytest
 from omegaconf import DictConfig
 
 import resources_servers.genrm_compare.app as genrm
-from nemo_gym._checkpoint.control import CheckpointRequest, next_attempt
-from nemo_gym._checkpoint.resources import ResourcesParticipant
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import EpisodeId
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest, next_attempt
+from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.verification.judge import JudgeError
 from resources_servers.genrm_compare.tests.support import request_with_session
 

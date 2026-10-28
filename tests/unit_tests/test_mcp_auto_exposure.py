@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for nemo_gym.mcp_auto_exposure — MCP auto-exposure of resources-server tool routes.
+"""Unit tests for nemo_gym.server_runtime.mcp_auto_exposure — MCP auto-exposure of resources-server tool routes.
 
 Self-contained: synthetic SimpleResourcesServer subclasses with a handful of routes exercise the
 engine through the real /mcp endpoint via TestClient. No external server dependencies.
@@ -44,7 +44,8 @@ from starlette.routing import Mount
 
 pytest.importorskip("mcp")
 
-from nemo_gym.base_resources_server import (  # noqa: E402
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -53,8 +54,7 @@ from nemo_gym.base_resources_server import (  # noqa: E402
     mcp_session_token_serializer,
     normalize_tool_name,
 )
-from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.mcp_auto_exposure import (  # noqa: E402
+from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
     bind_route,
     install_auto_exposure,
@@ -252,7 +252,7 @@ def test_server_utils_imports_mcp_auto_exposure_lazily():
     code = (
         "import sys\n"
         "import nemo_gym.server_utils\n"
-        "assert 'nemo_gym.mcp_auto_exposure' not in sys.modules, 'mcp_auto_exposure imported eagerly'\n"
+        "assert 'nemo_gym.server_runtime.mcp_auto_exposure' not in sys.modules, 'mcp_auto_exposure imported eagerly'\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
 
@@ -277,7 +277,7 @@ def test_run_webserver_guards_maybe_auto_expose_behind_flag():
             fn_name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
             if fn_name == "maybe_auto_expose":
                 call_guards.append(list(guards))
-        if isinstance(node, ast.ImportFrom) and node.module == "nemo_gym.mcp_auto_exposure":
+        if isinstance(node, ast.ImportFrom) and node.module == "nemo_gym.server_runtime.mcp_auto_exposure":
             import_guards.append(list(guards))
         for child in ast.iter_child_nodes(node):
             child_guards = guards

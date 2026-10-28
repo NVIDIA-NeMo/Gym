@@ -61,7 +61,9 @@ from typing import Any, NamedTuple, Optional, Protocol
 
 from pydantic import JsonValue
 
-from nemo_gym._checkpoint.control import (
+from nemo_gym.client.server_client import SESSION_ID_KEY
+from nemo_gym.core.episode import EpisodeId, current_episode_id
+from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointMode,
     CheckpointParticipant,
     CheckpointRecord,
@@ -70,21 +72,19 @@ from nemo_gym._checkpoint.control import (
     PrepareReport,
     next_attempt,
 )
-from nemo_gym._checkpoint.errors import (
+from nemo_gym.server_runtime._checkpoint.errors import (
     AdmissionClosedError,
     ControlError,
     RetireIncompleteError,
     RolloutIdRequiredError,
     StaleAttemptError,
 )
-from nemo_gym._checkpoint.steps import (
+from nemo_gym.server_runtime._checkpoint.steps import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     CHECKPOINT_RESTART_HEADER,
     CHECKPOINT_VERIFY_HEADER,
     StepType,
 )
-from nemo_gym.client.server_client import SESSION_ID_KEY
-from nemo_gym.core.episode import EpisodeId, current_episode_id
 
 
 LOGGER = logging.getLogger(__name__)

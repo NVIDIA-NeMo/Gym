@@ -15,7 +15,7 @@ Each worker runs a ``PolicyGate`` for its own calls and:
 - claims a restored cut from the coordinator before running a re-issued call that may continue one.
 
 The worker coordination itself (the socket, closing and reopening, readiness, retire,
-and losing a worker) is ``nemo_gym._checkpoint.workers``.
+and losing a worker) is ``nemo_gym.server_runtime._checkpoint.workers``.
 """
 
 import asyncio
@@ -25,9 +25,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from nemo_gym._checkpoint.control import CheckpointRecord, CheckpointRequest, PrepareReport
-from nemo_gym._checkpoint.errors import ControlError
-from nemo_gym._checkpoint.model import (
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.models._checkpoint import (
     CheckpointableLedger,
     CutRequester,
     GateReport,
@@ -46,14 +45,15 @@ from nemo_gym._checkpoint.model import (
     staging_keys_by_episode,
     with_scope,
 )
-from nemo_gym._checkpoint.workers import (
+from nemo_gym.server_runtime._checkpoint.control import CheckpointRecord, CheckpointRequest, PrepareReport
+from nemo_gym.server_runtime._checkpoint.errors import ControlError
+from nemo_gym.server_runtime._checkpoint.workers import (
     MESSAGE_TIMEOUT_SECONDS,
     CoordinatedParticipant,
     WorkerCoordinator,
     WorkerLink,
 )
-from nemo_gym._checkpoint.workers import coordinator_socket_path as _socket_path
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.workers import coordinator_socket_path as _socket_path
 
 
 LOGGER = logging.getLogger(__name__)

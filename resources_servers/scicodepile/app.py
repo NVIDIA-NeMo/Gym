@@ -15,16 +15,16 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from code_extraction import preprocess_code_completion
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics.reward_profile import (
+    compute_pass_majority_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
-)
-from nemo_gym.metrics.reward_profile import (
-    compute_pass_majority_metrics,
-    highest_k_metrics,
 )
 
 

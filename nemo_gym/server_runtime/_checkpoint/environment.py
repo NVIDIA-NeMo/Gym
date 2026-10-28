@@ -4,7 +4,7 @@
 
 An environment server owns the protocol of its episodes: which step runs next and what it needs.
 The protocol records a boundary after each completed step,
-and runs each step as a ``wait`` or ``replay`` step (see ``nemo_gym._checkpoint.steps``).
+and runs each step as a ``wait`` or ``replay`` step (see ``nemo_gym.server_runtime._checkpoint.steps``).
 Prepare closes episode admission and is ready once every live episode is parked at a boundary or inside a replay step.
 A restored boundary is handed to the replacement attempt's ``/run``, which continues from it instead of starting over.
 Replacements are refused until the controller resumes after the restore:
@@ -18,7 +18,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from nemo_gym._checkpoint.control import (
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.control import (
     MAX_REPORTED_BLOCKERS,
     PARSED_JSON_CONTEXT,
     CheckpointMode,
@@ -29,9 +30,8 @@ from nemo_gym._checkpoint.control import (
     PrepareReport,
     next_attempt,
 )
-from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError
-from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepType
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError
+from nemo_gym.server_runtime._checkpoint.steps import Boundary, EpisodeSteps, StepType
 
 
 class EpisodeRecord(CheckpointRecord):

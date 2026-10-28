@@ -23,7 +23,7 @@ from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.episode import EpisodeId
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient

@@ -39,7 +39,8 @@ from typing import Any, Literal, Optional, Protocol
 
 from pydantic import JsonValue
 
-from nemo_gym._checkpoint.control import (
+from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.server_runtime._checkpoint.control import (
     PARSED_JSON_CONTEXT,
     CheckpointParticipant,
     CheckpointRecord,
@@ -48,10 +49,14 @@ from nemo_gym._checkpoint.control import (
     PrepareReport,
     next_attempt,
 )
-from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, RolloutIdRequiredError, StaleAttemptError
-from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepType
-from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.server_runtime._checkpoint.errors import (
+    AdmissionClosedError,
+    ControlError,
+    RolloutIdRequiredError,
+    StaleAttemptError,
+)
+from nemo_gym.server_runtime._checkpoint.steps import Boundary, EpisodeSteps, StepType
+from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
 
 BoundarySnapshot = Callable[[], dict[str, JsonValue]]
