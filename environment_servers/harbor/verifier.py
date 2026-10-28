@@ -924,6 +924,15 @@ class HarborVerificationMixin:
             "verifier_seconds": round(asyncio.get_running_loop().time() - started, 1),
             "verifier_network": settings.network_mode or "public",
         }
+        LOGGER.debug(
+            "%s: test.sh exited %s after %ss%s; rewards %s; logs in %s",
+            task.task_id,
+            result.return_code,
+            extras["verifier_seconds"],
+            " (timed out)" if timed_out else "",
+            rewards,
+            extras["verifier_logs_dir"],
+        )
         if rewards is None and timed_out:
             # A reward written before the kill still counts; only a run that left none is the timeout.
             return (
