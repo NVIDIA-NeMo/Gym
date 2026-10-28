@@ -100,16 +100,20 @@ def transcript_usage(lines: Iterable[str]) -> dict[str, UsageCounts]:
 def transcript_usage_from_dir(config_dir: Path) -> Optional[dict[str, UsageCounts]]:
     """``transcript_usage`` over the session and subagent transcripts below ``config_dir/projects``.
 
-    None when there are none to read.
+    None when none could be read, so the caller falls back to the stream's usage; a transcript that was read is
+    authoritative even when it holds no finished call.
     """
-    paths = sorted((config_dir / "projects").rglob("*.jsonl"))
     usage: dict[str, UsageCounts] = {}
-    for path in paths:
+    readable = False
+    for path in sorted((config_dir / "projects").rglob("*.jsonl")):
         try:
-            usage.update(transcript_usage(path.read_text(errors="replace").splitlines()))
+            text = path.read_text(errors="replace")
         except OSError:
             LOG.warning("Could not read Claude Code transcript %s for token usage", path, exc_info=True)
-    return usage if paths else None
+            continue
+        usage.update(transcript_usage(text.splitlines()))
+        readable = True
+    return usage if readable else None
 
 
 def transcript_usage_from_tar(archive_bytes: bytes) -> Optional[dict[str, UsageCounts]]:

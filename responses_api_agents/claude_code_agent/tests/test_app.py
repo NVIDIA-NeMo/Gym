@@ -1186,6 +1186,34 @@ class TestCapturedUsage:
     def test_missing_or_unreadable_transcripts_are_none(self, tmp_path: Path) -> None:
         assert transcript_usage_from_dir(tmp_path) is None
         assert transcript_usage_from_tar(b"not a tar") is None
+        (tmp_path / "projects" / "session.jsonl").mkdir(parents=True)  # read_text raises IsADirectoryError
+        assert transcript_usage_from_dir(tmp_path) is None
+
+    def test_unreadable_transcripts_fall_back_to_the_streamed_input(self, tmp_path: Path) -> None:
+        capture = USAGE_CAPTURES["killed-mid"]
+        _, without = parse_stream_json(_capture_stream(capture), transcript=lambda: None)
+        (tmp_path / "projects" / "session.jsonl").mkdir(parents=True)
+        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
+        assert _counts(usage) == _counts(without) != (0, 0, 0)
+
+    def test_a_read_transcript_with_no_finished_call_counts_nothing(self, tmp_path: Path) -> None:
+        capture = USAGE_CAPTURES["killed-sub"]
+        unfinished = {
+            name: [entry for entry in entries if not (entry.get("message") or {}).get("stop_reason")]
+            for name, entries in capture["transcripts"].items()
+        }
+        assert any(entry.get("type") == "assistant" for entries in unfinished.values() for entry in entries)
+        _write_transcripts({"transcripts": unfinished}, tmp_path)
+        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
+        assert _counts(usage) == (0, 0, 0)
+
+    @pytest.mark.parametrize("name", KILLED)
+    def test_an_unreadable_transcript_beside_readable_ones_is_skipped(self, tmp_path: Path, name: str) -> None:
+        capture = USAGE_CAPTURES[name]
+        _write_transcripts(capture, tmp_path)
+        (tmp_path / "projects" / "unreadable.jsonl").mkdir()
+        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
+        assert _counts(usage) == _server_count(capture)
 
     def test_endpoint_without_cache_fields(self, tmp_path: Path) -> None:
         # No proxy recorded this session; the server's per-call usage is the stream's (one value per message).
