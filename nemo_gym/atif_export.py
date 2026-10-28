@@ -45,7 +45,7 @@ from nemo_gym.atif_v1_7 import (
     AtifToolCall,
     AtifTrajectoryV1_7,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.config_types import ConfigError, RunExportConfig
 from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, rollout_agent_label
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -63,11 +63,10 @@ class AtifExportError(ConfigError):
     """A rollout cannot be represented by Gym's supported ATIF profile."""
 
 
-class ExportAtifConfig(BaseNeMoGymCLIConfig):
-    """Configuration for ``gym eval export --format atif``."""
+class ExportAtifConfig(RunExportConfig):
+    """Settings of ``gym eval export atif``."""
 
     format: Literal["atif"] = "atif"
-    rollouts_jsonl_fpath: Path
     output_dirpath: Path
     session_id: str = Field(min_length=1)
     agent_version: str = Field(min_length=1)

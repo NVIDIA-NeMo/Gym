@@ -377,7 +377,7 @@ def test_merge_capture_reports_observation_join_failure(tmp_path, monkeypatch):
     def fail_association(*_args, **_kwargs):
         raise RuntimeError("association failed")
 
-    monkeypatch.setattr("nemo_gym.observability.model_calls.join_model_call_observations", fail_association)
+    monkeypatch.setattr("nemo_gym.observability.model_calls.join_agent_model_calls", fail_association)
     merge_model_call_capture_into_record(record, [tmp_path])
 
     assert [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]] == ["agent_observation_join_failed"]
