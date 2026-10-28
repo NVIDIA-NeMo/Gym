@@ -60,6 +60,7 @@ from nemo_gym.failure_kinds import AGENT_RUN_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow, report_for_current_request
 from nemo_gym.health.timeouts import TimeoutEvent
 from nemo_gym.openai_utils import (
+    MODEL_RESPONSE_TIMEOUT_REASON,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -195,25 +196,28 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
 
 # The operation of the agent failure that marks a policy request timeout; /run turns only this one into a final row.
 POLICY_TIMEOUT_OPERATION = "agent.policy_request"
-_TIMEOUT_TYPE_NAMES = frozenset({"TimeoutError", "ServerTimeoutError", "ConnectionTimeoutError", "SocketTimeoutError"})
 
 
 def _policy_request_timed_out(error: ClientResponseError) -> bool:
-    """Whether the policy model server's failed reply reports that every attempt of the request timed out.
+    """Whether the policy model server's failed reply shows that its final model call timed out on every attempt.
 
-    The model server forwards each failed attempt as a model-boundary event in its reply's failure report. A reply
-    with no such event, or with any attempt that failed another way, is not a known request timeout.
+    The reply's ``failure_id`` names the model attempt the failure ended on. Only that call's attempts count, so an
+    earlier call or a recovered attempt is not taken for the final failure, and each must have timed out waiting for
+    the model's response rather than while connecting. A reply that names no model attempt, or whose report was
+    omitted, is not a known request timeout.
     """
     report = FailureHeader.decode(error.headers)
-    attempts = [
-        event
-        for event in (report.events.values() if report is not None else ())
-        if event.boundary == FailureBoundary.MODEL and event.operation == "model_request"
-    ]
-    return bool(attempts) and all(
-        event.foreign_error is not None
-        and event.foreign_error.exception_type.rsplit(".", 1)[-1] in _TIMEOUT_TYPE_NAMES
-        for event in attempts
+    if report is None or report.omitted or report.failure_id is None:
+        return False
+    final = report.events.get(report.failure_id)
+    if final is None or final.boundary != FailureBoundary.MODEL or final.operation != "model_request":
+        return False
+    return all(
+        event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+        for event in report.events.values()
+        if event.boundary == FailureBoundary.MODEL
+        and event.operation == "model_request"
+        and event.operation_id == final.operation_id
     )
 
 

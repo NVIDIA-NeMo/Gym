@@ -60,6 +60,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.openai_utils import (
+    MODEL_RESPONSE_TIMEOUT_REASON,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -3159,16 +3160,45 @@ async def test_a_skip_verification_run_parks_at_its_return_boundary_until_resume
     assert result.reward == 0.25 and result.response.output == first.response.output
 
 
-def _model_attempt(exception_type: str | None, *, http_status: int | None = None) -> FailureEvent:
-    """One failed attempt as the policy model server's client reports it."""
+_ATTEMPTS = {
+    # (failure_reason, exception type, HTTP status) as the policy model server's client records each outcome.
+    "response_timeout": (MODEL_RESPONSE_TIMEOUT_REASON, "TimeoutError", None),
+    "connect_timeout": ("Model request transport failed", "TimeoutError", None),
+    "connection_timeout_error": (
+        "Model request transport failed",
+        "aiohttp.client_exceptions.ConnectionTimeoutError",
+        None,
+    ),
+    "refused": ("Model request transport failed", "aiohttp.client_exceptions.ClientConnectorError", None),
+    "http_500": ("HTTP 500 from the model server", None, 500),
+}
+
+
+def _model_attempt(outcome: str, *, operation_id: str = "final-call") -> FailureEvent:
+    """One failed attempt of the model call ``operation_id`` as the policy model server's client reports it."""
+    reason, exception_type, http_status = _ATTEMPTS[outcome]
     return FailureEvent(
         boundary=FailureBoundary.MODEL,
         failure_kind=MODEL_REQUEST_ERROR,
-        failure_reason="Model request transport failed",
+        failure_reason=reason,
         operation="model_request",
+        operation_id=operation_id,
         http_status=http_status,
         foreign_error=SdkErrorDetails(exception_type=exception_type, message="") if exception_type else None,
     )
+
+
+def _policy_report(attempts: list[FailureEvent], *, ended_on: FailureEvent | None = None) -> FailureReport:
+    """The policy model server's reply report: every observed attempt, and the attempt its failure ended on."""
+    return FailureReport(
+        failure_id=ended_on.event_id if ended_on is not None else None,
+        events={event.event_id: event for event in attempts},
+    )
+
+
+def _timed_out_report() -> FailureReport:
+    attempts = [_model_attempt("response_timeout") for _ in range(3)]
+    return _policy_report(attempts, ended_on=attempts[-1])
 
 
 def _failed_reply(report: FailureReport) -> MagicMock:
@@ -3190,29 +3220,55 @@ def _timeout_agent(**config) -> tuple[SimpleAgent, MagicMock]:
 
 class TestFinalOnModelTimeout:
     @pytest.mark.parametrize(
-        ("attempts", "timed_out"),
+        ("earlier", "final", "timed_out"),
         [
-            pytest.param(["TimeoutError"] * 3, True, id="every-attempt-timed-out"),
-            pytest.param(["aiohttp.client_exceptions.ServerTimeoutError"], True, id="qualified-aiohttp-timeout"),
-            pytest.param(["TimeoutError", None], False, id="one-attempt-answered-an-http-error"),
-            pytest.param(["TimeoutError", "aiohttp.client_exceptions.ClientConnectorError"], False, id="refused"),
-            pytest.param([], False, id="no-attempt-reported"),
+            pytest.param([], ["response_timeout"] * 3, True, id="every-attempt-waited-for-the-response"),
+            pytest.param(["http_500", "refused"], ["response_timeout"] * 2, True, id="an-earlier-call-does-not-count"),
+            pytest.param([], ["connect_timeout"] * 3, False, id="never-connected"),
+            pytest.param([], ["connection_timeout_error"] * 3, False, id="connect-timeout"),
+            pytest.param([], ["response_timeout", "connect_timeout"], False, id="one-attempt-never-connected"),
+            pytest.param([], ["response_timeout", "http_500"], False, id="one-attempt-answered-an-http-error"),
+            pytest.param([], ["response_timeout", "refused"], False, id="refused"),
         ],
     )
-    def test_a_policy_request_timed_out_only_when_every_attempt_did(self, attempts, timed_out: bool) -> None:
-        events = [_model_attempt(t, http_status=None if t else 500) for t in attempts]
-        report = FailureReport(events={event.event_id: event for event in events})
+    def test_a_policy_request_timed_out_only_when_every_attempt_of_its_final_call_did(
+        self, earlier: list[str], final: list[str], timed_out: bool
+    ) -> None:
+        earlier_attempts = [_model_attempt(outcome, operation_id="earlier-call") for outcome in earlier]
+        final_attempts = [_model_attempt(outcome) for outcome in final]
+        report = _policy_report(earlier_attempts + final_attempts, ended_on=final_attempts[-1])
         error = _failed_reply(report).raise_for_status.side_effect
 
         assert _policy_request_timed_out(error) is timed_out
 
+    @pytest.mark.parametrize(
+        "case", ["ended-on-no-model-attempt", "ended-on-another-failure", "omitted", "no-report", "no-attempt"]
+    )
+    def test_a_policy_reply_that_does_not_show_its_final_attempt_is_not_a_timeout(self, case: str) -> None:
+        # A recovered attempt timed out; the reply's failure is something the model client did not raise from one,
+        # such as a 400 it returned at once or a response body the model server rejected.
+        attempts = [_model_attempt("response_timeout") for _ in range(2)]
+        other = FailureEvent(
+            boundary=FailureBoundary.AGENT, failure_kind=AGENT_ROUTE_FAILED, failure_reason="x", operation="o"
+        )
+        report = {
+            "ended-on-no-model-attempt": _policy_report(attempts),
+            "ended-on-another-failure": FailureReport(
+                failure_id=other.event_id, events={e.event_id: e for e in [other, *attempts]}
+            ),
+            "omitted": _policy_report(attempts, ended_on=attempts[-1]).model_copy(update={"omitted": True}),
+            "no-attempt": FailureReport(),
+        }.get(case)
+        error = _failed_reply(report or FailureReport()).raise_for_status.side_effect
+        if case == "no-report":
+            error.headers = {}
+
+        assert _policy_request_timed_out(error) is False
+
     @pytest.mark.parametrize("enabled", [True, False])
     async def test_a_policy_timeout_becomes_an_agent_failure_only_when_enabled(self, enabled: bool) -> None:
         server, server_client = _timeout_agent(final_on_model_timeout=enabled)
-        attempts = [_model_attempt("TimeoutError") for _ in range(3)]
-        server_client.post = AsyncMock(
-            return_value=_failed_reply(FailureReport(events={event.event_id: event for event in attempts}))
-        )
+        server_client.post = AsyncMock(return_value=_failed_reply(_timed_out_report()))
         request = MagicMock(session={}, path_params={}, cookies={})
 
         with pytest.raises(NgFailureEvent if enabled else ClientResponseError) as raised:
@@ -3229,8 +3285,8 @@ class TestFinalOnModelTimeout:
 
     async def test_a_policy_http_error_stays_a_retryable_failure_when_enabled(self) -> None:
         server, server_client = _timeout_agent(final_on_model_timeout=True)
-        attempt = _model_attempt(None, http_status=500)
-        server_client.post = AsyncMock(return_value=_failed_reply(FailureReport(events={attempt.event_id: attempt})))
+        attempt = _model_attempt("http_500")
+        server_client.post = AsyncMock(return_value=_failed_reply(_policy_report([attempt], ended_on=attempt)))
         request = MagicMock(session={}, path_params={}, cookies={})
 
         with pytest.raises(ClientResponseError):
@@ -3289,12 +3345,12 @@ class TestFinalOnModelTimeout:
 
     async def test_run_keeps_other_policy_failures_retryable(self) -> None:
         server, server_client = _timeout_agent(final_on_model_timeout=True)
-        attempt = _model_attempt(None, http_status=500)
+        attempt = _model_attempt("http_500")
 
         async def post(*, url_path, **kwargs):
             if url_path == "/seed_session":
                 return _mock_response()
-            return _failed_reply(FailureReport(events={attempt.event_id: attempt}))
+            return _failed_reply(_policy_report([attempt], ended_on=attempt))
 
         server_client.post = AsyncMock(side_effect=post)
 
