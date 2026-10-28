@@ -43,6 +43,7 @@ from nemo_gym.config_types import (
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
@@ -925,20 +926,7 @@ async def _call_aggregate_metrics(
         key_metrics = agent_entry.get("key_metrics", {})
         print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
 
-    primitive_types = (bool, int, float, str, type(None))
-    metrics_to_log = dict()
-    for agent_entry in all_agent_metrics:
-        agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-        metrics_to_log.update(
-            {f"{agent_name}/{k}": v for k, v in agent_entry["agent_metrics"].items() if isinstance(v, primitive_types)}
-        )
-        metrics_to_log.update(
-            {
-                f"key_metrics/{agent_name}/{k}": v
-                for k, v in agent_entry["key_metrics"].items()
-                if isinstance(v, primitive_types)
-            }
-        )
+    metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
     export_metrics(metrics_to_log)
 
     # Write single file with all agents

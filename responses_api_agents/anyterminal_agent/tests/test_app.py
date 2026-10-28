@@ -282,16 +282,27 @@ class TestSetupParams:
             f"http://model-host:8000/ng-rollout/3-1{self.SEGMENT}"
         )
 
-    def test_explicit_sandbox_model_url_is_never_decorated(self, tmp_path: Path, monkeypatch) -> None:
+    @pytest.mark.parametrize("relay_url", ["http://relay:9000", "http://relay:9000/v1", "http://relay:9000/v1/"])
+    def test_sandbox_model_url_keeps_the_rollout_path(self, tmp_path: Path, monkeypatch, relay_url: str) -> None:
         from nemo_gym import server_utils
 
         monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+        agent = _make_setup_agent(tmp_path, model_server_url=relay_url, sandbox_model_base_url=relay_url)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == (
+            f"http://relay:9000/ng-rollout/3-1{self.SEGMENT}"
+        )
+
+    def test_sandbox_model_url_without_a_model_server_is_unchanged(self, tmp_path: Path) -> None:
+        # Without a Gym model server, nothing behind the URL strips the rollout path.
+        gateway = "https://gw.example/v1"
         agent = _make_setup_agent(
-            tmp_path, model_server_url="http://model-host:8000", sandbox_model_base_url="http://sandbox-host:9000"
+            tmp_path, model_server_url=gateway, sandbox_model_base_url=gateway, model_server=None
         )
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
 
-        assert agent._setup_params(body, rollout_id="3-1").model_server_url == "http://model-host:8000"
+        assert agent._setup_params(body, rollout_id="3-1").model_server_url == gateway
 
     def test_uses_per_task_timeout_by_default(self, tmp_path: Path) -> None:
         agent = _make_setup_agent(tmp_path)

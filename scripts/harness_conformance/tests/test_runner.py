@@ -78,9 +78,16 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         SingleAgentTurnEnvironmentServerConfig.model_validate(
             config["probe_environment"]["environment_servers"][environment_type]
         )
-        assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
         assert "resources_server" not in agent
-        assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
+        if harness == "simple":
+            assert "sandbox_provider" not in agent
+            assert "probe_sandbox" not in config
+            assert config["probe_environment"]["environment_servers"][environment_type][
+                "resources_tool_transports"
+            ] == ["direct_http"]
+        else:
+            assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
+            assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
         if harness == "codex":
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":

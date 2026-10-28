@@ -540,6 +540,7 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
 
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
+    from nemo_gym.resolved_config import write_resolved_config
     from nemo_gym.rollout_collection import (
         E2ERolloutCollectionConfig,
         RolloutCollectionConfig,
@@ -593,6 +594,8 @@ def e2e_rollout_collection():  # pragma: no cover
     rollout_collection_config = RolloutCollectionConfig.model_validate(
         OmegaConf.to_container(rollout_collection_config_dict)
     )
+
+    write_resolved_config(global_config_dict, output_fpath)
 
     rh = RunHelper()
     rh.start(None)
@@ -807,6 +810,7 @@ def _check_saved_completion(output: Path) -> None:
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
+    from nemo_gym.resolved_config import write_resolved_config
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.telemetry.setup import (
         configure_telemetry_env,
@@ -817,6 +821,7 @@ def collect_rollouts():  # pragma: no cover
 
     global_config_dict = get_global_config_dict()
     config = RolloutCollectionConfig.model_validate(global_config_dict)
+    write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
     rch = RolloutCollectionHelper()
 
     # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
@@ -877,13 +882,26 @@ def health_check_rollouts(
 
 
 @exit_cleanly_on_config_error
-def export_rollouts_as_atif() -> None:  # pragma: no cover
-    from nemo_gym.atif_export import ExportAtifConfig, export_rollouts_to_atif
+def export_run() -> None:  # pragma: no cover
+    from nemo_gym.config_types import RunExportConfig
+    from nemo_gym.exporters import load_run_exporter_class
+    from nemo_gym.exporters.base import ExportState
+    from nemo_gym.run_artifacts import RunArtifacts
+    from nemo_gym.run_exporter_registry import DEFAULT_RUN_EXPORTER
 
-    config = ExportAtifConfig.model_validate(get_global_config_dict())
-    result = export_rollouts_to_atif(config)
-    print(f"Exported {result.trajectory_count} ATIF trajectory file(s) to {result.output_dirpath}")
-    print(f"Manifest: {result.manifest_fpath}")
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(skip_exporters=True)
+    )
+    name = global_config_dict.get("exporter") or DEFAULT_RUN_EXPORTER
+    exporter = load_run_exporter_class(name).from_global_config(global_config_dict)
+    result = exporter.export(RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath))
+
+    print(f"Export {name}: {result.state.value}")
+    for key, value in result.detail.items():
+        print(f"  {key}: {value}")
+    if result.state is ExportState.FAILED:
+        print(f"Error: {result.error}", file=sys.stderr)
+        raise SystemExit(result.exit_code)
 
 
 @exit_cleanly_on_config_error
