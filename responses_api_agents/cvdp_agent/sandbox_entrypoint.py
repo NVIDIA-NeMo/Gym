@@ -47,7 +47,7 @@ def main() -> None:
     agent_class = os.environ["NV_AGENT_CLASS"]
     agent_cfg_class = os.environ["NV_AGENT_CFG_CLASS"]
 
-    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+    from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
     from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.server_utils import ServerClient
 

@@ -896,7 +896,7 @@ layers = [
     # utils/
     "nemo_gym.cli._compat : nemo_gym.cli._venv_setup : nemo_gym.decorators : nemo_gym.install_lock : nemo_gym.path_utils",
     # config/
-    "nemo_gym.config_types : nemo_gym.global_config : nemo_gym.secret_utils : nemo_gym.server_metadata",
+    "nemo_gym.config",
 ]
 # Imports that point up the order today.
 # Each one goes away with the split or move that resolves it, and this list may only shrink.
@@ -908,11 +908,11 @@ ignore_imports = [
     "nemo_gym.exporters.base -> nemo_gym.batch_status",
     "nemo_gym.exporters.base -> nemo_gym.rollout_collection",
     "nemo_gym.exporters.mlflow -> nemo_gym.rollout_collection",
-    "nemo_gym.global_config -> nemo_gym._checkpoint.settings",
-    "nemo_gym.global_config -> nemo_gym.exporters",
-    "nemo_gym.global_config -> nemo_gym.h2_ping_sidecar.config",
-    "nemo_gym.global_config -> nemo_gym.sandbox.providers.registry",
-    "nemo_gym.global_config -> nemo_gym.telemetry.setup",
+    "nemo_gym.config.global_config -> nemo_gym._checkpoint.settings",
+    "nemo_gym.config.global_config -> nemo_gym.exporters",
+    "nemo_gym.config.global_config -> nemo_gym.h2_ping_sidecar.config",
+    "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
+    "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
     "nemo_gym.judge -> nemo_gym.server_utils",
     "nemo_gym.rollout_correlation -> nemo_gym.episode_types",
     "nemo_gym.rollout_observability -> nemo_gym.observability.model_calls",

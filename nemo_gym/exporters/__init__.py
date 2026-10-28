@@ -29,7 +29,7 @@ from typing import Any, Optional
 
 from omegaconf import DictConfig
 
-from nemo_gym.config_types import ConfigError, ExporterConfig, MLFlowConfig, WANDBConfig
+from nemo_gym.config.config_types import ConfigError, ExporterConfig, MLFlowConfig, WANDBConfig
 from nemo_gym.exporters.base import BaseExporter, Exporter
 from nemo_gym.run_exporter_registry import RUN_EXPORTERS
 

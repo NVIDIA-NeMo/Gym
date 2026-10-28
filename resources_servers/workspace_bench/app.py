@@ -25,7 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.judge import JudgeError
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata

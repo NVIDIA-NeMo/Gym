@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.package_info import __version__ as nemo_gym_version
 from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider
 from nemo_gym.sandbox.providers import e2b as e2b_pkg

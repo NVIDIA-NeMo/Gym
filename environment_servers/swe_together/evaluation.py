@@ -22,7 +22,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
 )
-from nemo_gym.config_types import AgentServerRef
+from nemo_gym.config.config_types import AgentServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess

@@ -22,8 +22,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from benchmarks.assaybench.prepare import PROMPT_CONFIG_PATH, REPO_ROOT
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.config_types import AggregateMetricsRequest
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

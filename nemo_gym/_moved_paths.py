@@ -66,7 +66,12 @@ class MovedPath:
 
 # Old module path -> new module path.
 # A key also covers every submodule under it.
-MOVED_MODULES: dict[str, MovedPath] = {}
+MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.config_types": MovedPath(new="nemo_gym.config.config_types", since="0.8.0"),
+    "nemo_gym.global_config": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
+    "nemo_gym.secret_utils": MovedPath(new="nemo_gym.config.secret_utils", since="0.8.0"),
+    "nemo_gym.server_metadata": MovedPath(new="nemo_gym.config.server_metadata", since="0.8.0"),
+}
 
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
 MOVED_NAMES: dict[str, dict[str, MovedPath]] = {}

@@ -17,7 +17,7 @@ from pathlib import Path
 import nemo_gym.cli.eval
 import nemo_gym.cli.env
 import ray
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 paths, overrides = [], []
 args = iter(sys.argv[1:])

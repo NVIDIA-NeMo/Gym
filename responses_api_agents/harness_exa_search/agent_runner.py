@@ -89,7 +89,7 @@ async def start_model_relay(port: int) -> web.AppRunner:
 async def main() -> None:
     from fastapi import Request
 
-    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+    from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
     from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.server_utils import ServerClient
 

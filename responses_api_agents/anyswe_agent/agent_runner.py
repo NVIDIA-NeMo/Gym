@@ -150,7 +150,7 @@ def main() -> None:
     agent_kwargs = _json_env("NGSWE_AGENT_KWARGS")
     sampling = _json_env("NGSWE_SAMPLING")
 
-    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+    from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
     from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.server_utils import ServerClient
 

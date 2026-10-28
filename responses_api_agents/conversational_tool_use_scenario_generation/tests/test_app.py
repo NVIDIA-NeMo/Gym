@@ -25,8 +25,8 @@ import pytest
 from fastapi import Request
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,

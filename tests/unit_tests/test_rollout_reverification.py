@@ -25,8 +25,8 @@ from pydantic import ValidationError
 
 from nemo_gym.atif_reverification import AtifProjectionError
 from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,

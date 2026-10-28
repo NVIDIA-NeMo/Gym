@@ -34,8 +34,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.config.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -221,7 +221,7 @@ if openclaw_defaults.get("workspace") == ".":
     openclaw_defaults["workspace"] = str(Path.cwd())
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
 from {agent_module} import {agent_class}, {agent_cfg_class}
 

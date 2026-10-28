@@ -46,7 +46,8 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
@@ -54,7 +55,6 @@ from nemo_gym.failure_kinds import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
 )
-from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

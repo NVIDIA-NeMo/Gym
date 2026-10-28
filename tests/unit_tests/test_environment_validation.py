@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.config_types import ConfigInterpolationError
+from nemo_gym.config.config_types import ConfigInterpolationError
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,

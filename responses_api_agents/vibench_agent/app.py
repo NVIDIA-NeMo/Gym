@@ -43,8 +43,8 @@ from uuid import uuid4
 
 from fastapi import Body, Request
 
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,

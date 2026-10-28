@@ -23,8 +23,8 @@ from fastapi import HTTPException
 from pytest import MonkeyPatch, approx
 
 import resources_servers.genrm_compare.app
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.config.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )

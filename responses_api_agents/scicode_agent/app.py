@@ -48,8 +48,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
+from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.metrics_config import Stat
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,

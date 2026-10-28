@@ -31,14 +31,14 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,

@@ -27,8 +27,8 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, get_global_config_dict
+from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config.global_config import OBSERVABILITY_ENABLED_KEY_NAME, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle

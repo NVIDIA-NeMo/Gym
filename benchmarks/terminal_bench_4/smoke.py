@@ -22,7 +22,8 @@ import uvicorn
 from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
-from nemo_gym import global_config, server_utils
+from nemo_gym import server_utils
+from nemo_gym.config import global_config
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks

@@ -21,7 +21,7 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     environment_server_agent_refs,

@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, SandboxCommand, SandboxSession, shell_assignments
 from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox.utils import read_text, upload_text

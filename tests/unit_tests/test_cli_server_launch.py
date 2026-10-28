@@ -22,7 +22,7 @@ import pytest
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.cli.env import _server_launch_command
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     UV_VENV_DIR_KEY_NAME,

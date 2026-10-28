@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from nemo_gym.global_config import reset_global_config_dict
+from nemo_gym.config.global_config import reset_global_config_dict
 
 
 @pytest.fixture(autouse=True)

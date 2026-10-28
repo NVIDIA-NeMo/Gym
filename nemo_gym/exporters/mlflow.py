@@ -35,9 +35,9 @@ from mlflow.utils.validation import (
 )
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.config_types import MLFlowConfig
+from nemo_gym.config.config_types import MLFlowConfig
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.exporters.base import BaseExporter
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
 logger = logging.getLogger(__name__)

@@ -30,8 +30,8 @@ import orjson
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.cli.utils import did_you_mean
 from nemo_gym.comparison.schema import RunFile
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,

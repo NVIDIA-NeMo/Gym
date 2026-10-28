@@ -27,7 +27,7 @@ from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_science import prepare as preparation
-from nemo_gym import global_config
+from nemo_gym.config import global_config
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, create_provider, resolve_provider_config
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseServerConfig, ServerClient

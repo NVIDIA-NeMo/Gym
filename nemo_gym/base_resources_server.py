@@ -44,7 +44,7 @@ from nemo_gym._checkpoint.resources import (
 )
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import SESSION_LOST, validate_failure_kind
 from nemo_gym.judge import judge_failsafe

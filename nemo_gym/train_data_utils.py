@@ -30,7 +30,7 @@ from tqdm.auto import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     AGENT_REF_KEY,
     BaseNeMoGymCLIConfig,
     BenchmarkDatasetConfig,
@@ -40,15 +40,7 @@ from nemo_gym.config_types import (
     DownloadJsonlDatasetHuggingFaceConfig,
     ServerInstanceConfig,
 )
-from nemo_gym.dataset_metrics import (
-    DatasetMetricHook,
-    DatasetMetricsHookError,
-    DatasetMetricValue,
-    load_dataset_metrics_hook,
-)
-from nemo_gym.episode_types import TaskId, is_materialized_task_row
-from nemo_gym.gitlab_utils import download_jsonl_dataset
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -59,6 +51,14 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
 )
+from nemo_gym.dataset_metrics import (
+    DatasetMetricHook,
+    DatasetMetricsHookError,
+    DatasetMetricValue,
+    load_dataset_metrics_hook,
+)
+from nemo_gym.episode_types import TaskId, is_materialized_task_row
+from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )

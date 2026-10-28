@@ -72,7 +72,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym import failure_kinds
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
-from nemo_gym.config_types import AggregateMetricsRequest
+from nemo_gym.config.config_types import AggregateMetricsRequest
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env
 from nemo_gym.server_utils import ServerClient

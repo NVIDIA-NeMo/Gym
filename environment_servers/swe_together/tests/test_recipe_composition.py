@@ -7,8 +7,8 @@ from omegaconf import OmegaConf
 
 from environment_servers.swe_together.app import SWETConfig, SWETEnvironmentServer
 from nemo_gym.benchmarks import BenchmarkConfig
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import AggregateMetricsRequest
+from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     taskset_environment_server_name,

@@ -101,7 +101,7 @@ def test_a_bad_checkpoint_block_fails_when_the_client_is_built_not_on_every_requ
 
 
 def test_the_checkpoint_block_is_a_reserved_top_level_key() -> None:
-    from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+    from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 
     assert "checkpoint" in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 

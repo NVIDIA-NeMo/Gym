@@ -9,7 +9,7 @@ from collections import defaultdict
 from sqlite3 import Row
 from typing import Any
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,

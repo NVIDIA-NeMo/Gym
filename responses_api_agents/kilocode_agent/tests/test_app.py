@@ -27,7 +27,7 @@ import yaml
 from omegaconf import OmegaConf
 from starlette.requests import Request
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
