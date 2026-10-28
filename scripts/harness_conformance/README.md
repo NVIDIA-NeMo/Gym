@@ -87,9 +87,6 @@ pinned runtime during session setup, using Gym's local subprocess sandbox provid
 Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
 `PATH`; Hermes must be importable in the same Python environment. Missing
 dependencies or unsuccessful runtime installation are execution failures.
-Omitting `--harness` selects every registered harness, including OpenClaw.
-OpenClaw uses sandbox sessions with its pinned 2026.6.11 runtime and Node 22.19.0;
-CI installs the Python requirements and session setup installs the CLI inside the sandbox.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
