@@ -30,7 +30,6 @@ from omegaconf import OmegaConf
 import nemo_gym.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
 from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -39,6 +38,7 @@ from nemo_gym.config.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollout_collection import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_ENVIRONMENT_SERVER_KEY,

@@ -27,17 +27,17 @@ from typing import Any, Dict
 from fastapi import Request
 from pydantic import Field
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-)
 from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.models.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
+    Body,
+    SimpleResponsesAPIModel,
 )
 from nemo_gym.models.chat_completions_converter import ResponsesConverter
 from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI

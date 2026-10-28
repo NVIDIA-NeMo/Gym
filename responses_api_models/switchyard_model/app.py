@@ -43,11 +43,6 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from pydantic import Field, model_validator
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-)
 from nemo_gym.client.http_client import request
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.config.global_config import (
@@ -62,6 +57,11 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.models.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
+    Body,
+    SimpleResponsesAPIModel,
 )
 from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint

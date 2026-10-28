@@ -14,14 +14,13 @@ import pytest
 from aiohttp import ClientConnectorError, ClientOSError, ClientResponse, ClientResponseError, ServerDisconnectedError
 from fastapi.testclient import TestClient
 
-import nemo_gym.base_responses_api_model
 import nemo_gym.client.server_client
+import nemo_gym.models.base_responses_api_model
 import nemo_gym.server_runtime.server_utils
-from nemo_gym.base_responses_api_model import _CaptureMiddleware, _reconstruct_streamed_response
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import current_rollout_id
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.models.chat_streaming import SSE_KEEPALIVE
+from nemo_gym.core.responses_api_types import SSE_KEEPALIVE, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.models.model_call_capture import _CaptureMiddleware, _reconstruct_streamed_response
 from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.models.token_capture.protocols import CAPTURE_REFUSAL_HEADER
@@ -1016,7 +1015,7 @@ async def test_streaming_chat_continuation_commits_before_answer(monkeypatch, tm
     worker = NeMoGymAsyncOpenAI.create_chat_completion
     live = asyncio.Event()
     if keepalive:
-        monkeypatch.setattr(nemo_gym.base_responses_api_model, "_CHAT_KEEPALIVE_SECONDS", 0.001)
+        monkeypatch.setattr(nemo_gym.models.base_responses_api_model, "_CHAT_KEEPALIVE_SECONDS", 0.001)
 
     async def generate(client, **body):
         assert body["stream"] is False and "stream_options" not in body
@@ -1091,7 +1090,7 @@ async def test_cancelled_chat_keepalive_retains_uncertain_capture(monkeypatch, t
     worker = NeMoGymAsyncOpenAI.create_chat_completion
     live, staged, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     sent = []
-    monkeypatch.setattr(nemo_gym.base_responses_api_model, "_CHAT_KEEPALIVE_SECONDS", 0.001)
+    monkeypatch.setattr(nemo_gym.models.base_responses_api_model, "_CHAT_KEEPALIVE_SECONDS", 0.001)
 
     async def held_worker(client, **body):
         await worker(client, **body)

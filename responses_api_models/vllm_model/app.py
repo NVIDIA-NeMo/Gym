@@ -32,18 +32,6 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
-from nemo_gym.base_responses_api_model import (
-    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
-    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-    _request_messages,
-    _validate_responses_params,
-    context_overflow_error_fields,
-    is_propagated_refusal,
-    start_model_execution,
-)
 from nemo_gym.client.http_client import _redacted_url
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode import current_rollout_id
@@ -59,11 +47,23 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models._checkpoint import note_generation_backend, note_generation_request
+from nemo_gym.models.base_responses_api_model import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+    BaseResponsesAPIModelConfig,
+    Body,
+    SimpleResponsesAPIModel,
+    _request_messages,
+    _validate_responses_params,
+    context_overflow_error_fields,
+    is_propagated_refusal,
+)
 from nemo_gym.models.chat_completions_converter import (
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
+from nemo_gym.models.model_call_capture import start_model_execution
 from nemo_gym.models.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.models.token_capture import (
     CaptureContext,

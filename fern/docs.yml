@@ -244,6 +244,8 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/models/responses_streaming"
   - source: "/nemo/gym/nemo-gym/nemo_gym/token_id_capture"
     destination: "/nemo/gym/nemo-gym/nemo_gym/models/token_capture"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/base_responses_api_model"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/base_responses_api_model"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).
