@@ -224,7 +224,7 @@ class InProcessNOOARunner:
             rollout_id=request.rollout_id,
             default_model=self._model_server_name,
             root_status="incomplete"
-            if termination_reason is not None
+            if termination_reason is not None and termination_reason is not NOOATerminationReason.MODEL_REJECTED
             else "failed"
             if failure is not None
             else "completed",

@@ -22,6 +22,7 @@ from nemo_gym.rollout_collection import (
     _episode_record,
     failures_path_for,
 )
+from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.app import NOOAAgent
@@ -39,14 +40,37 @@ def rejection_agent(status: int) -> NOOAAgent:
     failure.message = "Provider rejected this request; diagnostic mentions HTTP 500"
     client.post = AsyncMock(side_effect=failure)
     invocation = invocation_config(
-        invocation_adapter="responses_api_agents.nooa_agent.tests.test_runner:invoke_model_directly"
+        agent_class="responses_api_agents.nooa_agent.tests.test_runner:PolicyAgent",
+        invocation_adapter="responses_api_agents.nooa_agent.tests.test_runner:invoke_policy",
     )
     return NOOAAgent(config=agent_config(nooa=invocation.model_dump()), server_client=client)
 
 
-@pytest.mark.parametrize("status", [400, 413, 422])
-@pytest.mark.parametrize("action", ["default", "fail", "retry"])
-async def test_model_rejection_obeys_environment_policy_and_closes(status: int, action: str) -> None:
+@pytest.mark.parametrize(
+    ("status", "action", "expected_action"),
+    [
+        (400, "default", "verify"),
+        (400, "fail", "fail"),
+        (400, "retry", "retry"),
+        (413, "default", "verify"),
+        (413, "fail", "fail"),
+        (413, "retry", "retry"),
+        (422, "default", "verify"),
+        (422, "fail", "fail"),
+        (422, "retry", "retry"),
+        (401, "default", "fail"),
+        (401, "verify", "verify"),
+        (401, "retry", "retry"),
+        (403, "default", "fail"),
+        (404, "default", "fail"),
+        (503, "default", "retry"),
+        (503, "fail", "fail"),
+        (503, "verify", "verify"),
+    ],
+)
+async def test_model_rejection_obeys_environment_policy_and_closes(
+    status: int, action: str, expected_action: str
+) -> None:
     instance = rejection_agent(status)
     environment, client = _environment(instance)
     if action != "default":
@@ -54,7 +78,7 @@ async def test_model_rejection_obeys_environment_policy_and_closes(status: int, 
 
     episode = await environment.run_request(_request())
 
-    if action == "default":
+    if expected_action == "verify":
         assert episode.failure is None
         assert episode.result.reward == 1
         response = episode.result.response
@@ -63,12 +87,19 @@ async def test_model_rejection_obeys_environment_policy_and_closes(status: int, 
     else:
         assert episode.result is None
         assert episode.failure.stage == "agent"
-        assert episode.failure.terminal is (action == "fail")
+        assert episode.failure.terminal is (expected_action == "fail")
         response = episode.failure.partial_response
         observations = episode.failure.agent_observations
         assert "/verify" not in _paths(client)
         assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
     assert response.status == "failed"
+    root = next(
+        record
+        for record in observations.records
+        if isinstance(record, AgentInvocation) and record.parent_invocation_id is None
+    )
+    assert root.status == "failed"
+    assert root.error_type == "GenerationError"
     assert orjson.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
         "failure_kind": "model_request_error",
         "status_code": status,
@@ -79,11 +110,11 @@ async def test_model_rejection_obeys_environment_policy_and_closes(status: int, 
     assert receipt.agent_observations == observations
     assert receipt.resources_cookies == {"resource": "seed"}
     assert client.post.call_args_list[-1].kwargs["cookies"] == receipt.resources_cookies
-    instance.server_client.post.assert_awaited_once()
-    assert instance.server_client.post.call_args.kwargs["url_path"] == (
-        "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
-    )
-    assert instance.server_client.post.call_args.kwargs["cookies"] == {}
+    # CodeAct exhausts its three attempts before the environment applies its policy.
+    assert instance.server_client.post.await_count == 3
+    for call in instance.server_client.post.await_args_list:
+        assert call.kwargs["url_path"] == "/ng-rollout/rollout-a2/training-token-capture/v1/responses"
+        assert call.kwargs["cookies"] == {}
 
 
 @pytest.mark.parametrize("action", ["fail", "retry"])
@@ -116,7 +147,7 @@ async def test_rejection_policy_respects_collector_attempt_cap(
     assert pending == ([{**key, ATTEMPT_INDEX_KEY_NAME: 1}] if action == "retry" and prior_attempts == 1 else [])
 
 
-@pytest.mark.parametrize("status", [400, 413, 422])
+@pytest.mark.parametrize("status", [400, 401, 413, 422, 503])
 async def test_worker_result_and_checkpoint_preserve_model_status(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int
 ) -> None:
@@ -139,6 +170,10 @@ async def test_worker_result_and_checkpoint_preserve_model_status(
     assert restored.resource_cookies == p.request.resource_cookies
     assert restored.episode.observations == artifact.observations
     assert restored.trajectory == artifact.trajectory
+    root = next(item for item in restored.trajectory.invocations if item.parent_invocation_id is None)
+    assert root.status == "failed"
+    assert root.error_type == "GenerationError"
+    assert instance.server_client.post.await_count == 3
     checkpoint_path = tmp_path / "checkpoint.json"
     entrypoint.write_checkpoint(checkpoint_path, restored)
     checkpoint = entrypoint.SandboxCheckpoint.model_validate_json(checkpoint_path.read_text())

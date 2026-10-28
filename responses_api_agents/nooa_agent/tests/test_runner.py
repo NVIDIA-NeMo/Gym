@@ -727,11 +727,14 @@ async def invoke_model_directly(agent: Any, request: NeMoGymResponseCreateParams
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [400, 413, 422])
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 408, 413, 422, 425, 429, 500, 503, 599])
 @pytest.mark.parametrize("wrapped", [False, True])
-async def test_model_rejection_preserves_original_provider_error(status: int, wrapped: bool) -> None:
+async def test_model_rejection_preserves_original_provider_error(
+    monkeypatch: pytest.MonkeyPatch, status: int, wrapped: bool
+) -> None:
     from responses_api_agents.nooa_agent.result import finalize_run_result
 
+    monkeypatch.setattr("responses_api_agents.nooa_agent.gym_llm.asyncio.sleep", AsyncMock())
     runner, _ = policy_runner()
     failure = model_http_error(status)
     runner._server_client.post = AsyncMock(side_effect=failure)
@@ -745,7 +748,10 @@ async def test_model_rejection_preserves_original_provider_error(status: int, wr
         )
     )
 
-    assert runner._server_client.post.await_count == (3 if wrapped else 1)
+    assert runner._server_client.post.await_count == (3 if wrapped else 1) * (3 if status == 429 else 1)
+    root = next(item for item in result.trajectory.invocations if item.parent_invocation_id is None)
+    assert root.status == "failed"
+    assert root.error_type == ("GenerationError" if wrapped else "ClientResponseError")
     assert result.termination_reason is NOOATerminationReason.MODEL_REJECTED
     assert result.model_status_code == status
     assert result.termination_error == str(failure)
@@ -756,9 +762,9 @@ async def test_model_rejection_preserves_original_provider_error(status: int, wr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [401, 403, 408, 425, 429, 500, 503])
+@pytest.mark.parametrize("status", [399, 600])
 @pytest.mark.parametrize("wrapped", [False, True])
-async def test_other_model_http_errors_remain_ungradable(status: int, wrapped: bool) -> None:
+async def test_non_error_model_http_status_is_not_reported_as_rejection(status: int, wrapped: bool) -> None:
     runner, _ = policy_runner()
     failure = model_http_error(status)
     runner._server_client.post = AsyncMock(side_effect=failure)
@@ -780,7 +786,7 @@ async def test_other_model_http_errors_remain_ungradable(status: int, wrapped: b
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [400, 413, 422])
+@pytest.mark.parametrize("status", [400, 401, 413, 422, 503])
 async def test_successful_model_retry_clears_rejection(status: int) -> None:
     runner, _ = policy_runner()
     runner._server_client.post.side_effect = [
@@ -809,10 +815,11 @@ async def test_successful_model_retry_clears_rejection(status: int) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 503])
 @pytest.mark.parametrize("handling", ["swallowed", "fabricated", "replacement", "arbitrary_wrapper"])
-async def test_only_propagated_model_rejection_is_gradable(handling: str) -> None:
+async def test_only_propagated_model_error_is_reported_as_rejection(status: int, handling: str) -> None:
     runner, _ = policy_runner()
-    failure = model_http_error(400)
+    failure = model_http_error(status)
     runner._server_client.post = AsyncMock(side_effect=failure)
 
     async def invoke(agent, request):
@@ -824,7 +831,7 @@ async def test_only_propagated_model_rejection_is_gradable(handling: str) -> Non
             if handling == "arbitrary_wrapper":
                 raise GenerationError("arbitrary wrapper") from cause
             if handling == "replacement":
-                raise model_http_error(400) from cause
+                raise model_http_error(status) from cause
         return "apparently successful"
 
     runner._invocation_adapter = invoke
@@ -840,11 +847,12 @@ async def test_only_propagated_model_rejection_is_gradable(handling: str) -> Non
 
 
 @pytest.mark.asyncio
-async def test_resource_infrastructure_failure_vetoes_model_rejection(outbound: AsyncMock) -> None:
+@pytest.mark.parametrize("status", [400, 401, 503])
+async def test_resource_infrastructure_failure_vetoes_model_rejection(outbound: AsyncMock, status: int) -> None:
     runner, _ = make_runner()
     resource_failure = ConnectionError("resources unavailable")
     outbound.side_effect = resource_failure
-    runner._server_client.post = AsyncMock(side_effect=model_http_error(400))
+    runner._server_client.post = AsyncMock(side_effect=model_http_error(status))
 
     async def invoke(agent, request):
         try:
@@ -868,10 +876,11 @@ async def test_resource_infrastructure_failure_vetoes_model_rejection(outbound: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 503])
 @pytest.mark.parametrize("marked_error", ["wrapper", "model"])
-async def test_cleanup_marker_anywhere_in_trusted_model_chain_vetoes_grading(marked_error: str) -> None:
+async def test_cleanup_marker_anywhere_in_trusted_model_chain_vetoes_rejection(status: int, marked_error: str) -> None:
     runner, _ = policy_runner()
-    runner._server_client.post = AsyncMock(side_effect=model_http_error(400))
+    runner._server_client.post = AsyncMock(side_effect=model_http_error(status))
     original_adapter = runner._invocation_adapter
 
     async def invoke(agent, request):

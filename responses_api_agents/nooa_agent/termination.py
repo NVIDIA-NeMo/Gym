@@ -79,15 +79,15 @@ def _is_codeact_loop_stop(error: BaseException) -> bool:
 def policy_termination(
     error: BaseException | None, *, model_error: BaseException | None = None
 ) -> tuple[NOOATerminationReason | None, str | None]:
-    """Recognize gradable native stops without hiding cleanup or outer failures."""
+    """Recognize native stops and model errors without hiding cleanup or outer failures."""
     seen: set[int] = set()
     while isinstance(error, Exception) and id(error) not in seen:
         seen.add(id(error))
         if cleanup_errors(error):
             break
-        if error is model_error and isinstance(error, ClientResponseError) and error.status in {400, 413, 422}:
-            # Only this invocation's model rejection is gradable; unrelated HTTP
-            # failures and cleanup errors retain their infrastructure semantics.
+        if error is model_error and isinstance(error, ClientResponseError) and 400 <= error.status <= 599:
+            # Report this invocation's terminal model error for the environment's
+            # outcome policy; unrelated HTTP and cleanup failures remain separate.
             return NOOATerminationReason.MODEL_REJECTED, str(error)
         if isinstance(error, OutputTokenLimitExceeded):
             return NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED, str(error)
