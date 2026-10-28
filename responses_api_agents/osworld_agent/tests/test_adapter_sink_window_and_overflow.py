@@ -629,3 +629,108 @@ def test_sink_window_telemetry_reaches_the_model_call_records() -> None:
     assert last["snapshot_sink_size"] == 1
     assert last["snapshot_image_intervals"] == [[0, 1], [6, 9]]
     assert last["history_policy_name"] == "sink_window"
+
+
+def test_stop_policy_ends_the_rollout_at_the_first_overflow() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=5,
+        context_overflow_policy="stop",
+    )
+    payloads: List[Dict[str, Any]] = []
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        if len(_image_turns(payload)) > 3:
+            raise ValueError("Error code: 400 - This model's maximum context length is 64000 tokens")
+        return _reply(len(payloads) - 1)
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    for index in range(3):
+        _, actions, _ = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+        assert actions == ["pyautogui.click(960, 540)"]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-4"})
+
+    assert actions == []
+    assert len(payloads) == 4, "one rejected request, no shrink-and-resend"
+    assert info["stop_rollout"] is True
+    assert info["agent_outcome"] == "context_limit_reached"
+    assert info["agent_outcome_family"] == "policy_stop"
+    assert info["model_call_completed"] is False
+    assert info["parse_failure"]["prompt_shrink_events"] == []
+    assert info["parse_failure"]["failure_kind_counts"] == {"context_overflow": 1}
+
+
+def test_prompt_token_limit_rejects_a_served_call_without_output_room() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        parse_retries=5,
+        context_overflow_policy="stop",
+        context_prompt_token_limit=40960,
+    )
+    prompt_tokens = iter([40000, 40961])
+    calls = []
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        calls.append(payload)
+        return {**_reply(len(calls) - 1), "prompt_tokens": next(prompt_tokens)}
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _, actions, _ = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+    assert actions == ["pyautogui.click(960, 540)"]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-2"})
+
+    assert actions == []
+    assert len(calls) == 2
+    assert info["agent_outcome"] == "context_limit_reached"
+    assert info["model_call_completed"] is True
+    assert "prompt_tokens=40961" in info["parse_failure"]["last_error"]
+    assert info["model_calls"][-1]["accepted"] is False
+
+
+def test_prompt_token_limit_under_shrink_policy_shrinks_and_recovers() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=5,
+        context_prompt_token_limit=3 * 1000,
+    )
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        return {**_reply(0), "prompt_tokens": len(_image_turns(payload)) * 1000}
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    for index in range(4):
+        _, actions, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+        assert actions == ["pyautogui.click(960, 540)"]
+    assert info["prompt_shrink_events"][0]["reason"] == "context_overflow"
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"context_overflow_policy": "truncate"}, "context_overflow_policy"),
+        ({"context_prompt_token_limit": 0}, "context_prompt_token_limit"),
+        ({"context_prompt_token_limit": "40960"}, "context_prompt_token_limit"),
+    ],
+)
+def test_context_options_are_validated(options: Dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        NemotronV3NanoOmniAgent(model="policy-under-test", max_steps=5, **options)
+
+
+def test_default_context_options_keep_the_published_contract() -> None:
+    from responses_api_agents.osworld_agent.adapter_agents import normalize_nemotron_agent_options
+
+    default = normalize_nemotron_agent_options({})
+    assert "context_overflow_policy" not in default
+    assert "context_prompt_token_limit" not in default
+    stop = normalize_nemotron_agent_options({"context_overflow_policy": "stop", "context_prompt_token_limit": 40960})
+    assert stop["context_overflow_policy"] == "stop"
+    assert stop["context_prompt_token_limit"] == 40960

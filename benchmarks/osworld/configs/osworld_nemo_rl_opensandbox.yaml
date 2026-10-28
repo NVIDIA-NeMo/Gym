@@ -46,5 +46,9 @@ osworld_nano_omni_agent:
         # Preserve the exact served completion between live turns, and keep
         # each turn's Code when the 3->10->3 policy compacts older turns.
         assistant_history_replay: ${oc.env:OSWORLD_ASSISTANT_HISTORY_REPLAY,raw_full}
+        # End a rollout at its first context overflow and train on what it
+        # did; the limit reserves output room below the server's window.
+        context_overflow_policy: ${oc.env:OSWORLD_CONTEXT_OVERFLOW_POLICY,stop}
+        context_prompt_token_limit: ${oc.decode:${oc.env:OSWORLD_CONTEXT_PROMPT_TOKEN_LIMIT,null}}
       task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
       exact_trace_transport_version: 3
