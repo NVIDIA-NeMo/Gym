@@ -93,7 +93,7 @@ def make_environment(tmp_path, monkeypatch, *, compose=False, verifier=False, co
     box._handle = SimpleNamespace(sandbox_id="owned-box")
     box.start = AsyncMock()
     box.stop = AsyncMock()
-    box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/app\n", stderr=""))
+    box.exec = AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="/app\n", stderr="", error_type=None))
     box.serialize = AsyncMock(return_value={"sandbox_id": "owned-box", "credentials": "must not be copied"})
     create = MagicMock(return_value=box)
     monkeypatch.setattr(module, "AsyncSandbox", create)
@@ -599,3 +599,35 @@ async def test_protein_submission_resolves_its_assay_url_without_hosts(tmp_path,
     assert "user" not in services["submission"]
     assert services["submission"]["environment"] == {"ASSAY_STATUS": "http://assay:8080/status"}
     assert services["submission"]["x-sandbox"] == {"hosts": [], "resolve_environment": ["ASSAY_STATUS"]}
+
+
+@pytest.mark.parametrize("gpus,pool", [(0, "cpu"), (1, "gpu")])
+def test_named_provider_tracks_resource_selected_pool(tmp_path, monkeypatch, gpus, pool):
+    from omegaconf import OmegaConf
+
+    from nemo_gym import global_config
+
+    monkeypatch.setattr(
+        global_config,
+        "_GLOBAL_CONFIG_DICT",
+        OmegaConf.create(
+            {
+                "cpu": {"opensandbox": {"connection": {"domain": "cpu.invalid"}}},
+                "gpu": {"opensandbox": {"connection": {"domain": "gpu.invalid"}}},
+            }
+        ),
+    )
+    # Inline legacy credentials must not override the named connection used by the agent.
+    monkeypatch.setenv("OPENSANDBOX_DOMAIN_CPU", "wrong.invalid")
+    env, *_ = make_environment(
+        tmp_path,
+        monkeypatch,
+        config={
+            "sandbox_provider": "cpu",
+            "sandbox_split_endpoints": True,
+            "sandbox_provider_by_pool": {"cpu": "cpu", "gpu": "gpu"},
+        },
+        task_config={"verifier": {"environment": {"docker_image": "verifier", "gpus": gpus}}},
+    )
+    assert env.provider_ref == pool
+    assert env.provider_config["opensandbox"]["connection"]["domain"] == f"{pool}.invalid"

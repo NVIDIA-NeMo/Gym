@@ -18,6 +18,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import Field, PositiveFloat, model_validator
 
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import (
     AsyncSandbox,
     AsyncSandboxCompose,
@@ -27,6 +28,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
     rewrite_image,
 )
+from nemo_gym.sandbox.config import resolve_provider_volume_sources
 from resources_servers.terminal_bench_4.compose_config import merge_patch, prebuilt_compose, resolve_compose
 from resources_servers.terminal_bench_4.task import Settings, Task, resolve_env
 
@@ -87,7 +89,8 @@ class TaskImages(Settings):
 class EnvironmentConfig(Settings):
     cpu_enforcement_policy: Literal["limit"]
     memory_enforcement_policy: Literal["limit"]
-    sandbox_provider: dict[str, Any]
+    sandbox_provider: dict[str, Any] | str
+    sandbox_provider_by_pool: dict[str, str] = Field(default_factory=dict)
     sandbox_metadata: dict[str, str]
     sandbox_provider_options: dict[str, Any]
     sandbox_env: dict[str, str]
@@ -167,7 +170,19 @@ class Environment:
                 f"{task.name} declares no prebuilt {role} image; configure environment.task_images.{role} "
                 f"or environment.task_images.by_task with an image built from its {self.environment_dir.name}/"
             )
-        self.provider_config = deepcopy(config.sandbox_provider)
+        self.provider_ref = config.sandbox_provider if isinstance(config.sandbox_provider, str) else None
+        if self.provider_ref and config.sandbox_split_endpoints:
+            pool = "gpu" if task.config.environment.gpus or task.config.verifier_environment.gpus else "cpu"
+            self.provider_ref = config.sandbox_provider_by_pool[pool]
+        provider_source = self.provider_ref or config.sandbox_provider
+        named = get_global_config_dict() if self.provider_ref else None
+        self.provider_config = deepcopy(resolve_provider_config(provider_source, named))
+        for key, value in (
+            ("default_metadata", resolve_provider_metadata(provider_source, named)),
+            ("volume_sources", resolve_provider_volume_sources(provider_source, named)),
+        ):
+            if value:
+                self.provider_config[key] = value
         self.pool = "default"
         self.main = None
         self.compose = None
@@ -194,12 +209,13 @@ class Environment:
             if "opensandbox" not in self.provider_config:
                 raise ValueError("Split endpoints require OpenSandbox")
             connection = self.provider_config["opensandbox"].setdefault("connection", {})
-            for key, suffix in (("domain", "DOMAIN"), ("api_key", "API_KEY")):
-                name = f"OPENSANDBOX_{suffix}_{self.pool.upper()}"
-                if not os.environ.get(name):
-                    raise ValueError(f"Missing environment variable: {name}")
-                connection[key] = os.environ[name]
-        elif "opensandbox" in self.provider_config and os.environ.get("OPENSANDBOX_API_KEY"):
+            if not self.provider_ref:
+                for key, suffix in (("domain", "DOMAIN"), ("api_key", "API_KEY")):
+                    name = f"OPENSANDBOX_{suffix}_{self.pool.upper()}"
+                    if not os.environ.get(name):
+                        raise ValueError(f"Missing environment variable: {name}")
+                    connection[key] = os.environ[name]
+        elif not self.provider_ref and "opensandbox" in self.provider_config and os.environ.get("OPENSANDBOX_API_KEY"):
             self.provider_config["opensandbox"].setdefault("connection", {}).setdefault(
                 "api_key", os.environ["OPENSANDBOX_API_KEY"]
             )
@@ -382,7 +398,7 @@ class Environment:
 
     async def agent_workdir(self):
         cwd = await self.exec("pwd", timeout_sec=30, user=self.task.config.agent.user)
-        if cwd.return_code:
+        if cwd.return_code != 0 or cwd.error_type:
             raise RuntimeError("Unable to determine the task working directory")
         return cwd.stdout.strip()
 

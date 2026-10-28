@@ -1784,5 +1784,40 @@ def test_explicit_native_model_and_runtime_paths_are_passed_to_the_harness(setup
         assert config["model"] == config["small_model"] == "nemo_gym/gpt-5.5"
         assert set(config["provider"]["nemo_gym"]["models"]) == {"gpt-5.5"}
         assert config["provider"]["nemo_gym"]["models"]["gpt-5.5"]["reasoning"] is True
-        # The runner puts the preinstalled runtime first and keeps the image PATH after it.
         assert params["setup"].endswith("PATH=/runtime/bin:$PATH\n")
+
+
+async def test_borrowed_session_honors_task_execution_user(setup):
+    agent, sandbox = setup
+    sandbox.set_default_user = MagicMock()
+    body = seed()
+    body.sandbox_access.user = "task-user"
+    state = await agent._seed_agent_session_state(body)
+    try:
+        sandbox.set_default_user.assert_called_once_with("task-user")
+    finally:
+        await state.close(1)
+
+
+def test_native_skill_permissions_do_not_restore_legacy_tool_flags(setup, monkeypatch):
+    from responses_api_agents.opencode_agent.task_context import TaskToolContext
+
+    agent, sandbox = setup
+    agent.config.task_tool_context = True
+    agent.config.opencode_config = {
+        "tools": None,
+        "permission": {"*": "allow", "task": "deny", "webfetch": "deny"},
+    }
+    monkeypatch.setattr(
+        "responses_api_agents.opencode_agent.app.read_task_context",
+        AsyncMock(return_value=TaskToolContext(skills_dir="/app/.agents/skills")),
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix code"})
+        assert result.status_code == 200, result.text
+        payload = sandbox.params()
+        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert "tools" not in config
+        assert config["permission"] == {"*": "allow", "task": "deny", "webfetch": "deny", "skill": "allow"}
+        assert config["skills"] == {"paths": ["/app/.agents/skills"]}

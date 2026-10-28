@@ -24,6 +24,8 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.failure_kinds import VERIFIER_ERROR
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox.utils import upload_text
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     is_nemo_gym_fastapi_entrypoint,
@@ -115,6 +117,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         self._slots = asyncio.Semaphore(self.config.max_concurrent_sessions)
         self._loader = PackageLoader(self.config.task_download_dir)
         self._closing = False
+        self._closed_identities: set[str] = set()
         self.config.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     def setup_webserver(self):
@@ -202,6 +205,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             request.session["tb4_client_session_id"] = body.client_session_id
         owner = self._owner(request)
         identity = hashlib.sha256(f"{owner}:{body.rollout_id}".encode()).hexdigest()
+        if identity in self._closed_identities:
+            raise HTTPException(410, "Episode was closed")
         session_id = self._by_identity.get(identity)
         if session_id is None:
             if self._state_path(identity).exists():
@@ -233,7 +238,31 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         with rollout_context(session.request.capture_rollout_id):
             try:
                 await lifecycle.prepare_session(session, self._loader)
+                if session.environment.provider_ref:
+                    await upload_text(
+                        session.environment.main,
+                        path="/tmp/.nemo-gym/task.json",
+                        text=json.dumps(
+                            {
+                                "mcp_servers": [
+                                    server.model_dump(mode="json")
+                                    for server in session.task.config.environment.mcp_servers
+                                ],
+                                "skills_dir": session.task.config.environment.skills_dir,
+                            }
+                        ),
+                    )
                 session.seed_response = SeedSessionResponse(
+                    sandbox_access=SandboxAccess(
+                        connection=DirectSandboxConnection(
+                            provider_config_ref=session.environment.provider_ref,
+                            descriptor=await session.environment.main.serialize(),
+                        ),
+                        workdir=await session.environment.agent_workdir(),
+                        user=session.task.config.agent.user,
+                    )
+                    if session.environment.provider_ref
+                    else None,
                     session_id=session.session_id,
                     task_id=session.request.task_name,
                     sandbox_descriptor=await session.environment.main.serialize(),
@@ -410,6 +439,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             raise HTTPException(409, "Session is already bound to another verification request")
         if session.verified_response is not None:
             return session.verified_response
+        if session.phase == "closed" or session.identity in self._closed_identities:
+            raise HTTPException(410, "Episode was closed without verification")
         if session.seed_response is None:
             raise HTTPException(409, "Episode has no recorded seed response")
         if session.finalization is None:
@@ -421,6 +452,29 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             session.finalization = asyncio.create_task(self._finalize_session(session))
         await asyncio.shield(session.finalization)
         return session.verified_response
+
+    async def close_resources_session(self, request: Request, body: TerminalBench4RunRequest) -> dict[str, bool]:
+        """Close by the original rollout identity, including when the seed reply was lost."""
+        if body.client_session_id:
+            request.session["tb4_client_session_id"] = body.client_session_id
+        identity = hashlib.sha256(f"{self._owner(request)}:{body.rollout_id}".encode()).hexdigest()
+        self._closed_identities.add(identity)
+        session_id = self._by_identity.get(identity)
+        if session_id is None:
+            return {"closed": True}
+        session = self._session(request, session_id)
+        if session.execution is not None:
+            await asyncio.shield(session.execution)
+        if session.finalization is not None:
+            await asyncio.shield(session.finalization)
+        # Require confirmed cleanup even if verification already attempted it.
+        await lifecycle.cleanup(session)
+        if any(
+            env is not None and not env.closed
+            for env in (session.environment, session.verifier_environment, session.shared_logs)
+        ):
+            raise HTTPException(503, "TB4 sandbox cleanup did not complete")
+        return {"closed": True}
 
 
 if __name__ == "__main__":

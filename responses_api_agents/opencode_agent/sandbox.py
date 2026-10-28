@@ -26,6 +26,7 @@ from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
 from responses_api_agents.opencode_agent.snapshot import snapshot
+from responses_api_agents.opencode_agent.task_context import TaskToolContext
 
 
 LOG = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     session: SandboxSession[str]
     runtime: str
+    task_context: TaskToolContext = field(default_factory=TaskToolContext)
     sandbox_id: str | None = None
     model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
@@ -348,6 +350,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 self.activation_trajectory = trajectory
             else:
                 self.observations = observations
+                self.trajectory = trajectory
         except Exception:
             LOG.exception("Failed to parse OpenCode observations")
             observations = AgentObservationBundle(
@@ -408,6 +411,8 @@ class OpenCodeSandboxSession(AgentSessionState):
         try:
             if await self.read_text("task-environment.ready") != "ready\n":
                 raise ValueError("Invalid task environment initialization receipt")
+            if self.task_context.mcp_servers and await self.read_text("task-tools.ready") != "ready\n":
+                raise ValueError("Required task MCP connections were not confirmed")
         except Exception as error:
             raise RuntimeError(
                 format_error_message("OpenCode task environment initialization was not confirmed", stderr=self.stderr)

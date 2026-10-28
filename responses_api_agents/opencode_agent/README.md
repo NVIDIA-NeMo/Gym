@@ -117,7 +117,10 @@ receipt fails the activation even if the CLI ignored a plugin-loading error.
 
 The session path accepts one text task, optional system/developer text and
 `instructions`. Unsupported controls, images, history replay and required external
-HTTP/MCP tools are rejected. `context_window` and `max_output_tokens` are independent
+HTTP/MCP grants are rejected. With `task_tool_context: true`, owner-provided
+`/tmp/.nemo-gym/task.json` declarations instead enable native task-local MCP
+connections and skill paths. Missing MCP connections fail the activation before
+the first model call. This opt-in also advertises task-tool support to the environment. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Configure
 sampling on the Gym model server. Request-level overrides are not silently ignored.
 Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
@@ -220,3 +223,7 @@ exist; the sandbox owner supplies mounts or image contents.
 `dummy_model` compatibility alias. Benchmarks can set the native ID to retain
 family-specific prompts, tools and defaults behind a Gym model route; the route
 still controls the actual provider/model. Native ID changes can affect scores.
+
+Single-turn session close also returns confirmed cleanup and the captured trajectory.
+Borrowed sessions honor `SandboxAccess.user` for setup and execution. Non-root
+images must supply the runtime prerequisites described above.

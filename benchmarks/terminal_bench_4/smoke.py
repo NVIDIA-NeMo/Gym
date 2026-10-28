@@ -23,12 +23,12 @@ from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
 from nemo_gym import global_config, server_utils
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.server_utils import BaseServerConfig, GlobalAIOHTTPAsyncClientConfig, ServerClient
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
-from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
@@ -80,6 +80,9 @@ async def main(args):
             "responses_api_agents/miniswe_sandboxed_agent/harness.py",
             "responses_api_agents/miniswe_sandboxed_agent/bootstrap.py",
             "responses_api_agents/miniswe_sandboxed_agent/mcp_client.py",
+            "environment_servers/terminal_bench_4/app.py",
+            "responses_api_agents/opencode_agent/app.py",
+            "benchmarks/terminal_bench_4/opencode.yaml",
         ]
     ]
     (args.output / "run.json").write_text(
@@ -102,7 +105,29 @@ async def main(args):
             indent=2,
         )
     )
-    config = OmegaConf.load(root / "resources.yaml")
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [str(root / f"{args.harness}.yaml")],
+                    "policy_model_name": args.model,
+                    "policy_model": {
+                        "responses_api_models": {
+                            "openai_model": {
+                                "entrypoint": "app.py",
+                                "openai_base_url": args.model_url,
+                                "openai_api_key": os.environ["OPENAI_API_KEY"],
+                                "openai_model": args.model,
+                            }
+                        }
+                    },
+                }
+            ),
+        )
+    )
     config.observability_enabled = True
     capture_dir = args.output / "model_calls"
     config.model_call_capture_dir = str(capture_dir)
@@ -112,14 +137,13 @@ async def main(args):
     config.tb4_agent_artifacts_dir = str(args.output / "agent")
     config.tb4_max_steps = args.steps
     agent_name = "terminal_bench_4_" + args.harness
-    profile = OmegaConf.load(root / f"{args.harness}.yaml")
-    del profile["config_paths"]
-    config = OmegaConf.merge(config, profile)
     ports = {name: free_port() for name in ["terminal_bench_4", agent_name, "policy_model"]}
     resource_config = config.terminal_bench_4.resources_servers.terminal_bench_4
     resource_config.task_download_dir = str(args.task_cache)
     resource_config.environment.sandbox_metadata["nemo-gym.nvidia.com/run"] = args.output.name
     agent_config = next(iter(config[agent_name].responses_api_agents.values()))
+    if args.harness == "opencode":
+        agent_config.max_output_tokens = 16384
     model_config = {
         "host": host,
         "port": ports["policy_model"],
@@ -140,15 +164,47 @@ async def main(args):
         config=TerminalBench4Config.model_validate(OmegaConf.to_container(resource_config, resolve=True)),
         server_client=client,
     )
-    agent = MiniSWESandboxedAgent(
-        config=MiniSWESandboxedConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
-        server_client=client,
-    )
+    if args.harness == "opencode":
+        from environment_servers.terminal_bench_4.app import (
+            TerminalBench4EnvironmentConfig,
+            TerminalBench4EnvironmentServer,
+        )
+        from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
+
+        agent = OpenCodeAgent(
+            config=OpenCodeAgentConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
+            server_client=client,
+        )
+        environment_name = agent_name + "_environment_server"
+        ports[environment_name] = free_port()
+        environment_config = config[environment_name].environment_servers.terminal_bench_4
+        environment_config.update(name=environment_name, host=host, port=ports[environment_name])
+        environment = TerminalBench4EnvironmentServer(
+            config=TerminalBench4EnvironmentConfig.model_validate(
+                OmegaConf.to_container(environment_config, resolve=True)
+            ),
+            server_client=client,
+        )
+        run_name = environment_name
+    else:
+        from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
+
+        agent = MiniSWESandboxedAgent(
+            config=MiniSWESandboxedConfig.model_validate(OmegaConf.to_container(agent_config, resolve=True)),
+            server_client=client,
+        )
+        run_name = agent_name
     model = SimpleModelServer(config=SimpleModelServerConfig.model_validate(model_config), server_client=client)
     servers = [
         uvicorn.Server(uvicorn.Config(instance.setup_webserver(), host=host, port=ports[name], log_level="warning"))
         for name, instance in [("terminal_bench_4", resource), (agent_name, agent), ("policy_model", model)]
     ]
+    if args.harness == "opencode":
+        servers.append(
+            uvicorn.Server(
+                uvicorn.Config(environment.setup_webserver(), host=host, port=ports[run_name], log_level="warning")
+            )
+        )
     workers = [asyncio.create_task(s.serve()) for s in servers]
     while not all(s.started for s in servers):
         if any(t.done() for t in workers):
@@ -173,7 +229,7 @@ async def main(args):
             try:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as session:
                     async with session.post(
-                        f"http://{host}:{ports[agent_name]}/run",
+                        f"http://{host}:{ports[run_name]}/run",
                         json={
                             "task_id": f"terminal-bench/{task['name']}",
                             "task_name": "terminal-bench/" + task["name"],
@@ -183,7 +239,9 @@ async def main(args):
                             "_ng_rollout_id": f"{args.output.name}-{task['name']}",
                             "_ng_task_index": manifest["tasks"].index(task),
                             "_ng_rollout_index": 0,
-                            "responses_create_params": {"input": [], "max_output_tokens": 16384},
+                            "responses_create_params": {"input": []}
+                            if args.harness == "opencode"
+                            else {"input": [], "max_output_tokens": 16384},
                         },
                     ) as response:
                         text = await response.text()
@@ -256,7 +314,7 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1", help="Service bind address reachable from the sandboxes")
-    parser.add_argument("--harness", choices=["miniswe"], default="miniswe")
+    parser.add_argument("--harness", choices=["miniswe", "opencode"], default="miniswe")
     parser.add_argument("--tasks", nargs="*")
     parser.add_argument("--exclude-tasks", nargs="*", default=[])
     parser.add_argument("--category", choices=["cpu", "compose", "gpu"])

@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - benchmarks/terminal_bench_4/opencode.yaml
+terminal_bench_4_opencode:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/terminal_bench_4/data/example.jsonl

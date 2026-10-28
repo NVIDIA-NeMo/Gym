@@ -8,6 +8,27 @@
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
   adapter, and task-local MCP CLI.
 
+- `terminal_bench_4/opencode`: OpenCode **1.17.11**, using its native tools,
+  task-local MCP servers and skills in the same resource-owned task containers.
+  Subagents and web tools are disabled. The environment closes OpenCode before
+  collecting task files and running the existing separate verifier.
+
+To use OpenCode, replace `terminal_bench_4/miniswe` with
+`terminal_bench_4/opencode` in the preparation and run commands below. Sampling
+and output-token overrides belong on the Gym model server; the OpenCode adapter
+rejects unsupported request-level controls. Configure its context and output
+budgets under `terminal_bench_4_opencode.responses_api_agents.opencode_agent`.
+`tb4_agent_max_timeout_sec` caps the task's execution deadline for either profile;
+mini-SWE's step and command-timeout settings do not apply to OpenCode.
+
+OpenCode uses named `tb4_sandbox`, `tb4_sandbox_cpu`, and `tb4_sandbox_gpu`
+connections so agent and Resources reconnect to the same deployment. A custom
+provider must be defined at the top level and selected through
+`environment.sandbox_provider`; split deployments also supply
+`environment.sandbox_provider_by_pool`. OpenCode requires a task working directory
+outside `/` and `/tmp`, plus its documented runtime prerequisites. See the
+[session environment](../../environment_servers/terminal_bench_4/README.md).
+
 ## Artificial Analysis comparison
 
 The version, prompts, 500-step limit, and 30-second command timeout follow

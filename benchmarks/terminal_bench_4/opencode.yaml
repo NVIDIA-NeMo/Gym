@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - benchmarks/terminal_bench_4/resources.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+
+terminal_bench_4:
+  resources_servers:
+    terminal_bench_4:
+      environment:
+        sandbox_provider: tb4_sandbox
+        sandbox_provider_by_pool: {cpu: tb4_sandbox_cpu, gpu: tb4_sandbox_gpu}
+
+tb4_sandbox_cpu:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_CPU,${oc.env:OPENSANDBOX_DOMAIN,localhost}}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_CPU,${oc.env:OPENSANDBOX_API_KEY,""}}
+      protocol: ${tb4_sandbox.opensandbox.connection.protocol}
+      use_server_proxy: ${tb4_sandbox.opensandbox.connection.use_server_proxy}
+      transport_backend: ${tb4_sandbox.opensandbox.connection.transport_backend}
+      tls_verify: ${tb4_sandbox.opensandbox.connection.tls_verify}
+    create: ${tb4_sandbox.opensandbox.create}
+    operations: ${tb4_sandbox.opensandbox.operations}
+    networking: ${tb4_sandbox.opensandbox.networking}
+    runtime_requirements: ${tb4_sandbox.opensandbox.runtime_requirements}
+
+tb4_sandbox_gpu:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_GPU,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_GPU,""}
+      protocol: ${tb4_sandbox.opensandbox.connection.protocol}
+      use_server_proxy: ${tb4_sandbox.opensandbox.connection.use_server_proxy}
+      transport_backend: ${tb4_sandbox.opensandbox.connection.transport_backend}
+      tls_verify: ${tb4_sandbox.opensandbox.connection.tls_verify}
+    create: ${tb4_sandbox.opensandbox.create}
+    operations: ${tb4_sandbox.opensandbox.operations}
+    networking: ${tb4_sandbox.opensandbox.networking}
+    runtime_requirements: ${tb4_sandbox.opensandbox.runtime_requirements}
+
+terminal_bench_4_opencode:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      opencode_version: 1.17.11
+      task_tool_context: true
+      timeout: 28800
+      max_output_tokens: ${oc.select:tb4_opencode_max_output_tokens,32000}
+      context_window: ${oc.select:tb4_opencode_context_window,262144}
+      sandbox_model_id: ${policy_model_name}
+      session_close_timeout_seconds: 120
+      opencode_config:
+        # Clear inherited legacy tool flags: OpenCode merges them before permissions,
+        # which can reorder the catch-all allow after explicit tool denials.
+        tools: null
+        permission:
+          bash: allow
+          external_directory: allow
+          task: deny
+          webfetch: deny
+          websearch: deny
+      datasets:
+        - name: terminal_bench_4
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_4/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_4/prepare.py
+          num_repeats: 1
+
+terminal_bench_4_opencode_environment_server:
+  environment_servers:
+    terminal_bench_4:
+      entrypoint: app.py
+      agent_server: {type: responses_api_agents, name: terminal_bench_4_opencode}
+      resources_server: {type: resources_servers, name: terminal_bench_4}
+      agent_max_timeout_sec: ${oc.select:tb4_agent_max_timeout_sec,null}
+      cleanup_timeout_seconds: 300

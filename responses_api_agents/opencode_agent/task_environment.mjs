@@ -5,14 +5,25 @@ import { readFile, writeFile } from "node:fs/promises";
 
 // OpenCode keeps its own database/config isolated, but task commands must use
 // the same home and XDG directories as the benchmark verifier.
-export const TaskEnvironment = async () => {
+export const TaskEnvironment = async ({ client } = {}) => {
   const env = JSON.parse(await readFile(new URL("./task-env.json", import.meta.url), "utf8"));
   for (const key of ["HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"]) {
     if (typeof env?.[key] !== "string" || !env[key].startsWith("/")) {
       throw new Error(`Invalid task directory: ${key}`);
     }
   }
+  const required = JSON.parse(process.env.NEMO_GYM_REQUIRED_MCP_SERVERS || "[]");
+  let checked = false;
   const hooks = {
+    "chat.params": async () => {
+      if (checked || required.length === 0) return;
+      const { data, error } = await client.mcp.status();
+      if (error || required.some((name) => data?.[name]?.status !== "connected")) {
+        throw new Error("Required task MCP tools are unavailable");
+      }
+      await writeFile(new URL("./task-tools.ready", import.meta.url), "ready\n");
+      checked = true;
+    },
     "shell.env": async (_input, output) => {
       Object.assign(output.env, env);
     },

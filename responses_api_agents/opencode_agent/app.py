@@ -94,6 +94,7 @@ from responses_api_agents.opencode_agent.runtime import (
 )
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
+from responses_api_agents.opencode_agent.task_context import read_task_context
 
 
 LOG = logging.getLogger(__name__)
@@ -186,6 +187,7 @@ class _ActivationDeadlineExpired(Exception):
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
+    task_tool_context: bool = False
     concurrency: int = 8
     command: str = "opencode"
     model: str = "openai/gpt-4o-mini"
@@ -665,6 +667,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )
 
+    def supports_task_tool_context(self) -> bool:
+        """Advertise opt-in native MCP and skill support for owner-provided task declarations."""
+        return self.config.task_tool_context
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
@@ -727,6 +733,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         else:
             try:
                 sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
+                if body.sandbox_access.user is not None:
+                    sandbox.set_default_user(body.sandbox_access.user)
             except BaseException:
                 await provider.aclose()
                 raise
@@ -752,6 +760,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             state.sandbox_id = sandbox.sandbox_id
+            if self.config.task_tool_context:
+                state.task_context = await read_task_context(sandbox)
             command = _sandbox_prepare_command(workdir, directory, runtime)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
@@ -810,7 +820,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 cleanup_confirmed=state.session.cleanup_confirmed,
             )
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id, agent_observations=observations
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            trajectory=state.trajectory,
+            cleanup_confirmed=state.session.cleanup_confirmed,
         )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
@@ -1126,11 +1139,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     },
                 }
             },
-            **self.config.opencode_config,
+            **copy.deepcopy(self.config.opencode_config),
         }
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
+        config.update(state.task_context.opencode_config())
+        if config.get("tools") is None:
+            config.pop("tools", None)
+        if state.task_context.skills_dir:
+            permission = config.setdefault("permission", {})
+            if isinstance(permission, str):
+                permission = config["permission"] = {"*": permission}
+            permission["skill"] = "allow"
         if self._model_call_capture_enabled():
             apply_observability_patch(config, plugin_path=Path(state.persistent_directory) / OBSERVABILITY_PATCH.name)
         config.setdefault("plugin", []).append((Path(state.session.session_dir) / "task_environment.mjs").as_uri())
@@ -1152,6 +1173,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "XDG_CACHE_HOME": f"{state.persistent_directory}/cache",
                 "XDG_STATE_HOME": f"{state.persistent_directory}/state",
                 **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
+                "NEMO_GYM_REQUIRED_MCP_SERVERS": json.dumps(
+                    [server.name for server in state.task_context.mcp_servers]
+                ),
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",

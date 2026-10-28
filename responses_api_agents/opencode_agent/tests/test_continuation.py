@@ -742,7 +742,7 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
         assert not agent._require_agent_session(request.agent_session_id).is_continuation
         assert response.json() == {"agent_session_id": request.agent_session_id, "supports_task_tool_context": False}
         receipt = close(client, request)
-        assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
+        assert receipt["cleanup_confirmed"] is True and "trajectory" not in receipt
 
 
 def test_provider_preparation_timeout_does_not_brick_unstarted_session(setup, tmp_path):
