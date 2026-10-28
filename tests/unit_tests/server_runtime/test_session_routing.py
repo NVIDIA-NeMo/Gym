@@ -204,6 +204,13 @@ class SecretSigningServer(StateServer):
         return "a secret, not the server's name"
 
 
+class CookieNamingServer(StateServer):
+    """Names its session cookie itself, as a server a sandbox can reach may, so callers see no class name."""
+
+    def get_session_cookie_name(self) -> str:
+        return "sid_state"
+
+
 class Worker:
     """One worker of a resources server, wired as run_webserver wires it; no socket directory means one worker."""
 
@@ -233,7 +240,7 @@ class Worker:
             mcp_routing = dict(
                 mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(self.server)
             )
-        self.cookie_name = self.server.get_session_middleware_key()
+        self.cookie_name = self.server.get_session_cookie_name()
         self.socket_dir = socket_dir
         self.routing_id = install_session_routing(
             self.app,
@@ -362,7 +369,7 @@ class AgentWorker:
         )
         self.agent = _SessionAgent(config=config, server_client=MagicMock(spec=ServerClient), label=label)
         self.app = self.agent.setup_webserver()
-        self.cookie_name = self.agent.get_session_middleware_key()
+        self.cookie_name = self.agent.get_session_cookie_name()
         self.socket_dir = socket_dir
         self.routing_id = install_session_routing(
             self.app,
@@ -476,6 +483,16 @@ class TestTheSessionIdSources:
         # A later request with that cookie names the same session.
         assert a.post("/store", json={"value": 1}, cookie=seeded.cookies[b.cookie_name]).json() == {"worker": "b"}
         assert b.server.store == {"typed": 1}
+
+    def test_a_cookie_under_the_servers_own_name(self, socket_dir: str) -> None:
+        a = Worker("a", socket_dir, server_class=CookieNamingServer)
+        b = Worker("b", socket_dir, server_class=CookieNamingServer)
+        with a.client, b.client:
+            stored = a.post("/store", json={"value": 7})
+            assert list(stored.cookies) == ["sid_state"]
+            assert _set_cookies(stored, a.server.get_session_middleware_key()) == []
+            # The router reads the cookie under that name, so it reaches the worker that holds the session.
+            assert b.post("/take", cookie=stored.cookies["sid_state"]).json() == {"worker": "a", "value": 7}
 
     def test_a_cookie_and_a_token_signed_with_the_servers_secret(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, mcp=True, server_class=SecretSigningServer)
