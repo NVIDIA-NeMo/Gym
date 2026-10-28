@@ -1817,8 +1817,9 @@ def _build_response(
         if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
             raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
         exact_fields.pop("media_assets")
-        # Exact model calls, including parser retries, are the trainable units.
-        # Semantic step messages remain available through trajectory_transitions.
+        # Ordinary output is the loss-membership carrier. Exact sidecars retain
+        # every model call, including parser retries, while output contains only
+        # calls the agent accepted as executable actions.
         output = exact_fields.pop("model_call_output")
         if exact_trace_transport_version == 3:
             # The schema-3 sidecar and canonical output arrays retain all
@@ -1826,9 +1827,17 @@ def _build_response(
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
     terminal_response_id: Optional[str] = None
+    accepted_call_references: List[Dict[str, str]] = []
     if served_call_output and not capabilities["exact_model_call_evidence"]:
-        served_output, terminal_response_id = _served_model_call_output(model_calls)
-        if served_output:
+        (
+            served_output,
+            terminal_response_id,
+            accepted_call_references,
+        ) = _served_model_call_output(model_calls)
+        # Model-call evidence is authoritative for capture-backed membership.
+        # An empty accepted set must stay empty instead of falling back to
+        # synthesized step messages that may contain a rejected retry.
+        if model_calls:
             output = served_output
 
     response_dict: Dict[str, Any] = {
@@ -1893,34 +1902,54 @@ def _build_response(
     if terminal_response_id is not None:
         # Names the scored (last) generation by the id the model server served.
         response_fields["terminal_response_id"] = terminal_response_id
+    if accepted_call_references:
+        # NeMo-RL resolves these served response IDs against capture records.
+        # Keeping membership separate from response.output means rejected
+        # retries remain in the capture manifest as exact context evidence.
+        response_fields["ng_trajectory"] = {
+            "turns": [{"model_calls": accepted_call_references}]
+        }
     return OSWorldVerifyResponse(**response_fields)
 
 
 def _served_model_call_output(
     model_calls: List[Dict[str, Any]],
-) -> tuple[List[Dict[str, Any]], Optional[str]]:
-    """Return each served generation as the client received it, in call order.
+) -> tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, str]]]:
+    """Return accepted served generations and their capture identities.
 
     Capture fingerprints the content the model server served, which keeps the
     reasoning inline as ``<think>...</think>``. Step text strips that reasoning
     and omits parser-retry calls, so it cannot identify captured calls.
 
+    Rejected parser retries stay in ``model_calls`` and the capture manifest as
+    exact evidence/context ancestry, but they are not ordinary output and do
+    not receive policy loss by default.
+
     A call with no response never reached the model. A call whose served
     content is empty is a local stand-in (for example the model server's
     context-overflow reply), which generated nothing and was never captured.
-    Both are skipped. The second value is the served id of the last emitted
-    call, which is the scored generation.
+    Both are skipped. Accepted calls must carry the response ID served by the
+    model endpoint, which provides an unambiguous join even when retries have
+    identical content.
     """
 
     output: List[Dict[str, Any]] = []
     terminal_response_id: Optional[str] = None
+    references: List[Dict[str, str]] = []
     for model_call in model_calls:
+        if model_call.get("accepted") is not True:
+            continue
         response = model_call.get("response")
         if not isinstance(response, Mapping):
             continue
         raw_content = response.get("raw_content")
         if not isinstance(raw_content, str) or not raw_content:
             continue
+        response_id = response.get("response_id")
+        if not isinstance(response_id, str) or not response_id:
+            raise ValueError(
+                "Accepted OSWorld model call is missing its served response_id"
+            )
         output.append(
             {
                 "id": f"msg-call-{model_call['turn_id']}",
@@ -1930,9 +1959,9 @@ def _served_model_call_output(
                 "content": [{"type": "output_text", "annotations": [], "text": raw_content}],
             }
         )
-        response_id = response.get("response_id")
-        terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
-    return output, terminal_response_id
+        references.append({"response_id": response_id})
+        terminal_response_id = response_id
+    return output, terminal_response_id, references
 
 
 def _empty_response(

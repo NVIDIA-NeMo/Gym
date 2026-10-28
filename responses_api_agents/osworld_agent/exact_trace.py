@@ -424,6 +424,7 @@ def build_exact_trace_envelope(
                 "completion_id": completion_id,
                 "action_id": action_id,
                 "model_call_id": model_call_id,
+                "response_id": model_call.get("response_id"),
                 "turn_id": turn_id,
                 "environment_step": model_call.get("environment_step"),
                 "parse_attempt": model_call.get("parse_attempt"),
@@ -468,7 +469,11 @@ def build_exact_trace_envelope(
         }
         if model_response.get("routed_experts") is not None:
             assistant_item["routed_experts"] = model_response["routed_experts"]
-        model_call_output.append(assistant_item)
+        # Keep every call in the evidence sidecars above, including parser
+        # retries, but expose only accepted actions through ordinary output.
+        # Output is the training-membership carrier; evidence is not.
+        if model_call.get("accepted") is True:
+            model_call_output.append(assistant_item)
 
         previous_context = [*prompt_token_ids, *sampled_token_ids]
         previous_media_ids = media_ids

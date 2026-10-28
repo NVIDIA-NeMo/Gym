@@ -1464,7 +1464,10 @@ def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
 
     response = _build_response(request, result, "test-policy", 1.0, 0.9)
 
-    assert len(response.response.output) == 2
+    # Rejected retries remain exact evidence, but ordinary output carries only
+    # accepted-call loss membership.
+    assert len(response.response.output) == 1
+    assert response.response.output[0].content[0].text == "sample 2"
     assert [item["accepted"] for item in response.response.completion_evidence or []] == [
         False,
         True,

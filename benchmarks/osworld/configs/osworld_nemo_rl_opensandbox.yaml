@@ -42,5 +42,9 @@ osworld_nano_omni_agent:
           _delete_key: keep_images
           low_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_LOW_WATER,3}}
           high_water: ${oc.decode:${oc.env:OSWORLD_HISTORY_HIGH_WATER,10}}
+      agent_kwargs:
+        # Preserve the exact served completion between live turns, and keep
+        # each turn's Code when the 3->10->3 policy compacts older turns.
+        assistant_history_replay: ${oc.env:OSWORLD_ASSISTANT_HISTORY_REPLAY,raw_full}
       task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
       exact_trace_transport_version: 3

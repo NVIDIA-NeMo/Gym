@@ -409,9 +409,17 @@ def collect_model_calls(
             parsed_actions = raw_call.get("parsed_actions")
             if not isinstance(parsed_actions, list):
                 parsed_actions = []
+            response_id = response.get("response_id") if isinstance(response, Mapping) else None
+            if response_id is not None and (
+                not isinstance(response_id, str) or not response_id
+            ):
+                raise ValueError(
+                    f"OSWorld step {step_position} model response_id must be a non-empty string"
+                )
             model_calls.append(
                 {
                     "model_call_id": model_call_id,
+                    "response_id": response_id,
                     "turn_id": len(model_calls) + 1,
                     "environment_step": step.get("step", step_position),
                     "step_position": step_position,
@@ -570,6 +578,7 @@ def build_trajectory_envelope(
     trajectory_model_calls = [
         {
             "model_call_id": call["model_call_id"],
+            "response_id": call["response_id"],
             "turn_id": call["turn_id"],
             "environment_step": call["environment_step"],
             "parse_attempt": call["parse_attempt"],
@@ -600,6 +609,7 @@ def build_trajectory_envelope(
     model_call_summaries = [
         {
             "model_call_id": call["model_call_id"],
+            "response_id": call["response_id"],
             "turn_id": call["turn_id"],
             "environment_step": call["environment_step"],
             "parse_attempt": call["parse_attempt"],

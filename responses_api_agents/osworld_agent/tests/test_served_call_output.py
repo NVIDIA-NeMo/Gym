@@ -149,21 +149,32 @@ def _captured_fingerprint(response_id: str) -> str:
     return output_item_fingerprint(item)
 
 
-def test_capture_on_output_returns_every_served_generation_in_call_order() -> None:
+def test_capture_on_output_selects_only_accepted_calls_by_served_id() -> None:
     result = _capture_on_result()
     response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
     dumped = response.model_dump()
 
     output = dumped["response"]["output"]
-    assert [item["id"] for item in output] == ["msg-call-1", "msg-call-2", "msg-call-3", "msg-call-6"]
+    assert [item["id"] for item in output] == ["msg-call-1", "msg-call-3", "msg-call-6"]
     assert [item["content"][0]["text"] for item in output] == [
-        _SERVED[rid] for rid in ("chatcmpl-1", "chatcmpl-2", "chatcmpl-3", "chatcmpl-5")
+        _SERVED[rid] for rid in ("chatcmpl-1", "chatcmpl-3", "chatcmpl-5")
     ]
     # Each returned item carries the same content witness capture recorded.
     assert [output_item_fingerprint(item) for item in output] == [
-        _captured_fingerprint(rid) for rid in ("chatcmpl-1", "chatcmpl-2", "chatcmpl-3", "chatcmpl-5")
+        _captured_fingerprint(rid) for rid in ("chatcmpl-1", "chatcmpl-3", "chatcmpl-5")
     ]
     assert dumped["terminal_response_id"] == "chatcmpl-5"
+    assert dumped["ng_trajectory"] == {
+        "turns": [
+            {
+                "model_calls": [
+                    {"response_id": "chatcmpl-1"},
+                    {"response_id": "chatcmpl-3"},
+                    {"response_id": "chatcmpl-5"},
+                ]
+            }
+        ]
+    }
     # Semantic per-step evidence is unchanged.
     transitions = dumped["response"]["trajectory_transitions"]
     assert [t["action"]["raw_completion"] for t in transitions] == ["pyautogui.click(1, 2)", "pyautogui.click(3, 4)", "DONE"]
@@ -187,6 +198,24 @@ def test_capture_on_without_call_evidence_keeps_step_messages() -> None:
 
     assert [item["id"] for item in dumped["response"]["output"]] == ["msg-step-0", "msg-step-1", "msg-step-2"]
     assert "terminal_response_id" not in dumped
+
+
+def test_capture_on_with_no_accepted_calls_returns_empty_membership() -> None:
+    result = _capture_on_result()
+    for step in result["steps"]:
+        for call in step["info"]["agent"]["model_calls"]:
+            call["accepted"] = False
+            call["parse_error"] = "bad action"
+
+    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
+    dumped = response.model_dump()
+
+    assert dumped["response"]["output"] == []
+    assert "terminal_response_id" not in dumped
+    assert "ng_trajectory" not in dumped
+    model_calls = dumped["response"]["trajectory_model_calls"]
+    assert len(model_calls) == 6
+    assert all(call["accepted"] is False for call in model_calls)
 
 
 @patch("openai.DefaultHttpxClient")
