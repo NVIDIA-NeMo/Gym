@@ -149,21 +149,35 @@ def install_moved_module_finder() -> None:
         sys.meta_path.insert(0, MovedModuleFinder(MOVED_MODULES))
 
 
+def _names_were_listed_under(module_name: str) -> list[str]:
+    """`module_name`, then each old path that `MOVED_MODULES` maps to it, directly or as part of a moved package."""
+    paths = [module_name]
+    for old, moved in MOVED_MODULES.items():
+        if module_name == moved.new or module_name.startswith(moved.new + "."):
+            paths.append(old + module_name[len(moved.new) :])
+    return paths
+
+
 def moved_names_getattr(module_name: str) -> Callable[[str], Any]:
     """Build a module `__getattr__` that serves the names `MOVED_NAMES[module_name]` lists.
 
     Assign the result to `__getattr__` in the old module.
     Names the old module still defines or imports never reach it.
+    If the module itself moves later, its entries stay under its old path, and this `__getattr__`
+    keeps serving them once the module runs under its new name.
     """
 
     def __getattr__(name: str) -> Any:
-        moved = MOVED_NAMES.get(module_name, {}).get(name)
-        if moved is None:
+        for listed_as in _names_were_listed_under(module_name):
+            moved = MOVED_NAMES.get(listed_as, {}).get(name)
+            if moved is not None:
+                break
+        else:
             raise AttributeError(f"module {module_name!r} has no attribute {name!r}")
         new_module, _, new_name = moved.new.partition(":")
         new_name = new_name or name
         warnings.warn(
-            deprecation_message(f"{module_name}.{name}", moved, f"{new_module}.{new_name}"),
+            deprecation_message(f"{listed_as}.{name}", moved, f"{new_module}.{new_name}"),
             DeprecationWarning,
             stacklevel=2,
         )

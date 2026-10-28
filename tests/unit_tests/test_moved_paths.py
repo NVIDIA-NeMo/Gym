@@ -19,6 +19,7 @@ import importlib.util
 import json
 import pickle
 import pkgutil
+import re
 import sys
 import textwrap
 import types
@@ -219,6 +220,29 @@ class TestMovedNames:
     def test_unknown_name_raises_attribute_error(self) -> None:
         with pytest.raises(AttributeError, match="has no attribute 'nothing'"):
             moved_names_getattr("nemo_gym.fake_old")("nothing")
+
+    @pytest.mark.parametrize(
+        ("old_module", "new_module", "running_as"),
+        [
+            ("nemo_gym.fake_old", "nemo_gym.pkg.fake_new", "nemo_gym.pkg.fake_new"),
+            ("nemo_gym.fake_oldpkg", "nemo_gym.pkg.fake_newpkg", "nemo_gym.pkg.fake_newpkg.types"),
+        ],
+    )
+    def test_names_listed_under_a_module_that_moved_later_still_resolve(
+        self, monkeypatch: pytest.MonkeyPatch, old_module: str, new_module: str, running_as: str
+    ) -> None:
+        # A module that served moved names can move itself: its entries stay under its old path, and its
+        # `__getattr__`, now built with the new module name, must still find them.
+        listed_as = old_module + running_as[len(new_module) :]
+        monkeypatch.setitem(
+            moved_paths.MOVED_NAMES, listed_as, {"VERSION": MovedPath(new="nemo_gym.package_info", since="0.8.0")}
+        )
+        monkeypatch.setitem(moved_paths.MOVED_MODULES, old_module, MovedPath(new=new_module, since="0.8.0"))
+        getter = moved_names_getattr(running_as)
+        with pytest.warns(DeprecationWarning, match=rf"`{re.escape(listed_as)}.VERSION` moved to"):
+            assert getter("VERSION") is importlib.import_module("nemo_gym.package_info").VERSION
+        with pytest.raises(AttributeError, match="has no attribute 'nothing'"):
+            getter("nothing")
 
 
 class TestDeprecationWindow:
