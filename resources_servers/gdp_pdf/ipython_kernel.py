@@ -131,7 +131,7 @@ def run(timeout: float, max_chars: int) -> None:
             elif kind in ("execute_result", "display_data"):
                 data = content["data"]
                 image_type = next((mime for mime in ("image/png", "image/jpeg") if mime in data), None)
-                if image_type:
+                if image_type and data[image_type]:
                     output.append(
                         {
                             "type": "input_image",
@@ -139,6 +139,8 @@ def run(timeout: float, max_chars: int) -> None:
                             "detail": "auto",
                         }
                     )
+                elif image_type:
+                    text = "[Cannot display image: the image data is empty.]\n"
                 elif "text/plain" in data:
                     text = data["text/plain"] + "\n"
             elif kind == "error":
