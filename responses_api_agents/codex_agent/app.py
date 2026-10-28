@@ -876,7 +876,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
             else:
                 LOG.warning("Codex event transcript unavailable after interrupted activation")
         events = []
-        for line in raw.splitlines():
+        # The runner copies event lines verbatim; JSON may hold U+2028 and similar inside a string.
+        for line in raw.split("\n"):
+            if not line.strip():
+                continue
             try:
                 observed_at, event = json.loads(line)
                 if isinstance(event, dict):

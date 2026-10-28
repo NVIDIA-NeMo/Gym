@@ -629,6 +629,25 @@ def test_cookie_identity_and_single_activation(setup):
     sandbox.launch.assert_awaited_once()
 
 
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_unicode_line_separators_inside_events_keep_the_message(setup, separator):
+    agent, sandbox = setup
+    records = [json.loads(line) for line in events().split("\n")]
+    message = next(event for _, event in records if event.get("item", {}).get("type") == "agent_message")
+    message["item"]["text"] = f"A{separator}B \u00e9"
+    # The runner copies each CLI line verbatim; Codex leaves these characters unescaped.
+    sandbox.events = "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records) + "[1.0, {bad\n"
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        body = result.json()
+        assert body["status"] == "completed"
+        texts = [part["text"] for item in body["output"] if item["type"] == "message" for part in item["content"]]
+        assert texts == [f"A{separator}B \u00e9"]
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
 @pytest.mark.parametrize("reason,expected", [("error", "failed"), ("aborted", "failed")])
 def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
     agent, sandbox = setup

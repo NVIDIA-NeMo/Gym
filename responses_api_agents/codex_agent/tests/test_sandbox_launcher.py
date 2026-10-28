@@ -185,6 +185,52 @@ def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
     assert json.loads(launched.stdout) == {"type": "turn.completed", "result": "done"}
 
 
+@pytest.mark.parametrize("fault", ["timeout", "truncated_chunk", "truncated_length"])
+def test_broken_429_body_is_recorded_and_retried(tmp_path, fault):
+    release = Event()
+    requests = []
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append(self.path)
+            if len(requests) > 1:
+                self.send_response(200)
+                self.send_header("Content-Length", "4")
+                self.end_headers()
+                self.wfile.write(b"done")
+                return
+            self.send_response(429)
+            self.send_header("Retry-After", "0")
+            if fault == "truncated_chunk":
+                self.send_header("Transfer-Encoding", "chunked")
+            elif fault == "truncated_length":
+                self.send_header("Content-Length", "1000")
+            self.end_headers()
+            if fault == "timeout":
+                release.wait(2)
+            elif fault == "truncated_chunk":
+                self.wfile.write(b"20\r\nslow down")
+            else:
+                self.wfile.write(b"slow down")
+
+    attempts_path = tmp_path / "attempts.jsonl"
+    with upstream_server(Upstream) as upstream:
+        try:
+            with rate_limit_proxy(upstream, attempts_path, timeout=0.3) as proxy:
+                with urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=10) as response:
+                    assert (response.status, response.read()) == (200, b"done")
+        finally:
+            release.set()
+    records = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    assert [record["status"] for record in records] == [429, 200]
+    assert records[0]["transport_error"]
+    assert "transport_error" not in records[1]
+
+
 @pytest.mark.parametrize("fault", ["timeout", "truncated_chunk", "truncated_length", "server_error"])
 def test_body_failure_retains_http_status_and_transport_error(tmp_path, fault):
     release = Event()

@@ -111,8 +111,16 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
         }
         const attemptRecord = { status: upstream.statusCode };
         if (upstream.statusCode === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
-            upstream.resume();
-            await new Promise((resolve) => upstream.on("close", resolve));
+            // A cut-short or stalled body must not escape this request, and its attempt is still recorded.
+            let error = null;
+            await new Promise((resolve) => {
+                upstream.on("error", (cause) => {
+                    error ??= cause.message;
+                });
+                upstream.once("close", resolve);
+                upstream.resume();
+            });
+            if (error || !upstream.complete) attemptRecord.transport_error = error ?? "upstream response ended early";
             record(attemptRecord);
             await sleep(retryDelay(upstream.headers["retry-after"], attempt) * 1000);
             continue;
