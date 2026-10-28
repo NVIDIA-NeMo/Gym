@@ -22,6 +22,8 @@ nl2repobench_opencode_resources_server:
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
+      # Same grading as opencode.yaml: NL2RepoBench's own protocol. Use grading_protocol=gym_strict to resume older runs.
+      grading_protocol: upstream
 
 nl2repobench_opencode_sandboxed_agent:
   _inherit_from: openhands_sdk_sandboxed_agent

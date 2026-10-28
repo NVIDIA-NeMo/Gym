@@ -311,3 +311,86 @@ def test_collect_command_excludes_precede_positional_args() -> None:
     ).stdout
     assert "src/a.py" in listing
     assert ".git" not in listing
+
+
+# --- grading_protocol="upstream" -----------------------------------------------------------------
+
+
+def _resolved_task(task_assets: Path):
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    return _resolve_task(NL2RepoBenchVerifyRequest.model_validate(_request()), server._task_store)
+
+
+def _exec_result(return_code: int, stdout: str = "") -> MagicMock:
+    return MagicMock(return_code=return_code, stdout=stdout, stderr="")
+
+
+def test_parse_pytest_upstream_sums_every_line_of_every_pytest_command() -> None:
+    outputs = ["===== 3 passed, 1 failed in 0.4s =====", "2 passed\nnoise\n1 error in 0.1s"]
+    assert app_module._parse_pytest_upstream(outputs) == (5, 1, 1)
+    assert app_module._parse_pytest_upstream([]) == (0, 0, 0)
+
+
+def test_upstream_restore_command_deletes_agent_packaging_and_tests_but_keeps_image_files(tmp_path: Path) -> None:
+    # The grading image's /workspace already holds the real packaging and held-out tests; the agent's copies of those
+    # must be dropped so the image's versions are what pip and pytest see, while the agent's code is laid on top.
+    image_ws = tmp_path / "workspace"
+    (image_ws / "tests").mkdir(parents=True)
+    (image_ws / "pyproject.toml").write_text("real", encoding="utf-8")
+    (image_ws / "tests" / "test_real.py").write_text("real test", encoding="utf-8")
+    agent = tmp_path / "agent"
+    (agent / "pkg").mkdir(parents=True)
+    (agent / "tests").mkdir()
+    (agent / "pyproject.toml").write_text("broken", encoding="utf-8")
+    (agent / "pkg" / "setup.cfg").write_text("nested packaging file", encoding="utf-8")
+    (agent / "pkg" / "__init__.py").write_text("code", encoding="utf-8")
+    (agent / "tests" / "test_agent.py").write_text("agent test", encoding="utf-8")
+    tar_path = tmp_path / "workspace.tar.gz"
+    subprocess.run(["tar", "czf", str(tar_path), "-C", str(agent), "."], check=True)
+
+    command = app_module._upstream_restore_command(
+        ["tests"], tar_path=str(tar_path), workspace=str(image_ws), stage=str(tmp_path / "stage")
+    )
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (image_ws / "pyproject.toml").read_text(encoding="utf-8") == "real"
+    assert (image_ws / "tests" / "test_real.py").exists()
+    assert not (image_ws / "tests" / "test_agent.py").exists()
+    assert (image_ws / "pkg" / "__init__.py").read_text(encoding="utf-8") == "code"
+    assert not (image_ws / "pkg" / "setup.cfg").exists()
+
+
+async def test_upstream_protocol_runs_every_command_and_scores_pytest(task_assets: Path) -> None:
+    config = _config(task_assets).model_copy(update={"grading_protocol": "upstream"})
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [
+        _exec_result(0),  # mkdir -p /workspace
+        _exec_result(0),  # restore
+        _exec_result(1, "ERROR: install failed"),  # pip install -e .
+        _exec_result(1, "===== 3 passed, 2 failed in 0.5s ====="),  # pytest
+    ]
+
+    result = await server._run_verifier(sandbox, _resolved_task(task_assets), b"tar-bytes")
+
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    assert "find " in commands[1] and "-name pyproject.toml" in commands[1]
+    assert all(command.startswith("export PYTHONPATH=/workspace") for command in commands[2:])
+    assert result.verifier_error is None
+    assert (result.tests_passed, result.tests_failed) == (3, 2)
+    assert result.reward == 3 / 5
+    assert result.test_output.startswith("[grading_protocol: upstream]")
+
+
+async def test_default_protocol_still_zeroes_on_install_failure(task_assets: Path) -> None:
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [_exec_result(0), _exec_result(0), _exec_result(1, "ERROR: install failed")]
+
+    result = await server._run_verifier(sandbox, _resolved_task(task_assets), b"tar-bytes")
+
+    assert sandbox.exec.await_args_list[1].args[0] == "tar xzf /tmp/workspace.tar.gz -C /workspace"
+    assert result.verifier_error == "install command failed: pip install -e ."
+    assert result.tests_passed == 0
+    assert result.reward == 0.0

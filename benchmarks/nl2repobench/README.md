@@ -32,5 +32,9 @@ On vahid_1016 tasks the guard identifiers come from the clone URL in `test_comma
 
 ## Grading notes
 verified-50 / vahid_1016 grading: reference clone + install, (optional) test-only dependency step, **purge of the reference implementation**, overlay of the agent's workspace, held-out tests; every mode grades in
-the per-task image for verified-50. Upstream grading is unchanged (tests in the agent's workspace on the pinned per-task image).
+the per-task image for verified-50. Upstream 104 grades with `grading_protocol: upstream` (since 2026-10-27), which follows NL2RepoBench's
+own post-processor: the agent's packaging files (setup.py, pyproject.toml, requirements*, ...) and its files at the held-out test paths
+are deleted, the rest is overlaid on the pinned per-task image's /workspace, PYTHONPATH=/workspace, every command runs, and the pytest
+commands' "N passed" lines are summed. Before that, runs used `gym_strict`: the agent's own packaging was installed as-is and the first
+failing command zeroed the row (about half of all rows), and agent-written tests at the held-out paths could inflate a score.
 Background, leak audit, residual risks: `sft_runs/lightning_vahid1016/testset/LEAK_AUDIT.md` in the parent repo.

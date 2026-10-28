@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import functools
+import json
+
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -26,6 +29,12 @@ def task_id(task: Task) -> str:
     return task.name
 
 
+@functools.lru_cache(maxsize=None)
+def _image_map(path: str) -> dict:
+    with open(path) as f:
+        return json.load(f)
+
+
 def task_image(task: Task, *, registry_template: str | None = None) -> str:
     """Return the pinned, immutable per-task base image.
 
@@ -35,6 +44,10 @@ def task_image(task: Task, *, registry_template: str | None = None) -> str:
     upstream's registry when not provided.
     """
 
+    if registry_template is not None and registry_template.startswith("map:"):
+        # "map:<json path>": explicit per-task image references ({task name: image}) for task sets whose images do not
+        # follow one naming template. Added 2026-10-24.
+        return _image_map(registry_template[4:])[task.name]
     if registry_template is not None:
         # Docker/OCI image references must be lowercase; some task names are not (e.g.
         # "LeapBeyond_scrubadub_pr54"). Scoped to the registry_template branch only - upstream's

@@ -177,6 +177,58 @@ for f in ("/root/.python_history", "/root/.bash_history"):
 print("scrubbed", removed)
 PYEOF"""
 
+_WORKSPACE_INSTALL_SCRUB_COMMAND = r"""python3 - <<'PYEOF'
+import glob, os, re, shutil
+IDENTS = set("__IDENTS__".split())
+norm = lambda s: re.sub(r"[-_.]", "", s.lower())
+removed = 0
+for d in ("/root/.cache/pip", "/root/.cache/uv", "/tmp/pip-cache"):
+    if os.path.isdir(d):
+        shutil.rmtree(d, ignore_errors=True); removed += 1
+roots = set(glob.glob("/usr/local/lib/python3*/site-packages") + glob.glob("/usr/lib/python3*/dist-packages")
+            + glob.glob("/usr/local/lib/python3*/dist-packages") + glob.glob("/usr/local/venv/lib/python3*/site-packages"))
+for root in roots:
+    for f in glob.glob(root + "/*.egg-link"):
+        if "/workspace" in open(f, errors="ignore").read() or norm(os.path.basename(f)[:-9]) in IDENTS:
+            os.remove(f); removed += 1
+    for f in glob.glob(root + "/*.pth") + glob.glob(root + "/__editable__*"):
+        if not os.path.isfile(f):
+            continue
+        lines = open(f, errors="ignore").read().splitlines(True)
+        keep = [l for l in lines if "/workspace" not in l]
+        if len(keep) != len(lines):
+            if keep and f.endswith(".pth"):
+                open(f, "w").writelines(keep)
+            else:
+                os.remove(f)
+            removed += 1
+    for di in glob.glob(root + "/*.dist-info") + glob.glob(root + "/*.egg-info"):
+        name = norm(re.sub(r"-\d.*$", "", os.path.basename(di).rsplit(".", 1)[0]))
+        try:
+            du = open(di + "/direct_url.json").read()
+        except OSError:
+            du = ""
+        if "file:///workspace" in du or name in IDENTS:
+            rec = di + "/RECORD"
+            if os.path.exists(rec):
+                for line in open(rec):
+                    p = os.path.normpath(os.path.join(root, line.split(",")[0]))
+                    if os.path.isfile(p) and not p.startswith(di):
+                        os.remove(p); removed += 1
+            shutil.rmtree(di, ignore_errors=True); removed += 1
+for b in glob.glob("/usr/local/bin/*"):
+    try:
+        if not os.path.isfile(b) or os.path.getsize(b) > 8192:
+            continue
+        t = open(b, errors="ignore").read()
+    except OSError:
+        continue
+    mods = re.findall(r"^\s*(?:from|import)\s+([A-Za-z0-9_]+)", t, re.M) + re.findall(r"__requires__\s*=\s*['\"]([^'\"=<>]+)", t)
+    if any(norm(m) in IDENTS for m in mods):
+        os.remove(b); removed += 1
+print("workspace-install scrub removed", removed)
+PYEOF"""
+
 # Timeout for the agent-side workspace collection tar command.
 WORKSPACE_COLLECT_TIMEOUT_S = 300.0
 # Per-command timeout for install/test commands run in the fresh verifier sandbox.
@@ -213,6 +265,74 @@ _PASSED_RE = re.compile(r"(\d+)\s+passed")
 _FAILED_RE = re.compile(r"(\d+)\s+failed")
 _ERROR_RE = re.compile(r"(\d+)\s+error")
 
+# grading_protocol="upstream": NL2RepoBench's own grader (data/cache/source/openhands/post_processor.py). It deletes these
+# agent-written files anywhere in the workspace (remove_package_files) and the agent's files at the task's test_files paths
+# (remove_test_files), copies the rest over the grading image's /workspace (which still holds the real packaging and the
+# held-out tests), sets PYTHONPATH=/workspace, runs every command without stopping, and sums the "N passed" lines of the
+# pytest commands' output (analyze_pytest_results), capped at test_case_count.
+_UPSTREAM_PACKAGE_FILES = (
+    "setup.py",
+    "pyproject.toml",
+    "setup.cfg",
+    "requirements.txt",
+    "requirements-dev.txt",
+    "requirements-test.txt",
+    "tox.ini",
+    "pytest.ini",
+    "poetry.lock",
+    "Pipfile",
+    "Pipfile.lock",
+    "environment.yml",
+    "conda-env.yaml",
+    "manifest.in",
+    "MANIFEST.in",
+)
+_UPSTREAM_STAGE_DIR = "/tmp/nl2repobench_agent_workspace"
+_UPSTREAM_PASSED_RE = re.compile(r"(\d+) passed")
+_UPSTREAM_FAILED_RE = re.compile(r"(\d+) failed")
+_UPSTREAM_ERROR_RE = re.compile(r"(\d+) error")
+GradingProtocol = Literal["gym_strict", "upstream"]
+
+
+def _upstream_restore_command(
+    test_files: list[str],
+    tar_path: str = "/tmp/workspace.tar.gz",
+    workspace: str = "/workspace",
+    stage: str = _UPSTREAM_STAGE_DIR,
+) -> str:
+    """Extract the agent tar to a staging dir, apply upstream's deletions, then overlay it onto the workspace.
+
+    The overlay keeps whatever the grading image already has under /workspace (upstream's Dockerfile does
+    `COPY workspace /workspace` on top of the same image), so the real setup.py/pyproject.toml and the held-out tests
+    survive wherever the agent's copies were deleted.
+    """
+    names = " -o ".join(f"-name {shlex.quote(name)}" for name in _UPSTREAM_PACKAGE_FILES)
+    test_paths = [
+        f"{stage}/{path.strip('/')}"
+        for path in test_files
+        if path.strip("/") and ".." not in path.strip("/").split("/")
+    ]
+    remove_tests = f"rm -rf {' '.join(shlex.quote(p) for p in test_paths)}; " if test_paths else ""
+    return (
+        f"set -e; rm -rf {stage}; mkdir -p {stage}; tar xzf {shlex.quote(tar_path)} -C {stage}; "
+        f"find {stage} -type f \\( {names} \\) -delete; {remove_tests}"
+        f"tar -C {stage} -cf - . | tar -C {shlex.quote(workspace)} -xf -"
+    )
+
+
+def _parse_pytest_upstream(pytest_outputs: list[str]) -> tuple[int, int, int]:
+    """Sum the first "N passed/failed/error" match of every line of every pytest command's output, like upstream."""
+    passed = failed = errors = 0
+    for output in pytest_outputs:
+        for line in output.split("\n"):
+            if match := _UPSTREAM_PASSED_RE.search(line):
+                passed += int(match.group(1))
+            if match := _UPSTREAM_FAILED_RE.search(line):
+                failed += int(match.group(1))
+            if match := _UPSTREAM_ERROR_RE.search(line):
+                errors += int(match.group(1))
+    return passed, failed, errors
+
 
 def _resolve_repo_path(path: Path) -> Path:
     expanded = path.expanduser()
@@ -243,6 +363,20 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # registry namespace - required to use agent_network_mode="no_internet_preinstalled" with
     # any task set other than upstream's 104 pinned tasks.
     task_image_registry_template: str | None = None
+    # no_internet_preinstalled only: also scrub installs that point INTO /workspace (images that ship the reference repo
+    # under /workspace with a legacy `setup.py develop` / egg-link or editable install, e.g. task images built from the finished reference repo),
+    # their console-script stubs, and pip caches. Off by default so existing eval behavior is byte-identical. Added 2026-10-24.
+    scrub_workspace_installs: bool = False
+    # no_internet_preinstalled only: grade in verify_image_override instead of the agent's task image. Needed when the task
+    # image ships the reference repo under /workspace (the verifier extracts the agent workspace over /workspace without
+    # wiping it). Off by default. Added 2026-10-24.
+    verify_with_override_image: bool = False
+    # "gym_strict" (default, original behavior): grade the agent's workspace as-is - its own setup.py/pyproject.toml and any
+    # files it wrote at the held-out test paths stay, and the first failing non-final command zeroes the row.
+    # "upstream": grade the way NL2RepoBench itself does (see _UPSTREAM_PACKAGE_FILES). Added 2026-10-27, after finding
+    # that about half of all gym_strict rows scored 0 at `pip install -e .` on the agent's own packaging files, which
+    # upstream deletes, and that agent-written tests at the held-out paths inflated some rows.
+    grading_protocol: GradingProtocol = "gym_strict"
     sandbox_config: dict[str, Any]
 
     logs_dir: Path = Path("resources_servers/nl2repobench/logs")
@@ -483,7 +617,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # byte-identical to already-reported eval baselines, since those don't touch this branch.
         verify_image = (
             task_image(task, registry_template=self.config.task_image_registry_template)
-            if mode == "no_internet_preinstalled"
+            if mode == "no_internet_preinstalled" and not (self.config.verify_with_override_image and self.config.verify_image_override)
             else self.config.verify_image_override
             or task_image(task, registry_template=self.config.task_image_registry_template)
         )
@@ -600,6 +734,19 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                         f"Failed to scrub editable-install metadata in agent sandbox for {task_id(task)!r}: "
                         f"{scrub_result.stderr or scrub_result.stdout or '(no output)'}"
                     )
+                if self.config.scrub_workspace_installs:
+                    ws_scrub = await sandbox.exec(
+                        command=_WORKSPACE_INSTALL_SCRUB_COMMAND.replace(
+                            "__IDENTS__", " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0])
+                        ),
+                        cwd="/",
+                        timeout_s=120,
+                    )
+                    if ws_scrub.return_code != 0:
+                        raise RuntimeError(
+                            f"Failed to scrub /workspace installs in agent sandbox for {task_id(task)!r}: "
+                            f"{ws_scrub.stderr or ws_scrub.stdout or '(no output)'}"
+                        )
             elif mode == "block_target":
                 await self._install_pip_git_guard(sandbox, task)
             elif mode == "block_target_v2":
@@ -790,7 +937,13 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             local_tar_path.write_bytes(workspace_tar)
             await sandbox.upload(local_tar_path, "/tmp/workspace.tar.gz")
 
-        extract_result = await sandbox.exec("tar xzf /tmp/workspace.tar.gz -C /workspace", timeout_s=300)
+        upstream = self.config.grading_protocol == "upstream"
+        if upstream:
+            extract_result = await sandbox.exec(
+                _upstream_restore_command(task.test_files.files), cwd="/", timeout_s=300
+            )
+        else:
+            extract_result = await sandbox.exec("tar xzf /tmp/workspace.tar.gz -C /workspace", timeout_s=300)
         if extract_result.return_code != 0:
             return VerifierResult(
                 evaluation_completed=False,
@@ -801,26 +954,36 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             )
 
         output_parts: list[str] = []
+        pytest_outputs: list[str] = []
         verifier_error: str | None = None
         last_exit_code: int | None = None
         commands = task.test_commands.commands
         for index, command in enumerate(commands):
             is_last = index == len(commands) - 1
-            command_result = await sandbox.exec(command, cwd="/workspace", timeout_s=TEST_COMMAND_TIMEOUT_S)
+            run_command = f"export PYTHONPATH=/workspace${{PYTHONPATH:+:$PYTHONPATH}}; {command}" if upstream else command
+            command_result = await sandbox.exec(run_command, cwd="/workspace", timeout_s=TEST_COMMAND_TIMEOUT_S)
             last_exit_code = command_result.return_code
-            output_parts.append(
-                f"$ {command}\n{command_result.stdout or ''}{command_result.stderr or ''}"
-                f"\n[exit code: {command_result.return_code}]\n"
-            )
+            command_output = f"{command_result.stdout or ''}{command_result.stderr or ''}"
+            output_parts.append(f"$ {command}\n{command_output}\n[exit code: {command_result.return_code}]\n")
+            if upstream:
+                # Upstream never stops early: a failed install still leaves the image's own install and PYTHONPATH.
+                if "pytest" in command.lower():
+                    pytest_outputs.append(command_output)
+                continue
             if command_result.return_code != 0 and not is_last:
                 verifier_error = f"install command failed: {command}"
                 break
 
         combined_output = ("\n" + "-" * 40 + "\n").join(output_parts)
+        if upstream:
+            # Parsed before the size cap below, so a long log can't hide a summary line.
+            tests_passed, tests_failed, tests_error = _parse_pytest_upstream(pytest_outputs)
+            combined_output = f"[grading_protocol: upstream]\n{combined_output}"
         if len(combined_output) > TEST_OUTPUT_MAX_CHARS:
             combined_output = combined_output[-TEST_OUTPUT_MAX_CHARS:]
 
-        tests_passed, tests_failed, tests_error = _parse_pytest_summary(combined_output)
+        if not upstream:
+            tests_passed, tests_failed, tests_error = _parse_pytest_summary(combined_output)
         if verifier_error is not None:
             tests_passed = 0
         reward = _compute_reward(tests_passed, task.test_case_count)

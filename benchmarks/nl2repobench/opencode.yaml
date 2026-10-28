@@ -18,6 +18,10 @@ nl2repobench_opencode_resources_server:
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
+      # Grade like NL2RepoBench itself: the agent's packaging files and its files at the held-out test paths are deleted,
+      # the image's real ones are used, and every command runs (see _UPSTREAM_PACKAGE_FILES in app.py). Runs started
+      # before 2026-10-27 used gym_strict; pass ...nl2repobench.grading_protocol=gym_strict to resume one of those.
+      grading_protocol: upstream
       # agent_network_mode defaults to "official" (set in nl2repobench.yaml), which reproduces
       # today's behavior exactly - needed to keep already-completed eval runs reproducible. To
       # run a different network posture, override at the CLI instead of editing this file, e.g.:
