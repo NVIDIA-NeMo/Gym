@@ -16,12 +16,14 @@ import asyncio
 import json
 import time
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call
 
 import httpx
 import orjson
 import pytest
+from aiohttp import ClientResponseError
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -46,7 +48,9 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureEvent, FailureReport, SdkErrorDetails, TaskId
+from nemo_gym.failure_kinds import AGENT_ROUTE_FAILED, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -69,7 +73,9 @@ from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from responses_api_agents.simple_agent.app import (
+    POLICY_TIMEOUT_OPERATION,
     ModelServerRef,
     ResourcesServerRef,
     SimpleAgent,
@@ -77,6 +83,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentLoopState,
     SimpleAgentRunRequest,
     SimpleAgentVerifyRequest,
+    _policy_request_timed_out,
 )
 
 
@@ -3150,3 +3157,149 @@ async def test_a_skip_verification_run_parks_at_its_return_boundary_until_resume
     # Restored at its return step: no seed, model call, tool call, or verification runs again.
     assert calls == []
     assert result.reward == 0.25 and result.response.output == first.response.output
+
+
+def _model_attempt(exception_type: str | None, *, http_status: int | None = None) -> FailureEvent:
+    """One failed attempt as the policy model server's client reports it."""
+    return FailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason="Model request transport failed",
+        operation="model_request",
+        http_status=http_status,
+        foreign_error=SdkErrorDetails(exception_type=exception_type, message="") if exception_type else None,
+    )
+
+
+def _failed_reply(report: FailureReport) -> MagicMock:
+    """A 500 reply from another Gym server whose failure report travels in its header, as on the wire."""
+    request_info = SimpleNamespace(url="http://server", method="POST", headers={}, real_url="http://server")
+    error = ClientResponseError(
+        request_info, (), status=500, message="Internal Server Error", headers=FailureHeader.encode(report)
+    )
+    response = MagicMock(status=500, ok=False, cookies={})
+    response.content.read = AsyncMock(return_value=b"Internal Server Error")
+    response.raise_for_status = MagicMock(side_effect=error)
+    return response
+
+
+def _timeout_agent(**config) -> tuple[SimpleAgent, MagicMock]:
+    server, server_client = _make_agent(False)
+    return type(server)(config=server.config.model_copy(update=config), server_client=server_client), server_client
+
+
+class TestFinalOnModelTimeout:
+    @pytest.mark.parametrize(
+        ("attempts", "timed_out"),
+        [
+            pytest.param(["TimeoutError"] * 3, True, id="every-attempt-timed-out"),
+            pytest.param(["aiohttp.client_exceptions.ServerTimeoutError"], True, id="qualified-aiohttp-timeout"),
+            pytest.param(["TimeoutError", None], False, id="one-attempt-answered-an-http-error"),
+            pytest.param(["TimeoutError", "aiohttp.client_exceptions.ClientConnectorError"], False, id="refused"),
+            pytest.param([], False, id="no-attempt-reported"),
+        ],
+    )
+    def test_a_policy_request_timed_out_only_when_every_attempt_did(self, attempts, timed_out: bool) -> None:
+        events = [_model_attempt(t, http_status=None if t else 500) for t in attempts]
+        report = FailureReport(events={event.event_id: event for event in events})
+        error = _failed_reply(report).raise_for_status.side_effect
+
+        assert _policy_request_timed_out(error) is timed_out
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_a_policy_timeout_becomes_an_agent_failure_only_when_enabled(self, enabled: bool) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=enabled)
+        attempts = [_model_attempt("TimeoutError") for _ in range(3)]
+        server_client.post = AsyncMock(
+            return_value=_failed_reply(FailureReport(events={event.event_id: event for event in attempts}))
+        )
+        request = MagicMock(session={}, path_params={}, cookies={})
+
+        with pytest.raises(NgFailureEvent if enabled else ClientResponseError) as raised:
+            await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+        if enabled:
+            assert (raised.value.boundary, raised.value.failure_kind, raised.value.operation) == (
+                FailureBoundary.AGENT,
+                MODEL_TRANSPORT_ERROR,
+                POLICY_TIMEOUT_OPERATION,
+            )
+        # One policy call: the model server's attempts are its own, and nothing here adds one.
+        assert server_client.post.await_count == 1
+
+    async def test_a_policy_http_error_stays_a_retryable_failure_when_enabled(self) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=True)
+        attempt = _model_attempt(None, http_status=500)
+        server_client.post = AsyncMock(return_value=_failed_reply(FailureReport(events={attempt.event_id: attempt})))
+        request = MagicMock(session={}, path_params={}, cookies={})
+
+        with pytest.raises(ClientResponseError):
+            await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_run_ends_a_policy_timeout_as_a_final_row_only_when_enabled(self, enabled: bool) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=enabled)
+        policy_timeout = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=MODEL_TRANSPORT_ERROR,
+            failure_reason="Policy model request timed out on every attempt",
+            operation=POLICY_TIMEOUT_OPERATION,
+        )
+        route_failure = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=AGENT_ROUTE_FAILED,
+            failure_reason="Agent route failed",
+            operation="agent.responses",
+        )
+        route_failure.__cause__ = policy_timeout
+        report = failure_report_for(route_failure)
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            assert url_path.endswith("/v1/responses"), "the rollout must not be verified"
+            return _failed_reply(report)
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = SimpleAgentRunRequest.model_validate({"responses_create_params": {"input": "question"}})
+
+        if not enabled:
+            with pytest.raises(ClientResponseError):
+                await server.run(MagicMock(cookies={}), body)
+            return
+        reply = await server.run(MagicMock(cookies={}), body)
+
+        row = json.loads(reply.body)
+        assert reply.status_code == 200
+        assert {key: row[key] for key in ("_ng_failure_class", "_ng_failure_terminal", "failure_kind")} == {
+            "_ng_failure_class": "agent_run_error",
+            "_ng_failure_terminal": True,
+            "failure_kind": "model_transport_error",
+        }
+        # The metrics count it as 0 on its own, without count_failure_classes_as_zero.
+        assert row["_ng_failure_counts_as_zero"] is True
+        assert "reward" not in row
+        [timeout] = row["timeouts"]
+        assert (timeout["event_id"], timeout["limit"], timeout["enforcer"]) == (
+            policy_timeout.event_id,
+            "model_request",
+            "model",
+        )
+        assert policy_timeout.event_id in row["_ng_failure_events"]
+
+    async def test_run_keeps_other_policy_failures_retryable(self) -> None:
+        server, server_client = _timeout_agent(final_on_model_timeout=True)
+        attempt = _model_attempt(None, http_status=500)
+
+        async def post(*, url_path, **kwargs):
+            if url_path == "/seed_session":
+                return _mock_response()
+            return _failed_reply(FailureReport(events={attempt.event_id: attempt}))
+
+        server_client.post = AsyncMock(side_effect=post)
+
+        with pytest.raises(ClientResponseError):
+            await server.run(
+                MagicMock(cookies={}),
+                SimpleAgentRunRequest.model_validate({"responses_create_params": {"input": "q"}}),
+            )

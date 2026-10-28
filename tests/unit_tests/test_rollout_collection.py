@@ -80,6 +80,7 @@ from nemo_gym.rollout_collection import (
     NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_CLASS_KEY,
+    NG_FAILURE_COUNTS_AS_ZERO_KEY,
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_NO_PERSIST_KEY,
@@ -3310,6 +3311,72 @@ class TestRolloutCollection:
 
         export_rollouts.assert_not_called()
         assert not output_jsonl_fpath.with_suffix(".jsonl.upload.tmp").exists()
+
+    def test_a_marked_failure_row_counts_as_zero_without_its_class(self, tmp_path: Path) -> None:
+        """A producer-marked row is counted as its rollout's zero; naming no class zeroes nothing else."""
+        failures_fpath = tmp_path / "output_failures.jsonl"
+
+        def attempt(task_index: int, *, marked: bool) -> dict:
+            row = {
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS,
+            }
+            return {**row, NG_TERMINAL_KEY: True, NG_FAILURE_COUNTS_AS_ZERO_KEY: True} if marked else row
+
+        rows = [
+            attempt(0, marked=True),
+            attempt(1, marked=False),
+            # The later attempt stands: its rollout is not marked any more.
+            attempt(2, marked=True),
+            attempt(2, marked=False),
+            attempt(3, marked=True),
+        ]
+        failures_fpath.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+
+        counted = _failure_rows_counted_as_zero([failures_fpath], [], {(3, 0)})
+
+        assert [(row[TASK_INDEX_KEY_NAME], row["reward"]) for row in counted] == [(0, 0.0)]
+        assert not any(key.startswith("_ng_failure_") for key in counted[0])
+        # Naming the class still counts every rollout of it, marked or not.
+        named = _failure_rows_counted_as_zero([failures_fpath], [AGENT_RUN_ERROR_FAILURE_CLASS], set())
+        assert sorted(row[TASK_INDEX_KEY_NAME] for row in named) == [0, 1, 2, 3]
+
+    async def test_aggregate_counts_a_marked_failure_row_without_its_class(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """`gym eval aggregate` counts a producer-marked row offline too, and no other row of its class."""
+        shard_fpath = tmp_path / "rollouts-chunk0.jsonl"
+        agent = {AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+        shard_fpath.write_bytes(
+            orjson.dumps({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, **agent, "reward": 1.0}) + b"\n"
+        )
+        failure = {NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, **agent}
+        _failures_path_for(shard_fpath).write_bytes(
+            orjson.dumps(
+                {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, **failure, NG_FAILURE_COUNTS_AS_ZERO_KEY: True}
+            )
+            + b"\n"
+            + orjson.dumps({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, **failure})
+            + b"\n"
+        )
+        aggregated: dict[str, list[dict]] = {}
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            aggregated["verify_responses"] = [dict(r) for r in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutAggregationConfig(
+            input_glob=str(shard_fpath), output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"), disable_health_check=True
+        )
+
+        await RolloutAggregationHelper().run_from_config(config)
+
+        assert sorted((row[TASK_INDEX_KEY_NAME], row["reward"]) for row in aggregated["verify_responses"]) == [
+            (0, 1.0),
+            (1, 0.0),
+        ]
 
     async def test_aggregate_counts_an_opted_in_failure_class_from_each_shard_sidecar(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
