@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Opt-in sandbox-session settings for running OpenCode as a harness started in the task container."""
 
+import asyncio
 import json
-import shlex
 import shutil
 import subprocess
 import sys
@@ -15,13 +15,14 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.sandbox import SandboxStatus
-from responses_api_agents.opencode_agent import sandbox_runner
 from responses_api_agents.opencode_agent.app import _REMAINING_CONTEXT_PLUGIN as REMAINING_CONTEXT_PLUGIN
 from responses_api_agents.opencode_agent.app import _is_model_endpoint_failure, _sandbox_prepare_command, argv_prompt
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
+from responses_api_agents.opencode_agent.tests.test_sandbox_runner import stage
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  # noqa: F401
     capture_observations,
     close_body,
+    read_params,
     seed,
     setup,
 )
@@ -44,13 +45,14 @@ def configure_direct(agent, **overrides):
 
 
 def run_session(agent, sandbox, body=None, request=None):
-    """Seed, activate and close one session; return the response and the runner input."""
+    """Seed, activate and close one session; return the response and the runner input with its prompt."""
     body = body or seed()
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert created.status_code == 200, created.text
         response = client.post(ROLLOUT, json=request or {"input": "Fix the code"})
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = read_params(sandbox.files[f"{sandbox.directory}/params.sh"])
+        payload["prompt"] = sandbox.files[f"{sandbox.directory}/prompt.txt"]
         closed = client.post("/v1/agent_sessions/close", json=close_body(body.agent_session_id))
         assert closed.status_code == 200, closed.text
     return response, payload, closed.json()
@@ -176,7 +178,7 @@ def test_root_workdir_runs_when_allowed(setup):
     assert response.status_code == 200, response.text
     assert payload["cwd"] == "/"
     assert sandbox.directory.startswith("/tmp/nemo-gym-opencode-sessions/")
-    assert "allow_root=True" in sandbox.exec.await_args_list[0].args[0]
+    assert "allow_root=1\n" in sandbox.exec.await_args_list[0].args[0]
 
 
 @pytest.mark.parametrize("workdir", ["/tmp", "/tmp/nemo-gym-opencode-sessions"])
@@ -193,21 +195,18 @@ async def test_root_workdir_setting_still_rejects_adapter_storage(setup, workdir
 
 @pytest.mark.parametrize("allow_root", [False, True])
 def test_resolved_root_workdir_check(tmp_path, allow_root):
-    command = shlex.split(
-        _sandbox_prepare_command("/", "/tmp/nemo-gym-opencode-sessions/x", "/tmp/rt", allow_root=allow_root)
-    )
-    script = command[command.index("-I") + 2]
     sessions, runtime = tmp_path / "sessions", tmp_path / "runtime"
-    checked = subprocess.run(
-        [sys.executable, "-I", "-c", script, "/", str(sessions), str(runtime)], capture_output=True, text=True
-    )
+
+    def prepare(workdir):
+        command = _sandbox_prepare_command(workdir, str(sessions / "x"), str(runtime), allow_root=allow_root)
+        return subprocess.run(["sh", "-c", command], capture_output=True, text=True)
+
+    checked = prepare("/")
     assert (checked.returncode == 0) is allow_root, checked.stderr
     # A storage path that holds the workdir is rejected either way.
     workdir = sessions / "task"
     workdir.mkdir(parents=True)
-    held = subprocess.run(
-        [sys.executable, "-I", "-c", script, str(workdir), str(sessions), str(runtime)], capture_output=True, text=True
-    )
+    held = prepare(str(workdir))
     assert held.returncode != 0
     assert "overlaps the task workdir" in held.stderr
 
@@ -341,35 +340,16 @@ def test_oom_score_setting_reaches_the_runner(setup, enabled):
     agent.config.raise_oom_score_adj = enabled
     response, payload, _ = run_session(agent, sandbox)
     assert response.status_code == 200, response.text
-    assert payload["raise_oom_score_adj"] is enabled
+    assert ("oom_score_adj" in payload["setup"]) is enabled
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="reads /proc/self/oom_score_adj")
 def test_runner_raises_the_oom_score_for_opencode_and_its_tools(tmp_path):
-    score = tmp_path / "oom_score_adj"
-    score.write_text("0\n")
-    assert sandbox_runner.prefer_for_oom_kill(str(score)) == "0 -> 1000"
-    score.write_text("-997\n")
-    assert sandbox_runner.prefer_for_oom_kill(str(score)) == "-997 -> 0"
-    assert sandbox_runner.prefer_for_oom_kill(str(tmp_path / "missing")).startswith("unchanged:")
-    code = "import sys; print(open('/proc/self/oom_score_adj').read().strip(), file=sys.stderr)"
-    params = {
-        "directory": str(tmp_path),
-        "command": [sys.executable, "-c", code],
-        "cwd": str(tmp_path),
-        "env": {},
-        "prompt": "",
-        "raise_oom_score_adj": True,
-    }
-    before = Path("/proc/self/oom_score_adj").read_text().strip()
-    try:
-        assert sandbox_runner.run(params) == 0
-    finally:
-        # The test process is the runner here: restore what the runner raised (lowering may need privilege).
-        try:
-            Path("/proc/self/oom_score_adj").write_text(before)
-        except OSError:
-            pass
-    record, child = (tmp_path / "stderr.log").read_text().splitlines()
-    assert record.startswith("oom_score_adj: ")
-    if record.endswith("-> 1000"):
-        assert child == "1000"
+    before = int(Path("/proc/self/oom_score_adj").read_text())
+    after = 0 if before < 0 else 1000
+    argv = asyncio.run(stage(tmp_path, ["bash", "-c", "cat /proc/self/oom_score_adj"], raise_oom_score_adj=True))
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stderr
+    # The runner records what it changed, and OpenCode (here the child) inherits the score.
+    assert f"oom_score_adj: {before} -> {after}" in completed.stderr
+    assert (tmp_path / "stdout.jsonl").read_text().strip() == str(after)

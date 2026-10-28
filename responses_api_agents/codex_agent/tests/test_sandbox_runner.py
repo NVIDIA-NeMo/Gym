@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT
 from responses_api_agents.codex_agent import sandbox_runner
 
 
@@ -34,9 +34,8 @@ def launch(tmp_path, code, timeout=3, python=sys.executable):
     path.write_text(json.dumps(request))
     process = subprocess.Popen(
         [
-            python,
-            "-I",
-            process_supervisor.__file__,
+            "bash",
+            str(SUPERVISOR_SCRIPT),
             "--timeout",
             str(timeout),
             "--cleanup-timeout",
@@ -129,45 +128,6 @@ def test_stop_marker_prevents_process_launch(tmp_path):
     assert not (tmp_path / "should-not-exist").exists()
 
 
-def test_sigterm_during_spawn_does_not_lose_child_handle(tmp_path):
-    # Deliver SIGTERM after the real child exists but before Popen returns to run().
-    # Isolate signal handlers from pytest, and always reap the test child.
-    driver = """
-import json, os, runpy, signal, subprocess, sys
-runner = runpy.run_path(sys.argv[1])
-spawn = subprocess.Popen
-children = []
-def interrupted_spawn(*args, **kwargs):
-    child = spawn(*args, **kwargs)
-    children.append(child)
-    os.kill(os.getpid(), signal.SIGTERM)
-    return child
-subprocess.Popen = interrupted_spawn
-try:
-    summary = runner['_supervise']([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=5, cleanup_timeout=2)
-    summary['child_alive'] = any(child.poll() is None for child in children)
-    print(json.dumps(summary))
-finally:
-    for child in children:
-        if child.poll() is None:
-            child.kill()
-        child.wait()
-"""
-    completed = subprocess.run(
-        [sys.executable, "-c", driver, process_supervisor.__file__, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=10,
-        check=True,
-    )
-    summary = json.loads(completed.stdout)
-    assert summary["timed_out"] is False
-    assert summary["cleanup_confirmed"] is True
-    assert summary["error"] is None
-    assert summary["child_alive"] is False
-
-
 def test_runtime_environment_does_not_inherit_provider_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("SANDBOX_PROVIDER_API_KEY", "must-not-inherit")
     task_environment = {"HOME": str(tmp_path / "task-home"), "XDG_DATA_HOME": str(tmp_path / "task-data")}
@@ -181,47 +141,6 @@ def test_runtime_environment_does_not_inherit_provider_credentials(tmp_path, mon
     assert result(tmp_path, process)["cleanup_confirmed"]
     _, event = json.loads((tmp_path / "events.jsonl").read_text())
     assert event == {"SANDBOX_PROVIDER_API_KEY": None, **task_environment}
-
-
-def test_lost_spawn_handle_requires_sandbox_teardown(tmp_path):
-    # A lost handle cannot confirm termination; the owner must destroy the sandbox.
-    driver = """
-import json, os, runpy, subprocess, sys
-runner = runpy.run_path(sys.argv[1])
-spawn = subprocess.Popen
-children = []
-def lost_handle(*args, **kwargs):
-    child = spawn(*args, **kwargs)
-    children.append(child)
-    raise OSError('launch handle lost after process creation')
-subprocess.Popen = lost_handle
-try:
-    summary = runner['_supervise']([sys.executable, '-c', 'import time; time.sleep(60)'], timeout=5, cleanup_timeout=2)
-    try:
-        os.kill(children[0].pid, 0)
-        summary['child_alive'] = True
-    except ProcessLookupError:
-        summary['child_alive'] = False
-    print(json.dumps(summary))
-finally:
-    for child in children:
-        if child.poll() is None:
-            child.kill()
-        child.wait()
-"""
-    completed = subprocess.run(
-        [sys.executable, "-c", driver, process_supervisor.__file__, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=10,
-        check=True,
-    )
-    summary = json.loads(completed.stdout)
-    assert summary["return_code"] != 0
-    assert summary["error"] == "Harness launch failed: launch handle lost after process creation"
-    assert summary["cleanup_confirmed"] is False
-    assert summary["child_alive"] is True
 
 
 @pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")

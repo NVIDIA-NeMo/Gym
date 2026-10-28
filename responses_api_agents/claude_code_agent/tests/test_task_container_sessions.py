@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -14,8 +15,9 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.claude_code_agent import app, sandbox_runner
+from responses_api_agents.claude_code_agent import app
 from responses_api_agents.claude_code_agent import sandbox as adapter
 from responses_api_agents.claude_code_agent.system_dependencies import system_dependencies_command
 from responses_api_agents.claude_code_agent.tests.test_sandbox import agent, result, seed
@@ -62,16 +64,32 @@ async def test_instruction_reaches_the_cli_on_stdin_when_configured(monkeypatch,
 
 
 def run_runner(tmp_path, prompt=None):
+    """Stage a stub CLI through stage_activation and run it with the shared bash runner, as the sandbox does."""
+
+    async def upload(source, target):
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, tmp_path / HARNESS_RUNNER_FILE)
     child = tmp_path / "child.py"
     child.write_text("import json,sys; print(json.dumps({'stdin': sys.stdin.read()}))")
-    payload = {"directory": str(tmp_path), "command": [sys.executable, str(child)], "cwd": str(tmp_path), "env": {}}
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir=str(tmp_path), sandbox=SimpleNamespace(upload=upload)),
+    )
+    payload = {
+        "command": [sys.executable, str(child)],
+        "cwd": str(tmp_path),
+        "env": {},
+        "settings": {},
+        "mcp_config": None,
+        "skills_path": None,
+    }
     if prompt is not None:
         payload["prompt"] = prompt
-    params = tmp_path / "input.json"
-    params.write_text(json.dumps(payload))
-    completed = subprocess.run(
-        [sys.executable, str(Path(sandbox_runner.__file__)), str(params)], capture_output=True, timeout=30
-    )
+    command = asyncio.run(state.stage_activation(payload)).argv
+    completed = subprocess.run(command, capture_output=True, timeout=30)
     assert completed.returncode == 0, completed.stderr
     return json.loads((tmp_path / "events.jsonl").read_text())["stdin"]
 
@@ -160,7 +178,7 @@ async def test_root_workdir_is_accepted_when_allowed(monkeypatch):
     state = await agent(allow_root_workdir=True)._seed_agent_session_state(seed(workdir="/"))
     assert state.session.workdir == "/"
     assert state.session.session_dir.startswith("/tmp/nemo-gym-claude-sessions/")
-    assert remote.exec.await_args_list[0].args[0].startswith("test -d / ")
+    assert "\ntest -d / && " in remote.exec.await_args_list[0].args[0]
 
 
 @pytest.mark.asyncio

@@ -1123,6 +1123,10 @@ class TestEntrypoint:
 
         monkeypatch.setattr(server, "_create_compose", start_compose)
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        # The seed checks the Compose document against the deployment's provider block before the (stubbed) start.
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
 
         response = await run_episode(server, task)
 

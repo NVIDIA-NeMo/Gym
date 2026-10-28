@@ -847,9 +847,13 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             config_overrides["tb_sandbox_ttl"] = required_ttl
 
         server_config = self._server.model_dump()
-        if not self.config.sandbox_model_base_url and server_config["model_server_url"]:
+        # A sandbox_model_base_url relays to the same model server, so it keeps the rollout path that attributes calls.
+        # The rollout path goes before /v1, which the in-box runner adds back, so a relay URL given with /v1 drops it.
+        if self.config.model_server is not None and server_config["model_server_url"]:
             server_config["model_server_url"] = apply_rollout_prefix(
-                server_config["model_server_url"], rollout_id, token_capture=self._token_id_capture_enabled()
+                server_config["model_server_url"].rstrip("/").removesuffix("/v1"),
+                rollout_id,
+                token_capture=self._token_id_capture_enabled(),
             )
 
         params = AnyTerminalInstanceConfig(

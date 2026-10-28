@@ -135,6 +135,28 @@ at the linked Gym revision, independently of benchmark accuracy.
 
 ## Onboard a producer
 
+### Simple Agent probes
+
+Run the built-in Simple Agent through its agent-session interface and the Environment Server:
+
+```bash
+python scripts/run_harness_conformance.py --harness simple --output results/simple-conformance
+```
+
+The fixture provides a direct HTTP shell tool through the Resources Server. It needs
+Gym's Python dependencies and `sh`, with no external harness runtime or sandbox provider.
+All seven scenarios use the same P0 expectations as the other registered harnesses.
+
+Simple Agent retries model HTTP 408, 425, 429 and 5xx responses twice by default,
+repeating the model request without repeating completed tool executions. Set
+`max_model_retries` in its agent configuration to change the number of additional
+attempts, or set it to `0` to disable them. Backoff starts at 0.5 seconds and doubles
+up to 8 seconds. A terminal model HTTP error in an agent session returns a failed
+response with its cause, partial output and retained observations; the Environment
+Server decides whether to verify, retry the episode or report a failure.
+
+### Custom producers
+
 Enable `observability_enabled: true` and set `model_call_capture_dir` to a shared
 absolute directory. Route requests through Gym's correlated model URL and retain
 all attempts. See [Model-Call Capture](/main/model-server/model-call-capture).

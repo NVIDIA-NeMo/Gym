@@ -110,14 +110,15 @@ Completed parser reports follow Pro's required-pass rule, including empty report
 execution failures or unusable parser output remain inconclusive.
 The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
 
-The supervisor stops live harness-group processes and reaps its children. At the harness
-timeout it preserves children already adopted before the stop and outside the harness
-group, and drains newly adopted children within the cleanup deadline, including tools in
-separate sessions. This runner never signals the supervisor, so it does not request this
-cleanup on close. The sandbox owner stops the preserved processes later.
+The supervisor stops live harness-group processes. At the harness timeout it also kills,
+within the cleanup deadline, the harness's descendants in other process groups, including
+tools in separate sessions, and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker. This runner never requests an early stop, so it does not request this cleanup on
+close. Processes that left the harness before the stop remain for the sandbox owner.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
+The supervisor runs with the task image's bash; this adapter does not install it.
 Supervisor diagnostics retain at most the last 1 MiB, including a truncation marker.
 Missing termination confirmation skips verification and stops
 the task sandbox. Resources cleanup retains failed handles for retry; final agent

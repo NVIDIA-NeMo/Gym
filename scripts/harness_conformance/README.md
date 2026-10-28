@@ -82,12 +82,14 @@ python scripts/run_harness_conformance.py \
 ```
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
-installed. Probes using agent sessions require Linux and install the adapter's
+installed. Simple Agent (`--harness simple`) uses Gym's Python implementation and
+a direct HTTP shell tool; it needs `sh` and does not require a sandbox provider.
+Other probes using agent sessions require Linux and install the adapter's
 pinned runtime during session setup, using Gym's local subprocess sandbox provider.
 Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
 `PATH`; Hermes must be importable in the same Python environment. Missing
 dependencies or unsuccessful runtime installation are execution failures.
-Omitting `--harness` selects all four.
+Omitting `--harness` selects all registered harnesses.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.

@@ -38,7 +38,7 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -173,13 +173,10 @@ def argv_prompt(text: str) -> str:
     return '"' + text.replace('"', '\\"') + '"' if " " in text else text
 
 
-def _sandbox_prepare_command(
-    workdir: str, directory: str, runtime: str, *, python: str = "python3", allow_root: bool = False
-) -> str:
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str, *, allow_root: bool = False) -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "OpenCode sandbox execution requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -194,19 +191,30 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
+    # Resolve symlinks like realpath -m: storage roots need not exist yet.
     # With allow_root, a workdir of / may hold the runtime and session storage (images without a WORKDIR).
-    validate_paths = (
-        f"from pathlib import Path; import sys; allow_root={allow_root!r}; "
-        "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
-        "assert workdir.is_dir(), 'OpenCode task workdir is missing'; "
-        "assert all(workdir != root and root not in workdir.parents "
-        "and ((allow_root and workdir == Path('/')) or workdir not in root.parents) "
-        "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
-    )
+    validate_paths = """resolve() {
+    if [ -e "$1" ]; then (cd -P "$1" && pwd -P); else
+        parent=${1%/*}
+        parent=$(resolve "${parent:-/}") && printf '%s/%s\\n' "${parent%/}" "${1##*/}"
+    fi
+}
+[ -d "$1" ] || { echo 'OpenCode task workdir is missing' >&2; exit 1; }
+workdir=$(resolve "$1")
+shift
+for root in "$@"; do
+    root=$(resolve "$root")
+    case "$root/" in "${workdir%/}"/*) [ "$allow_root" = 1 ] && [ "$workdir" = / ] || overlap=1 ;; esac
+    case "$workdir/" in "${root%/}"/*) overlap=1 ;; esac
+done
+[ -z "${overlap-}" ] || { echo 'OpenCode runtime/session storage overlaps the task workdir' >&2; exit 1; }
+"""
     return (
-        bootstrap.replace("command -v python3", "command -v " + quote(python))
-        + f"{quote(python)} -I -c {quote(validate_paths)} {quote(workdir)} "
-        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
+        bootstrap
+        + f"set -- {quote(workdir)} {quote(str(PurePosixPath(directory).parent))} {quote(runtime)}\n"
+        + f"allow_root={1 if allow_root else 0}\n"
+        + validate_paths
+        + f"mkdir -p {quote(directory)}"
     )
 
 
@@ -236,7 +244,6 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_version: str = OPENCODE_VERSION
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
-    sandbox_python_executable: str = "python3"
     sandbox_path_prefix: list[str] = Field(default_factory=list)
     sandbox_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
@@ -807,7 +814,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
             ),
             runtime=runtime,
-            python_executable=self.config.sandbox_python_executable,
             model_ref=self.config.model_server,
         )
         prepared_directory = False
@@ -821,9 +827,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             state.sandbox_id = sandbox.sandbox_id
-            command = _sandbox_prepare_command(
-                workdir, directory, runtime, python=self.config.sandbox_python_executable, allow_root=root_workdir
-            )
+            command = _sandbox_prepare_command(workdir, directory, runtime, allow_root=root_workdir)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
@@ -837,13 +841,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self.config.opencode_version,
                     self.config.sandbox_executable_path or "",
                     self.config.sandbox_executable_sha256 or "",
-                    self.config.sandbox_python_executable,
                     ":".join(self.config.sandbox_path_prefix),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
             await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
             if self.config.output_token_policy == "remaining_context":
                 await sandbox.upload(
@@ -1237,13 +1240,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         payload = {
             "instructions": system,
             "path_prefix": self.config.sandbox_path_prefix,
-            "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": argv_prompt(prompt) if self.config.argv_prompt_quoting else prompt,
-            "harness_session_id": state.harness_session_id,
-            "previous_message_ids": state.message_ids,
-            "activation_id": state.activation_id,
             "env": {
                 "HOME": f"{state.persistent_directory}/home",
                 "XDG_DATA_HOME": f"{state.persistent_directory}/data",

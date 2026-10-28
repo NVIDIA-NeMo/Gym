@@ -32,7 +32,9 @@ from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
+from nemo_gym.tasks.harbor.compose_overlay import merged_mcp_servers
 from nemo_gym.tasks.harbor.digest import is_ignored
+from nemo_gym.tasks.harbor.models import HarborMCPServer
 from nemo_gym.tasks.harbor.task import HarborTurn
 
 
@@ -279,18 +281,26 @@ class HarborSessionMixin:
         finally:
             sandbox.set_default_user(turn_user)
 
+    def _task_mcp_servers(self, task: HarborTask) -> list[HarborMCPServer]:
+        """The MCP servers the harness gets for ``task``: its ``[[environment.mcp_servers]]`` with the job-level
+        overlay's ``mcp_servers`` merged in by name, the overlay's winning, as Harbor merges the task's with the
+        job's ``agents[].mcp_servers`` (:func:`~nemo_gym.tasks.harbor.compose_overlay.merged_mcp_servers`)."""
+        return merged_mcp_servers(task.config.environment.mcp_servers, self.config.compose_overlay)
+
     async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
         """Leave the task's in-sandbox tool declarations where a harness can read them.
 
-        ``/tmp/.nemo-gym/task.json`` carries ``mcp_servers`` (Harbor's ``[[environment.mcp_servers]]``)
-        and ``skills_dir``. Harnesses that know how to talk to task MCP servers from inside the sandbox
-        read it at session start; nothing in the episode protocol needs to change for that.
+        ``/tmp/.nemo-gym/task.json`` carries ``mcp_servers`` (Harbor's ``[[environment.mcp_servers]]`` with the
+        job-level overlay's entries merged in by name, :meth:`_task_mcp_servers`) and ``skills_dir``. Harnesses
+        that know how to talk to task MCP servers from inside the sandbox read it at session start; nothing in
+        the episode protocol needs to change for that.
         """
         environment = task.config.environment
-        if not environment.mcp_servers and not environment.skills_dir:
+        servers = self._task_mcp_servers(task)
+        if not servers and not environment.skills_dir:
             return
         context = {
-            "mcp_servers": [server.model_dump(mode="json") for server in environment.mcp_servers],
+            "mcp_servers": [server.model_dump(mode="json") for server in servers],
             "skills_dir": environment.skills_dir,
         }
         payload = shlex.quote(json.dumps(context))

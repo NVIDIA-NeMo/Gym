@@ -32,7 +32,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -198,7 +198,6 @@ def _sandbox_prepare_command(directory: str, extra_directories: tuple[str, ...] 
     # Keep the bootstrap POSIX sh: Bash must exist before its installer can run.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "Pi in the task sandbox requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -294,6 +293,29 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             )
 
     return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+
+
+def _parse_recorded_events(raw: str) -> list[tuple[float, dict[str, Any]]]:
+    """Read the runner's ``[seen_at, event]`` lines, skipping any it kept that are not valid records."""
+    events = []
+    # JSONL: split on "\n" only; str.splitlines() would also split inside strings on U+2028/U+0085.
+    for line in raw.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            record = None
+        if (
+            isinstance(record, list)
+            and len(record) == 2
+            and type(record[0]) in (int, float)
+            and isinstance(record[1], dict)
+        ):
+            events.append((float(record[0]), record[1]))
+        else:
+            LOG.warning("Skipping malformed Pi event record")
+    return events
 
 
 async def _read_pi_stdout(stream: asyncio.StreamReader) -> tuple[str, list[tuple[float, dict[str, Any]]]]:
@@ -834,7 +856,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"Pi sandbox installation failed (exit {installed.return_code}, "
                     f"error_type={installed.error_type}): {details[-16000:]}"
                 )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -945,7 +967,7 @@ class PiAgent(SimpleResponsesAPIAgent):
     def _sandbox_payload(
         self, state: PiSandboxSession, *, prompt: str, system: str, extensions: list[str]
     ) -> dict[str, Any]:
-        """The runner input: Pi's argv (the prompt goes on stdin, never in argv), environment and log paths."""
+        """The activation: Pi's argv (the prompt goes on stdin, never in argv), environment and log paths."""
         directory = state.session.session_dir
         command = [
             f"{state.runtime}/node/bin/node",
@@ -983,10 +1005,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         if self.config.log_requests:
             env["NEMO_GYM_PI_REQUEST_LOG"] = f"{logs}/pi-requests.jsonl"
         return {
-            "directory": directory,
             "command": command,
             "prompt": prompt,
-            "cwd": state.session.workdir,
             "env": env,
             "raise_oom_score_adj": self.config.raise_oom_score_adj,
             "transcript": f"{logs}/pi.txt" if logs else None,
@@ -1052,18 +1072,14 @@ class PiAgent(SimpleResponsesAPIAgent):
         try:
             async with self.sem:
                 raw = await state.execute(
-                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                    **payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
         except BaseException as failure:
             # Common finalization captures before close removes the session directory.
             raw = state.session.artifacts if state.session.artifacts is not None else ""
-            events, output = [], []
-            for line in (part for part in raw.split("\n") if part.strip()):
+            events, output = _parse_recorded_events(raw), []
+            for _, event in events:
                 try:
-                    observed_at, event = json.loads(line)
-                    if not isinstance(event, dict):
-                        continue
-                    events.append((float(observed_at), event))
                     parsed, _ = parse_pi_events(json.dumps(event))
                     output.extend(parsed)
                 except (ValueError, TypeError, AttributeError):
@@ -1094,8 +1110,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 if isinstance(record, AgentInvocation):
                     record.status = "incomplete"
             raise
-        # JSONL: split on "\n" only; str.splitlines() would also split inside strings on U+2028/U+0085.
-        events = [tuple(json.loads(line)) for line in raw.split("\n") if line.strip()]
+        events = _parse_recorded_events(raw)
         output = []
         usage = {"input_tokens": 0, "output_tokens": 0}
         cached_tokens: int | None = 0

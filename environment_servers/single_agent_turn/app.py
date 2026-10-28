@@ -48,8 +48,10 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
     AgentObservationBundle,
     TrajectoryRecord,
+    VerifierInvocation,
 )
 from nemo_gym.server_utils import (
     get_response_json,
@@ -478,6 +480,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         observations: AgentObservationBundle | None,
         trajectory: TrajectoryRecord | None = None,
     ) -> SingleAgentTurnResult:
+        verifier_invocations = None
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -488,8 +491,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
-            await raise_for_status(verify_http_response)
-            return SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
+            # Read returned evidence before raising on an HTTP failure. A non-JSON
+            # error body still follows the original HTTP-error handling path.
+            try:
+                payload = await get_response_json(verify_http_response)
+                if isinstance(payload, dict) and payload.get(NG_VERIFIER_INVOCATIONS_KEY):
+                    verifier_invocations = [
+                        VerifierInvocation.model_validate(value) for value in payload[NG_VERIFIER_INVOCATIONS_KEY]
+                    ]
+            except (ValueError, TypeError):
+                await raise_for_status(verify_http_response, content=await verify_http_response.read())
+                raise
+            await raise_for_status(verify_http_response, content=await verify_http_response.read())
+            return SingleAgentTurnResult.model_validate(payload)
         except Exception as error:
             raise dependency_failure(
                 error,
@@ -498,6 +512,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 partial_response=agent_response,
                 agent_observations=observations,
                 trajectory=trajectory,
+                verifier_invocations=verifier_invocations,
             ) from error
 
     @staticmethod
@@ -550,6 +565,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         partial_response: Any = None,
         agent_observations: Any = None,
         trajectory: Any = None,
+        verifier_invocations: list[VerifierInvocation] | None = None,
     ) -> HandledEpisodeError:
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
@@ -561,6 +577,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 partial_response=partial_response,
                 agent_observations=agent_observations,
                 trajectory=trajectory,
+                verifier_invocations=verifier_invocations,
             )
         )
 

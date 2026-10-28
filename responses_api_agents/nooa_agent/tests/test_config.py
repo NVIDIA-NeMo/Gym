@@ -171,3 +171,34 @@ def test_episode_policy_is_not_agent_configuration(field: str) -> None:
 
 def test_several_workers_are_accepted() -> None:
     assert agent_config(num_workers=2).num_workers == 2
+
+
+@pytest.mark.parametrize("field", ["sandbox_runner_timeout_seconds", "session_close_timeout_seconds"])
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), float("-inf")])
+def test_session_timeouts_must_be_positive_and_finite(field: str, value: float) -> None:
+    with pytest.raises(ValidationError, match=field):
+        agent_config(**{field: value})
+
+
+def test_session_timeout_defaults_and_fractional_budgets() -> None:
+    default = agent_config()
+    assert default.sandbox_runner_timeout_seconds == 21420
+    assert default.session_close_timeout_seconds == 30
+    configured = agent_config(sandbox_runner_timeout_seconds=0.5, session_close_timeout_seconds=0.25)
+    assert configured.sandbox_runner_timeout_seconds == 0.5
+    assert configured.session_close_timeout_seconds == 0.25
+
+
+def test_shipped_yaml_declares_worker_and_close_defaults_below_episode_timeout() -> None:
+    from pathlib import Path
+
+    import yaml
+
+    config = yaml.safe_load((Path(__file__).parents[1] / "configs/nooa_agent.yaml").read_text())
+    agent = config["nooa_agent"]["responses_api_agents"]["nooa_agent"]
+    environment = config["nooa_environment_server"]["environment_servers"]["single_agent_turn"]
+    defaults = agent_config()
+    assert agent["sandbox_runner_timeout_seconds"] == defaults.sandbox_runner_timeout_seconds
+    assert agent["session_close_timeout_seconds"] == defaults.session_close_timeout_seconds
+    # These clocks start at different times; this does not reserve cleanup time within the episode.
+    assert agent["sandbox_runner_timeout_seconds"] < environment["default_episode_timeout_seconds"]
