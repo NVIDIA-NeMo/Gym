@@ -598,6 +598,7 @@ async def request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -617,6 +618,9 @@ async def request(
 
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
     server may already have received it. A connection that was never made is still retried.
+
+    ``_read_body=True`` reads the body before returning, so a reply cut off mid-body is handled by the same
+    retry rules and limits as any other failed attempt.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
@@ -643,6 +647,7 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _read_body=_read_body,
             **kwargs,
         )
     # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
@@ -657,6 +662,7 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _read_body=_read_body,
             **kwargs,
         )
     finally:
@@ -672,6 +678,7 @@ async def _traced_request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -715,6 +722,7 @@ async def _traced_request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _read_body=_read_body,
             **kwargs,
         )
 
@@ -781,6 +789,7 @@ async def _request_with_retries(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
@@ -795,7 +804,10 @@ async def _request_with_retries(
             if _max_num_tries is not None:
                 explicit_tries += 1
             try:
-                return await client.request(method=method, url=url, **kwargs)
+                response = await client.request(method=method, url=url, **kwargs)
+                if _read_body:
+                    await response.read()
+                return response
             except ServerDisconnectedError:
                 if not _resend_after_disconnect:
                     raise
@@ -1092,6 +1104,8 @@ class ServerClient(BaseModel):
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
             and not (self.checkpoint_enabled() and url_path == "/run"),
+            # Collection reads the whole /run reply, so a reply cut off mid-body counts as a failed attempt.
+            _read_body=url_path == "/run",
             **kwargs,
         )
 

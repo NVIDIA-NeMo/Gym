@@ -37,7 +37,13 @@ import orjson
 import pytest
 import uvicorn
 import yaml
-from aiohttp import ClientConnectorError, ClientResponseError, ClientSession, ServerDisconnectedError
+from aiohttp import (
+    ClientConnectorError,
+    ClientPayloadError,
+    ClientResponseError,
+    ClientSession,
+    ServerDisconnectedError,
+)
 from anyio import CancelScope
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
@@ -205,6 +211,9 @@ class FakeResponse:
 
     def release(self) -> None:
         self.released = True
+
+    async def read(self) -> bytes:
+        return orjson.dumps(self.payload)
 
 
 def http_error(status: int, message: str = "boom", body: bytes | None = None) -> ClientResponseError:
@@ -1731,6 +1740,29 @@ class TestRolloutCollection:
         for call in transport.request.call_args_list:
             assert call.kwargs["url"] == "http://agent:1234/run"
             assert "_resend_after_disconnect" not in call.kwargs
+
+    @pytest.mark.parametrize("retry_requests", [True, False])
+    async def test_run_reply_cut_off_mid_body_follows_transport_replay(
+        self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool
+    ) -> None:
+        """A /run reply cut off mid-body is replayed only when a dropped connection would be."""
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
+        cut_off = FakeResponse(200, {"reward": 0})
+        cut_off.read = AsyncMock(side_effect=ClientPayloadError("Response payload is not completed"))
+        transport = MagicMock(request=AsyncMock(side_effect=[cut_off, FakeResponse(200, {"reward": 1})]))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        run = RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests)
+        if retry_requests:
+            _, result = await next(run)
+            assert result["reward"] == 1
+        else:
+            with pytest.raises(ClientPayloadError):
+                await next(run)
+        assert transport.request.await_count == (2 if retry_requests else 1)
 
     @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
     async def test_run_examples_propagates_non_request_failures(
