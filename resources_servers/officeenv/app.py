@@ -25,8 +25,8 @@ tools differ from those definitions (a row in the ``api_search``, ``cli`` or ``m
 with another tool-name separator) is refused.
 
 A row may name its TaskSpec's large strings by SHA-256 instead of carrying them (OfficeEnv's
-artifact references, ``officeenv.artifacts``). The stores in ``artifacts_dirs`` (a corpus's
-``artifacts/`` folder beside its rows file; ``artifacts_dir`` is searched last) go to the episode
+artifact references, ``officeenv.artifacts``). The stores in ``artifacts_dirs`` (such as a
+corpus's ``artifacts/`` folder beside its rows file), searched in order, go to the episode
 service, which reads the references back at seed, each checked against its hash, and refuses a
 row whose artifacts cannot be read (400).
 
@@ -104,17 +104,15 @@ class OfficeEnvResourcesServerConfig(BaseResourcesServerConfig):
             "beside its rows file. A row that names artifacts no store holds is refused (400)."
         ),
     )
-    artifacts_dir: str | None = Field(default=None, description="One more store, searched after artifacts_dirs")
 
-    @field_validator("artifacts_dirs", "artifacts_dir")
+    @field_validator("artifacts_dirs")
     @classmethod
-    def _stores_are_absolute(cls, value: list[str] | str | None) -> list[str] | str | None:
+    def _stores_are_absolute(cls, stores: list[str]) -> list[str]:
         # the server runs in its own directory, not where its config was written
-        stores = [value] if isinstance(value, str) else value or []
         relative = [store for store in stores if not os.path.isabs(store)]
         if relative:
             raise ValueError(f"artifact stores must be absolute paths: {relative}")
-        return value
+        return stores
 
 
 class OfficeEnvSeedSessionRequest(BaseSeedSessionRequest):
@@ -228,9 +226,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
-        stores = [*self.config.artifacts_dirs, *filter(None, [self.config.artifacts_dir])]
-        if stores:  # the service reads a row's artifact references back from them at seed
-            self.service = EpisodeService(artifacts=ArtifactStore(stores))
+        if self.config.artifacts_dirs:  # the service reads a row's artifact references back from them at seed
+            self.service = EpisodeService(artifacts=ArtifactStore(self.config.artifacts_dirs))
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

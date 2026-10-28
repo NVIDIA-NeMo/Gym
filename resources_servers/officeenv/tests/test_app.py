@@ -425,7 +425,7 @@ def test_both_seeds_read_a_moved_corpus_back_from_the_store_beside_its_rows(tmp_
     assert drive_files(client, typed.cookies) == (BOOK_B64, LEDGER)
 
 
-def test_stores_are_searched_in_order_and_artifacts_dir_last(tmp_path: Path) -> None:
+def test_stores_are_searched_in_order(tmp_path: Path) -> None:
     good, bad = tmp_path / "good", tmp_path / "bad"
     row = corpus_row(good)
     bad.mkdir()
@@ -437,8 +437,8 @@ def test_stores_are_searched_in_order_and_artifacts_dir_last(tmp_path: Path) -> 
 
     refused = seed(artifacts_dirs=[str(bad), str(good)])
     assert refused.status_code == 400 and refused.json()["detail"]["error"]["code"] == "artifact_mismatch"
-    assert seed(artifacts_dirs=[str(good)], artifacts_dir=str(bad)).status_code == 200
-    assert seed(artifacts_dirs=[str(tmp_path / "empty")], artifacts_dir=str(good)).status_code == 200
+    assert seed(artifacts_dirs=[str(good), str(bad)]).status_code == 200
+    assert seed(artifacts_dirs=[str(tmp_path / "empty"), str(good)]).status_code == 200
 
 
 def test_a_row_whose_artifacts_cannot_be_read_is_refused_and_seeds_nothing(tmp_path: Path) -> None:
@@ -455,10 +455,12 @@ def test_a_row_whose_artifacts_cannot_be_read_is_refused_and_seeds_nothing(tmp_p
         assert client.post("/seed_session", json=gym_row(DRIVE_SPEC, "x")).status_code == 200  # no references
 
 
-@pytest.mark.parametrize("stores", [{"artifacts_dirs": ["data/corpus/artifacts"]}, {"artifacts_dir": "artifacts"}])
-def test_artifact_stores_must_be_absolute_paths(stores: dict) -> None:
+@pytest.mark.parametrize("stores", [["data/corpus/artifacts"], ["/srv/corpus/artifacts", "artifacts"]])
+def test_artifact_stores_must_be_absolute_paths(stores: list[str]) -> None:
     with pytest.raises(ValidationError, match="absolute"):  # the server runs in its own directory
-        OfficeEnvResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="officeenv", **stores)
+        OfficeEnvResourcesServerConfig(
+            host="0.0.0.0", port=8080, entrypoint="", name="officeenv", artifacts_dirs=stores
+        )
 
 
 # The MCP exposure.

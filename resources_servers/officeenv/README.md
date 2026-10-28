@@ -99,7 +99,7 @@ so it moves as one directory and is read with only its rows path changed.
 
 The server reads the references back at seed, for an Agent's seed and an Environment Server's
 alike, from the stores in `artifacts_dirs`: absolute paths (the server runs in its own
-directory), searched in order, with `artifacts_dir` searched last. Each artifact is checked
+directory), searched in order. Each artifact is checked
 against its hash and size before OfficeEnv reads the TaskSpec. A row whose artifacts cannot be
 read is refused with 400 (`missing_artifact`, `artifact_mismatch` or `invalid_artifact`) and
 nothing is seeded; a row without references seeds as before. To serve a corpus:
