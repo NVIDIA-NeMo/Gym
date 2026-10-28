@@ -374,9 +374,22 @@ class SandboxSession[Artifacts]:
                 self.capture_error = error
         if self.owns_sandbox:
             if not self.sandbox_stopped:
-                async with asyncio.timeout(timeout):
-                    await self.sandbox.stop()
-                self.sandbox_stopped = True
+                try:
+                    if self.cleanup is not None:
+                        # A local sandbox stops its workspace, but session runtimes can
+                        # live outside it. Reclaim them after capture while exec works.
+                        async with asyncio.timeout(timeout):
+                            await remove_session_directory(
+                                self.sandbox,
+                                session_dir=self._session_root or self.session_dir,
+                                workdir=self.workdir,
+                                timeout=timeout,
+                                harness=self.harness,
+                            )
+                finally:
+                    async with asyncio.timeout(timeout):
+                        await self.sandbox.stop()
+                    self.sandbox_stopped = True
             await self._release_exec(timeout=timeout)
         else:
             await self._release_exec(timeout=timeout)
