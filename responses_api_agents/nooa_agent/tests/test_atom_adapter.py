@@ -116,3 +116,30 @@ async def test_atom_runs_through_the_runner_with_a_scripted_model(tmp_path: Path
         "non_trainable_terminal_output",
         "public_assistant_metadata_unavailable",
     ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_unwraps_atoms_turn_failure_to_the_strategy_error():
+    """The runner classifies CodeAct stops and model rejections by the error the strategy raised;
+    Atom's session wraps it, so the adapter hands the original back."""
+    from nooa.errors import GenerationError
+    from nooa_atom.session.session import TurnFailedError
+
+    original = GenerationError("LLM API error after 3 retries")
+
+    async def failing(task: str):
+        try:
+            raise original
+        except GenerationError as error:
+            raise TurnFailedError(str(error)) from error
+
+    agent = SimpleNamespace(solve=failing)
+    with pytest.raises(GenerationError) as info:
+        await invoke_atom(agent, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert info.value is original
+
+    async def other(task: str):
+        raise RuntimeError("not a turn failure")
+
+    with pytest.raises(RuntimeError):
+        await invoke_atom(SimpleNamespace(solve=other), NeMoGymResponseCreateParamsNonStreaming(input="task"))

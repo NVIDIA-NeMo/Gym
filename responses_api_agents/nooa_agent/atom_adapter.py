@@ -22,5 +22,16 @@ if TYPE_CHECKING:
 
 
 async def invoke_atom(agent: AtomHarness, request: NeMoGymResponseCreateParamsNonStreaming) -> TaskResult:
-    """Hand the latest user message to Atom and return its structured result."""
-    return await agent.solve(_latest_user_text(request))
+    """Hand the latest user message to Atom and return its structured result.
+
+    Atom's session reports a failed turn as ``TurnFailedError`` wrapping the error the agent's
+    strategy raised. The wrapper is re-raised as that original error so the runner's termination
+    policy sees the same CodeAct stops and model rejections it sees from any other NOOA agent.
+    """
+    try:
+        return await agent.solve(_latest_user_text(request))
+    except Exception as error:
+        cause = error.__cause__
+        if type(error).__name__ == "TurnFailedError" and isinstance(cause, Exception):
+            raise cause
+        raise
