@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -169,8 +170,18 @@ class TestARunAfterAPrepare:
         dispatched: list[str] = []
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: dispatched.append(target))
         monkeypatch.setattr(harbor_cli, "build_run", lambda prepared, agent, **kwargs: (tmp_path / "run.yaml", []))
-        monkeypatch.setattr(harbor_cli, "_resolved_collection", lambda tokens, prepared: object())
+        # The run reads the collection's output path before dispatch (to fingerprint what an earlier run left
+        # there) and again for the run summary afterwards; the summary itself is that machinery, not this test.
+        rollouts = tmp_path / "results" / "harbor" / "ds" / "rollouts.jsonl"
+        monkeypatch.setattr(
+            harbor_cli,
+            "_resolved_collection",
+            lambda tokens, prepared: SimpleNamespace(output_jsonl_fpath=str(rollouts)),
+        )
         monkeypatch.setattr(harbor_cli, "_resumable_cache", lambda collection: None)
+        monkeypatch.setattr(harbor_cli, "_write_summary", lambda *args, **kwargs: None)
+        # The split comes from the resolved run config (hydra over sys.argv), which this stubbed run never builds.
+        monkeypatch.setattr(harbor_cli, "_collector_split", lambda: None)
 
         def fail(message):
             raise SystemExit(message)
