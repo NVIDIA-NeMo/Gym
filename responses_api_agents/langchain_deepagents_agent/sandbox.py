@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,16 +18,17 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.sandbox.utils import read_text, upload_text
 
 
-REQUIREMENTS = (
-    "deepagents==0.6.12",
-    "langchain==1.4.7",
-    "langchain-core==1.7.0",
-    "langgraph==1.2.16",
-    "aiohttp>=3.13,<4",
+LOG = logging.getLogger(__name__)
+REQUIREMENTS = tuple(
+    line
+    for line in Path(__file__).with_name("runtime_requirements.txt").read_text().splitlines()
+    if line and not line.startswith("#")
 )
 RUNTIME_KEY = hashlib.sha256(" ".join(REQUIREMENTS).encode()).hexdigest()[:16]
 RUNTIME_DIR = f"/tmp/nemo-gym-deepagents-runtime-{RUNTIME_KEY}"
 RUNTIME_PYTHON = f"{RUNTIME_DIR}/venv/bin/python"
+RUNTIME_EXECUTABLE = f"{RUNTIME_DIR}/venv/bin/deepagents-runtime"
+RUNNER_NAME = "sandbox_runner"
 RUNTIME_FILES = ("sandbox_runner.py", "runtime_model.py", "runtime_messages.py", "runtime_observer.py")
 
 
@@ -47,11 +49,18 @@ class DeepAgentsSandboxSession(AgentSessionState):
         """Install the pinned SDK in the actual sandbox and stage this adapter's source."""
         sandbox = self.session.sandbox
         prepared = await sandbox.exec(
-            f"mkdir -p {shlex.quote(RUNTIME_DIR)} {shlex.quote(self.package_dir)}", timeout_s=30
+            f"mkdir -p {shlex.quote(RUNTIME_DIR)} {shlex.quote(self.package_dir)} && "
+            f"chmod 700 {shlex.quote(self.session.session_dir)}",
+            timeout_s=30,
         )
         if prepared.return_code != 0 or prepared.error_type:
             raise RuntimeError(f"DeepAgents runtime directory setup failed: {prepared.stderr or prepared.stdout}")
-        check = f'{shlex.quote(RUNTIME_PYTHON)} -c \'import deepagents, aiohttp; from importlib.metadata import version; assert version("deepagents") == "0.6.12"\''
+        versions = {name: version for name, version in (r.split("==") for r in REQUIREMENTS if "==" in r)}
+        check_code = (
+            "import deepagents, aiohttp; from importlib.metadata import version; "
+            f"assert all(version(k) == v for k, v in {versions!r}.items())"
+        )
+        check = f"{shlex.quote(RUNTIME_PYTHON)} -c {shlex.quote(check_code)}"
         ready = await sandbox.exec(check, timeout_s=60)
         if ready.return_code != 0 or ready.error_type:
             uv = f"{self.session.session_dir}/uv"
@@ -70,8 +79,18 @@ class DeepAgentsSandboxSession(AgentSessionState):
             ready = await sandbox.exec(check, timeout_s=60)
             if ready.return_code != 0 or ready.error_type:
                 raise RuntimeError(f"DeepAgents runtime import check failed: {ready.stderr or ready.stdout}")
+        # Keep the venv layout (and SDK imports), but avoid matching task cleanup commands
+        # such as pkill python3 / pkill -f '\.py'. This is not a stdlib-only runner.
+        neutral = await sandbox.exec(
+            f"cp -L {shlex.quote(RUNTIME_PYTHON)} {shlex.quote(RUNTIME_EXECUTABLE)} && "
+            f"chmod 755 {shlex.quote(RUNTIME_EXECUTABLE)}",
+            timeout_s=30,
+        )
+        if neutral.return_code != 0 or neutral.error_type:
+            raise RuntimeError("Could not prepare the DeepAgents runtime executable")
         for name in RUNTIME_FILES:
-            await sandbox.upload(Path(__file__).with_name(name), f"{self.package_dir}/{name}")
+            target = RUNNER_NAME if name == "sandbox_runner.py" else name
+            await sandbox.upload(Path(__file__).with_name(name), f"{self.package_dir}/{target}")
         for package in (self.package_dir, str(Path(self.package_dir).parent)):
             await upload_text(sandbox, path=f"{package}/__init__.py", text="")
 
@@ -83,11 +102,10 @@ class DeepAgentsSandboxSession(AgentSessionState):
                 self.session.sandbox, path=f"{self.session.session_dir}/input.json", text=json.dumps(payload)
             )
             return SandboxCommand(
-                python=RUNTIME_PYTHON,
                 argv=[
-                    RUNTIME_PYTHON,
+                    RUNTIME_EXECUTABLE,
                     "-I",
-                    f"{self.package_dir}/sandbox_runner.py",
+                    f"{self.package_dir}/{RUNNER_NAME}",
                     f"{self.session.session_dir}/input.json",
                     f"{self.session.session_dir}/output.json",
                 ],
@@ -102,6 +120,7 @@ class DeepAgentsSandboxSession(AgentSessionState):
                 raise RuntimeError(
                     f"DeepAgents returned no valid artifact: {await self.session.read_output_log()}"
                 ) from error
+            LOG.info("DeepAgents sandbox runtime: %s", result.get("runtime"))
             return result
 
         return await self.session.execute(

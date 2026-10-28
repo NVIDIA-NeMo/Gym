@@ -4,6 +4,5 @@
 # from anthropic and deliberately avoids the real client (httpx), so its pin is a routine periodic bump,
 # not a hard ceiling, but changing it repo-wide is out of scope for this one agent. Capped here instead;
 # 0.6.12 is the newest version that resolves.
-deepagents==0.6.12
-langchain-core
+-r runtime_requirements.txt
 langchain-tavily>=0.2.18

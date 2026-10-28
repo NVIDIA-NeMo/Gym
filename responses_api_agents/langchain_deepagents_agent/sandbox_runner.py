@@ -155,6 +155,7 @@ def main(input_path: str, output_path: str) -> None:
         model_ref=payload["model_ref"],
         sandbox_id=payload["sandbox_id"],
     )
+    observer.runtime = runtime
     observer.save()
 
     async def start() -> None:

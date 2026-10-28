@@ -81,6 +81,7 @@ class DeepAgentsObserver(AsyncCallbackHandler):
         self.error_status: int | None = None
         self.stop_reason: str | None = None
         self.shell_results: dict[str, int] = {}
+        self.runtime: dict[str, Any] | None = None
 
     @staticmethod
     def _invocation(name: str, **kwargs: Any) -> dict[str, Any]:
@@ -245,6 +246,7 @@ class DeepAgentsObserver(AsyncCallbackHandler):
     def save(self) -> None:
         """Atomically retain partial evidence after each native event."""
         payload = {
+            "runtime": self.runtime,
             "output_items": self.invocations["root"]["conversation"][self.initial_input_counts.get("root", 0) :],
             "invocations": list(self.invocations.values()),
             "tools": list(self.tools.values()),

@@ -56,10 +56,10 @@ class SandboxedDeepAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int = Field(default=8, gt=0)
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
-    sandbox_install_timeout_seconds: float = Field(default=900, gt=0)
-    sandbox_runner_timeout_seconds: float = Field(default=12600, gt=0)
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+    sandbox_runner_timeout_seconds: float = Field(default=12600, gt=0, allow_inf_nan=False)
     shell_timeout_seconds: int = Field(default=120, gt=0)
-    session_close_timeout_seconds: float = Field(default=30, gt=0)
+    session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
 
 
 class SandboxedDeepAgent(SimpleResponsesAPIAgent):
