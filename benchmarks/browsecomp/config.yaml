@@ -20,7 +20,7 @@ browsecomp_benchmark_resources_server:
       # Search/browse backend: "ydc", "tavily" or "exa". Override per-run with
       # ++...browsecomp_advanced_harness.search_provider=tavily (+ tavily_api_key=[...]).
       # ++...browsecomp_advanced_harness.search_provider=exa (+ exa_api_key=[...]) or
-      search_provider: ydc
+      search_provider: exa
       # Results per query. 10 is the Exa reference value; the Tavily path uses 5.
       max_results: 10
       # Supplied per-run as a sharded key list so concurrent runs do not collide
