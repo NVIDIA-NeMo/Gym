@@ -8033,34 +8033,90 @@ class TestLongestFirstDispatch:
 
             assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
 
+    _RECOVERY_CONFIG = {
+        "agent": {"responses_api_agents": {"simple_agent": {"resources_server": {"name": "judge_rs"}}}},
+        "judge_rs": {"resources_servers": {"equivalence_llm_judge": {}}},
+        # An Environment Server that judges in its own sandbox, with no resources server to send a row to.
+        "sandbox_env": {"environment_servers": {"swe_together": {"agent_server": {"name": "candidate"}}}},
+        "candidate": {"responses_api_agents": {"opencode_agent": {"resources_server": None}}},
+    }
+
     def test_a_judge_failure_with_a_saved_answer_is_not_run_again(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Resume would generate a new answer; `gym eval reverify --judge-failed-only` judges the saved one."""
+        answer = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "42"}]}]}
+        judged_by_agent = {NG_FAILURE_CLASS_KEY: "judge_failed", "agent_ref": {"name": "agent"}}
+        failures = [
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, **judged_by_agent, "response": answer},
+            # Nothing to judge again: no saved answer, a multi-stage row reverify refuses, or no resources server.
+            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, **judged_by_agent},
+            {
+                TASK_INDEX_KEY_NAME: 3,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                **judged_by_agent,
+                "response": answer,
+                "stage_index": 0,
+            },
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "judge_failed",
+                "response": answer,
+                "agent_ref": {"name": "candidate"},
+                "_ng_environment_server": "sandbox_env",
+            },
+        ]
+        config = self._write_resume_state(tmp_path, failures)
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(
+            config, global_config_dict=OmegaConf.create(self._RECOVERY_CONFIG)
+        )
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 2, 3]
+        assert "1 judge failures with a saved answer → not retried" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("recovery_config", [None, {"agent": {"responses_api_agents": {"simple_agent": {}}}}])
+    def test_a_judge_failure_recovery_cannot_route_is_run_again(self, tmp_path: Path, recovery_config) -> None:
+        """Without a config, or with no resources server in it, `--judge-failed-only` cannot judge the row."""
         answer = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "42"}]}]}
         failures = [
             {
                 TASK_INDEX_KEY_NAME: 1,
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 NG_FAILURE_CLASS_KEY: "judge_failed",
+                "agent_ref": {"name": "agent"},
                 "response": answer,
-            },
-            # Nothing to judge again: no saved answer, or a multi-stage row reverify cannot recover.
-            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "judge_failed"},
-            {
-                TASK_INDEX_KEY_NAME: 3,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "judge_failed",
-                "response": answer,
-                "stage_index": 0,
-            },
+            }
         ]
         config = self._write_resume_state(tmp_path, failures)
+        global_config_dict = None if recovery_config is None else OmegaConf.create(recovery_config)
 
-        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config, global_config_dict=global_config_dict)
 
-        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 2, 3]
-        assert "1 judge failures with a saved answer → not retried" in capsys.readouterr().out
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 1, 2, 3]
+
+    async def test_resume_gives_the_run_config_to_the_judge_recovery_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        run_config = OmegaConf.create(self._RECOVERY_CONFIG)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "maybe_get_global_config_dict", lambda: run_config)
+        seen: dict = {}
+
+        class _Stop(Exception):
+            pass
+
+        def load_from_cache(_self, _config, **kwargs):
+            seen.update(kwargs)
+            raise _Stop
+
+        monkeypatch.setattr(RolloutCollectionHelper, "_load_from_cache", load_from_cache)
+        config = self._write_resume_state(tmp_path, [], resume_from_cache=True)
+
+        with pytest.raises(_Stop):
+            await RolloutCollectionHelper()._run_from_config(config)
+
+        assert seen["global_config_dict"] is run_config
 
 
 class TestResubmitAttemptBudget:

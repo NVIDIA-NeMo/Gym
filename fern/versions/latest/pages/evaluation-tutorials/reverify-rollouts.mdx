@@ -193,7 +193,7 @@ When a run uses an LLM-as-judge verifier, the judge is a second model call made 
 - `--rollouts` is the run's **successful** rollouts (`rollouts.jsonl`); they are carried through unchanged.
 - The failed subset is read automatically from the sidecar next to it (`rollouts_failures.jsonl`), filtered to the rows tagged as judge failures.
 - The reverify-mode guard is skipped, so `--force` is not needed and the output is not prefixed with `unsafe_`.
-- `gym eval run --resume` does not run these rollouts again, since that would generate a new policy answer. It reports how many it left for recovery. A judge-failed row without a stored `response`, or a multi-stage row, is still retried by resume.
+- `gym eval run --resume` does not run these rollouts again, since that would generate a new policy answer. It reports how many it left for recovery. A judge-failed row without a stored `response`, a multi-stage row, or a row for which the run's config names no resources server (an Environment Server such as SWE-Together that judges in its own sandbox) is still retried by resume.
 
 ```bash
 gym eval reverify --judge-failed-only \
