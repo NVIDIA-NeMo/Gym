@@ -32,7 +32,7 @@ def controller_for(participant: EnvironmentParticipant) -> ParticipantControlPla
 
 
 async def test_a_wait_step_blocks_prepare_until_its_result_is_recorded() -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     controller = controller_for(participant)
     episode_id = EpisodeId(rollout_id="r")
     verified = asyncio.Event()
@@ -60,7 +60,7 @@ async def test_a_wait_step_blocks_prepare_until_its_result_is_recorded() -> None
 
 
 async def test_a_replay_step_does_not_block_and_its_result_waits_at_the_next_boundary() -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     controller = controller_for(participant)
     episode_id = EpisodeId(rollout_id="r")
     judged = asyncio.Event()
@@ -93,12 +93,12 @@ async def test_a_replay_step_does_not_block_and_its_result_waits_at_the_next_bou
 
 
 async def test_new_episodes_are_refused_while_closed_but_restored_ones_start() -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     await participant.close_admission(CLOSE)
     with pytest.raises(AdmissionClosedError):
         participant.begin(EpisodeId(rollout_id="new"), TASK, None)
 
-    fresh = EnvironmentParticipant()
+    fresh = EnvironmentParticipant(mode="exported")
     fresh.restore_records(
         [
             EpisodeRecord(
@@ -110,7 +110,7 @@ async def test_new_episodes_are_refused_while_closed_but_restored_ones_start() -
     # Not before the resume that follows the restore; the restored record waits for the replacement.
     with pytest.raises(AdmissionClosedError):
         fresh.begin(EpisodeId(rollout_id="r", attempt=3), TASK, None)
-    assert fresh.status_extra()["restored_pending"] == ["r-a3"]
+    assert fresh.status_extra()["unclaimed"] == ["r-a3"]
     await fresh.open_admission()
     # After that resume, a new checkpoint that closes admission still admits the replacement.
     await fresh.close_admission(CLOSE)
@@ -124,7 +124,7 @@ async def test_new_episodes_are_refused_while_closed_but_restored_ones_start() -
 
 
 async def test_restored_state_must_match_the_replacement_task() -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     participant.restore_records(
         [EpisodeRecord(episode_id=EpisodeId(rollout_id="r"), task_digest=task_digest({"task_id": "a"}), boundary={})]
     )
@@ -135,7 +135,7 @@ async def test_restored_state_must_match_the_replacement_task() -> None:
 
 @pytest.mark.parametrize("parked_by", ["boundary", "replay_step"])
 async def test_checkpoint_pause_does_not_count_against_a_parked_episode_deadline(parked_by: str) -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     episode_id = EpisodeId(rollout_id="r")
     started, closed, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
     deadlines: list[asyncio.Timeout] = []
@@ -175,7 +175,7 @@ async def test_checkpoint_pause_does_not_count_against_a_parked_episode_deadline
 
 
 async def test_commit_restore_round_trip_and_retire_after_restore(tmp_path: Path) -> None:
-    source = EnvironmentParticipant()
+    source = EnvironmentParticipant(mode="exported")
     source_controller = controller_for(source)
     episode_id = EpisodeId(rollout_id="r", attempt=1)
     release = asyncio.Event()
@@ -194,21 +194,21 @@ async def test_commit_restore_round_trip_and_retire_after_restore(tmp_path: Path
     await source_controller.resume(CheckpointRequest(**request()))
     await task
 
-    restored = EnvironmentParticipant()
+    restored = EnvironmentParticipant(mode="exported")
     controller = controller_for(restored)
     await controller.restore(RestoreRequest(**request("r1", checkpoint_dir=str(tmp_path), episode_ids=[episode_id])))
     await controller.resume(CheckpointRequest(**request("r1")))
     status = controller.status()
     await controller.retire(RetireRequest(**request("cleanup", episode_ids=[{"rollout_id": "r", "attempt": 2}])))
 
-    assert status["restored_pending"] == ["r-a2"]
-    assert controller.status()["restored_pending"] == []
+    assert status["unclaimed"] == ["r-a2"]
+    assert controller.status()["unclaimed"] == []
 
 
 async def test_a_restored_episode_not_yet_restarted_survives_the_next_checkpoint(tmp_path: Path) -> None:
     first, second = tmp_path / "first", tmp_path / "second"
     episode_id = EpisodeId(rollout_id="r")
-    source = EnvironmentParticipant()
+    source = EnvironmentParticipant(mode="exported")
     source_controller = controller_for(source)
     release = asyncio.Event()
 
@@ -225,14 +225,14 @@ async def test_a_restored_episode_not_yet_restarted_survives_the_next_checkpoint
     task.cancel()
 
     # Restore and resume, then checkpoint again before the replacement attempt starts.
-    restored = EnvironmentParticipant()
+    restored = EnvironmentParticipant(mode="exported")
     controller = controller_for(restored)
     await controller.restore(RestoreRequest(**request("r1", checkpoint_dir=str(first), episode_ids=[episode_id])))
     await controller.resume(CheckpointRequest(**request("r1")))
     await controller.prepare(CheckpointRequest(**request("c2")))
     committed = await controller.commit(CommitRequest(**request("c2", checkpoint_dir=str(second))))
 
-    again = EnvironmentParticipant()
+    again = EnvironmentParticipant(mode="exported")
     again_controller = controller_for(again)
     replacement = EpisodeId(rollout_id="r", attempt=1)
     await again_controller.restore(
@@ -263,7 +263,7 @@ async def test_a_retire_during_final_cleanup_does_not_interrupt_it() -> None:
 
     config = _environment_server().config.model_copy(update={"cleanup_timeout_seconds": 5})
     server = SlowCleanupServer(config=config, server_client=_environment_server().server_client)
-    server._checkpoint = EnvironmentParticipant()
+    server._checkpoint = EnvironmentParticipant(mode="exported")
     controller = controller_for(server._checkpoint)
     episode = _request()
     run = asyncio.create_task(server.run_request(episode))
@@ -278,7 +278,7 @@ async def test_a_retire_during_final_cleanup_does_not_interrupt_it() -> None:
 
 async def test_a_commit_that_no_longer_continues_a_restored_episode_retires_it(tmp_path: Path) -> None:
     episode_id = EpisodeId(rollout_id="r")
-    source = EnvironmentParticipant()
+    source = EnvironmentParticipant(mode="exported")
     source_controller = controller_for(source)
     release = asyncio.Event()
 
@@ -294,7 +294,7 @@ async def test_a_commit_that_no_longer_continues_a_restored_episode_retires_it(t
     await source_controller.commit(CommitRequest(**request(checkpoint_dir=str(tmp_path / "first"))))
     task.cancel()
 
-    restored = EnvironmentParticipant()
+    restored = EnvironmentParticipant(mode="exported")
     controller = controller_for(restored)
     await controller.restore(
         RestoreRequest(**request("r1", checkpoint_dir=str(tmp_path / "first"), episode_ids=[episode_id]))
@@ -309,7 +309,7 @@ async def test_a_commit_that_no_longer_continues_a_restored_episode_retires_it(t
 
     # Outside the scope, so not exported, and retired after the write.
     assert committed["episode_ids"] == []
-    assert controller.status()["restored_pending"] == []
+    assert controller.status()["unclaimed"] == []
     # Retired without a lasting refusal, since attempt 1 never ran here: a later /run for it starts from its input.
     restored.begin(EpisodeId(rollout_id="r", attempt=1), TASK, None)
     assert restored.continuation(EpisodeId(rollout_id="r", attempt=1)) is None
@@ -334,7 +334,7 @@ async def test_a_retire_replies_only_after_the_episode_and_its_cleanup_have_ende
 
     config = _environment_server().config.model_copy(update={"cleanup_timeout_seconds": 5})
     server = LongEpisodeServer(config=config, server_client=_environment_server().server_client)
-    server._checkpoint = EnvironmentParticipant()
+    server._checkpoint = EnvironmentParticipant(mode="exported")
     controller = controller_for(server._checkpoint)
     episode = _request()
     run = asyncio.create_task(server.run_request(episode))
@@ -349,7 +349,7 @@ async def test_a_retire_replies_only_after_the_episode_and_its_cleanup_have_ende
 
 async def test_an_episode_without_a_boundary_is_exported_and_restarts_from_its_input(tmp_path: Path) -> None:
     episode_id = EpisodeId(rollout_id="r")
-    source = EnvironmentParticipant()
+    source = EnvironmentParticipant(mode="exported")
     source_controller = controller_for(source)
     release = asyncio.Event()
 
@@ -367,7 +367,7 @@ async def test_an_episode_without_a_boundary_is_exported_and_restarts_from_its_i
     )
     task.cancel()
 
-    restored = EnvironmentParticipant()
+    restored = EnvironmentParticipant(mode="exported")
     await controller_for(restored).restore(
         RestoreRequest(**request("r1", checkpoint_dir=str(tmp_path), episode_ids=[episode_id]))
     )
@@ -380,7 +380,7 @@ async def test_an_episode_without_a_boundary_is_exported_and_restarts_from_its_i
 
 async def test_an_episode_whose_retire_was_cut_short_blocks_the_next_prepare(tmp_path: Path) -> None:
     episode_id = EpisodeId(rollout_id="r")
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     controller = controller_for(participant)
     release, stepped = asyncio.Event(), asyncio.Event()
 
@@ -420,7 +420,7 @@ async def test_an_episode_whose_retire_was_cut_short_blocks_the_next_prepare(tmp
 
 
 async def test_readiness_is_answered_by_the_blocker_count_without_listing_episodes() -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     for index in range(3):
         participant.begin(EpisodeId(rollout_id=f"r{index}"), TASK, None)
 
@@ -433,7 +433,7 @@ async def test_readiness_is_answered_by_the_blocker_count_without_listing_episod
 async def test_an_episode_marked_restart_never_holds_up_prepare_and_is_left_out_of_the_commit(tmp_path: Path) -> None:
     from nemo_gym._checkpoint.errors import RestartInScopeError
 
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     controller = controller_for(participant)
     restart, continued = EpisodeId(rollout_id="r"), EpisodeId(rollout_id="s")
     release = asyncio.Event()
@@ -472,7 +472,7 @@ async def test_an_episode_marked_restart_never_holds_up_prepare_and_is_left_out_
 async def test_a_replay_step_that_raises_during_a_checkpoint_parks_until_resume_and_starts_over_after_a_crash(
     tmp_path: Path,
 ) -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     controller = controller_for(participant)
     episode_id = EpisodeId(rollout_id="r")
     entered, fail = asyncio.Event(), asyncio.Event()
@@ -517,7 +517,7 @@ async def test_a_replay_step_that_raises_during_a_checkpoint_parks_until_resume_
 
 
 async def test_a_retire_stops_an_episode_parked_after_its_replay_step_raised() -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     episode_id = EpisodeId(rollout_id="r")
     entered, fail = asyncio.Event(), asyncio.Event()
 
@@ -552,7 +552,7 @@ async def test_a_retire_stops_an_episode_parked_after_its_replay_step_raised() -
 
 
 async def test_live_records_outside_the_commit_scope_are_not_exported() -> None:
-    participant = EnvironmentParticipant()
+    participant = EnvironmentParticipant(mode="exported")
     episode_ids = [EpisodeId(rollout_id="r"), EpisodeId(rollout_id="s")]
     for episode_id in episode_ids:
         participant.begin(episode_id, TASK, None)
@@ -580,7 +580,7 @@ async def test_after_a_restore_a_late_start_of_the_replaced_attempt_is_refused(t
     write_participant_state(
         tmp_path, kind="environment", instance="env", checkpoint_id="c0", records=[record.to_json_record()]
     )
-    restored = EnvironmentParticipant()
+    restored = EnvironmentParticipant(mode="exported")
     controller = controller_for(restored)
     # This server holds no record of "unrecorded", which the restore continues all the same.
     scope = [{"rollout_id": "r"}, {"rollout_id": "unrecorded"}]

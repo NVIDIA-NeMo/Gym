@@ -451,6 +451,47 @@ gym eval run \
   `--resume` reruns; Pi does not set it yet. So a timeout counts against Pi's score, but not against Stirrup's.
 - The prompt and the harness differ from the certified Stirrup setup, so these are not AA v2 scores.
 
+`benchmarks/gdpval/codex.yaml` runs [Codex](../../responses_api_agents/codex_agent/README.md) the same way. Codex sends
+no sampling or output limit to a Gym model server, so set them on the model server, for example on `openai_model` in
+front of vLLM:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_codex/deliverables
+gym eval prepare --benchmark gdpval/codex
+gym eval run \
+    --model-type openai_model \
+    --benchmark gdpval/codex \
+    --split benchmark \
+    --output results/gdpval_codex.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name> \
+    '++policy_model.responses_api_models.openai_model.extra_body={temperature: 1.0, top_p: 0.95, max_output_tokens: 32768}' \
+    '++policy_model.responses_api_models.openai_model.propagate_upstream_http_status_codes=[400]'
+```
+
+- The rows, the task tools and the deliverables directory work as for Pi, and these are not AA v2 scores either.
+  Codex installs Node.js and Codex in the task sandbox at the start of each episode, from nodejs.org and the npm
+  registry (about 190 MB). The model sees the tools as `mcp__gdpval_resources_server__<tool>`, and rollouts record
+  the calls by the tool name alone, such as `finish`. Codex keeps about 12 KB of each tool result, so the model sees
+  only the start and end of a long `fetch_web_page` result.
+- `extra_body` pins the Stirrup agent's temperature and top_p and limits each model call to 32,768 output tokens.
+- Codex checks `model_auto_compact_token_limit` after each reply that calls a tool, so the context can pass it by
+  about a reply and its tool output before Codex compacts, and the compaction call reserves 32,768 tokens for its own
+  reply. So keep the limit at about the window minus twice the output limit or lower: `codex.yaml` uses 196,608 for
+  a 262,144-token window. A near-full reply with a large tool result can still overflow the compaction call, and the
+  run then fails.
+- Codex does not compact on a context-length error; the run fails. `propagate_upstream_http_status_codes: [400]`
+  makes it fail within seconds with vLLM's message. By default `openai_model` returns HTTP 500, and Codex sends the
+  request 30 times before failing with a "high demand" error.
+- `finish` does not end a Codex run: Codex continues until the model replies without a tool call, and a later
+  `finish` or `abandon_task_finish` replaces the recorded call. The files are collected when the run ends, so a run
+  that fails after `finish`, for example on a context-length error, is not judged.
+- The Codex agent rejects sampling and output limits in the request, so every row fails if `gym eval run` gets
+  `--temperature`, `--top-p` or `--max-output-tokens`. Change Codex's own settings, such as `model_context_window`
+  and `model_auto_compact_token_limit` for another window, with
+  `++gdpval_codex_agent.responses_api_agents.codex_agent.<key>=<value>`.
+
 ## Multi-judge panel
 
 By default every GDPVal deliverable is graded by a **panel** of frontier LLM

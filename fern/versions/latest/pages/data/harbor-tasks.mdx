@@ -16,10 +16,12 @@ reads, and the three commands that work on such a dataset.
 ```
 my-dataset/
 ├── dataset.toml          # Harbor's dataset file; Gym's settings live in its [gym] table
+├── task_data.py          # optional: the TaskData model every task's fields are validated against
 ├── compose-images.json   # written by Gym at prepare: recorded image configurations (do not edit)
 └── hello/                # one task folder per task; the folder name is the task id
     ├── task.toml
     ├── instruction.md
+    ├── task_data.json    # optional: the task's own fields, carried in its row's task_data
     ├── environment/      # Dockerfile or docker-compose.yaml, plus files the task needs
     ├── tests/test.sh     # the verifier; writes /logs/verifier/reward.txt or reward.json
     └── solution/solve.sh # the reference solution `gym dataset validate` runs (optional)
@@ -34,15 +36,32 @@ task whose digest no longer matches, so edits after materialization are caught r
 ## `dataset.toml` and the `[gym]` table
 
 Harbor's own tables (`[dataset]`) are left to Harbor. What a dataset needs on top of its tasks goes in a `[gym]`
-table, as data: defaults that scale every task, and per-task overrides written with Harbor's own
-`[environment]` fields.
+table, as data: the facts Harbor has no field for (which split the rows enter and under which license, which
+harnesses may run them, catalog metadata), defaults that scale every task or set how often an evaluation plays
+each one, and per-task overrides written with Harbor's own `[environment]` fields.
 
 ```toml
 [dataset]
 name = "local/my-dataset"   # Harbor requires org/name here
 version = "0.1.0"
 
+[gym]
+# The split the rows enter: train, validation, example or benchmark. Unset means validation with a license,
+# else benchmark, which needs no license and never enters a training split. A license (one of Gym's dataset
+# license values) is required for train and validation.
+type = "validation"
+license = "Apache 2.0"
+# The harnesses admitted to run the dataset, by implementation name (responses_api_agents/<name>, what --agent
+# resolves to). Unset admits any. The oracle of `gym dataset validate` is always admitted.
+allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
+# Catalog metadata, carried into the generated run config: one of Gym's domain values (any other value is refused
+# with the values named), and whether the rewards were baselined and reviewed (false unless declared).
+domain = "coding"
+verified = false
+
 [gym.defaults]
+# Rollouts per task for an evaluation. `+num_repeats=` on the command line replaces it; it never enters a task's digest.
+num_repeats = 1
 # Scales every task's [agent] and [verifier] timeout_sec.
 timeout_multiplier = 1.0
 # Scales cpus, memory_mb and storage_mb of the agent's and the verifier's environments. GPUs never scale.
@@ -57,6 +76,32 @@ env = { EXAMPLE = "1" }
 memory_mb = 4096
 ```
 
+The generated run config's `datasets:` entry carries `type`, `license`, `domain`, `verified` and `allowed_agents`
+as declared, its top-level `num_repeats` is `[gym.defaults].num_repeats`, and `gym eval run` starts from that split
+and repeat count (`+split=` and `+num_repeats=` on the command line replace them); `gym dataset validate` plays each
+reference solution once unless `+num_repeats=` says otherwise. None of these keys enters a task's `_ng_digest`; only
+`[gym.defaults]` scaling and `[gym.tasks]` overrides do. Every materialized row carries
+`task_source` (the dataset folder's name: the parent's for a single task folder target inside a dataset, one whose
+parent holds a `dataset.toml` or a `manifest.toml`; a standalone task folder is labelled by its own name) and
+`_ng_digest` (the task
+folder's digest), and every results row carries them too, with `reward` and, when the verifier's `reward.json`
+named no `reward` key, `reward_components`:
+the keys that sum to the reward. That mapping is Harbor's optional, task-specific reading of the file, not the shared
+multi-reward contract of `BaseMultiRewardVerifyResponse` (a required mapping with the same objective keys on every
+task): tasks of one dataset may name different keys and a measured row may name none, so a trainer reads it row by
+row and takes the scalar `reward` alone where a row has none; a dataset meant for a fixed-objective trainer such as
+GDPO must have every task write the same keys without a `reward` key, which Gym does not pad or check across tasks.
+`gym eval run` with a harness outside `allowed_agents` fails before any image is
+recorded or built or any server started, naming the harness and the admitted list, and a run config edited to
+another harness afterwards is refused at dispatch by the collector's pairing guard. An `example` dataset is not
+runnable: that type marks committed smoke-test samples, and both commands refuse it at the same early point, before
+any image is recorded or built. `domain`, `verified` and `allowed_agents` stay out of the
+metrics sidecar Gym writes beside the rows. The rows' metrics sidecar and the collated split's are removed and
+rewritten on every fresh run, because the rows are regenerated from the task folder each time: growing or narrowing
+the selection or editing `type` or `license` between two runs of one taskset and harness never fails data
+preparation, and `overwrite_metrics_conflicts` is never needed. A `--resume` run keeps the collated metrics, as its
+rows are unchanged.
+
 Deployment settings (which sandbox provider, registry credentials, image mirrors) do not belong here: a dataset
 must run unchanged on every deployment. Those live in the sandbox provider block of the run configuration. See
 [OpenSandbox](/main/infrastructure/sandbox/opensandbox) for the provider's `images` and `setup` blocks.
@@ -67,6 +112,54 @@ manifest model, which serializes only Harbor's own tables. The `[gym]` table is 
 the multipliers and per-task overrides to their defaults without an error. Keep the dataset in git and restore the
 table from there after running one of these commands.
 </Note>
+
+## `task_data.py` and typed task fields
+
+A task may carry its own field values in `task_data.json`, a JSON object in its folder (a question and its
+expected answer, a tool subset, anything the dataset's own grading needs). The loader writes them into the task's
+row under `task_input.task_data`, beside the reserved `_ng_digest` and `_ng_dataset_digest` keys Gym adds, and the
+file is part of the task digest, so an edit after materialization is caught like any other.
+
+A dataset that ships `task_data.py` beside `dataset.toml` types those fields. The module exports one Pydantic
+model named `TaskData`:
+
+```python
+from pydantic import BaseModel, Field
+
+
+class TaskData(BaseModel):
+    question: str
+    answer: str = Field(min_length=1)
+    difficulty: int = 1
+```
+
+Every row is validated against it at the three points it crosses a boundary, with the task named in the error:
+
+- **Materialize.** `gym eval run` and `gym dataset validate` import the module once per dataset and check every
+  task folder's `task_data.json` against it before any image is recorded or built (the loaded tasks are checked
+  again before a row is written), and refuse the whole dataset when a task's fields do not satisfy the model, when
+  a field the model does not declare appears (whatever the model's `extra` setting; `TaskData` is the complete
+  description, validated with extras forbidden: the input names pydantic itself reads, aliases, `AliasChoices` and
+  `AliasPath` included, are the declared ones, and a key no field consumed, such as a field's name where only its
+  alias is accepted or a second spelling of a field already given, is refused rather than ignored), or when
+  the module does not import. Values are validated strictly, as JSON: `"3"` does not pass as an `int` nor `"no"`
+  as a `bool`, since the row and the verifier's `task_data.json` carry the file's values as written, never the
+  model's coerced ones (JSON's own spellings of a type still pass: an ISO string for a `datetime`, an integer for
+  a `float`). A validator that raises something pydantic does not wrap (a `KeyError` from a
+  lookup) is the same refusal at all three points, with the exception named. A task without `task_data.json` has
+  no fields, which is a violation only if the model requires some.
+- **Seed.** The `harbor` environment server imports each taskset's module at startup and validates the row it is
+  handed before anything is provisioned; a row the model rejects, or whose fields are not the pinned folder's
+  `task_data.json`, fails the episode at the seed stage (terminal, never retried). The pin holds for every task,
+  one without `task_data.json` included: a row that carries keys beside the reserved `_ng_*` ones for such a task,
+  which the server used to accept and ignore, is refused the same way (re-materialize it). A module that does not
+  import refuses every episode of its taskset with the import error.
+- **Collate.** `gym dataset collate` validates the taskset's rows against the server's reserved keys and the
+  dataset's `TaskData` in one report; the dataset's declared fields are not reported as unknown keys.
+
+A dataset without `task_data.py` (every hub dataset) is checked only for the reserved keys and behaves as before.
+The module is imported by Gym, so it runs on the host like `dataset.toml` is read there: keep it to the model.
+The reserved `_ng_*` keys are never task fields and are refused in `task_data.json`.
 
 ## `gym dataset init`
 
@@ -125,8 +218,8 @@ gym eval run harbor:terminal-bench/terminal-bench@4.0.0 --agent hermes_agent --s
 
 | Option | Description |
 | --- | --- |
-| `TARGET` | A task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`. `harbor:<org>/<name>[@<tag>]` fetches a package-store dataset. Fetched datasets land in `$NEMO_GYM_DATASETS_DIR` (default `./datasets`). |
-| `--agent`, `-a` | The harness that works in the task sandbox. It must accept `sandbox_access` in its session seed. |
+| `TARGET` | A task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`. `harbor:<org>/<name>[@<tag>]` fetches a package-store dataset. Fetched datasets land in `$NEMO_GYM_DATASETS_DIR` (default `environments/harbor/` in the Gym checkout); the fetch stages its clone in a hidden `.nemo-gym-harbor-*` directory there, which discovery skips. An unhidden `nemo-gym-harbor-*` directory left by a fetch interrupted under a `main` build from before this change is refused as a duplicate task ID: delete it once. |
+| `--agent`, `-a` | The harness that works in the task sandbox. It must accept `sandbox_access` in its session seed, and the dataset's `[gym] allowed_agents`, when set, must name it; otherwise the run stops before any image is built or server started. |
 | `--sandbox PROVIDER` | Sandbox provider for the task containers. |
 | `--only-tasks`, `--exclude-tasks` | Select tasks by name or glob. Left-out tasks are listed on stdout. |
 | `--skip-unloadable` | Run the loadable subset when some tasks do not load. Without it the run lists them and stops. |
@@ -137,3 +230,65 @@ out and stops before starting servers. Pass `--skip-unloadable` to run the loada
 tasks stay listed in `skipped.json`. Tasks that declare GPUs run on the environment server's `gpu_sandbox_provider`
 block when one is configured. The run's rows, generated configuration and outputs are the same artifacts every
 other `gym eval run` produces, so `gym eval aggregate`, `gym eval export` and the health check apply unchanged.
+
+### Run summary and verbosity
+
+Both commands leave a per-run summary beside the rollouts, `rollouts_run_summary.json` (`<stem>_run_summary.json`
+when `--output` names another file). It records the command, target, taskset and agent, the dataset's folder,
+source and digests, the run's `task_source` (the dataset label the rows were materialized with, beside the one the
+result rows carry as `rows_task_source`), the files of the run (rollouts and sidecars, the health check's
+reports, the rows and the data processor's files beside them, the collated collector input, run config,
+`skipped.json`, `images.json`, the verifier root; `null` for one the run did not write, for the aggregate
+metrics when an older file by that name predates this run's rollouts, for the health reports unless the quality
+summary records this rollouts file as the one it was computed from (their names are shared by every `--output`
+stem in the folder), and for rollouts,
+failures and materialized inputs a fresh start never got to clear, such as after servers that failed to start;
+such files are named under `stale_files` instead, and their rows are not this run's), and one entry per
+selected task and repeat: its status,
+reward and `failure_kind`, the verifier's mode, wall time and return code, the relative paths of its verifier log
+folder (`test-stdout.txt`, `trajectory.json`, collected `artifacts/`), and the input the row carried (task and
+dataset digests, `agent_timeout_sec`, the step for a multi-step task). A path a row names that is missing on
+disk is listed under `missing_paths`. The file is written whatever the run did, a validate that found no task
+with a `solution/` included (beside the requested `--output`): the tasks a validate left out for want of one are
+named under `unvalidated` with the reason (`no reference solution`), beside the tasks that did not load under
+`skipped`, so a selection that ran nothing explains why. Start from this file when a score needs checking.
+
+`gym dataset validate ... -v` (or `--verbose`, the `verbose` config key) raises the log level to DEBUG in the CLI
+and in the spun-up servers: the Harbor environment server then traces every episode's seed, verifier exit and
+score, and the oracle agent its `solve.sh` run.
+
+## Job-level Compose overlay
+
+A run can attach services and tools to every task without touching the tasks, as Harbor's job config does with
+`extra_docker_compose`, `agents[].mcp_servers` and an agent's `prompt_template_path`. The environment server's
+`compose_overlay` block names Compose `files` merged onto every task's Compose group after the task's own file
+(a task with only an image first becomes Harbor's one-service group `main`), `mcp_servers` merged by name with
+the task's `[[environment.mcp_servers]]` (the overlay's winning, as Harbor merges the job's) and granted with them,
+and a Jinja `prompt_template` with `{{ instruction }}` rendered around the instruction of the episode's first
+turn. The files merge as Compose merges `-f` files, `!reset` and `!override` included, and are interpolated with
+the task's variables, the deployment's `compose_variables` standing above the task's own sources in them (the overlay
+files are the operator's, like the values); their relative paths (`env_file` entries, bind sources) resolve against the
+Compose project directory, the task's `environment` folder, as Compose resolves every `-f` file's and Harbor's
+`--project-directory` names it, never against the overlay file's own folder; their `env_file` entries may be any
+readable file and are read once after the merge, the merged `environment` winning, as Compose reads them. Prepare
+reads the block from the configuration the command names, so the overlay's images are recorded with the tasks'
+and the merge is checked per task before any sandbox starts; set it in a `--config` file, and swap the backend by
+swapping the block. A dataset prepared without the block the server runs with is refused at seed (terminally,
+naming the services whose images have no record) until it is prepared again with it, and so is an overlay the
+deployment cannot run (the seed runs every check prepare ran on the merged document: the field check, the volume
+planner, the services the task's artifacts and collect hooks name, the non-root sidecar `extra_hosts` rule); the
+reason names the task's Compose file and the overlay files merged onto it. The template is read and compiled once,
+when the block is read.
+
+```yaml
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      compose_overlay:
+        files: [/path/hindsight-docker-compose.yaml, /path/hindsight-docker-compose.harbor.yaml]
+        mcp_servers:
+          - {name: hindsight-memory, transport: streamable-http, url: "http://hindsight:8888/mcp/default/"}
+        prompt_template: /path/memory_prompt.md.j2
+```
+
+See the environment server README, "Job-level Compose overlay", for the merge rules and what the group cannot run.
