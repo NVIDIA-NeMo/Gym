@@ -640,12 +640,11 @@ class TestPythonTool:
 
     def test_a_kernel_that_exits_is_restarted(self, python_client: TestClient) -> None:
         _python(python_client, "x = 42")
-        _python(python_client, "exit()")
 
-        output = _python(python_client, "print(open('document.pdf', 'rb').read(4))")
+        output = _python(python_client, "exit()")
 
-        assert output.startswith("b'%PDF'\n")
-        assert "[The Python kernel was restarted; variables from earlier cells are gone.]" in output
+        assert output == "[The Python kernel was restarted; variables from earlier cells are gone.]\n"
+        assert _python(python_client, "print(open('document.pdf', 'rb').read(4))") == "b'%PDF'\n"
         assert "NameError" in _python(python_client, "x")
 
     def test_long_output_is_truncated_in_the_sandbox(

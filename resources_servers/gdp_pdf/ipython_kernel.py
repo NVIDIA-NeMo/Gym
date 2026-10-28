@@ -75,6 +75,16 @@ def stop() -> None:
         os.killpg(int(PID_FILE.read_text()), signal.SIGKILL)
 
 
+def asked_to_exit(client: BlockingKernelClient, msg_id: str) -> bool:
+    """Whether the cell called exit(), after which the kernel shuts itself down."""
+    with contextlib.suppress(Empty):
+        while True:
+            reply = client.get_shell_msg(timeout=IDLE_TIMEOUT_S)
+            if reply["parent_header"].get("msg_id") == msg_id:
+                return any(item.get("source") == "ask_exit" for item in reply["content"].get("payload", []))
+    return False
+
+
 def run(timeout: float, max_chars: int) -> None:
     output, size, dropped, notes = [], 0, 0, []
     try:
@@ -108,6 +118,11 @@ def run(timeout: float, max_chars: int) -> None:
                 continue
             kind, content = message["msg_type"], message["content"]
             if kind == "status" and content["execution_state"] == "idle":
+                if asked_to_exit(client, msg_id):
+                    # Start the next kernel now, so the next cell never reaches the one shutting down.
+                    stop()
+                    start().stop_channels()
+                    notes.append(RESTARTED)
                 break
             text = ""
             if kind == "stream":
