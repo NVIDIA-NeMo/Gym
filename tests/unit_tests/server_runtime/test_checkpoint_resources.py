@@ -1118,6 +1118,25 @@ def test_mcp_session_tokens_are_decoded_with_one_serializer_per_server(monkeypat
     assert built.count("serializer") == 1
 
 
+def test_mcp_session_tokens_ride_as_bearer_tokens_with_mcp_bearer_token() -> None:
+    from nemo_gym._checkpoint.resources import MCPTokenClaims
+    from nemo_gym.base_resources_server import mcp_session_token_serializer
+
+    server, _ = make_server()
+    server.config.mcp_bearer_token = True
+    token = mcp_session_token_serializer(server.get_session_secret()).dumps({"sid": "s", "episode": "r-a1"})
+
+    def claims(*headers: tuple[bytes, bytes]) -> Any:
+        return server._mcp_token_claims({"headers": list(headers)})
+
+    expected = MCPTokenClaims("s", EpisodeId(rollout_id="r", attempt=1))
+    assert claims((b"authorization", f"Bearer {token}".encode())) == expected
+    # Gym's own header, another scheme, or no credentials name no session.
+    assert claims((b"x-nemo-gym-session-token", token.encode())) is None
+    assert claims((b"authorization", f"Basic {token}".encode())) is None
+    assert claims((b"authorization", b"Bearer ")) is None
+
+
 def test_an_exported_server_without_its_hooks_fails_at_startup() -> None:
     class Unfinished(SimpleResourcesServer):
         ray_enabled = False

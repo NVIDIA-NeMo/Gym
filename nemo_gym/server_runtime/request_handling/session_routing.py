@@ -84,7 +84,7 @@ import os
 import re
 import secrets
 from base64 import b64decode
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from time import monotonic
@@ -197,6 +197,19 @@ def cookie_session(cookie: str, *, signer: itsdangerous.TimestampSigner) -> Opti
     except (itsdangerous.BadSignature, ValueError):
         return None
     return session if isinstance(session, dict) else None
+
+
+def mcp_session_token(headers: Mapping[str, str], header: str) -> Optional[str]:
+    """Return the MCP session token a request carries in ``header``, or None.
+
+    In ``Authorization`` (a server with ``mcp_bearer_token``) the token is the credentials of a ``Bearer`` scheme;
+    in any other header it is the value.
+    """
+    value = headers.get(header)
+    if value is None or header.lower() != "authorization":
+        return value
+    scheme, _, token = value.partition(" ")
+    return (token.strip() or None) if scheme.lower() == "bearer" else None
 
 
 def mcp_token_session_id(token: str, *, serializer: itsdangerous.URLSafeSerializer) -> Optional[str]:
@@ -724,7 +737,11 @@ class SessionRoutingMiddleware:
 
     def _session_id_from_headers(self, connection: HTTPConnection) -> Optional[str]:
         cookie = connection.cookies.get(self.session_cookie)
-        token = connection.headers.get(self.mcp_token_header) if self.mcp_token_serializer is not None else None
+        token = (
+            mcp_session_token(connection.headers, self.mcp_token_header)
+            if self.mcp_token_serializer is not None
+            else None
+        )
         path = connection.scope["path"]
         is_mcp = path == self.mcp_path or path.startswith(self.mcp_path + "/")
         # MCP tool calls name their session by the token, never by a cookie.

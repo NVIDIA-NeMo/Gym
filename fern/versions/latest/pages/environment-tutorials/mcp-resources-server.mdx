@@ -262,6 +262,15 @@ def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
 
 The returned names are signed into that rollout's session token; `tools/list` then advertises only those tools and `tools/call` rejects any other name — per rollout, with no server-wide state.
 
+### An endpoint that sandboxed code calls
+
+When the MCP client runs where the model can read its configuration, such as a harness in a sandbox the resources server lends, two config options make the endpoint an ordinary one:
+
+- `mcp_server_name` is the name the `mcp` metadata gives the endpoint, which clients name its tools by (default: the server's name). Verify-time normalization strips `mcp__<mcp_server_name>__`.
+- `mcp_bearer_token: true` hands out the token as `Authorization: Bearer <token>` instead of `X-NeMo-Gym-Session-Token`. `tools/list` then requires the token and lists only the session's tools, and a tool outside the session's grant is answered as an unknown tool. Errors name no framework: a missing or invalid token is `Missing session token (Authorization header).` or `Invalid session token.`, and a tool's HTTP error names the tool rather than its route. It works with clients that pass the metadata's headers as given, as the Environment Server's MCP grants do.
+
+Both options are off by default, and the endpoint then answers as described above.
+
 ### Run it
 
 A complete, copy-pasteable run (assumes you saved `app_mcp.py` above). The compose config wires that subclass entrypoint to the agent:
