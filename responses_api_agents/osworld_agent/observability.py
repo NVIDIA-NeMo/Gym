@@ -83,6 +83,11 @@ def build_gym_observability(
         ),
         "unknown",
     )
+    # Keep failed requests in OSWorld's records and shared captures, but only
+    # completions own turns. Missing evidence alone is not proof of a failed request.
+    completion_calls = [
+        call for call in model_calls if not (call.get("completion_received") is False and call.get("response") is None)
+    ]
     trajectory = TrajectoryRecord(task_id=task_id, rollout_id=rollout_id)
     if not model_call_records_complete:
         trajectory.gaps.append(
@@ -91,13 +96,15 @@ def build_gym_observability(
         trajectory.gaps.append(
             ObservationGap(code="turn_model_call_scope_incomplete", detail="osworld_step_model_call_records")
         )
+        if not completion_calls:
+            trajectory.gaps.append(ObservationGap(code="turns_unavailable", detail="osworld_step_model_call_records"))
     invocation = AgentInvocation(
         invocation_id="root",
         status="completed" if evaluation_completed else "incomplete",
-        conversation=_conversation(model_calls[-1]) if model_calls else [],
+        conversation=_conversation(completion_calls[-1]) if completion_calls else [],
     )
     trajectory.invocations.append(invocation)
-    for position, call in enumerate(model_calls):
+    for position, call in enumerate(completion_calls):
         response = call.get("response") or {}
         observed = response.get("observation") or {}
         if not _valid_usage(observed.get("usage")):

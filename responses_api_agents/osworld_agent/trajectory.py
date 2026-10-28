@@ -420,6 +420,7 @@ def collect_model_calls(
                     "projected_prompt_messages": projected_prompt,
                     "media_ids": media_ids,
                     "response": dict(response) if isinstance(response, Mapping) else None,
+                    "completion_received": raw_call.get("completion_received"),
                     "exact_generation_arrays": arrays,
                     "partial_generation_evidence": partial_generation_evidence,
                     "exact_evidence": not call_reasons,

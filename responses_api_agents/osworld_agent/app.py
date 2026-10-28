@@ -719,6 +719,9 @@ def _build_messages_model_fn(
 
     def _call(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> Any:
         nonlocal call_index
+        # This private payload fact survives exceptions without changing their type.
+        # Unknown SDK/decoding failures must not imply that no completion was received.
+        payload["_nemo_gym_completion_received"] = None
         call_log_context = dict(base_log_context)
         call_log_context.update(_normalize_log_context(payload.get("_osworld_log_context")))
         create_kwargs: Dict[str, Any] = {
@@ -781,6 +784,10 @@ def _build_messages_model_fn(
                 request_kwargs["extra_headers"] = context_headers
             resp = client.chat.completions.create(**request_kwargs)
         except Exception as exc:
+            from openai import APIConnectionError, APIStatusError, APITimeoutError  # noqa: PLC0415
+
+            if isinstance(exc, (APIConnectionError, APIStatusError)):
+                payload["_nemo_gym_completion_received"] = False
             if model_io_enabled:
                 finished_ns = time.time_ns()
                 _append_model_io(
@@ -796,11 +803,10 @@ def _build_messages_model_fn(
                         "error": repr(exc),
                     }
                 )
-            from openai import APITimeoutError  # noqa: PLC0415
-
             if isinstance(exc, APITimeoutError):
                 raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
             raise
+        payload["_nemo_gym_completion_received"] = True
         # The response finished, so its tokens count even if it is rejected below.
         if policy_usage is not None:
             policy_usage.add(resp)

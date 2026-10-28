@@ -7,13 +7,21 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
+from openai import APIConnectionError, InternalServerError
 from openai.types.chat import ChatCompletion
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from responses_api_agents.osworld_agent.app import OSWorldRunRequest, _build_messages_model_fn, _build_response
+from responses_api_agents.osworld_agent.adapter_agents import NemotronV3NanoOmniAgent
+from responses_api_agents.osworld_agent.app import (
+    OSWorldRunRequest,
+    _build_messages_model_fn,
+    _build_response,
+    _PolicyUsage,
+)
 
 
 MODEL_REF = ModelServerRef(type="responses_api_models", name="policy_model")
@@ -191,6 +199,45 @@ def test_missing_step_call_record_cannot_pass_health_checks(tmp_path, observed_r
     assert row["response"]["usage"] == result["usage"]
 
 
+@pytest.mark.parametrize("failed_request_recorded", [False, True])
+def test_missing_completion_records_are_unobserved_turns(tmp_path, observed_run, failed_request_recorded):
+    body, result, captures = observed_run
+    result["steps"][0]["info"]["agent"].pop("model_calls")
+    if failed_request_recorded:
+        failed_step = copy.deepcopy(result["steps"][0])
+        failed_step["info"]["agent"]["model_calls"] = [
+            {"parse_attempt": 1, "prompt_messages": [], "response": None, "completion_received": False}
+        ]
+        result["steps"].insert(0, failed_step)
+        captures.insert(
+            0,
+            {
+                "model_call_id": "failed-request",
+                "started_at": 999.0,
+                "model_ref": MODEL_REF.model_dump(),
+                "status_code": 503,
+            },
+        )
+    row, digest = _collect_and_check(tmp_path, body, result, captures)
+
+    assert digest.verdict == "unobserved"
+    assert "rollout_missing_agent_turns" in digest.unobserved
+    assert not digest.findings
+    assert row["ng_trajectory"]["turns"] == []
+    assert row["response"]["usage"] == result["usage"]
+
+
+def test_complete_zero_call_observation_still_reports_missing_turns(tmp_path, observed_run):
+    body, result, _ = observed_run
+    result["steps"] = []
+    result["usage"] = None
+    row, digest = _collect_and_check(tmp_path, body, result, [])
+
+    assert row["ng_trajectory"]["turns"] == []
+    assert "turns_unavailable" not in {gap["code"] for gap in row["ng_trajectory"]["gaps"]}
+    assert "rollout_missing_agent_turns" in {finding.check for finding in digest.findings}
+
+
 def test_final_multimodal_context_is_preserved_without_mutating_prompts(tmp_path, observed_run):
     body, result, captures = observed_run
     image_url = "data:image/png;base64,aA=="
@@ -275,12 +322,117 @@ def test_real_findings_are_not_hidden(tmp_path, observed_run, fault, check):
     assert check in {finding.check for finding in digest.findings}
 
 
-def test_recovered_model_call_failure_keeps_upstream_health_semantics(tmp_path, observed_run):
-    body, result, captures = observed_run
-    captures[0]["status_code"] = 500
-    _, digest = _collect_and_check(tmp_path, body, result, captures)
-    assert digest.verdict == "healthy"
-    assert not digest.findings
+@pytest.mark.parametrize("logging_enabled", [False, True])
+@pytest.mark.parametrize(
+    "failure,terminal,verdict",
+    [
+        ("connection", False, "healthy"),
+        ("http", False, "healthy"),
+        ("connection", True, "unhealthy"),
+        ("http", True, "unhealthy"),
+        ("ambiguous", False, "unobserved"),
+        ("post_response", False, "unobserved"),
+        ("post_response_unknown_usage", False, "unobserved"),
+    ],
+)
+def test_request_outcome_reaches_health_checks(
+    monkeypatch, tmp_path, observed_run, logging_enabled, failure, terminal, verdict
+):
+    if logging_enabled:
+        monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(tmp_path / "model.jsonl"))
+    else:
+        monkeypatch.delenv("OSWORLD_MODEL_IO_LOG", raising=False)
+    body, result, _ = observed_run
+    captures = []
+    answer = "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```"
+    request = httpx.Request("POST", "http://policy/v1/chat/completions")
+
+    def create(**kwargs):
+        index = len(captures)
+        capture = {
+            "model_call_id": f"capture-{index}",
+            "call_index": index,
+            "started_at": 1000.0 + index,
+            "model_ref": MODEL_REF.model_dump(),
+            "request": {"messages": copy.deepcopy(kwargs["messages"])},
+        }
+        captures.append(capture)
+        if index == 0 and failure in {"connection", "http", "ambiguous"}:
+            if failure == "connection":
+                error = APIConnectionError(message="policy endpoint unreachable", request=request)
+            elif failure == "http":
+                error = InternalServerError(
+                    "policy endpoint unavailable", response=httpx.Response(503, request=request), body=None
+                )
+            else:
+                error = ValueError("could not decode the upstream response")
+            capture.update(
+                status_code=503 if failure == "http" else None,
+                error_category="capture_parse_error" if failure == "ambiguous" else "client_error",
+            )
+            raise error
+        completion = ChatCompletion.model_validate(
+            {
+                "id": f"completion-{index}",
+                "created": 1000 + index,
+                "model": "super",
+                "object": "chat.completion",
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": answer}}
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            }
+        )
+        if index == 0 and failure.startswith("post_response"):
+            # The wrapper receives and counts this completion, then rejects it before
+            # returning a response to the adapter. It must not look like a failed request.
+            completion.choices = []
+            if failure == "post_response_unknown_usage":
+                completion.usage = None
+        capture.update(
+            status_code=200,
+            response_id=completion.id,
+            finish_reason="stop",
+            tokens_in=completion.usage.prompt_tokens if completion.usage is not None else None,
+            tokens_out=completion.usage.completion_tokens if completion.usage is not None else None,
+            response=completion.model_dump(mode="json"),
+        )
+        return completion
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    usage = _PolicyUsage()
+    with patch("responses_api_agents.osworld_agent.app._build_policy_openai_client", return_value=client):
+        caller = _build_messages_model_fn(
+            base_url="http://policy/v1", model_name="super", api_key="unused", policy_usage=usage
+        )
+        agent = NemotronV3NanoOmniAgent(model="super", max_steps=1, parse_retries=1 if terminal else 2)
+        agent.call_llm = lambda payload, model: caller(payload["messages"], payload)
+        text, actions, info = agent.predict("Click.", {"screenshot": b"fake-png"})
+    result["steps"][0].update(model_text=text, actions=actions, info={"agent": info})
+    result["usage"] = usage.reported().model_dump(mode="json") if usage.reported() is not None else None
+    row, digest = _collect_and_check(tmp_path, body, result, captures)
+
+    assert digest.verdict == verdict
+    assert row["response"]["usage"] == result["usage"]
+    assert digest.model_calls == len(captures) == (1 if terminal else 2)
+    assert len(row["ng_trajectory"]["turns"]) == (0 if terminal else 1)
+    assert info["model_calls"][0]["response"] is None
+    if terminal:
+        assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+    elif verdict == "healthy":
+        assert digest.unobserved == []
+        assert not digest.findings
+        assert digest.transcript_prompt_tokens == digest.capture_prompt_tokens == 3
+        assert digest.transcript_completion_tokens == digest.capture_completion_tokens == 2
+        assert row["ng_trajectory"]["turns"][0]["turn_no"] == 1
+    else:
+        assert "rollout_token_count_mismatch" in digest.unobserved
+        assert "turns_unavailable" in {gap["code"] for gap in row["ng_trajectory"]["gaps"]}
+        if failure == "post_response":
+            assert row["response"]["usage"]["input_tokens"] == 6
+            assert row["response"]["usage"]["output_tokens"] == 4
+        elif failure == "post_response_unknown_usage":
+            assert row["response"]["usage"] is None
 
 
 @pytest.mark.parametrize("logging_enabled", [False, True])
