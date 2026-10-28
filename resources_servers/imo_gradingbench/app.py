@@ -60,7 +60,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 from resources_servers.chemreason_bench import metrics as M
 from resources_servers.chemreason_bench import response_parsing
 from resources_servers.chemreason_bench.app import (

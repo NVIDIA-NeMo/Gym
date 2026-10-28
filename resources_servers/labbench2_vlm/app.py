@@ -45,7 +45,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.verification.judge import JudgeError, call_judge
 
 

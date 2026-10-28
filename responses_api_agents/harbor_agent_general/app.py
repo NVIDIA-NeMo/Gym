@@ -56,7 +56,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics
+from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 from nemo_gym.telemetry.setup import init_telemetry
 

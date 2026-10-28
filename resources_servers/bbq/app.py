@@ -56,7 +56,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
 )
-from nemo_gym.reward_profile import (
+from nemo_gym.metrics.reward_profile import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
 )

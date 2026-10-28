@@ -183,7 +183,7 @@ dependencies = [
     "rich",
 
     # scipy: t-distribution confidence intervals for repeat-level reward metrics in
-    # nemo_gym/reward_profile.py. Lower bound is the first release with cp313 wheels;
+    # nemo_gym/metrics/reward_profile.py. Lower bound is the first release with cp313 wheels;
     # deliberately NOT >=1.18, which requires numpy>=2.0 and breaks servers pinned to
     # numpy<2 (wmt_translation and osworld_agent, via unbabel-comet).
     # Updated Tue Aug 18, 2026 with scipy>=1.14.1
@@ -882,7 +882,7 @@ layers = [
     # artifacts/
     "nemo_gym.exporters : nemo_gym.resolved_config : nemo_gym.run_artifacts : nemo_gym.run_exporter_registry",
     # metrics/
-    "nemo_gym.metrics_config : nemo_gym.reward_profile",
+    "nemo_gym.metrics",
     # verification/
     "nemo_gym.verification",
     # trajectory/

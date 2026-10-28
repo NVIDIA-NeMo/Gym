@@ -42,8 +42,13 @@ from nemo_gym.config.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
-from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER, COMPLETION_TOKEN_METRIC_NAMES, PassMajorityStat, Stat
-from nemo_gym.metrics_config import (
+from nemo_gym.metrics.metrics_config import (
+    ACROSS_REPEATS_MARKER,
+    COMPLETION_TOKEN_METRIC_NAMES,
+    PassMajorityStat,
+    Stat,
+)
+from nemo_gym.metrics.metrics_config import (
     is_primary_metric as is_repeat_aggregatable_metric,
 )
 

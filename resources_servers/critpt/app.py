@@ -33,7 +33,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.client.http_client import request
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 # Repo root: resources_servers/critpt/app.py -> nemo-gym/

@@ -30,8 +30,8 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER
-from nemo_gym.reward_profile import (
+from nemo_gym.metrics.metrics_config import ACROSS_REPEATS_MARKER
+from nemo_gym.metrics.reward_profile import (
     RewardProfiler,
     add_avg_sample_std_dev,
     compute_aggregate_metrics,

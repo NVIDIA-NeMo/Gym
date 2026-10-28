@@ -52,7 +52,7 @@ MOVED_SYMBOLS = [
     ("nemo_gym.gitlab_utils", "upload_jsonl_dataset_cli", "nemo_gym.cli.dataset", "upload_jsonl_dataset_cli"),
     ("nemo_gym.gitlab_utils", "download_jsonl_dataset_cli", "nemo_gym.cli.dataset", "download_jsonl_dataset_cli"),
     ("nemo_gym.prompt", "materialize_prompts_cli", "nemo_gym.cli.dataset", "materialize_prompts_cli"),
-    ("nemo_gym.reward_profile", "reward_profile", "nemo_gym.cli.eval", "reward_profile"),
+    ("nemo_gym.metrics.reward_profile", "reward_profile", "nemo_gym.cli.eval", "reward_profile"),
     ("nemo_gym.rollout_collection", "collect_rollouts", "nemo_gym.cli.eval", "collect_rollouts"),
     ("nemo_gym.rollout_collection", "aggregate_rollouts", "nemo_gym.cli.eval", "aggregate_rollouts"),
     ("nemo_gym.train_data_utils", "prepare_data", "nemo_gym.cli.dataset", "prepare_data"),

@@ -178,6 +178,11 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/verification"
   - source: "/nemo/gym/nemo-gym/nemo_gym/verifier_utils/sandbox_verification"
     destination: "/nemo/gym/nemo-gym/nemo_gym/verification/sandbox_verification"
+  # Library reference pages of modules moved into nemo_gym/metrics (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/reward_profile"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/metrics/reward_profile"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/metrics_config"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/metrics/metrics_config"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

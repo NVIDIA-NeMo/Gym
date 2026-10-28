@@ -49,7 +49,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import failure_kinds
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider

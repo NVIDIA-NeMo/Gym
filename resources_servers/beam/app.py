@@ -96,7 +96,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_subset_metrics
+from nemo_gym.metrics.reward_profile import compute_subset_metrics
 from nemo_gym.verification.judge import JudgeError, call_judge
 from resources_servers.beam.prompts import (
     BINARY_LLM_JUDGE_BASE_PROMPT,
