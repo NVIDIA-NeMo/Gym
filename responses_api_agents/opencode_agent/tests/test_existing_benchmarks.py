@@ -115,3 +115,14 @@ def test_nemotron_overlays_still_bind_existing_agents(staged: bool, monkeypatch:
             assert settings.datasets == []
         environment = get_first_server_config_dict(config, f"{prefix}_environment_server")
         assert environment.agent_server.name == agent_name
+
+
+@pytest.mark.parametrize("image_input", [False, True])
+def test_tb4_image_input_override(image_input: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _resolve_config(
+        "benchmarks/terminal_bench_4/opencode.yaml",
+        monkeypatch,
+        cli_args=("++tb4_opencode_image_input=true",) if image_input else (),
+    )
+    settings = get_first_server_config_dict(config, "terminal_bench_4_opencode")
+    assert settings.image_input is image_input

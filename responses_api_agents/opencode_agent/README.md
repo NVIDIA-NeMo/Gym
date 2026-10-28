@@ -231,3 +231,9 @@ images must supply the runtime prerequisites described above.
 When `task_tool_context` is enabled, the owner may also include `instruction` and
 `agent_timeout_sec` in the sandbox's task context. The instruction fills an empty
 request input; the timeout bounds the configured and request execution budgets.
+
+### Image input
+
+Set `image_input: true` when the Gym model endpoint supports vision. This enables
+OpenCode’s native `read` tool to send sandbox images to the model. The default is
+`false`.

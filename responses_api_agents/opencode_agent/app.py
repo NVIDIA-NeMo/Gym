@@ -198,6 +198,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/opencode_agent/workspaces"
     repo_dir: Optional[str] = None
     thinking: bool = True
+    image_input: bool = False
     system_prompt: Optional[str] = None
     timeout: int = 900
     extra_args: list[str] = []
@@ -368,6 +369,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     "limit": {"context": self.config.context_window, "output": self.config.max_output_tokens},
                 },
             )
+            if self.config.image_input:
+                model["modalities"] = {"input": ["text", "image"], "output": ["text"]}
             nemo["models"] = {self.config.model: model}
         if self._model_call_capture_enabled():
             apply_observability_patch(config)
@@ -1131,6 +1134,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             **(
                                 {"reasoning": self.config.thinking}
                                 if self.config.sandbox_model_id != "dummy_model"
+                                else {}
+                            ),
+                            **(
+                                {"modalities": {"input": ["text", "image"], "output": ["text"]}}
+                                if self.config.image_input
                                 else {}
                             ),
                             "interleaved": {"field": "reasoning_content"},

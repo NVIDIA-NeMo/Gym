@@ -11,6 +11,7 @@ terminal_bench_4_opencode:
     opencode_agent:
       opencode_version: 1.17.11
       task_tool_context: true
+      image_input: ${oc.select:tb4_opencode_image_input,false}
       timeout: 28800
       max_output_tokens: ${oc.select:tb4_opencode_max_output_tokens,32000}
       context_window: ${oc.select:tb4_opencode_context_window,262144}

@@ -304,10 +304,12 @@ def capture_observations(sandbox, tmp_path):
     return database
 
 
+@pytest.mark.parametrize("image_input", [False, True])
 @pytest.mark.parametrize("output_budget", [4096, 32000])
-def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
+def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget, image_input):
     agent, sandbox = setup
     agent.config.max_output_tokens = output_budget
+    agent.config.image_input = image_input
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
@@ -334,6 +336,9 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
             "input": 32000,
             "output": output_budget,
         }
+        assert config["provider"]["nemo_gym"]["models"]["dummy_model"].get("modalities") == (
+            {"input": ["text", "image"], "output": ["text"]} if image_input else None
+        )
         assert payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == str(output_budget)
         assert (
             config["provider"]["nemo_gym"]["options"]["baseURL"]

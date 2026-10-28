@@ -571,9 +571,11 @@ class TestEnv:
         assert env["FOO"] == "bar"
         assert "EMPTY" not in env
 
-    def test_model_server_builds_local_provider(self) -> None:
+    @pytest.mark.parametrize("image_input", [False, True])
+    def test_model_server_builds_local_provider(self, image_input) -> None:
         agent = _make_agent(
             model="Qwen3.6-35B-A3B",
+            image_input=image_input,
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         )
         with patch.object(agent, "_resolve_model_base_url", return_value="http://model/v1"):
@@ -581,6 +583,9 @@ class TestEnv:
             config = agent._build_opencode_config()
 
         provider = config["provider"]["nemo"]
+        assert provider["models"][agent.config.model].get("modalities") == (
+            {"input": ["text", "image"], "output": ["text"]} if image_input else None
+        )
         assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
         assert env["OPENAI_BASE_URL"] == "http://model/v1"
         assert provider["options"]["baseURL"] == "http://model/v1"

@@ -18,6 +18,8 @@ opencode_agent:
 
       # Set this to the actual model context window; it is metadata, not an output-token limit.
       context_window: 262144
+      # Enable native image reads with a vision-capable model endpoint.
+      image_input: false
       timeout: 10800
       sandbox_install_timeout_seconds: 600
       session_close_timeout_seconds: 60

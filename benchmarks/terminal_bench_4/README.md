@@ -21,6 +21,9 @@ budgets under `terminal_bench_4_opencode.responses_api_agents.opencode_agent`.
 `tb4_agent_max_timeout_sec` caps the task's execution deadline for either profile;
 mini-SWE's step and command-timeout settings do not apply to OpenCode.
 
+For OpenCode vision tasks, use a vision-capable model endpoint and add
+`++tb4_opencode_image_input=true`. This enables image input for the native `read` tool.
+
 OpenCode uses named `tb4_sandbox`, `tb4_sandbox_cpu`, and `tb4_sandbox_gpu`
 connections (shared by both profiles) so agent and Resources reconnect to the same deployment. A custom
 provider must be defined at the top level and selected through
