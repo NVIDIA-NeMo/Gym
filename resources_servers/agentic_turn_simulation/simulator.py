@@ -15,8 +15,7 @@ from resources_servers.agentic_turn_simulation.render import SIMULATOR_RENDER, r
 from resources_servers.agentic_turn_simulation.workspace import Workspace
 
 
-# Left open on purpose: /verify finds a failed simulation by this substring, and `simulator_failure` closes the
-# bracket after the reason.
+# `simulator_failure` closes the bracket after the reason.
 SIMULATOR_FAILED = "[tool simulator failed"
 
 
@@ -96,3 +95,32 @@ REPLY_PARSERS: dict[str, Callable[[dict[str, Any], str | None], str | None]] = {
 def simulator_failure(reason: str) -> str:
     """The tool output when the simulator itself failed. /verify masks a turn that received one."""
     return json.dumps({"status": "error", "message": f"{SIMULATOR_FAILED}: {reason[:120]}]"})
+
+
+# Where a `simulator_failure` output starts: json.dumps escapes nothing in this prefix.
+_FAILURE_START = '{"status": "error", "message": "' + SIMULATOR_FAILED
+_JSON = json.JSONDecoder()
+
+
+def holds_simulator_failure(text: str) -> bool:
+    """Whether a tool result holds a complete `simulator_failure` output: that exact JSON object (these two keys, an
+    error status, a message `[tool simulator failed: <reason>]`), not merely its phrase, which a file or a command's
+    output may contain. The object may sit inside the text: Cline frames a result under its header and joins a
+    turn's results into one user message."""
+    start = text.find(_FAILURE_START)
+    while start >= 0:
+        try:
+            value, _ = _JSON.raw_decode(text, start)
+        except json.JSONDecodeError:
+            value = None
+        if (
+            isinstance(value, dict)
+            and value.keys() == {"status", "message"}
+            and value["status"] == "error"
+            and isinstance(value["message"], str)
+            and value["message"].startswith(f"{SIMULATOR_FAILED}: ")
+            and value["message"].endswith("]")
+        ):
+            return True
+        start = text.find(_FAILURE_START, start + 1)
+    return False

@@ -71,7 +71,8 @@ more than fresh ones; facts taken from the conversation's own tool outputs gener
 A reply that cannot be used is retried: an empty or cut-off reply with double the output budget (up to
 `tool_simulator_max_tokens_cap`), a reply in the wrong format at the same budget. After the last attempt, the tool
 result is a marked failure (a JSON error object whose message starts `[tool simulator failed:`), never an invented
-result, and the rollout is masked: the failure is the environment's, not the policy's.
+result, and the rollout is masked: the failure is the environment's, not the policy's. Only that whole object
+masks; the phrase alone, which a file or a command's output may contain, does not.
 
 ### The workspace model
 

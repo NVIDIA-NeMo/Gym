@@ -11,6 +11,7 @@ import pytest
 from resources_servers.agentic_turn_simulation.harnesses.sandbox import SandboxWorkspace
 from resources_servers.agentic_turn_simulation.simulator import (
     SIMULATOR_FAILED,
+    holds_simulator_failure,
     parse_json_text_reply,
     parse_text_reply,
     simulation_history,
@@ -43,6 +44,36 @@ class TestSimulatorFailure:
         assert out["status"] == "error"
         assert out["message"].startswith(SIMULATOR_FAILED + ": ")
         assert out["message"] == f"{SIMULATOR_FAILED}: {'x' * 120}]"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            simulator_failure("HTTP 503: busy"),
+            simulator_failure('a "quoted"\nreason'),
+            f"[read_file for 'a.py'] Result:\n{simulator_failure('timeout')}",
+            f"{simulator_failure('HTTP 500: oops')}\n[read_file for 'b.py'] Result:\nprint(1)",
+            f"{simulator_failure('x')[:-1]}\n{simulator_failure('y')}",
+        ],
+        ids=["whole_result", "escaped_reason", "cline_framed", "cline_joined_unframed", "after_a_broken_copy"],
+    )
+    def test_a_complete_failure_output_is_found(self, text: str) -> None:
+        assert holds_simulator_failure(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "",
+            f"{SIMULATOR_FAILED}: HTTP 503]",
+            f'12: SIMULATOR_FAILED = "{SIMULATOR_FAILED}"',
+            simulator_failure("x")[:-1],
+            json.dumps({"status": "error", "message": f"{SIMULATOR_FAILED}: x]", "code": 1}),
+            json.dumps({"status": "error", "message": f"{SIMULATOR_FAILED} x]"}),
+            json.dumps({"status": "error", "message": f"{SIMULATOR_FAILED}: x"}),
+        ],
+        ids=["empty", "phrase_only", "phrase_in_code", "cut_off", "extra_key", "no_reason", "unclosed_message"],
+    )
+    def test_the_phrase_or_another_object_is_not_a_failure(self, text: str) -> None:
+        assert not holds_simulator_failure(text)
 
 
 class TestSimulationHistory:

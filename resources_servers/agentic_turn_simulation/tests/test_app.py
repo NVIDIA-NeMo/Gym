@@ -661,6 +661,19 @@ class TestVerifyMasks:
         assert out.failure_kind == f"{SERVER}:simulator_failed" and out.failure_reason == failed
         server.server_client.post.assert_not_called()
 
+    async def test_a_tool_result_that_only_mentions_the_failure_phrase_is_judged(self) -> None:
+        server = make_server()
+        sent = script(server, [judge_reply(GOOD)])
+        grep = {"status": "completed", "exit_code": 0, "stdout": f'12: SIMULATOR_FAILED = "{SIMULATOR_FAILED}"\n'}
+        items = [
+            _call_item("bash", json.dumps({"command": "grep -n SIMULATOR_FAILED simulator.py"})),
+            _output_item("p1", json.dumps(grep)),
+            _message_item("Line 12 defines it."),
+        ]
+        out = await server.verify(req(), _verify_body(items))
+        assert not getattr(out, MASK_SAMPLE_FIELD) and out.failure_kind is None
+        assert out.reward == 1.0 and len(sent) == 1
+
     async def test_reference_turn_cut_off_after_a_tool_result_is_masked(self) -> None:
         server = make_server(score_source="reference_turn")
         turn = [_call("bash", "r1", command="ls"), _out("r1", BASH_OK)]

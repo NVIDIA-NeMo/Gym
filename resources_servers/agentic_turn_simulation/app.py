@@ -71,7 +71,7 @@ from resources_servers.agentic_turn_simulation.render import (
     render_system_prompt,
 )
 from resources_servers.agentic_turn_simulation.simulator import (
-    SIMULATOR_FAILED,
+    holds_simulator_failure,
     simulation_history,
     simulator_failure,
     simulator_user_message,
@@ -635,7 +635,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
                 text = content_text(item.get("content"))
             else:
                 continue
-            if SIMULATOR_FAILED in text:
+            if holds_simulator_failure(text):
                 return _masked(f"{FAILURE_KIND_PREFIX}:simulator_failed", text[:300])
         return None
 
