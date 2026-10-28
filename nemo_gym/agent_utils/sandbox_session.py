@@ -155,6 +155,7 @@ class SandboxSession[Artifacts]:
     # An expiry whose marker write failed, possibly after the marker reached the sandbox, and its reason.
     _unconfirmed_expiry: bool = field(default=False, init=False)
     _unconfirmed_expire_reason: str | None = field(default=None, init=False)
+    _expire_write: asyncio.Task[None] | None = field(default=None, init=False)
 
     @property
     def closing(self) -> bool:
@@ -297,6 +298,7 @@ class SandboxSession[Artifacts]:
             self._expire_requested = False
             self.expire_reason = None
             self._unconfirmed_expiry = False
+            self._expire_write = None
         if self._session_root is None:
             self._session_root = self.session_dir
         self.session_dir = session_dir
@@ -324,15 +326,20 @@ class SandboxSession[Artifacts]:
         self._expire_requested = True
         self.expire_reason = reason
         if self.launch_started:
-            try:
-                await self._request_expiry(timeout=timeout)
-            except BaseException:
-                self._expire_requested = False
-                self.expire_reason = None
-                # The marker may have landed before the write failed; finalization keeps the stop only if it did.
-                self._unconfirmed_expiry, self._unconfirmed_expire_reason = True, reason
-                raise
+            # A task, so that finalization can wait for a write still in flight before it checks the marker.
+            self._expire_write = asyncio.create_task(self._write_expiry(timeout=timeout, reason=reason))
+            await self._expire_write
         return True
+
+    async def _write_expiry(self, *, timeout: float, reason: str | None) -> None:
+        try:
+            await self._request_expiry(timeout=timeout)
+        except BaseException:
+            self._expire_requested = False
+            self.expire_reason = None
+            # The marker may have landed before the write failed; finalization keeps the stop only if it did.
+            self._unconfirmed_expiry, self._unconfirmed_expire_reason = True, reason
+            raise
 
     async def _request_expiry(self, *, timeout: float) -> None:
         """Write the marker the supervisor watches, within ``timeout`` including any wait for the provider.
@@ -407,15 +414,31 @@ class SandboxSession[Artifacts]:
         await self._release_exec(timeout=timeout)
 
     async def _confirm_unacknowledged_expiry(self, *, timeout: float) -> None:
-        """Keep a stop whose marker write failed only if the marker is in place and the receipt timed out."""
-        if not self._unconfirmed_expiry or self._expire_requested or not (self.cleanup and self.cleanup["timed_out"]):
-            return
-        self._unconfirmed_expiry = False
-        marker = quote(f"{self.session_dir}/{EXPIRE_REQUEST_FILE}")
+        """Keep a stop whose marker write failed only if the marker is in place and the receipt timed out.
+
+        A write still in flight is awaited first, so a failure that arrives during finalization is checked too.
+        The whole check, including any wait for provider capacity, is bounded by ``timeout``; without a
+        confirmation the stop stays unattributed and finalization goes on.
+        """
         try:
-            probe = await self.sandbox.exec(f"[ -e {marker} ] && echo present", cwd=self.workdir, timeout_s=timeout)
+            async with asyncio.timeout(timeout):
+                if self._expire_write is not None and not self._expire_write.done():
+                    await asyncio.wait({self._expire_write})
+                if (
+                    not self._unconfirmed_expiry
+                    or self._expire_requested
+                    or not (self.cleanup and self.cleanup["timed_out"])
+                ):
+                    return
+                self._unconfirmed_expiry = False
+                marker = quote(f"{self.session_dir}/{EXPIRE_REQUEST_FILE}")
+                probe = await self.sandbox.exec(
+                    f"[ -e {marker} ] && echo present", cwd=self.workdir, timeout_s=timeout
+                )
         except Exception:
-            LOG.warning("Could not check for the %s expiry marker", self.harness, exc_info=True)
+            LOG.warning(
+                "Could not confirm the %s expiry marker; the stop stays unattributed", self.harness, exc_info=True
+            )
             return
         if probe.return_code == 0 and not probe.error_type and probe.stdout.strip() == "present":
             self._expire_requested, self.expire_reason = True, self._unconfirmed_expire_reason

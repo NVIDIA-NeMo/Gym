@@ -768,6 +768,74 @@ async def test_failed_expire_write_keeps_the_stop_only_if_the_marker_landed(sess
     await session.close(timeout=1)
 
 
+async def test_expire_write_failing_during_finalization_still_keeps_a_landed_stop(session, receipt_reader):
+    # The marker lands, the harness ends at the stop, and the write fails only once finalization has begun.
+    launched, landed, fail_write = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    finish = asyncio.Event()
+    written = set()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        if "echo present" in command:
+            present = EXPIRE_MARKER in written
+            return SandboxExecResult(stdout="present\n" if present else "", stderr="", return_code=0 if present else 1)
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER:
+            written.add(target)
+            landed.set()
+            await fail_write.wait()
+            raise ConnectionError("acknowledgment lost")
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        stop = asyncio.create_task(session.expire(timeout=5, reason="budget"))
+        await asyncio.wait_for(landed.wait(), 2)
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        # Finalization waits for the write still in flight instead of reconciling past it.
+        await asyncio.sleep(0.1)
+        assert not activation.done()
+        fail_write.set()
+        with pytest.raises(RuntimeError, match="Could not request test expiry"):
+            await asyncio.wait_for(stop, 2)
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired and session.expire_reason == "budget"
+    await session.close(timeout=1)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
+async def test_stop_confirmation_is_bounded_when_every_local_exec_slot_is_held(tmp_path, monkeypatch):
+    # The marker check runs during finalization; another workload holding every exec slot must not stall grading.
+    monkeypatch.setattr(LocalProvider, "_semaphores", {})
+    provider = LocalProvider(workspace_root=str(tmp_path), concurrency=1)
+    workdir = tmp_path / "task"
+    sandbox = await AsyncSandbox(provider, owns_provider=False).start(SandboxSpec(workdir=str(workdir)))
+    session = SandboxSession(
+        sandbox=sandbox, session_dir=str(workdir / "session"), workdir=str(workdir), harness="test", owns_sandbox=True
+    )
+    holder = asyncio.create_task(sandbox.exec("sleep 30", timeout_s=60))
+    try:
+        async with asyncio.timeout(5):
+            while not provider._semaphore.locked():
+                await asyncio.sleep(0.01)
+        # A stop whose marker write failed, possibly after the marker landed, and a run that ended at a timeout.
+        session._unconfirmed_expiry, session._unconfirmed_expire_reason = True, "budget"
+        session.cleanup = {**RECEIPT, "return_code": -15, "timed_out": True}
+        begun = monotonic()
+        await asyncio.wait_for(session._finish(timeout=0.2), 5)
+        assert monotonic() - begun < 1
+        assert not session.expired and session.expire_reason is None
+    finally:
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        await session.close(timeout=5)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
 @pytest.mark.parametrize("sessions, concurrency", [(1, 1), (8, 8)])
 async def test_expire_reaches_harnesses_that_hold_every_local_exec_slot(tmp_path, monkeypatch, sessions, concurrency):
