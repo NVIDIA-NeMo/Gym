@@ -337,12 +337,13 @@ as for mini-SWE. Defaults:
   (`agent/sessions/`), as Harbor keeps them under `/logs/agent`.
 
 Rows carry the official instruction as their prompt. `prepare_codex.py` reads it from the
-pinned packages, which needs the resources server's environment (it verifies package hashes
-with `pathspec`), and checks every selected task's 8-hour budget:
+pinned packages and checks every selected task's 8-hour budget. Verifying the package hashes
+needs `pathspec`, which Gym's own environment leaves out, so the script runs itself in the
+resources server's environment, setting that up first as `gym env start` would:
 
 ```sh
-resources_servers/terminal_bench_4/.venv/bin/python -m benchmarks.terminal_bench_science.prepare_codex \
-  --task-names mri-harmonization eeg-erp-recovery
+gym eval prepare --benchmark terminal_bench_science/codex \
+  '+prepare_script_args.task_names=[mri-harmonization,eeg-erp-recovery]'
 ```
 
 ### Codex with DeepSeek V4.1 Flash

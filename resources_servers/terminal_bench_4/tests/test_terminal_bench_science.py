@@ -823,6 +823,64 @@ def test_codex_rows_embed_the_official_instruction(tmp_path, monkeypatch, timeou
         }
 
 
+def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_missing(tmp_path, monkeypatch):
+    from benchmarks.terminal_bench_science import prepare_codex
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.cli import setup_command
+
+    monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
+    monkeypatch.chdir(tmp_path)
+    runs = []
+
+    def run_command(command, working_dir_path, **kwargs):
+        runs.append((command, working_dir_path, kwargs))
+        return SimpleNamespace(wait=lambda: 0)
+
+    monkeypatch.setattr(setup_command, "run_command", run_command)
+    selection = ["mri-harmonization", "eeg-erp-recovery"]
+    assert prepare_codex.prepare(task_names=selection, task_download_dir="packages") == prepare_codex.OUTPUT_PATH
+
+    [(command, working_dir, kwargs)] = runs
+    in_manifest_order = [
+        task["name"] for task in preparation.select_tasks(preparation.load_manifest(), task_names=selection)
+    ]
+    python = prepare_codex.SERVER_DIR / ".venv" / "bin" / "python"
+    assert command.endswith(
+        f" && {python} -m benchmarks.terminal_bench_science.prepare_codex --task-names {' '.join(in_manifest_order)} "
+        f"--task-download-dir {tmp_path / 'packages'}"
+    )
+    assert "uv pip install" in command  # sets up the server's environment as `gym env start` does
+    assert (working_dir, kwargs["project_root"]) == (prepare_codex.SERVER_DIR, PARENT_DIR)
+    assert kwargs["extra_env"] == {prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR: "1"}
+
+
+def test_codex_rows_fail_when_the_server_environment_run_fails(monkeypatch):
+    from benchmarks.terminal_bench_science import prepare_codex
+    from nemo_gym.cli import setup_command
+
+    monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
+    monkeypatch.setattr(setup_command, "run_command", lambda *args, **kwargs: SimpleNamespace(wait=lambda: 3))
+    with pytest.raises(RuntimeError, match=r"server's environment failed \(exit 3\)"):
+        prepare_codex.prepare(task_names=["mri-harmonization"])
+    # An unknown task fails here, before any hand-off.
+    with pytest.raises(ValueError):
+        prepare_codex.prepare(task_names=["no-such-task"])
+
+
+def test_codex_rows_hand_off_only_once_and_only_without_pathspec(monkeypatch):
+    import importlib.util
+
+    from benchmarks.terminal_bench_science import prepare_codex
+
+    monkeypatch.delenv(prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR, raising=False)
+    assert importlib.util.find_spec("pathspec") is not None  # these tests run in the server's environment
+    assert not prepare_codex._needs_server_environment()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)
+    assert prepare_codex._needs_server_environment()
+    monkeypatch.setenv(prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR, "1")
+    assert not prepare_codex._needs_server_environment()
+
+
 def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_server():
     config = OmegaConf.load(BENCHMARK_DIR / "codex.yaml")
     resources = config.terminal_bench_science_codex_resources_server.resources_servers.terminal_bench_4
