@@ -886,6 +886,9 @@ def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
     response_id = getattr(resp, "id", None)
     if isinstance(response_id, str) and response_id:
         normalized["response_id"] = response_id
+    prompt_tokens = getattr(getattr(resp, "usage", None), "prompt_tokens", None)
+    if type(prompt_tokens) is int:
+        normalized["prompt_tokens"] = prompt_tokens
 
 
 def _recover_first_fenced_action(content: str) -> str | None:

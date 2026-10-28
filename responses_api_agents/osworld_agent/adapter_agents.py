@@ -29,6 +29,7 @@ from responses_api_agents.osworld_agent.history_policy import (
     HistoryPolicyState,
     plan_history,
 )
+from responses_api_agents.osworld_agent.rollout_outcome import CONTEXT_LIMIT_STOP_REASON
 from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
 from responses_api_agents.osworld_agent.trajectory import stable_id
 
@@ -529,6 +530,9 @@ NEMOTRON_AGENT_OPTION_DEFAULTS: Dict[str, Any] = {
     "repeated_action_warning_threshold": 0,
     "repeated_action_window": 12,
 }
+# shrink: drop one live image per overflow and retry the step.
+# stop: end the rollout at the first overflow and score it as is.
+_CONTEXT_OVERFLOW_POLICIES = frozenset({"shrink", "stop"})
 
 
 def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, Any]:
@@ -559,6 +563,16 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
     # assigning raw replay its own explicit semantic identity.
     if assistant_history_replay != "normalized":
         result["assistant_history_replay"] = assistant_history_replay
+    context_overflow_policy = options.get("context_overflow_policy", "shrink")
+    if context_overflow_policy not in _CONTEXT_OVERFLOW_POLICIES:
+        raise ValueError("context_overflow_policy must be 'shrink' or 'stop'")
+    if context_overflow_policy != "shrink":
+        result["context_overflow_policy"] = context_overflow_policy
+    prompt_token_limit = options.get("context_prompt_token_limit")
+    if prompt_token_limit is not None:
+        if type(prompt_token_limit) is not int or prompt_token_limit <= 0:
+            raise ValueError("context_prompt_token_limit must be a positive integer")
+        result["context_prompt_token_limit"] = prompt_token_limit
     return result
 
 
@@ -645,6 +659,8 @@ class NemotronV3NanoOmniAgent:
         history_policy: Mapping[str, Any] | HistoryPolicySpec | None = None,
         model_protocol_id: str | None = None,
         assistant_history_replay: str = "normalized",
+        context_overflow_policy: str = "shrink",
+        context_prompt_token_limit: int | None = None,
         platform: str = "ubuntu",
         max_tokens: int = 16384,
         top_p: float | None = 0.95,
@@ -675,6 +691,8 @@ class NemotronV3NanoOmniAgent:
                 "repeated_action_warning_threshold": repeated_action_warning_threshold,
                 "repeated_action_window": repeated_action_window,
                 "assistant_history_replay": assistant_history_replay,
+                "context_overflow_policy": context_overflow_policy,
+                "context_prompt_token_limit": context_prompt_token_limit,
             }
         )
         if action_space != "pyautogui":
@@ -715,6 +733,8 @@ class NemotronV3NanoOmniAgent:
         self.assistant_history_replay = behavior_options.get(
             "assistant_history_replay", "normalized"
         )
+        self.context_overflow_policy = behavior_options.get("context_overflow_policy", "shrink")
+        self.context_prompt_token_limit = behavior_options.get("context_prompt_token_limit")
         self.max_steps = max_steps
         self.client_password = client_password
         self.thinking = behavior_options["thinking"]
@@ -831,6 +851,22 @@ class NemotronV3NanoOmniAgent:
         if reasoning and _THINK_RE.search(content) is None:
             return f"<think>\n{reasoning}\n</think>\n{content}"
         return content
+
+    def _check_prompt_token_limit(self, response: Any) -> None:
+        """Reject a served call whose prompt left less than the output reserve.
+
+        The server clamps the output budget to what remains of its window, so
+        a prompt near the window still samples, usually into a truncated reply.
+        """
+
+        limit = self.context_prompt_token_limit
+        if limit is None or not isinstance(response, Mapping):
+            return
+        prompt_tokens = response.get("prompt_tokens")
+        if type(prompt_tokens) is int and prompt_tokens > limit:
+            raise ValueError(
+                f"context_length_exceeded: prompt_tokens={prompt_tokens} exceeds context_prompt_token_limit={limit}"
+            )
 
     def _parse_retry_messages(
         self,
@@ -1042,6 +1078,7 @@ class NemotronV3NanoOmniAgent:
                 model_call_completed = True
                 completed_model_calls += 1
                 model_call_record["response"] = _jsonable(response)
+                self._check_prompt_token_limit(response)
                 finish_reason = response.get("finish_reason") if isinstance(response, Mapping) else None
                 if finish_reason is not None and finish_reason not in {"stop", "tool_calls"}:
                     raise ValueError(f"Model response did not finish cleanly: finish_reason={finish_reason!r}")
@@ -1097,7 +1134,10 @@ class NemotronV3NanoOmniAgent:
                 model_call_record["parsed_actions"] = attempt_actions
                 model_calls.append(model_call_record)
                 will_retry = attempt + 1 < self.parse_retries
-                if last_failure_kind == "context_overflow" and will_retry:
+                if last_failure_kind == "context_overflow" and self.context_overflow_policy == "stop":
+                    will_retry = False
+                    feedback_next = False
+                elif last_failure_kind == "context_overflow" and will_retry:
                     # Resending an over-long prompt cannot succeed; parse
                     # feedback would only make it longer. Shrink the live-image
                     # set and rebuild instead, replanning from the entry state.
@@ -1166,10 +1206,13 @@ class NemotronV3NanoOmniAgent:
             # runtime-admission policy decides whether the result is masked.
             # In particular, do not turn malformed sampled output into a
             # synthetic model-authored FAIL action.
+            context_limit_stop = last_failure_kind == "context_overflow" and self.context_overflow_policy == "stop"
             parsed_info.update(
                 {
-                    "agent_outcome": MODEL_FAILURE_OUTCOMES[last_failure_kind],
-                    "agent_outcome_family": "model_response_invalid",
+                    "agent_outcome": (
+                        CONTEXT_LIMIT_STOP_REASON if context_limit_stop else MODEL_FAILURE_OUTCOMES[last_failure_kind]
+                    ),
+                    "agent_outcome_family": "policy_stop" if context_limit_stop else "model_response_invalid",
                     "stop_rollout": True,
                     # Admission needs the terminal attempt's fact. An earlier
                     # malformed sample must not hide a later transport failure.

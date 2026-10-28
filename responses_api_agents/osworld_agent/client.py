@@ -41,6 +41,7 @@ import requests
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
 from responses_api_agents.osworld_agent.rollout_outcome import (
+    CONTEXT_LIMIT_STOP_REASON,
     RUNTIME_ADMISSION_POLICY_ID,
     RolloutOutcomeFacts,
     classify_rollout_outcome,
@@ -2440,7 +2441,7 @@ def run_osworld_task(
                     },
                 )
                 if agent_stop_reason is not None:
-                    if agent_model_call_completed is False:
+                    if agent_model_call_completed is False and agent_stop_reason != CONTEXT_LIMIT_STOP_REASON:
                         parse_failure = agent_step_info.get("parse_failure")
                         failure_message = (
                             parse_failure.get("last_error") if isinstance(parse_failure, Mapping) else None
@@ -2612,7 +2613,11 @@ def run_osworld_task(
         infrastructure_failure_reason = "evaluator_error"
     elif proxy_setup_error:
         infrastructure_failure_reason = "proxy_setup_error"
-    elif agent_stop_reason is not None and agent_model_call_completed is False:
+    elif (
+        agent_stop_reason is not None
+        and agent_model_call_completed is False
+        and agent_stop_reason != CONTEXT_LIMIT_STOP_REASON
+    ):
         infrastructure_failure_reason = "model_call_failed"
     elif error:
         infrastructure_failure_reason = "rollout_error"
