@@ -166,7 +166,10 @@ async def finalize_rollout_token_capture(
 
     response = result.get("response") if isinstance(result.get("response"), dict) else {}
     explicit_terminal = result.get(TERMINAL_CALL_KEY)
-    declared_terminal = result.get(TERMINAL_RESPONSE_ID_KEY)
+    # A harness on the legacy /run path declares its terminal on the result; a harness behind an
+    # agent-session environment can only speak through its response, so its metadata counts too.
+    response_metadata = response.get("metadata") if isinstance(response.get("metadata"), dict) else {}
+    declared_terminal = result.get(TERMINAL_RESPONSE_ID_KEY) or response_metadata.get(TERMINAL_RESPONSE_ID_KEY)
     try:
         # The result's response is what the verifier scored.
         # Terminal attribution joins it to one captured call.
