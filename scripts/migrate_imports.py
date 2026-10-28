@@ -57,6 +57,9 @@ RELEASED_DOCS = re.compile(r"(^|/)fern/versions/v\d[^/]*/")
 PATCH_THROUGH_MODULE = re.compile(
     r"(?:setattr|patch\.object)\(\s*(?P<module>[A-Za-z_][\w.]*)\s*,\s*[\"'](?P<name>\w+)[\"']"
 )
+# A line with this comment keeps its old paths: a fallback for an older nemo_gym, such as a script that runs against
+# whatever nemo-gym a sandbox image has installed.
+KEEP_LINE_MARKER = "# path before nemo_gym 0.8.0"
 TEXT_SUFFIXES = {".md", ".mdx", ".yaml", ".yml", ".toml", ".json", ".sh", ".txt", ".cfg", ".ini"}
 TEXT_NAMES = {"CODEOWNERS", "Dockerfile", "Makefile"}
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache"}
@@ -133,6 +136,9 @@ class Migrator:
 
         One-line `from <module> import <names>` text, such as a code sample in docs or a template in a string, is rewritten too.
         """
+        if KEEP_LINE_MARKER in text:
+            lines = text.splitlines(keepends=True)
+            return "".join(line if KEEP_LINE_MARKER in line else self.rewrite_dotted(line) for line in lines)
         if self._text_import_re is not None:
             text = self._text_import_re.sub(self._rewrite_text_import, text)
         if self._dotted_re is not None:
@@ -239,6 +245,10 @@ class Migrator:
             if not (isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "nemo_gym"):
                 continue
             start, end = span(node)
+            if any(KEEP_LINE_MARKER in lines[i] for i in range(node.lineno - 1, node.end_lineno)):
+                # A marked import keeps all its lines, also when a formatter wrapped it.
+                kept.append((start, end, source[start:end]))
+                continue
             line_start = offsets[node.lineno - 1]
             new = self._rewrite_import_from(node, source[start:end], source[line_start:start])
             if new is not None:

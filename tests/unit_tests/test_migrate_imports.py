@@ -302,6 +302,35 @@ class TestRewritePython:
         )
         assert migrator.rewrite_python(source, path="t.py")[1] == []
 
+    def test_lines_marked_as_fallbacks_for_an_older_nemo_gym_keep_their_old_paths(self, migrator) -> None:
+        source = textwrap.dedent("""
+            try:
+                from nemo_gym.server_utils import ServerClient, SimpleServer
+            except ModuleNotFoundError:
+                from nemo_gym.server_utils import ServerClient, SimpleServer  # path before nemo_gym 0.8.0
+            RUNNER = \"\"\"
+            from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
+            \"\"\"
+        """)
+        assert migrator.rewrite_python(source, path="x.py")[0] == textwrap.dedent("""
+            try:
+                from nemo_gym.client.server_client import ServerClient
+                from nemo_gym.server_runtime.server_utils import SimpleServer
+            except ModuleNotFoundError:
+                from nemo_gym.server_utils import ServerClient, SimpleServer  # path before nemo_gym 0.8.0
+            RUNNER = \"\"\"
+            from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
+            \"\"\"
+        """)
+
+    def test_a_wrapped_fallback_import_keeps_every_line(self) -> None:
+        migrator = migrate_imports.Migrator({"nemo_gym.openai_utils": "nemo_gym.models.openai_utils"}, {})
+        source = (
+            "try:\n    import nemo_gym.models.openai_utils\nexcept ImportError:\n"
+            "    from nemo_gym.openai_utils import (\n        A,\n        B,\n    )  # path before nemo_gym 0.8.0\n"
+        )
+        assert migrator.rewrite_python(source, path="x.py")[0] == source
+
 
 class TestRewriteText:
     def test_library_reference_urls_are_left_for_the_docs_redirects(self, migrator) -> None:
