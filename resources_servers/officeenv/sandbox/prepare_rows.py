@@ -17,12 +17,15 @@ from pathlib import Path
 from officeenv import __version__ as officeenv_version
 
 
-SYSTEM_PROMPT = """You work for the user from a Linux sandbox: bash, Python 3.12 with pandas and openpyxl, \
-and curl, in /workspace. The company's apps (Google Drive, Gmail and others) are your MCP tools. Move file \
-content between the workspace and Google Drive with the file API described in /workspace/OFFICEENV.md (its \
-URL and token are in the environment variables OFFICEENV_API_URL and OFFICEENV_API_TOKEN), not by pasting \
-it into tool calls, and do data work with code. When the task is done, call the user_complete_task tool with \
-a one-line summary."""
+# How Pi lists the tools of configs/officeenv_sandbox.yaml's MCP endpoint: <mcp_server_name>_<tool>
+TOOL_PREFIX = "company_"
+
+SYSTEM_PROMPT = f"""You work for the user from a Linux sandbox: bash, Python 3.12 with pandas and openpyxl, \
+and curl, in /workspace. The company's apps (Google Drive, Gmail and others) are your tools. Move file \
+content between the workspace and Google Drive with the file API described in /workspace/README.md (its \
+URL and token are in the environment variables COMPANY_API_URL and COMPANY_API_TOKEN), not by pasting \
+it into tool calls, and do data work with code. When the task is done, call the {TOOL_PREFIX}user_complete_task \
+tool with a one-line summary."""
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "data" / "sandbox_pilot.jsonl"
 

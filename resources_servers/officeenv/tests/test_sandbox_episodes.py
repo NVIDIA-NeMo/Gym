@@ -11,14 +11,16 @@ import io
 import ipaddress
 import json
 import os
+import re
 import stat
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from officeenv import __version__ as officeenv_version
@@ -50,6 +52,7 @@ from resources_servers.officeenv.app import (
 pytest.importorskip("mcp")
 
 SANDBOX_ROWS = Path(__file__).parents[1] / "data" / "sandbox_pilot.jsonl"
+SANDBOX_CONFIG = Path(__file__).parents[1] / "configs" / "officeenv_sandbox.yaml"
 ME = "alex.morgan@example.com"
 RPC_HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
 LEDGER = "invoice_id,vendor,amount\nINV-1,Acme,10.50\nINV-2,Globex,4.25\n"
@@ -268,10 +271,17 @@ def file_auth(server: OfficeEnvResourcesServer, session_id: str = "rs-1") -> dic
     return {"Authorization": f"Bearer {server._episodes[session_id].token}"}
 
 
-def test_tool_names_leave_room_for_pis_grant_prefix() -> None:
+def configured_mcp_settings() -> dict:
+    """The MCP settings configs/officeenv_sandbox.yaml gives the server."""
+    settings = yaml.safe_load(SANDBOX_CONFIG.read_text())["oe"]["resources_servers"]["officeenv"]
+    return {key: settings[key] for key in ("mcp_server_name", "mcp_bearer_token")}
+
+
+def test_tool_names_fit_pis_limit_with_the_configured_server_name() -> None:
     names = set(tools_exposure_catalog())
     assert {"gdrive_create_file", "gdrive_download_file", "user_complete_task"} <= names
-    assert all(len(name) <= 61 for name in names)  # Pi prefixes the grant name: "oe_" + name fits in 64
+    prefix = configured_mcp_settings()["mcp_server_name"] + "_"  # Pi names a tool <server>_<tool>, in 64 characters
+    assert all(len(prefix + name) <= 64 for name in names)
 
 
 # Lending a sandbox per episode.
@@ -289,9 +299,9 @@ def test_a_seed_lends_a_sandbox_with_the_episode_file_api_and_close_stops_it(san
         assert sandbox.provider_config == {"docker": {}}
         assert sandbox.spec.image == "officeenv-sandbox:pilot" and sandbox.spec.workdir == "/workspace"
         assert sandbox.spec.metadata["officeenv-task"] == "sandbox-files"
-        assert sandbox.spec.env["OFFICEENV_API_URL"] == "http://10.0.0.1:8080"  # this server's host and port
-        assert sandbox.spec.env["OFFICEENV_API_TOKEN"] == server._episodes["rs-1"].token
-        assert sandbox.spec.files == {"/workspace/OFFICEENV.md": WORKSPACE_GUIDE}
+        assert sandbox.spec.env["COMPANY_API_URL"] == "http://10.0.0.1:8080"  # this server's host and port
+        assert sandbox.spec.env["COMPANY_API_TOKEN"] == server._episodes["rs-1"].token
+        assert sandbox.spec.files == {"/workspace/README.md": WORKSPACE_GUIDE}
 
         token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
         listed = {tool["name"] for tool in rpc(client, "tools/list", {}, token).json()["result"]["tools"]}
@@ -305,7 +315,7 @@ def test_a_seed_lends_a_sandbox_with_the_episode_file_api_and_close_stops_it(san
 def test_files_api_url_overrides_the_address_a_sandbox_calls(sandboxes) -> None:
     with mcp_client(make_server(files_api_url="http://node-7:8080/")) as client:
         assert client.post("/seed_session", json=seed_body()).status_code == 200
-        assert sandboxes.started[0].spec.env["OFFICEENV_API_URL"] == "http://node-7:8080"
+        assert sandboxes.started[0].spec.env["COMPANY_API_URL"] == "http://node-7:8080"
 
 
 def test_a_repeated_seed_lends_the_same_sandbox(sandboxes) -> None:
@@ -374,7 +384,7 @@ def test_retiring_a_session_stops_its_sandbox(sandboxes) -> None:
         auth = file_auth(server)
         asyncio.run(server.retire_session_state("rs-1"))
         assert sandboxes.stopped == sandboxes.started and len(server.service.store) == 0
-        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).status_code == 401
+        assert client.get("/v1/files/gdrive/F_LEDGER", headers=auth).status_code == 401
 
 
 def test_verify_stops_the_sandbox_and_closes_the_tools_before_grading(sandboxes) -> None:
@@ -392,7 +402,7 @@ def test_verify_stops_the_sandbox_and_closes_the_tools_before_grading(sandboxes)
         assert when_stopped == [(True, True)]  # the tools closed and the sandbox stopped before grading
         assert sandboxes.stopped == sandboxes.started
         # a process left running in the sandbox reaches neither the file API nor the episode's tools any more
-        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).status_code == 401
+        assert client.get("/v1/files/gdrive/F_LEDGER", headers=auth).status_code == 401
         called = rpc(client, "tools/call", {"name": "gdrive_list_files", "arguments": {}}, grant).json()["result"]
         assert called["isError"] is True
         assert client.post("/close_session", json=close_body(), cookies=seeded.cookies).status_code == 200
@@ -406,7 +416,7 @@ def test_while_verification_stops_the_sandbox_the_episodes_tools_refuse(sandboxe
         grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
         server._episodes["rs-1"].grading = True  # as /verify sets it before it awaits the sandbox's stop
         called = rpc(client, "tools/call", {"name": "gdrive_list_files", "arguments": {}}, grant).json()["result"]
-        assert called["isError"] is True and "verification has started" in json.dumps(called)
+        assert called["isError"] is True and "The task has ended: its tools are closed" in json.dumps(called)
         refused = client.post("/gdrive_list_files", json={}, cookies=seeded.cookies)
         assert refused.status_code == 409 and server.service.store.get("rs-1") is not None
 
@@ -426,14 +436,14 @@ def test_an_upload_streaming_in_when_verification_begins_writes_nothing(sandboxe
             return args
 
         monkeypatch.setattr(OfficeEnvResourcesServer, "_content_args", staticmethod(body_then_verification))
-        replaced = client.put("/officeenv/files/gdrive/F_LEDGER", content=b"vendor,total\n", headers=auth)
+        replaced = client.put("/v1/files/gdrive/F_LEDGER", content=b"vendor,total\n", headers=auth)
         server._episodes["rs-1"].grading = False
         created = client.post(
-            "/officeenv/files", params={"app": "gdrive", "name": "late.csv"}, content=b"a,b\n", headers=auth
+            "/v1/files", params={"app": "gdrive", "name": "late.csv"}, content=b"a,b\n", headers=auth
         )
         assert replaced.status_code == 409 and created.status_code == 409, (replaced.text, created.text)
         server._episodes["rs-1"].grading = False
-        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).text == LEDGER  # unchanged
+        assert client.get("/v1/files/gdrive/F_LEDGER", headers=auth).text == LEDGER  # unchanged
         listed = client.post("/gdrive_list_files", json={}, cookies=seeded.cookies)
         assert listed.status_code == 200 and "late.csv" not in listed.text
 
@@ -447,7 +457,7 @@ def test_a_failed_stop_before_grading_still_grades_and_close_stops_it(sandboxes)
         verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies)
         assert verified.status_code == 200 and verified.json()["reward"] == 0.0, verified.text
         assert sandboxes.stopped == [] and server._episodes["rs-1"].sandbox is not None
-        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).status_code == 401
+        assert client.get("/v1/files/gdrive/F_LEDGER", headers=auth).status_code == 401
         sandboxes.fail_on = None
         assert client.post("/close_session", json=close_body(), cookies=seeded.cookies).status_code == 200
         assert sandboxes.stopped == sandboxes.started and not server._episodes
@@ -523,7 +533,7 @@ def test_a_host_relay_starts_in_the_sandbox_before_it_is_lent(sandboxes, monkeyp
         assert client.post("/seed_session", json=seed_body()).status_code == 200
         (sandbox,) = sandboxes.started
         assert sandbox.spec.files[RELAY_PATH] == RELAY_SOURCE
-        assert sandbox.spec.env["OFFICEENV_API_URL"] == "http://127.0.0.1:8080"
+        assert sandbox.spec.env["COMPANY_API_URL"] == "http://127.0.0.1:8080"
         assert "relay.py host.lima.internal 8080 18173" in sandbox.commands[0]
         assert "relay ready" in sandbox.commands[1]
 
@@ -587,23 +597,23 @@ def test_the_file_api_moves_text_files_with_the_episode_token(sandboxes) -> None
         seeded = client.post("/seed_session", json=seed_body())
         auth = file_auth(server)
 
-        downloaded = client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth)
+        downloaded = client.get("/v1/files/gdrive/F_LEDGER", headers=auth)
         assert downloaded.status_code == 200 and downloaded.text == LEDGER
 
         uploaded = client.post(
-            "/officeenv/files",
+            "/v1/files",
             params={"app": "gdrive", "name": "totals.csv", "parent": "F_FIN", "mime_type": "text/csv"},
             content=TOTALS.encode(),
             headers=auth,
         )
         assert uploaded.status_code == 200, uploaded.text
         file_id = uploaded.json()["id"]
-        assert client.get(f"/officeenv/files/gdrive/{file_id}", headers=auth).text == TOTALS
+        assert client.get(f"/v1/files/gdrive/{file_id}", headers=auth).text == TOTALS
 
-        replaced = client.put(f"/officeenv/files/gdrive/{file_id}", content=b"vendor,total\n", headers=auth)
+        replaced = client.put(f"/v1/files/gdrive/{file_id}", content=b"vendor,total\n", headers=auth)
         assert replaced.status_code == 200
-        assert client.get(f"/officeenv/files/gdrive/{file_id}", headers=auth).text == "vendor,total\n"
-        client.put(f"/officeenv/files/gdrive/{file_id}", content=TOTALS.encode(), headers=auth)
+        assert client.get(f"/v1/files/gdrive/{file_id}", headers=auth).text == "vendor,total\n"
+        client.put(f"/v1/files/gdrive/{file_id}", content=TOTALS.encode(), headers=auth)
 
         verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies)
         assert verified.json()["reward"] == 1.0, verified.text
@@ -616,7 +626,7 @@ def test_the_file_api_moves_binary_files_byte_for_byte(sandboxes) -> None:
         auth = file_auth(server)
 
         uploaded = client.post(
-            "/officeenv/files",
+            "/v1/files",
             params={"app": "gdrive", "name": "totals.xlsx", "parent": "F_FIN"},
             content=BOOK,
             headers=auth,
@@ -624,19 +634,19 @@ def test_the_file_api_moves_binary_files_byte_for_byte(sandboxes) -> None:
         assert uploaded.status_code == 200, uploaded.text
         created = uploaded.json()
         assert created["mimeType"] == XLSX and created["size"] == str(len(BOOK))
-        downloaded = client.get(f"/officeenv/files/gdrive/{created['id']}", headers=auth)
+        downloaded = client.get(f"/v1/files/gdrive/{created['id']}", headers=auth)
         assert downloaded.status_code == 200 and downloaded.content == BOOK
         assert downloaded.headers["content-type"] == XLSX
 
         noise = bytes(range(256)) * 4  # every byte value, no UTF-8 text
-        replaced = client.put(f"/officeenv/files/gdrive/{created['id']}", content=noise, headers=auth)
+        replaced = client.put(f"/v1/files/gdrive/{created['id']}", content=noise, headers=auth)
         assert replaced.status_code == 200 and replaced.json()["size"] == str(len(noise))
-        assert client.get(f"/officeenv/files/gdrive/{created['id']}", headers=auth).content == noise
-        blob = client.post("/officeenv/files", params={"app": "gdrive", "name": "blob"}, content=noise, headers=auth)
-        got = client.get(f"/officeenv/files/gdrive/{blob.json()['id']}", headers=auth)
+        assert client.get(f"/v1/files/gdrive/{created['id']}", headers=auth).content == noise
+        blob = client.post("/v1/files", params={"app": "gdrive", "name": "blob"}, content=noise, headers=auth)
+        got = client.get(f"/v1/files/gdrive/{blob.json()['id']}", headers=auth)
         assert got.content == noise and got.headers["content-type"] == "application/octet-stream"
 
-        client.put(f"/officeenv/files/gdrive/{created['id']}", content=BOOK, headers=auth)
+        client.put(f"/v1/files/gdrive/{created['id']}", content=BOOK, headers=auth)
         verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies)
         assert verified.json()["reward"] == 1.0, verified.text
 
@@ -646,19 +656,19 @@ def test_the_file_api_refuses_other_tokens_apps_and_oversized_uploads(sandboxes,
     with mcp_client(server) as client:
         seeded = client.post("/seed_session", json=seed_body())
         auth = file_auth(server)
-        assert client.get("/officeenv/files/gdrive/F_LEDGER").status_code == 401
-        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers={"Authorization": "Bearer x"}).status_code == 401
-        assert client.get("/officeenv/files/box/F_LEDGER", headers=auth).status_code == 404
-        missing = client.get("/officeenv/files/gdrive/F_MISSING", headers=auth)
+        assert client.get("/v1/files/gdrive/F_LEDGER").status_code == 401
+        assert client.get("/v1/files/gdrive/F_LEDGER", headers={"Authorization": "Bearer x"}).status_code == 401
+        assert client.get("/v1/files/box/F_LEDGER", headers=auth).status_code == 404
+        missing = client.get("/v1/files/gdrive/F_MISSING", headers=auth)
         assert missing.status_code == 404 and "error" in missing.text
         monkeypatch.setattr(officeenv_app, "MAX_UPLOAD_BYTES", 8)
         too_big = client.post(
-            "/officeenv/files", params={"app": "gdrive", "name": "x.bin"}, content=b"\xff" * 9, headers=auth
+            "/v1/files", params={"app": "gdrive", "name": "x.bin"}, content=b"\xff" * 9, headers=auth
         )
         assert too_big.status_code == 413
 
         assert client.post("/close_session", json=close_body(), cookies=seeded.cookies).status_code == 200
-        assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).status_code == 401  # revoked at close
+        assert client.get("/v1/files/gdrive/F_LEDGER", headers=auth).status_code == 401  # revoked at close
 
 
 # Drive file content stays out of a sandboxed episode's conversation (sandbox_config.inline_file_bytes).
@@ -745,22 +755,20 @@ def test_an_upload_that_pastes_its_content_is_refused_with_the_file_api_command(
         pasted = call("gdrive_create_file", name="Q3 totals.xlsx", parents=["F_FIN"], content_base64=BOOK_B64)
         assert pasted["error"]["code"] == "upload_from_workspace", pasted
         assert (
-            'curl -sf -X POST -H "Authorization: Bearer $OFFICEENV_API_TOKEN" --data-binary @<local path> '
-            '"$OFFICEENV_API_URL/officeenv/files?app=gdrive&name=Q3%20totals.xlsx&parent=F_FIN"'
+            'curl -sf -X POST -H "Authorization: Bearer $COMPANY_API_TOKEN" --data-binary @<local path> '
+            '"$COMPANY_API_URL/v1/files?app=gdrive&name=Q3%20totals.xlsx&parent=F_FIN"'
         ) in pasted["error"]["message"]
         too_long = call("gdrive_create_file", name="big.csv", content=LONG)
         assert "text over 8192 bytes" in too_long["error"]["message"]
         replaced = call("gdrive_update_file", file_id="F_LEDGER", content_base64=BOOK_B64)
         assert "-X PUT" in replaced["error"]["message"]
-        assert '"$OFFICEENV_API_URL/officeenv/files/gdrive/F_LEDGER"' in replaced["error"]["message"]
+        assert '"$COMPANY_API_URL/v1/files/gdrive/F_LEDGER"' in replaced["error"]["message"]
         # short text still goes in the call, and the file API takes what the tools refused
         assert call("gdrive_create_file", name="totals.csv", parents=["F_FIN"], content=TOTALS)["name"] == "totals.csv"
         auth = file_auth(server)
-        sent = client.post(
-            "/officeenv/files", params={"app": "gdrive", "name": "big.xlsx"}, content=BOOK, headers=auth
-        )
+        sent = client.post("/v1/files", params={"app": "gdrive", "name": "big.xlsx"}, content=BOOK, headers=auth)
         assert sent.status_code == 200, sent.text
-        assert client.get(f"/officeenv/files/gdrive/{sent.json()['id']}", headers=auth).content == BOOK
+        assert client.get(f"/v1/files/gdrive/{sent.json()['id']}", headers=auth).content == BOOK
         assert sandboxes.started[0].files == {}  # the file API writes nothing into the sandbox
 
         result = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
@@ -775,9 +783,9 @@ def test_tool_descriptions_and_the_guide_say_where_file_content_goes(sandboxes) 
         assert download.startswith("[Google Drive] Download a file's content (alt=media) into the workspace")
         assert "at most 8192 bytes" in download and "contentBase64" not in download
         create = described["gdrive_create_file"]
-        assert "file API (/workspace/OFFICEENV.md)" in create and "content_base64" not in create
+        assert "file API (/workspace/README.md)" in create and "content_base64" not in create
         assert described["gdrive_list_files"] == catalog["gdrive_list_files"]["description"]  # OfficeEnv's own
-        guide = sandboxes.started[0].spec.files["/workspace/OFFICEENV.md"]
+        guide = sandboxes.started[0].spec.files["/workspace/README.md"]
         assert guide == WORKSPACE_GUIDE and "drive/<file id>/<name>" in guide and "at most 8192" in guide
     assert "drive/<file id>" not in workspace_guide(None)
 
@@ -789,7 +797,7 @@ def test_with_no_limit_file_content_moves_through_the_conversation(sandboxes) ->
         assert call("gdrive_download_file", file_id="F_BOOK")["contentBase64"] == BOOK_B64
         created = call("gdrive_create_file", name="totals.xlsx", parents=["F_FIN"], content_base64=BOOK_B64)
         assert created["name"] == "totals.xlsx" and sandboxes.started[0].files == {}
-        assert "drive/<file id>" not in sandboxes.started[0].spec.files["/workspace/OFFICEENV.md"]
+        assert "drive/<file id>" not in sandboxes.started[0].spec.files["/workspace/README.md"]
         assert described["gdrive_download_file"] == catalog["gdrive_download_file"]["description"]
         verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
         assert verified["sandbox_files_saved"] == 0.0 and verified["sandbox_uploads_refused"] == 0.0
@@ -916,9 +924,12 @@ def test_in_sandbox_mode_callers_from_another_host_reach_only_mcp_and_the_file_a
             ("/gdrive_list_files", {}),
         ]:
             refused = remote.post(path, json=body, cookies=seeded.cookies)
-            assert refused.status_code == 403, (path, refused.text)
-        assert remote.get("/officeenv/apps").status_code == 403
-        assert remote.get("/officeenv/files/gdrive/F_LEDGER", headers=file_auth(server)).status_code == 200
+            assert refused.status_code == 404 and refused.json() == {"detail": "Not Found"}, (path, refused.text)
+        assert remote.get("/officeenv/apps").status_code == 404
+        for docs in ("/openapi.json", "/docs", "/redoc"):  # they would show a sandbox every route
+            for answer in (local.get(docs), remote.get(docs)):  # 405: the tool route takes POST /<name>
+                assert answer.status_code in (404, 405) and "paths" not in answer.text, (docs, answer.text)
+        assert remote.get("/v1/files/gdrive/F_LEDGER", headers=file_auth(server)).status_code == 200
         grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
         called = rpc(remote, "tools/call", {"name": "gdrive_list_files", "arguments": {}}, grant).json()["result"]
         assert called.get("isError") is not True, called
@@ -937,11 +948,17 @@ def test_in_sandbox_mode_a_token_signed_with_the_servers_name_is_refused(sandbox
         assert refused["isError"] is True and "Invalid Gym MCP session token" in json.dumps(refused)
 
 
-def test_sandbox_mode_signs_with_a_per_process_secret() -> None:
+def test_sandbox_mode_signs_with_a_per_process_secret_and_names_its_cookie_neutrally(sandboxes) -> None:
     server = make_server()
     named_key = f"{type(server).__name__}___oe"
-    assert server.get_session_middleware_key() == named_key  # names the cookie, appears in error text
+    assert server.get_session_middleware_key() == named_key  # appears in logs and error text
     assert server.get_session_secret() not in (named_key, make_server().get_session_secret())
+    # a sandbox's calls get the cookie too, so its name says nothing of the environment, and stays unique
+    cookie = server.get_session_cookie_name()
+    assert cookie.startswith("sid_") and cookie != make_server(name="oe2").get_session_cookie_name()
+    with mcp_client(server) as client:
+        assert list(client.post("/seed_session", json=seed_body()).cookies) == [cookie]
+    assert make_server(sandbox_provider=None).get_session_cookie_name() == named_key
 
 
 def test_sandbox_mode_needs_one_worker() -> None:
@@ -971,11 +988,151 @@ def test_without_a_sandbox_provider_nothing_changes_for_any_caller(monkeypatch) 
     with mcp_client(server, client=SANDBOX) as remote:
         seeded = remote.post("/seed_session", json=seed_body())
         assert seeded.status_code == 200 and seeded.json()["sandbox_access"] is None, seeded.text
-        assert remote.get("/officeenv/apps").status_code == 200
-        assert remote.get("/officeenv/files/gdrive/F_LEDGER").status_code == 404  # no file API
+        assert remote.get("/officeenv/apps").status_code == 200 and remote.get("/openapi.json").status_code == 200
+        assert remote.get("/v1/files/gdrive/F_LEDGER").status_code == 404  # no file API
         assert remote.post("/gdrive_list_files", json={}, cookies=seeded.cookies).status_code == 200
         assert remote.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).status_code == 200
         assert remote.post("/close_session", json=close_body(), cookies=seeded.cookies).status_code == 200
+
+
+# Nothing a sandbox reads names the environment.
+
+# What names the environment behind the company's API, or Gym: a sandboxed model reads none of it.
+ENVIRONMENT_NAMES = re.compile(
+    r"officeenv|office_env|\bgym\b|nemo|rollout|episode|simulat|seed|verif|surface|harness|dummy|token.capture|ng-trace",
+    re.I,
+)
+
+
+def environment_names(text: str) -> set[str]:
+    return {found.group(0).lower() for found in ENVIRONMENT_NAMES.finditer(text)}
+
+
+def harness_model_url(*, token_capture: bool) -> str:
+    """The policy's URL as Gym's agents hand it to a sandboxed harness for one rollout (Pi writes it into the
+    sandbox, in its models.json); traces off."""
+    from nemo_gym.client import apply_rollout_prefix
+
+    return (
+        apply_rollout_prefix("http://10.0.0.1:9000", "17-0", token_capture=token_capture, trace_context=False) + "/v1"
+    )
+
+
+def sandbox_view(server: OfficeEnvResourcesServer, sandboxes: type[FakeSandbox]) -> str:
+    """Everything a sandboxed model can read of ``server``: its variables, the files and commands its sandbox gets,
+    the MCP endpoint's name, header and tools, and the answers of every route a sandbox reaches, right and wrong
+    (a saved download, a refused upload, a tool outside the grant, the routes it may not use, the docs), with the
+    cookies they set. Drive's tools are described by this server; OfficeEnv's other descriptions are OfficeEnv's to
+    check. Tokens are masked."""
+    seen: list[str] = []
+    with mcp_client(server) as local, mcp_client(server, client=SANDBOX) as remote:
+        seeded = local.post("/seed_session", json=seed_body(content_spec()))
+        assert seeded.status_code == 200, seeded.text
+        (sandbox,) = sandboxes.started
+        token = sandbox.spec.env["COMPANY_API_TOKEN"]
+        mcp = seeded.json()["resources_tools"]
+        header, grant = next(iter(mcp["headers"].items()))
+        seen += [f"{name}={value}" for name, value in sandbox.spec.env.items()]
+        seen += [f"{path}\n{text}" for path, text in sandbox.spec.files.items()]
+        seen += [mcp["server_name"], mcp["url_path"], header]
+        granted = {**RPC_HEADERS, header: grant}
+
+        def read(answer) -> str:
+            seen.extend(cookie.split("=", 1)[0] for cookie in answer.headers.get_list("set-cookie"))
+            return answer.text
+
+        def mcp_call(method: str, params: dict, headers: dict) -> str:
+            body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+            return read(remote.post("/mcp", headers=headers, json=body))
+
+        tools = json.loads(mcp_call("tools/list", {}, granted))["result"]["tools"]
+        seen += [json.dumps(tool) if tool["name"].startswith("gdrive_") else tool["name"] for tool in tools]
+        for name, arguments in [
+            ("gdrive_download_file", {"file_id": "F_BOOK"}),  # saved in the workspace
+            ("gdrive_create_file", {"name": "x.bin", "content_base64": "AAEC"}),  # refused: pasted content
+            ("slack_post_message", {"channel": "C1", "text": "hi"}),  # outside the grant
+        ]:
+            seen.append(mcp_call("tools/call", {"name": name, "arguments": arguments}, granted))
+        seen.append(mcp_call("tools/list", {}, RPC_HEADERS))
+        forged = {**RPC_HEADERS, "Authorization": "Bearer forged", NEMO_GYM_MCP_SESSION_TOKEN_HEADER: "forged"}
+        seen.append(mcp_call("tools/call", {"name": "gdrive_list_files", "arguments": {}}, forged))
+        auth = {"Authorization": f"Bearer {token}"}
+        for method, path, kwargs in [
+            ("get", "/openapi.json", {}),
+            ("get", "/docs", {}),
+            ("get", "/redoc", {}),
+            ("post", "/seed_session", {"json": seed_body(session_id="rs-2", rollout_id="r2")}),
+            ("post", "/verify", {"json": VERIFY_BODY}),
+            ("post", "/close_session", {"json": close_body()}),
+            ("post", "/gdrive_list_files", {"json": {}}),
+            ("get", "/officeenv/apps", {}),
+            ("get", "/v1/files/gdrive/F_LEDGER", {"headers": auth}),
+            ("get", "/v1/files/gdrive/F_LEDGER", {}),
+            ("get", "/v1/files/gdrive/F_LEDGER", {"headers": {"Authorization": "Bearer forged"}}),
+            ("get", "/v1/files/gdrive/F_NONE", {"headers": auth}),
+            ("get", "/v1/files/slack/F1", {"headers": auth}),
+            ("post", "/v1/files", {"headers": auth, "params": {"app": "gdrive", "name": "t.csv"}, "content": b"a,b"}),
+            ("put", "/v1/files/gdrive/F_NONE", {"headers": auth, "content": b"a,b"}),
+        ]:
+            answer = getattr(remote, method)(path, **kwargs)
+            assert answer.status_code != 500, (path, answer.text)
+            seen.append(read(answer))
+        seen += sandbox.commands  # the relay, and the saved download's folder and mode
+        seen += list(sandbox.files)
+    return "\n".join(seen).replace(token, "<token>").replace(grant.removeprefix("Bearer "), "<token>")
+
+
+def test_a_sandbox_reads_environment_names_only_in_the_model_url(sandboxes) -> None:
+    server = make_server(sandbox_config={**IMAGE, "host_relay": "host.lima.internal"}, **configured_mcp_settings())
+    text = sandbox_view(server, sandboxes)
+    assert "COMPANY_API_URL=http://10.0.0.1:8080" in text and "/workspace/README.md" in text
+    assert "savedTo" in text and "$COMPANY_API_URL/v1/files" in text  # a saved download, a refused pasted upload
+    assert RELAY_PATH in text and server.get_session_cookie_name() in text  # the relay, a cookie an answer sets
+    assert environment_names(text) == set()  # nothing of this server's
+    # What is left, from Gym's agents: the policy's URL carries Gym's own path names, the rollout prefix from rollout
+    # correlation alone, the token-capture segment with token capture (and /ng-trace/<traceparent> while traces
+    # export). Making them configurable is a follow-up.
+    assert harness_model_url(token_capture=False) == "http://10.0.0.1:9000/ng-rollout/17-0/v1"
+    assert environment_names(harness_model_url(token_capture=False)) == {"rollout"}
+    assert environment_names(harness_model_url(token_capture=True)) == {"rollout", "token-capture"}
+
+
+def test_without_the_company_mcp_settings_the_sandbox_reads_gym(sandboxes) -> None:
+    """The check above can fail: Gym's MCP header is what the config's settings replace."""
+    assert {"nemo", "gym"} <= environment_names(sandbox_view(make_server(), sandboxes))
+
+
+def test_the_opensandbox_probe_prints_a_plain_word() -> None:
+    """OpenSandbox's exec daemon keeps each command's output in the sandbox, and the provider's default post-create
+    probe prints a marker that names Gym: the OpenSandbox config's probe, merged into the provider's settings, prints
+    a plain word."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProbeConfig, OpenSandboxProvider
+
+    merged = OmegaConf.merge(
+        OmegaConf.load(Path(__file__).parents[3] / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"),
+        OmegaConf.load(SANDBOX_CONFIG.with_name("officeenv_opensandbox.yaml")),
+    )
+    probe = OmegaConf.to_container(merged["sandbox"]["opensandbox"]["probe"])
+    assert probe["stable_count"] == 2  # the provider's own probe settings stay
+    assert ENVIRONMENT_NAMES.search(OpenSandboxProbeConfig().command)  # the provider's default marker
+    provider = OpenSandboxProvider(probe=probe)
+    execute = AsyncMock(return_value=SandboxExecResult("ready", "", 0))
+    provider._exec = execute
+    asyncio.run(provider._verify_created_handle(SandboxHandle("box", "opensandbox", None)))
+    assert {call.args[1] for call in execute.call_args_list} == {"printf ready"}
+
+
+def test_the_rows_name_the_company_api_as_the_sandbox_does() -> None:
+    for line in SANDBOX_ROWS.read_text().splitlines():
+        row = json.loads(line)
+        (system,) = [item["content"] for item in row["responses_create_params"]["input"] if item["role"] == "system"]
+        assert "/workspace/README.md" in system and "COMPANY_API_URL" in system and "COMPANY_API_TOKEN" in system
+        prefix = configured_mcp_settings()["mcp_server_name"]
+        assert f"{prefix}_user_complete_task" in system  # the tool as Pi lists it
+        assert not ENVIRONMENT_NAMES.search(system), system
 
 
 # The committed rows.

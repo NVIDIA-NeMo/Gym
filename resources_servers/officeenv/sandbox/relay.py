@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Forward loopback ports inside a sandbox to the host that runs Gym's servers.
+"""Forward loopback ports to the same ports on a host alias.
 
-Gym gives a sandbox its servers' bind addresses. Servers on a workstation bind loopback, which a
-container cannot reach, and a host firewall may drop connections to its other addresses. This relay
-listens on the sandbox's loopback for each port and forwards to the same port on a host alias that
-reaches the host's loopback (colima: host.lima.internal; Docker Desktop: host.docker.internal).
-It runs in the sandbox's own Python, with the standard library only.
+Services on a workstation bind loopback, which a container cannot reach, and a host firewall may drop
+connections to the host's other addresses. This relay listens on the container's loopback for each port
+and forwards to the same port on a host alias that reaches the host's loopback (colima:
+host.lima.internal; Docker Desktop: host.docker.internal). Standard library only.
 
     python3 relay.py <host alias> <port> [<port> ...]
 """

@@ -153,10 +153,10 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
    verification stops it (or `/close_session`, when verification did not), and so does shutting
    the server down;
 2. moves file content between the workspace and Google Drive without passing it through the
-   model: the sandbox gets `OFFICEENV_API_URL` and `OFFICEENV_API_TOKEN`, and `OFFICEENV.md` in
-   the workspace documents the file API (`GET`/`PUT /officeenv/files/{app}/{file_id}`,
-   `POST /officeenv/files?app=&name=&parent=&mime_type=`). Text and binary files (an XLSX
-   workbook, say) move byte for byte; uploads are limited to 20 MB;
+   model: the sandbox gets `COMPANY_API_URL` and `COMPANY_API_TOKEN`, and `README.md` in the
+   workspace documents the file API (`GET`/`PUT /v1/files/{app}/{file_id}`,
+   `POST /v1/files?app=&name=&parent=&mime_type=`). Text and binary files (an XLSX workbook, say)
+   move byte for byte; uploads are limited to 20 MB;
 3. keeps Drive file content out of the conversation on its tools too
    (`sandbox_config.inline_file_bytes`, 8192 by default):
    - a download (`download_file`, `export_file`, `get_revision`) saves the file in the workspace
@@ -168,7 +168,7 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
      bytes, pasted into the call (`upload_from_workspace`), with the file API command that sends
      the file instead;
    - the five tools are described as they behave here, in place of OfficeEnv's words
-     (`contentBase64`, `content_base64`), and `OFFICEENV.md` says the same. `/verify` reports
+     (`contentBase64`, `content_base64`), and `README.md` says the same. `/verify` reports
      `sandbox_files_saved`, `sandbox_bytes_saved` and `sandbox_uploads_refused`.
 
    The file API, short text, calls without content and episodes without a sandbox are unchanged;
@@ -182,18 +182,31 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.
 
-The instance name (`oe`) is the grant name Pi prefixes to each tool, so it stays short (the
-longest tool name is 56 characters). Rows come from OfficeEnv's sandbox example tasks:
-`sandbox/prepare_rows.py` writes `data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its five
-sandbox tasks). A row holds a system and a user message and the TaskSpec, and no tool
-list, since the harness takes its tools from the MCP grant.
+Rows come from OfficeEnv's sandbox example tasks: `sandbox/prepare_rows.py` writes
+`data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its five sandbox tasks). A
+row holds a system and a user message and the TaskSpec, and no tool list, since the harness takes
+its tools from the MCP grant.
+
+What a sandbox reads of this server names a company's API, never the environment behind it or
+Gym: the variables above, the `/v1/...` routes, the workspace's `README.md`, the answers and
+errors of every route a sandbox reaches, and the session cookie that answers set (`sid_<hash>`,
+`get_session_cookie_name`). The config's `mcp_server_name: company` and `mcp_bearer_token: true`
+make the MCP endpoint an ordinary one too: Pi lists it as `company` and names its tools
+`company_<tool>` (at most 64 characters; the longest tool name is 56), the session token goes as
+a standard bearer token, and `tools/list` without it lists nothing. `sandbox/prepare_rows.py`'s
+system prompt names the tools the same way. On OpenSandbox, whose exec daemon keeps each command's
+output in the sandbox, `configs/officeenv_opensandbox.yaml` has the provider's post-create probe
+print `ready` (`sandbox.opensandbox.probe`) instead of its default marker, which names Gym. What a
+sandbox still reads of Gym comes from outside this server: the policy's URL and Pi's own files and
+environment (see Known limits).
 
 A sandbox can reach this server, so sandbox mode guards it:
 
 - seeding, closing, verification, `GET /officeenv/apps` and the tool routes answer only callers
-  from this node and from `trusted_networks` (CIDR, empty by default) and refuse others with 403.
-  Sandboxes keep the MCP endpoint and the file API, whose tokens name their episode. When Gym's
-  other servers call this one from other nodes, list their network in `trusted_networks`;
+  from this node and from `trusted_networks` (CIDR, empty by default), and others as routes that
+  do not exist (404); no generated docs (`/openapi.json`, `/docs`) are served. Sandboxes keep the
+  MCP endpoint and the file API, whose tokens name their episode. When Gym's other servers call
+  this one from other nodes, list their network in `trusted_networks`;
 - session cookies and MCP tokens are signed with a secret drawn when the server starts
   (`get_session_secret`), not with Gym's default key, which anyone can derive from the server's
   name, so code in a sandbox cannot sign a token for another episode or for more tools. The secret
@@ -248,8 +261,20 @@ command.
 Known limits: Pi installs Node and its own package in every sandbox at session start (network
 access to nodejs.org and npm); token-ID capture through Pi needs a vLLM model server and is not
 validated here; the file API serves Google Drive only; OpenCode's sandbox sessions refuse MCP
-tool grants, so Pi is the harness these episodes run. The caller check is not a network boundary:
-a gateway that exposes only MCP and the file API to sandboxes would be one.
+tool grants, so Pi is the harness these episodes run. What a sandbox still reads of Gym:
+
+- the policy's URL, which Gym's agents hand the harness with Gym's own path names:
+  `/ng-rollout/<id>` from rollout correlation (`ROLLOUT_PATH_PREFIX`), `/training-token-capture`
+  with token capture (`TOKEN_CAPTURE_PATH_SEGMENT`), and `/ng-trace/<traceparent>` while traces
+  export. Pi writes it into its `models.json` in the sandbox, where a model can read it (it is not
+  in Pi's environment or process arguments). The test of what a sandbox reads lists it among its
+  findings; making the two path names configurable is a further core change;
+- Pi's own names: its session and runtime directories, the `NEMO_GYM_PI_*` variables its shell
+  inherits, the model provider `nemo`, its supervisor's process names, and a system prompt that
+  states the sandbox clock's date. Changing those is Pi agent work.
+
+The caller check is not a network boundary: a gateway that exposes only MCP and the file API to
+sandboxes would be one.
 
 ## Verification
 

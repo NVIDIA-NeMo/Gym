@@ -32,17 +32,22 @@ row whose artifacts cannot be read (400).
 
 With ``sandbox_provider`` set, each Environment Server episode also gets a sandbox from Gym's
 sandbox providers, lent to the harness (``SandboxAccess``) and stopped before the episode is graded.
-The sandbox gets the episode's file API in ``OFFICEENV_API_URL`` and ``OFFICEENV_API_TOKEN``
-(``OFFICEENV.md`` in the workspace documents it), so file content moves between the workspace and
-the simulated apps over HTTP instead of through the model's context. Drive's own file-content tools
-keep it out too (``sandbox_config.inline_file_bytes``): a download saves the file in the workspace
-(``drive/<file id>/<name>``) and answers with its path, carrying the content only for short text, and
-an upload that pastes binary content or long text is refused with the file API command that sends
-the file instead. A sandbox can reach this
+The sandbox gets the episode's file API (``/v1/files``) in ``COMPANY_API_URL`` and
+``COMPANY_API_TOKEN`` (``README.md`` in the workspace documents it), so file content moves between
+the workspace and the simulated apps over HTTP instead of through the model's context. Drive's own
+file-content tools keep it out too (``sandbox_config.inline_file_bytes``): a download saves the file
+in the workspace (``drive/<file id>/<name>``) and answers with its path, carrying the content only
+for short text, and an upload that pastes binary content or long text is refused with the file API
+command that sends the file instead.
+
+What a sandbox reads of this server names a company's API, never the environment behind it or Gym:
+the variables, routes, guide, answers and session cookie (``get_session_cookie_name``), and with the
+config's ``mcp_server_name`` and ``mcp_bearer_token`` the MCP endpoint too. A sandbox can reach this
 server, so sandbox mode guards it: seeding, closing, verification, the app catalog and the tool
-routes refuse callers other than this node and ``trusted_networks``, which leaves sandboxes the MCP
-endpoint and the file API; and session cookies and MCP tokens are signed with a per-process secret
-(``get_session_secret``) instead of Gym's key, which anyone can derive from the server's name. With
+routes answer callers other than this node and ``trusted_networks`` as routes that do not exist
+(404), which leaves sandboxes the MCP endpoint and the file API, and no generated docs are served;
+and session cookies and MCP tokens are signed with a per-process secret (``get_session_secret``)
+instead of Gym's key, which anyone can derive from the server's name. With
 ``sandbox_config.block_internet`` a sandbox reaches nothing else: OpenSandbox's egress policy refuses
 every outbound connection except to this server and the model servers.
 
@@ -55,6 +60,7 @@ import asyncio
 import base64
 import binascii
 import contextvars
+import hashlib
 import ipaddress
 import json
 import logging
@@ -304,16 +310,17 @@ FILE_OPS: dict[str, dict[str, str]] = {
 }
 MAX_UPLOAD_BYTES = 20_000_000
 
-# What a sandbox reads of this server: the variables that name the episode's file API, its route, and the guide.
-API_URL_ENV, API_TOKEN_ENV = "OFFICEENV_API_URL", "OFFICEENV_API_TOKEN"
-FILES_ROUTE = "/officeenv/files"
-GUIDE_NAME = "OFFICEENV.md"
+# What a sandbox reads of this server names a company's API, never the environment behind it or Gym: the variables
+# that name the episode's file API, its route, and the guide.
+API_URL_ENV, API_TOKEN_ENV = "COMPANY_API_URL", "COMPANY_API_TOKEN"
+FILES_ROUTE = "/v1/files"
+GUIDE_NAME = "README.md"
 
-FILES_GUIDE = f"""# OfficeEnv workspace
+FILES_GUIDE = f"""# Company apps
 
-Business apps are tools on your MCP server. File content moves between this workspace and
-Google Drive over HTTP, without going through the conversation, byte for byte: text files
-(CSV, TSV, JSON, Markdown) and binary ones (XLSX workbooks, PDFs, images) alike.
+The company's apps are your tools, one per operation of an app. File content moves between this
+workspace and Google Drive over HTTP, without going through the conversation, byte for byte: text
+files (CSV, TSV, JSON, Markdown) and binary ones (XLSX workbooks, PDFs, images) alike.
 
     # download a Drive file's content
     curl -sf -H "Authorization: Bearer ${API_TOKEN_ENV}" \\
@@ -562,8 +569,8 @@ def _drive_file_name(session: Any, file_id: str) -> str | None:
 
 
 RELAY_SOURCE = (Path(__file__).parent / "sandbox" / "relay.py").read_text(encoding="utf-8")
-RELAY_PATH = "/opt/officeenv/relay.py"
-RELAY_LOG = "/tmp/officeenv-relay.log"
+RELAY_PATH = "/usr/local/lib/net-relay/relay.py"
+RELAY_LOG = "/tmp/net-relay.log"
 
 
 def _error_status(body: Any) -> int | None:
@@ -725,16 +732,25 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         sandbox can reach this server; Gym's name-derived key, which anyone can compute, otherwise."""
         return self._session_secret or super().get_session_secret()
 
+    def get_session_cookie_name(self) -> str:
+        """In sandbox mode a sandbox's calls get the session cookie too (``curl -v`` shows it), so its name says
+        nothing of the environment: "sid_" and a hash of Gym's name for it, which keeps it unique per server."""
+        key = self.get_session_middleware_key()
+        if self.config.sandbox_provider is None:
+            return key
+        return f"sid_{hashlib.sha256(key.encode()).hexdigest()[:12]}"
+
     def _require_gym_caller(self, request: Request) -> None:
-        """In sandbox mode, refuse a caller from another host: seeding, closing, verification, the app catalog
-        and the tool routes answer Gym's servers on this node (and ``trusted_networks``) only. A check in the
-        handlers, not middleware, because Gym's MCP exposure dispatches tool calls straight to them (as from
-        loopback) and refuses servers with middleware of their own."""
+        """In sandbox mode, answer a caller from another host as a route that does not exist: seeding, closing,
+        verification, the app catalog and the tool routes answer Gym's servers on this node (and
+        ``trusted_networks``) only. A check in the handlers, not middleware, because Gym's MCP exposure
+        dispatches tool calls straight to them (as from loopback) and refuses servers with middleware of their
+        own."""
         if self.config.sandbox_provider is None:
             return
         host = request.client.host if request.client else None
         if not is_trusted_caller(host, local=self._node_addresses, networks=self._trusted_networks):
-            raise HTTPException(status_code=403, detail="This route answers Gym's servers only")
+            raise HTTPException(status_code=404, detail="Not Found")
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -742,6 +758,10 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         if self.config.sandbox_provider is not None:
             self._setup_sandbox_routes(app)
         app.post("/{tool_name}")(self.tool_call)  # registered last: fixed routes win
+        if self.config.sandbox_provider is not None:
+            # A sandbox reaches this server, and generated docs would show it every route: none are served.
+            docs = {app.openapi_url, app.docs_url, app.swagger_ui_oauth2_redirect_url, app.redoc_url} - {None}
+            app.router.routes[:] = [route for route in app.router.routes if getattr(route, "path", None) not in docs]
         return app
 
     def _setup_sandbox_routes(self, app: FastAPI) -> None:
@@ -757,9 +777,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
                 await self.shutdown()
 
         app.router.lifespan_context = lifespan
-        app.get("/officeenv/files/{app_name}/{file_id}")(self.download_file)
-        app.put("/officeenv/files/{app_name}/{file_id}")(self.replace_file)
-        app.post("/officeenv/files")(self.upload_file)
+        app.get(f"{FILES_ROUTE}/{{app_name}}/{{file_id}}")(self.download_file)
+        app.put(f"{FILES_ROUTE}/{{app_name}}/{{file_id}}")(self.replace_file)
+        app.post(FILES_ROUTE)(self.upload_file)
 
     async def list_apps(self, request: Request) -> dict[str, Any]:
         self._require_gym_caller(request)
@@ -995,9 +1015,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         # sandbox: a call under way when verification begins finishes first, and one that comes later is refused.
         async with self._locks.setdefault(session_id, asyncio.Lock()):
             if episode is not None and episode.grading:
-                raise HTTPException(
-                    status_code=409, detail="This episode's verification has started; its tools are closed"
-                )
+                # neutral words: a process the harness left running in the sandbox may read them
+                raise HTTPException(status_code=409, detail="The task has ended: its tools are closed")
             reply = self.service.call(session_id, tool_name, body)
             await self._save_downloads(session_id, episode)
         return Response(content=reply.text(), media_type="application/json", status_code=reply.status)
@@ -1053,7 +1072,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         scheme, _, token = (request.headers.get("authorization") or "").partition(" ")
         session_id = self._tokens.get(token.strip()) if scheme.lower() == "bearer" else None
         if session_id is None:
-            raise HTTPException(status_code=401, detail="Send the episode's token as 'Authorization: Bearer <token>'")
+            raise HTTPException(status_code=401, detail="Missing or invalid bearer token")
         return session_id
 
     def _refuse_once_grading(self, session_id: str) -> None:
@@ -1066,7 +1085,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     def _file_call(self, session_id: str, app_name: str, verb: str, args: dict[str, Any]) -> dict[str, Any]:
         ops = FILE_OPS.get(app_name)
         if ops is None:
-            raise HTTPException(status_code=404, detail=f"File transfer serves {sorted(FILE_OPS)}, not {app_name!r}")
+            raise HTTPException(status_code=404, detail="Not Found")  # files move for FILE_OPS' apps only
         episode = self._episodes.get(session_id)
         if episode is not None:  # the file API moves the content itself
             episode.direct = True

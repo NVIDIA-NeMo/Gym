@@ -39,8 +39,13 @@ oe:
 
 sandbox:
   opensandbox:
+    # OpenSandbox's execd keeps each command's output in the sandbox, where the model's shell can read it, and the
+    # provider's default post-create probe prints a marker that names Gym: this one prints a plain word.
+    probe:
+      command: printf ready
+      expected_stdout: ready
     setup:
-      # Run as root in every new sandbox before it is lent to the episode, and before OFFICEENV.md is written to the
+      # Run as root in every new sandbox before it is lent to the episode, and before README.md is written to the
       # workspace (sandbox_config.workdir, which the stock image lacks).
       commands:
         - mkdir -p /workspace

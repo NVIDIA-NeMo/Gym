@@ -1,6 +1,6 @@
 # OfficeEnv episodes for a sandboxed harness. Pi borrows each episode's sandbox (a container from
 # sandbox/Dockerfile), reaches OfficeEnv's tools over MCP, and moves file content over the episode's
-# file API (OFFICEENV.md in the workspace). Compose with a sandbox provider and a model server; the
+# file API (README.md in the workspace). Compose with a sandbox provider and a model server; the
 # sandbox must reach both this resources server and the model server, so bind them to an address
 # the containers can reach:
 #
@@ -11,8 +11,8 @@
 #     ++oe.resources_servers.officeenv.host=<host address> \
 #     ++policy_model.responses_api_models.inference_provider.host=<host address>
 #
-# Rows: data/sandbox_pilot.jsonl (sandbox/prepare_rows.py). The resources server's instance name is
-# the MCP grant name Pi prefixes to every tool, so it stays short.
+# Rows: data/sandbox_pilot.jsonl (sandbox/prepare_rows.py), whose prompts name the tools as Pi lists
+# them (company_<tool>).
 config_paths:
   - responses_api_agents/pi_agent/configs/pi_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
@@ -25,6 +25,11 @@ oe:
       verified: false
       description: OfficeEnv episodes lent to sandboxed harnesses (MCP tools, a sandbox per episode, a file API)
       expose_tools_over_mcp: true
+      # Everything the sandbox reads names a company's API, the MCP endpoint too: Pi lists it as `company` and
+      # names its tools company_<tool> (at most 64 characters: the longest tool name is 56), and the session
+      # token goes as a standard bearer token, which tools/list requires.
+      mcp_server_name: company
+      mcp_bearer_token: true
       sandbox_provider: sandbox
       sandbox_config:
         image: officeenv-sandbox:pilot
