@@ -23,7 +23,7 @@ import orjson
 from tqdm.auto import tqdm
 
 from nemo_gym.config.global_config import get_global_config_dict
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 global_config = get_global_config_dict()

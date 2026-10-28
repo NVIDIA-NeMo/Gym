@@ -20,8 +20,8 @@ from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.harness_capabilities.cli import json_rows
-from nemo_gym.observability.model_calls import build_model_call_record
+from nemo_gym.rollouts.harness_capabilities.cli import json_rows
+from nemo_gym.rollouts.model_calls import build_model_call_record
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -60,7 +60,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
     config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
     from omegaconf import OmegaConf
 
-    from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
+    from nemo_gym.rollouts.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
 
     assert (
         _environment_server_for_agent("probe_agent", _environment_servers_by_agent(OmegaConf.create(config)))

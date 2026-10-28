@@ -6,8 +6,8 @@ from dataclasses import replace
 
 import pytest
 
-from nemo_gym.harness_capabilities.checks import BehavioralCheck, SchemaCheck, SemanticCheck
-from nemo_gym.harness_capabilities.results import Results, gate_passes, render_matrices
+from nemo_gym.rollouts.harness_capabilities.checks import BehavioralCheck, SchemaCheck, SemanticCheck
+from nemo_gym.rollouts.harness_capabilities.results import Results, gate_passes, render_matrices
 
 
 def schema_check(check_id="call.id", value="call-1", **kwargs):

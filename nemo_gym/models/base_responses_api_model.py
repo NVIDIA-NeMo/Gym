@@ -975,7 +975,7 @@ _moved_lazy_names = moved_attr_getter(
                 "clear_model_call_captures_for_rollouts",
                 "merge_model_call_capture_into_record",
             ),
-            "nemo_gym.observability.model_calls",
+            "nemo_gym.rollouts.model_calls",
         ),
         "maybe_rollout_id_from_run_body": "nemo_gym.core.episode",
     },

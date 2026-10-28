@@ -7,7 +7,7 @@ import pytest
 from tau2.data_model.message import AssistantMessage, Message, MultiToolMessage, ToolCall, ToolMessage, UserMessage
 from tau2.data_model.simulation import SimulationRun, TerminationReason
 
-from nemo_gym.rollout_collection import _build_trajectory_record
+from nemo_gym.rollouts.rollout_collection import _build_trajectory_record
 from responses_api_agents.tau2.observability import build_tool_observations
 
 

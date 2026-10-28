@@ -9,10 +9,10 @@ import json
 import pytest
 from jsonschema import Draft202012Validator
 
-from nemo_gym.harness_capabilities.checker import EvidenceScope, Inspector, inspect_record
-from nemo_gym.harness_capabilities.checks import Check, SchemaCheck
-from nemo_gym.harness_capabilities.cli import inspect_bundle, main
-from nemo_gym.harness_capabilities.results import Results
+from nemo_gym.rollouts.harness_capabilities.checker import EvidenceScope, Inspector, inspect_record
+from nemo_gym.rollouts.harness_capabilities.checks import Check, SchemaCheck
+from nemo_gym.rollouts.harness_capabilities.cli import inspect_bundle, main
+from nemo_gym.rollouts.harness_capabilities.results import Results
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 

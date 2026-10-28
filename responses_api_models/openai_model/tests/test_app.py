@@ -32,7 +32,7 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.models.model_call_capture import CaptureStore, _CaptureMiddleware
 from nemo_gym.models.openai_utils import PermanentEndpointError
-from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.rollouts.model_calls import aggregate_model_call_metrics, read_model_call_records
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,

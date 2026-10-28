@@ -22,7 +22,7 @@ from nemo_gym.config.global_config import (
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
 )
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     capture_observations,

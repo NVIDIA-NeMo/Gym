@@ -47,7 +47,7 @@ from nemo_gym.models.model_call_capture import (
     make_capture_store,
 )
 from nemo_gym.models.token_capture.replay import replay_context
-from nemo_gym.observability.model_calls import read_model_call_records
+from nemo_gym.rollouts.model_calls import read_model_call_records
 
 
 @pytest.mark.parametrize("text", ["What is 2 + 2?", ""])
@@ -114,9 +114,9 @@ class TestBaseResponsesAPIModel:
 @pytest.mark.parametrize(
     ("name", "module"),
     [
-        ("ModelCallRecord", "nemo_gym.observability.model_calls"),
-        ("read_model_call_records", "nemo_gym.observability.model_calls"),
-        ("aggregate_model_call_metrics", "nemo_gym.observability.model_calls"),
+        ("ModelCallRecord", "nemo_gym.rollouts.model_calls"),
+        ("read_model_call_records", "nemo_gym.rollouts.model_calls"),
+        ("aggregate_model_call_metrics", "nemo_gym.rollouts.model_calls"),
         ("maybe_rollout_id_from_run_body", "nemo_gym.core.episode"),
     ],
 )
@@ -865,7 +865,7 @@ def test_model_call_capture_keys_are_reserved_global_config():
 
 
 def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, monkeypatch):
-    from nemo_gym.observability.model_calls import model_call_capture_dirs_from_config
+    from nemo_gym.rollouts.model_calls import model_call_capture_dirs_from_config
 
     assert make_capture_store(ModelCallCaptureConfig()) is None
     with pytest.raises(ValueError, match="required"):
@@ -1665,7 +1665,7 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
     import asyncio
 
     from nemo_gym.models.model_call_capture import _CaptureMiddleware
-    from nemo_gym.observability.model_calls import await_model_call_capture_quiescence
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
 
     store = CaptureStore(tmp_path)
 
@@ -1719,7 +1719,7 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
 @pytest.mark.asyncio
 async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observations(tmp_path):
     from nemo_gym.models.model_call_capture import _CaptureMiddleware
-    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     statuses = iter([400, 200])
@@ -1771,7 +1771,7 @@ async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observ
 
 @pytest.mark.parametrize("invocation_id", ["", "  ", 42, {}])
 def test_invalid_verifier_id_does_not_hide_the_captured_call(tmp_path, invocation_id):
-    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     store.record(

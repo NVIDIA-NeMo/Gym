@@ -862,7 +862,7 @@ layers = [
     # cli/
     "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils : nemo_gym.cli_setup_command",
     # testing/
-    "nemo_gym.harness_capabilities : nemo_gym.testing",
+    "nemo_gym.testing",
     # environment/
     "nemo_gym.agent_registry : nemo_gym.benchmarks : nemo_gym.deliverables : nemo_gym.discovery : nemo_gym.environment : nemo_gym.model_registry : nemo_gym.registry : nemo_gym.resources_server_registry",
     # eval/
@@ -870,7 +870,7 @@ layers = [
     # orchestration/
     "nemo_gym.cli.setup_command : nemo_gym.h2_ping_sidecar : nemo_gym.orchestration",
     # rollouts/
-    "nemo_gym.batch_status : nemo_gym.health : nemo_gym.observability.model_calls : nemo_gym.omitted_rollouts : nemo_gym.rollout_collection : nemo_gym.rollout_health : nemo_gym.rollout_outcomes",
+    "nemo_gym.rollouts",
     # data/
     "nemo_gym.data",
     # agents/
@@ -912,5 +912,5 @@ ignore_imports = [
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",
     "nemo_gym.sandbox.compose_config -> nemo_gym.data.tasks.harbor.digest",
     "nemo_gym.telemetry.setup -> nemo_gym.sandbox.observability",
-    "nemo_gym.trajectory.trajectory_record -> nemo_gym.observability.model_calls",
+    "nemo_gym.trajectory.trajectory_record -> nemo_gym.rollouts.model_calls",
 ]

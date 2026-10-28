@@ -57,7 +57,6 @@ from nemo_gym.artifacts.rollout_rows import (
     _strip_capture_payloads,
 )
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
-from nemo_gym.batch_status import BatchStatusTracker
 from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
@@ -95,15 +94,16 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.health.types import RunHealthConfig
-from nemo_gym.observability.model_calls import (
+from nemo_gym.rollouts.batch_status import BatchStatusTracker
+from nemo_gym.rollouts.health.types import RunHealthConfig
+from nemo_gym.rollouts.model_calls import (
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
-from nemo_gym.omitted_rollouts import omitted_rollout_record
+from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
@@ -163,7 +163,6 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
-from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 from nemo_gym.models.token_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
@@ -179,6 +178,7 @@ from nemo_gym.models.token_capture.delivery import (
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
+from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 
 
 logger = logging.getLogger(__name__)
@@ -1233,7 +1233,7 @@ def record_resubmit_offset(output_fpath: str | Path) -> int:
 
 
 def _normalize_health_check_ignored_checks(value) -> List[str]:
-    from nemo_gym.rollout_health import normalize_ignored_checks
+    from nemo_gym.rollouts.rollout_health import normalize_ignored_checks
 
     return list(normalize_ignored_checks(value))
 
@@ -2272,7 +2272,7 @@ def _record_rollout_health(
     under that dispatch span. Gated on telemetry only, not on the post-run report switch. Never raises:
     telemetry must not fail a rollout.
     """
-    from nemo_gym.rollout_health import evaluate_record
+    from nemo_gym.rollouts.rollout_health import evaluate_record
 
     try:
         digest = evaluate_record(result, ignored_checks)
@@ -4194,7 +4194,7 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_aggregation and not config.disable_health_check:
-            from nemo_gym.rollout_health import _aggregated_shards, format_health_report, run_health_checks
+            from nemo_gym.rollouts.rollout_health import _aggregated_shards, format_health_report, run_health_checks
 
             try:
                 # A run that wrote no row leaves an aggregated output to its shards: those are checked, as the
@@ -5145,7 +5145,7 @@ class RolloutAggregationHelper(BaseModel):
             batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
 
         if config.merge_shards:
-            from nemo_gym.rollout_health import write_aggregation_sources
+            from nemo_gym.rollouts.rollout_health import write_aggregation_sources
 
             print(f"Merging shards into {output_fpath}")
             # The merged rows have none of the shards' failures or inventories, so a recheck of this directory reads
@@ -5285,7 +5285,7 @@ Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_health_check:
-            from nemo_gym.rollout_health import format_health_report, run_health_checks
+            from nemo_gym.rollouts.rollout_health import format_health_report, run_health_checks
 
             try:
                 health_result = await asyncio.to_thread(

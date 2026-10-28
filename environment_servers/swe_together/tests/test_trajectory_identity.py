@@ -14,7 +14,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.rollout_collection import _build_trajectory_record, _episode_record, _episode_request_body
+from nemo_gym.rollouts.rollout_collection import _build_trajectory_record, _episode_record, _episode_request_body
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
 
 

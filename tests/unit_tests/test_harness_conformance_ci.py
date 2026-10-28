@@ -21,7 +21,7 @@ def test_adapter_changes_select_only_that_harness(harness):
 @pytest.mark.parametrize(
     "path",
     [
-        "nemo_gym/rollout_collection.py",
+        "nemo_gym/rollouts/rollout_collection.py",
         "nemo_gym/telemetry/gym_metrics.py",
         "nemo_gym/agents/utils/sandbox_session.py",
         "nemo_gym/sandbox/local.py",

@@ -21,8 +21,8 @@ import yaml
 
 from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
-from nemo_gym.harness_capabilities.cli import digest_file
 from nemo_gym.models.base_responses_api_model import NeMoGymResponse
+from nemo_gym.rollouts.harness_capabilities.cli import digest_file
 
 from .provider import Probe
 from .registry import HARNESSES
@@ -215,7 +215,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             environment_config_cls = LegacyAgentEnvironmentServerConfig
         from nemo_gym.client.http_client import get_global_aiohttp_client
         from nemo_gym.client.server_client import setup_server_client
-        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
         client = setup_server_client()
         agent = agent_cls(

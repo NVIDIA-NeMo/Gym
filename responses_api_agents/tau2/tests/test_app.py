@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.agents.base_responses_api_agent import AggregateMetricsRequest
 from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_collection import NG_TERMINAL_KEY
 
 
 # Import the adapter before Tau2 so it can set TAU2_DATA_DIR before Tau2

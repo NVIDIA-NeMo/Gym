@@ -19,7 +19,7 @@ from pydantic import Field
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode import rollout_context
 from nemo_gym.core.failure_kinds import VERIFIER_ERROR
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     ReverifyMode,

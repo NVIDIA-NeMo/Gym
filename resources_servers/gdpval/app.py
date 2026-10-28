@@ -56,7 +56,7 @@ from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsReque
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.deliverables import is_deliverable
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime.base_resources_server import (

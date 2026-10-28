@@ -26,8 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import nemo_gym
-from nemo_gym.harness_capabilities import checker
-from nemo_gym.harness_capabilities.cli import digest_file
+from nemo_gym.rollouts.harness_capabilities import checker
+from nemo_gym.rollouts.harness_capabilities.cli import digest_file
 
 from . import episode, runner
 from .documentation import BEGIN, END, PAGE, atomic_write, replace_block

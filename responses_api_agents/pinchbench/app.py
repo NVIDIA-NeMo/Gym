@@ -52,7 +52,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, ObservationGap

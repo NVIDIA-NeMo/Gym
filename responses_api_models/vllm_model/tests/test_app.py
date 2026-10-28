@@ -80,7 +80,7 @@ from nemo_gym.models.token_capture import (
 )
 from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.models.token_capture.staging.records import CaptureAdmission
-from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
+from nemo_gym.rollouts.rollout_collection import _agent_request_failure_row, is_terminal_failure
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GenerationCutInventory,

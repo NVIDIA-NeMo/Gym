@@ -87,7 +87,7 @@ from nemo_gym.models.base_responses_api_model import (
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
 )
-from nemo_gym.rollout_collection import (
+from nemo_gym.rollouts.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
     ENVIRONMENT_SERVER_FAILURE_CLASS,
@@ -2472,7 +2472,7 @@ async def run_rollout_collection(
     if (global_config_dict.get("multistage") or {}).get("enabled"):
         return await run_e2e_multistage(rollout_collection_config, global_config_dict)
 
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     await RolloutCollectionHelper().run_from_config(rollout_collection_config)
     return None
@@ -2491,8 +2491,8 @@ async def run_e2e_multistage(
     """
     from contextlib import nullcontext
 
-    from nemo_gym.observability.model_calls import observability_enabled_from_config
-    from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_ng_perf
+    from nemo_gym.rollouts.model_calls import observability_enabled_from_config
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper, _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
     observability_enabled = observability_enabled_from_config(global_config_dict)

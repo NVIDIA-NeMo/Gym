@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.harness_capabilities import cli
+from nemo_gym.rollouts.harness_capabilities import cli
 from tests.unit_tests.harness_capabilities.synthetic import evidence_record
 
 

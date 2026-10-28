@@ -67,7 +67,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.server_runtime.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,

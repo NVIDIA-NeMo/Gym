@@ -16,7 +16,7 @@ import nemo_gym.cli.main as main_module
 from nemo_gym.config import global_config
 from nemo_gym.data.tasks.harbor.prepare import prepare_target, resolve_agent
 from nemo_gym.data.tasks.harbor.run_summary import build_run_summary, write_run_summary
-from nemo_gym.rollout_health import write_provisional_summary
+from nemo_gym.rollouts.rollout_health import write_provisional_summary
 from nemo_gym.utils.path_utils import failures_path_for, materialized_path_for, run_summary_path_for
 from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
 from tests.unit_tests.test_harbor_validation import (  # noqa: F401 (fixtures)
@@ -848,7 +848,7 @@ def test_validate_lists_the_tasks_it_left_out_for_want_of_a_solution_beside_the_
 
 
 def test_eval_run_writes_the_summary_for_a_model_run(tmp_path, monkeypatch, capsys):
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     write_task(tmp_path / "ds" / "a")
     monkeypatch.chdir(tmp_path)
@@ -896,7 +896,7 @@ def test_eval_run_writes_the_summary_for_a_model_run(tmp_path, monkeypatch, caps
 
 
 def test_eval_run_reads_the_selected_rows_inside_the_summary_guard(tmp_path, monkeypatch, capfd):
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
     write_task(tmp_path / "ds" / "a")
     monkeypatch.chdir(tmp_path)
@@ -941,7 +941,7 @@ def test_eval_run_fresh_start_that_dies_before_the_collector_clears_its_outputs_
     from omegaconf import OmegaConf
 
     from nemo_gym.config.global_config import TASK_SOURCE_KEY_NAME, get_global_config_dict
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     write_task(tmp_path / "ds" / "a")
     monkeypatch.chdir(tmp_path)
@@ -1049,7 +1049,7 @@ def test_a_resumed_run_summarizes_the_saved_schedule_it_resumed_not_the_current_
     from omegaconf import OmegaConf
 
     from nemo_gym.config.global_config import TASK_SOURCE_KEY_NAME, get_global_config_dict
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     write_task(tmp_path / "ds" / "a")
     monkeypatch.chdir(tmp_path)

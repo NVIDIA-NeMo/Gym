@@ -15,7 +15,7 @@ from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest,
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseUsage
-from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.rollouts.rollout_collection import _episode_record
 
 
 def activation(index=0, **kwargs):

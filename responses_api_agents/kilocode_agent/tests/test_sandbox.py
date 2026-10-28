@@ -26,8 +26,8 @@ from nemo_gym.agents.utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_R
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models.base_responses_api_model import ModelCallRecord
-from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
+from nemo_gym.rollouts.rollout_collection import _build_trajectory_record
+from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.trajectory.trajectory_record import AgentInvocation, AgentObservationBundle, join_agent_model_calls
