@@ -152,24 +152,33 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
    the harness as `SandboxAccess`. Seeding the episode again lends the same sandbox;
    verification stops it (or `/close_session`, when verification did not), and so does shutting
    the server down;
-2. moves file content between the workspace and Google Drive without passing it through the
-   model: the sandbox gets `COMPANY_API_URL` and `COMPANY_API_TOKEN`, and `README.md` in the
-   workspace documents the file API (`GET`/`PUT /v1/files/{app}/{file_id}`,
-   `POST /v1/files?app=&name=&parent=&mime_type=`). Text and binary files (an XLSX workbook, say)
-   move byte for byte; uploads are limited to 20 MB;
-3. keeps Drive file content out of the conversation on its tools too
+2. moves file content between the workspace and the file apps (Google Drive, Box, SharePoint,
+   OneDrive) without passing it through the model: the sandbox gets `COMPANY_API_URL` and
+   `COMPANY_API_TOKEN`, and `README.md` in the workspace documents the file API for the
+   episode's file apps (`GET`/`PUT /v1/files/{app}/{file_id}`,
+   `POST /v1/files?app=&name=&parent=&mime_type=`). Files and folders are named by id: the server
+   reads what an app's op also wants (SharePoint's library, folder and name) from the world.
+   SharePoint uploads need a folder (`parent`); `mime_type` is Drive's. Text and binary files (an
+   XLSX workbook, say) move byte for byte; uploads are limited to 20 MB; an app's error comes back
+   under its own HTTP status (a missing file is 404, a name Box already holds 409);
+3. keeps their content out of the conversation on the apps' own tools too
    (`sandbox_config.inline_file_bytes`, 8192 by default):
-   - a download (`download_file`, `export_file`, `get_revision`) saves the file in the workspace
-     at `drive/<file id>/<name>` (a revision under `revisions/<version>/`, an export with its
-     type's extension), mode 644, and answers with `savedTo` and `savedBytes`. The answer carries
-     the content as well only for a text file of at most `inline_file_bytes` bytes; a longer text
-     gets its first 2,000 characters as `preview`, a binary file nothing but its path;
-   - `create_file` and `update_file` refuse binary content, and text over `inline_file_bytes`
-     bytes, pasted into the call (`upload_from_workspace`), with the file API command that sends
-     the file instead;
-   - the five tools are described as they behave here, in place of OfficeEnv's words
+   - a download (Drive's `download_file`, `export_file` and `get_revision`, Box's
+     `get_file_content`, SharePoint's `get_item_content`, OneDrive's `get_content` and
+     `get_version_content`) saves the file in the workspace at `<folder>/<file id>/<name>`
+     (`drive/`, `box/`, `sharepoint/`, `onedrive/`; a Drive revision under
+     `revisions/<version>/`, a Box or OneDrive version under `versions/<version>/`, an export with
+     its type's extension), mode 644, and answers with `savedTo` and `savedBytes`. The answer
+     carries the content as well only for a text file of at most `inline_file_bytes` bytes; a
+     longer text gets its first 2,000 characters as `preview`, a binary file nothing but its path;
+   - the uploads (Drive's `create_file` and `update_file`, Box's `upload_file` and
+     `upload_file_version`, SharePoint's `upload_content`, OneDrive's `upload_file`) refuse binary
+     content, and text over `inline_file_bytes` bytes, pasted into the call
+     (`upload_from_workspace`), with the file API command that sends the file instead;
+   - these tools are described as they behave here, in place of OfficeEnv's words
      (`contentBase64`, `content_base64`), and `README.md` says the same. `/verify` reports
-     `sandbox_files_saved`, `sandbox_bytes_saved` and `sandbox_uploads_refused`.
+     `sandbox_files_saved`, `sandbox_bytes_saved` and `sandbox_uploads_refused`, over all four
+     apps.
 
    The file API, short text, calls without content and episodes without a sandbox are unchanged;
    `inline_file_bytes: null` restores full answers. The server wraps the episode's OfficeEnv

@@ -33,9 +33,10 @@ from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.officeenv import app as officeenv_app
 from resources_servers.officeenv.app import (
+    CONTENT_DOWNLOADS,
+    CONTENT_UPLOADS,
     RELAY_PATH,
     RELAY_SOURCE,
-    WORKSPACE_GUIDE,
     OfficeEnvResourcesServer,
     OfficeEnvResourcesServerConfig,
     OfficeEnvSandboxConfig,
@@ -301,7 +302,7 @@ def test_a_seed_lends_a_sandbox_with_the_episode_file_api_and_close_stops_it(san
         assert sandbox.spec.metadata["officeenv-task"] == "sandbox-files"
         assert sandbox.spec.env["COMPANY_API_URL"] == "http://10.0.0.1:8080"  # this server's host and port
         assert sandbox.spec.env["COMPANY_API_TOKEN"] == server._episodes["rs-1"].token
-        assert sandbox.spec.files == {"/workspace/README.md": WORKSPACE_GUIDE}
+        assert sandbox.spec.files == {"/workspace/README.md": workspace_guide(8192, ("gdrive",))}  # its file apps
 
         token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
         listed = {tool["name"] for tool in rpc(client, "tools/list", {}, token).json()["result"]["tools"]}
@@ -786,7 +787,11 @@ def test_tool_descriptions_and_the_guide_say_where_file_content_goes(sandboxes) 
         assert "file API (/workspace/README.md)" in create and "content_base64" not in create
         assert described["gdrive_list_files"] == catalog["gdrive_list_files"]["description"]  # OfficeEnv's own
         guide = sandboxes.started[0].spec.files["/workspace/README.md"]
-        assert guide == WORKSPACE_GUIDE and "drive/<file id>/<name>" in guide and "at most 8192" in guide
+        assert (
+            guide == workspace_guide(8192, ("gdrive",))
+            and "drive/<file id>/<name>" in guide
+            and "at most 8192" in guide
+        )
     assert "drive/<file id>" not in workspace_guide(None)
 
 
@@ -906,7 +911,268 @@ def test_workspace_paths_take_one_segment_per_name() -> None:
     assert _path_part("..", "F1") == "F1" and _path_part(None, "F1") == "F1" and _path_part(" ", "F1") == "F1"
     long = "é" * 300 + ".xlsx"
     assert _path_part(long, "F1").endswith(".xlsx") and len(_path_part(long, "F1").encode()) <= 200
-    assert saved_download("list_files", {}, {"files": []}, folder="/w", limit=10, name_of=lambda _: None) is None
+    answer = {"files": []}
+    assert saved_download("gdrive", "list_files", {}, answer, folder="/w", limit=10, file_id="F1", name=None) is None
+
+
+# Box, SharePoint and OneDrive: their file content stays out of the conversation as Drive's does.
+
+SP_DOCS, OD_ME = "b!opsdocs", "b!alexdrive"
+SHORT = "vendor,total\nAcme,10.50\n"
+
+
+def file_apps_spec() -> dict:
+    """content_spec() with Box, SharePoint and OneDrive connected: in a Finance folder of each, a long CSV
+    (``<X>_LONG``), a short one (``<X>_SHORT``) and the workbook (``<X>_BOOK``); X is B, S or O."""
+    spec = content_spec()
+
+    def files(prefix: str, *, binary_key: str, **place: object) -> list[dict]:
+        return [
+            {"id": f"{prefix}_LONG", "name": "ledger long.csv", **place, "content": LONG},
+            {"id": f"{prefix}_SHORT", "name": "totals.csv", **place, "content": SHORT},
+            {"id": f"{prefix}_BOOK", "name": "ledger.xlsx", **place, binary_key: BOOK_B64},
+        ]
+
+    graph_user = {"id": "u-alex", "displayName": "Alex Morgan", "mail": ME}
+    spec["apps"]["box"] = {
+        "data": {
+            "users": [{"id": "11000000001", "name": "Alex Morgan", "login": ME, "role": "user"}],
+            "folders": [{"id": "B_FIN", "name": "Finance", "owned_by": ME}],
+            "files": files("B", binary_key="content_base64", parent="B_FIN"),
+        }
+    }
+    spec["apps"]["sharepoint"] = {
+        "data": {
+            "users": [graph_user],
+            "sites": [{"id": "S_OPS", "name": "ops", "displayName": "Ops", "owners": [ME]}],
+            "drives": [{"id": SP_DOCS, "siteId": "S_OPS", "name": "Documents", "default": True}],
+            "driveItems": [
+                {"id": "S_FIN", "driveId": SP_DOCS, "name": "Finance", "folder": {}},
+                *files("S", binary_key="contentBase64", driveId=SP_DOCS, parentId="S_FIN"),
+            ],
+        }
+    }
+    spec["apps"]["onedrive"] = {
+        "data": {
+            "users": [graph_user],
+            "drives": [{"id": OD_ME, "owner": ME}],
+            "driveItems": [
+                {"id": "O_FIN", "driveId": OD_ME, "name": "Finance", "folder": {}},
+                *files("O", binary_key="contentBase64", driveId=OD_ME, parentId="O_FIN"),
+            ],
+        }
+    }
+    return spec
+
+
+# Per app: how its tools download a file by id, and where the download is saved.
+DOWNLOADS = {
+    "box": ("box_get_file_content", lambda file_id: {"file_id": file_id}),
+    "sharepoint": ("sharepoint_get_item_content", lambda file_id: {"drive_id": SP_DOCS, "item_id": file_id}),
+    "onedrive": ("onedrive_get_content", lambda file_id: {"item_id": file_id}),
+}
+FILE_APPS_UNDER_TEST = tuple(DOWNLOADS)
+
+
+def seed_file_apps(client: TestClient) -> tuple:
+    seeded = client.post("/seed_session", json=seed_body(file_apps_spec()))
+    assert seeded.status_code == 200, seeded.text
+    token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+
+    def call(tool: str, /, **arguments: object) -> dict:
+        result = rpc(client, "tools/call", {"name": tool, "arguments": arguments}, token).json()["result"]
+        return result.get("structuredContent") or json.loads(result["content"][0]["text"])
+
+    listed = rpc(client, "tools/list", {}, token).json()["result"]["tools"]
+    return seeded, call, {tool["name"]: tool["description"] for tool in listed}
+
+
+@pytest.mark.parametrize("app", FILE_APPS_UNDER_TEST)
+def test_a_file_apps_download_is_saved_in_the_workspace(sandboxes, app: str) -> None:
+    prefix = app[0].upper()
+    tool, args = DOWNLOADS[app]
+    with mcp_client(make_server()) as client:
+        seeded, call, _ = seed_file_apps(client)
+        (sandbox,) = sandboxes.started
+        long = call(tool, **args(f"{prefix}_LONG"))
+        assert "content" not in long and long["savedTo"] == f"/workspace/{app}/{prefix}_LONG/ledger long.csv", long
+        assert long["savedBytes"] == len(LONG) and LONG.startswith(long["preview"]) and len(long["preview"]) <= 2000
+        assert sandbox.files[long["savedTo"]] == LONG.encode() and sandbox.modes[long["savedTo"]] == 0o644
+        assert f"mkdir -p /workspace/{app}/{prefix}_LONG" in sandbox.commands
+        assert any(command.startswith(f"chmod 644 '/workspace/{app}/{prefix}_LONG/") for command in sandbox.commands)
+        short = call(tool, **args(f"{prefix}_SHORT"))  # short text: inline as well
+        assert short["content"] == SHORT and sandbox.files[short["savedTo"]] == SHORT.encode()
+        result = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
+        assert result["sandbox_files_saved"] == 2.0 and result["sandbox_bytes_saved"] == float(len(LONG) + len(SHORT))
+
+
+@pytest.mark.parametrize("app", FILE_APPS_UNDER_TEST)
+def test_a_file_apps_workbook_is_saved_byte_for_byte(sandboxes, app: str) -> None:
+    prefix = app[0].upper()
+    tool, args = DOWNLOADS[app]
+    with mcp_client(make_server()) as client:
+        _, call, _ = seed_file_apps(client)
+        book = call(tool, **args(f"{prefix}_BOOK"))
+        assert not {"content", "contentBase64", "content_base64"} & set(book), book
+        assert book["savedTo"] == f"/workspace/{app}/{prefix}_BOOK/ledger.xlsx" and book["savedBytes"] == len(BOOK)
+        assert "binary content" in book["note"] and "preview" not in book
+        assert sandboxes.started[0].files[book["savedTo"]] == BOOK
+
+
+def test_versions_are_saved_in_their_own_folder(sandboxes) -> None:
+    server = make_server()
+    with mcp_client(server) as client:
+        _, call, _ = seed_file_apps(client)
+        auth = file_auth(server)
+        for app, file_id in (("box", "B_LONG"), ("onedrive", "O_LONG")):  # a second version, through the file API
+            assert client.put(f"/v1/files/{app}/{file_id}", content=SHORT.encode(), headers=auth).status_code == 200
+        files = sandboxes.started[0].files
+        first = call("box_get_file_content", file_id="B_LONG", version_id="1")
+        assert first["savedTo"] == "/workspace/box/B_LONG/versions/1/ledger long.csv"
+        assert files[first["savedTo"]] == LONG.encode()
+        assert call("box_get_file_content", file_id="B_LONG")["content"] == SHORT  # the current one, inline
+        old = call("onedrive_get_version_content", item_id="O_LONG", version_id="1.0")
+        assert old["savedTo"] == "/workspace/onedrive/O_LONG/versions/1.0/ledger long.csv"
+        assert files[old["savedTo"]] == LONG.encode()
+        by_path = call("onedrive_get_version_content", path="/Finance/ledger long.csv", version_id="1.0")
+        assert by_path["savedTo"] == old["savedTo"]  # the item a path names
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "command"),
+    [
+        (
+            "box_upload_file",
+            {"name": "Q3 totals.csv", "parent_id": "B_FIN"},
+            '-X POST {send} "$COMPANY_API_URL/v1/files?app=box&name=Q3%20totals.csv&parent=B_FIN"',
+        ),
+        ("box_upload_file_version", {"file_id": "B_LONG"}, '-X PUT {send} "$COMPANY_API_URL/v1/files/box/B_LONG"'),
+        (
+            "sharepoint_upload_content",
+            {"drive_id": SP_DOCS, "parent_id": "S_FIN", "name": "Q3 totals.csv"},
+            '-X POST {send} "$COMPANY_API_URL/v1/files?app=sharepoint&name=Q3%20totals.csv&parent=S_FIN"',
+        ),
+        (
+            "sharepoint_upload_content",  # by path: the folder the path names
+            {"drive_id": SP_DOCS, "path": "/Finance/Q3 totals.csv"},
+            '-X POST {send} "$COMPANY_API_URL/v1/files?app=sharepoint&name=Q3%20totals.csv&parent=S_FIN"',
+        ),
+        (
+            "sharepoint_upload_content",  # the library by its name within the site, as SharePoint takes it
+            {"drive_id": "Documents", "site": "ops", "path": "/Finance/Q3 totals.csv"},
+            '-X POST {send} "$COMPANY_API_URL/v1/files?app=sharepoint&name=Q3%20totals.csv&parent=S_FIN"',
+        ),
+        (
+            "onedrive_upload_file",  # a folder that is not there: the command names the parameter to fill in
+            {"path": "/Nowhere/Q3 totals.csv"},
+            '-X POST {send} "$COMPANY_API_URL/v1/files?app=onedrive&name=Q3%20totals.csv&parent=<folder_id>"',
+        ),
+        (
+            "onedrive_upload_file",
+            {"path": "/Finance/Q3 totals.csv"},
+            '-X POST {send} "$COMPANY_API_URL/v1/files?app=onedrive&name=Q3%20totals.csv&parent=O_FIN"',
+        ),
+        ("onedrive_upload_file", {"item_id": "O_LONG"}, '-X PUT {send} "$COMPANY_API_URL/v1/files/onedrive/O_LONG"'),
+    ],
+)
+def test_a_file_apps_pasted_upload_is_refused_with_the_file_api_command(
+    sandboxes, tool: str, arguments: dict, command: str
+) -> None:
+    send = '-H "Authorization: Bearer $COMPANY_API_TOKEN" --data-binary @<local path>'
+    with mcp_client(make_server()) as client:
+        seeded, call, _ = seed_file_apps(client)
+        refused = call(tool, **arguments, content=LONG)
+        message = json.dumps(refused)
+        assert "upload_from_workspace" in message and "text over 8192 bytes" in message, refused
+        assert "curl -sf " + command.format(send=send) in refused_message(refused)
+        accepted = call(tool, **arguments, content=SHORT)  # short text still goes in the call
+        assert "upload_from_workspace" not in json.dumps(accepted), accepted
+        pasted = call(tool, **arguments, content_base64=BOOK_B64)
+        assert "binary content" in refused_message(pasted)
+        result = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
+        assert result["sandbox_uploads_refused"] == 2.0
+
+
+def refused_message(answer: dict) -> str:
+    """An app's error message, in Drive's, Box's or Graph's envelope."""
+    error = answer.get("error") if isinstance(answer.get("error"), dict) else answer
+    return str(error.get("message") or "")
+
+
+@pytest.mark.parametrize(
+    ("app", "parent"),
+    [("box", "B_FIN"), ("box", None), ("sharepoint", "S_FIN"), ("onedrive", "O_FIN"), ("onedrive", None)],
+)
+def test_the_file_api_moves_a_file_apps_files(sandboxes, app: str, parent: str | None) -> None:
+    server = make_server()
+    with mcp_client(server) as client:
+        seed_file_apps(client)
+        auth = file_auth(server)
+        where = {"app": app, "name": "totals new.csv", **({"parent": parent} if parent else {})}
+        sent = client.post("/v1/files", params=where, content=LONG.encode(), headers=auth)
+        assert sent.status_code == 200, sent.text
+        created = sent.json()
+        file_id = (created.get("entries") or [created])[0]["id"]  # Box answers {total_count, entries}
+        assert client.get(f"/v1/files/{app}/{file_id}", headers=auth).content == LONG.encode()
+        replaced = client.put(f"/v1/files/{app}/{file_id}", content=SHORT.encode(), headers=auth)
+        assert replaced.status_code == 200, replaced.text
+        assert client.get(f"/v1/files/{app}/{file_id}", headers=auth).content == SHORT.encode()
+        book = client.put(f"/v1/files/{app}/{file_id}", content=BOOK, headers=auth)
+        assert book.status_code == 200, book.text
+        assert client.get(f"/v1/files/{app}/{file_id}", headers=auth).content == BOOK  # byte for byte
+        assert client.get(f"/v1/files/{app}/{app[0].upper()}_BOOK", headers=auth).content == BOOK
+        assert sandboxes.started[0].files == {}  # the file API writes nothing into the sandbox
+        (episode,) = server._episodes.values()
+        assert episode.direct is False and episode.uploads_refused == 0
+
+
+def test_a_file_api_call_a_file_app_refuses_answers_with_its_http_status(sandboxes) -> None:
+    server = make_server()
+    with mcp_client(server) as client:
+        seed_file_apps(client)
+        auth = file_auth(server)
+        for app in FILE_APPS_UNDER_TEST:
+            missing = client.get(f"/v1/files/{app}/X_NONE", headers=auth)
+            assert missing.status_code == 404, (app, missing.text)
+            assert client.put(f"/v1/files/{app}/X_NONE", content=b"a,b", headers=auth).status_code == 404, app
+            into_nothing = client.post(
+                "/v1/files", params={"app": app, "name": "a.csv", "parent": "X_NONE"}, content=b"a,b", headers=auth
+            )
+            assert into_nothing.status_code == 404, (app, into_nothing.text)
+        taken = client.post(
+            "/v1/files", params={"app": "box", "name": "totals.csv", "parent": "B_FIN"}, content=b"a,b", headers=auth
+        )
+        assert taken.status_code == 409 and "item_name_in_use" in taken.text  # Box's own status
+        no_folder = client.post(
+            "/v1/files", params={"app": "sharepoint", "name": "a.csv"}, content=b"a,b", headers=auth
+        )
+        assert no_folder.status_code == 400 and "parent" in no_folder.text  # SharePoint needs a folder
+
+
+def test_file_apps_tools_and_the_guide_say_where_content_goes(sandboxes) -> None:
+    catalog = tools_exposure_catalog()
+    with mcp_client(make_server()) as client:
+        _, _, described = seed_file_apps(client)
+        assert described["box_get_file_content"].startswith(
+            "[Box] Download a file's content (GET /files/{id}/content), optionally a given version, into the workspace"
+        )
+        assert described["sharepoint_get_item_content"].startswith("[SharePoint] A file's content (GET /drives/")
+        assert "saved in the workspace" in described["onedrive_get_version_content"]
+        for tool in (
+            "box_upload_file",
+            "box_upload_file_version",
+            "sharepoint_upload_content",
+            "onedrive_upload_file",
+        ):
+            assert "file API (/workspace/README.md)" in described[tool] and "content_base64" not in described[tool]
+        for tool in ("box_get_file_content", "sharepoint_get_item_content", "onedrive_get_content"):
+            assert "base64" not in described[tool].lower() and "at most 8192 bytes" in described[tool]
+        assert described["onedrive_list_versions"] == catalog["onedrive_list_versions"]["description"]  # OfficeEnv's
+        guide = sandboxes.started[0].spec.files["/workspace/README.md"]
+        assert guide == workspace_guide(8192, ("gdrive", "box", "sharepoint", "onedrive"))
+        for folder in ("drive", "box", "sharepoint", "onedrive"):
+            assert f"{folder}/<file id>/<name>" in guide
+        assert "SharePoint: parent required" in guide and "$COMPANY_API_URL/v1/files/<app>/<file id>" in guide
 
 
 # Guarding a server that sandboxes can reach.
@@ -1021,12 +1287,13 @@ def harness_model_url(*, token_capture: bool) -> str:
 def sandbox_view(server: OfficeEnvResourcesServer, sandboxes: type[FakeSandbox]) -> str:
     """Everything a sandboxed model can read of ``server``: its variables, the files and commands its sandbox gets,
     the MCP endpoint's name, header and tools, and the answers of every route a sandbox reaches, right and wrong
-    (a saved download, a refused upload, a tool outside the grant, the routes it may not use, the docs), with the
-    cookies they set. Drive's tools are described by this server; OfficeEnv's other descriptions are OfficeEnv's to
-    check. Tokens are masked."""
+    (saved downloads, refused uploads, a tool outside the grant, the routes it may not use, the docs), with the
+    cookies they set, for each file app. The file apps' content tools are described by this server; OfficeEnv's
+    other descriptions are OfficeEnv's to check. Tokens are masked."""
     seen: list[str] = []
+    content_tools = {f"{app}_{op}" for app, op in CONTENT_DOWNLOADS | CONTENT_UPLOADS}
     with mcp_client(server) as local, mcp_client(server, client=SANDBOX) as remote:
-        seeded = local.post("/seed_session", json=seed_body(content_spec()))
+        seeded = local.post("/seed_session", json=seed_body(file_apps_spec()))
         assert seeded.status_code == 200, seeded.text
         (sandbox,) = sandboxes.started
         token = sandbox.spec.env["COMPANY_API_TOKEN"]
@@ -1046,10 +1313,17 @@ def sandbox_view(server: OfficeEnvResourcesServer, sandboxes: type[FakeSandbox])
             return read(remote.post("/mcp", headers=headers, json=body))
 
         tools = json.loads(mcp_call("tools/list", {}, granted))["result"]["tools"]
-        seen += [json.dumps(tool) if tool["name"].startswith("gdrive_") else tool["name"] for tool in tools]
+        described = {tool["name"] for tool in tools if tool["name"].startswith("gdrive_")} | content_tools
+        seen += [json.dumps(tool) if tool["name"] in described else tool["name"] for tool in tools]
         for name, arguments in [
             ("gdrive_download_file", {"file_id": "F_BOOK"}),  # saved in the workspace
             ("gdrive_create_file", {"name": "x.bin", "content_base64": "AAEC"}),  # refused: pasted content
+            ("box_get_file_content", {"file_id": "B_LONG"}),
+            ("box_upload_file", {"name": "x.csv", "parent_id": "B_FIN", "content": LONG}),
+            ("sharepoint_get_item_content", {"drive_id": SP_DOCS, "item_id": "S_LONG"}),
+            ("sharepoint_upload_content", {"drive_id": SP_DOCS, "path": "/Finance/x.csv", "content": LONG}),
+            ("onedrive_get_content", {"item_id": "O_LONG"}),
+            ("onedrive_upload_file", {"item_id": "O_LONG", "content": LONG}),
             ("slack_post_message", {"channel": "C1", "text": "hi"}),  # outside the grant
         ]:
             seen.append(mcp_call("tools/call", {"name": name, "arguments": arguments}, granted))
@@ -1073,6 +1347,24 @@ def sandbox_view(server: OfficeEnvResourcesServer, sandboxes: type[FakeSandbox])
             ("get", "/v1/files/slack/F1", {"headers": auth}),
             ("post", "/v1/files", {"headers": auth, "params": {"app": "gdrive", "name": "t.csv"}, "content": b"a,b"}),
             ("put", "/v1/files/gdrive/F_NONE", {"headers": auth, "content": b"a,b"}),
+            ("get", "/v1/files/box/B_SHORT", {"headers": auth}),
+            ("get", "/v1/files/box/X_NONE", {"headers": auth}),
+            (
+                "post",
+                "/v1/files",
+                {
+                    "headers": auth,
+                    "params": {"app": "box", "name": "totals.csv", "parent": "B_FIN"},
+                    "content": b"a,b",
+                },
+            ),
+            ("get", "/v1/files/sharepoint/X_NONE", {"headers": auth}),
+            (
+                "post",
+                "/v1/files",
+                {"headers": auth, "params": {"app": "sharepoint", "name": "a.csv"}, "content": b"a,b"},
+            ),
+            ("put", "/v1/files/onedrive/X_NONE", {"headers": auth, "content": b"a,b"}),
         ]:
             answer = getattr(remote, method)(path, **kwargs)
             assert answer.status_code != 500, (path, answer.text)

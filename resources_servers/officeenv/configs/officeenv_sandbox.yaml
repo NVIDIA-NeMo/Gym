@@ -34,10 +34,10 @@ oe:
       sandbox_config:
         image: officeenv-sandbox:pilot
         ttl_s: 7200
-        # Drive file content stays out of the model's context: a download saves the file in the workspace
-        # (/workspace/drive/<file id>/<name>) and answers with its path, the content inline only for text up to
-        # this many bytes; an upload that pastes binary content or longer text is refused with the file API
-        # command. null answers and takes content in full.
+        # File content (Google Drive, Box, SharePoint, OneDrive) stays out of the model's context: a download saves
+        # the file in the workspace (/workspace/<app folder>/<file id>/<name>) and answers with its path, the content
+        # inline only for text up to this many bytes; an upload that pastes binary content or longer text is refused
+        # with the file API command. null answers and takes content in full.
         inline_file_bytes: 8192
 
 pi_agent:

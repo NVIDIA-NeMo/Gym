@@ -34,11 +34,12 @@ With ``sandbox_provider`` set, each Environment Server episode also gets a sandb
 sandbox providers, lent to the harness (``SandboxAccess``) and stopped before the episode is graded.
 The sandbox gets the episode's file API (``/v1/files``) in ``COMPANY_API_URL`` and
 ``COMPANY_API_TOKEN`` (``README.md`` in the workspace documents it), so file content moves between
-the workspace and the simulated apps over HTTP instead of through the model's context. Drive's own
-file-content tools keep it out too (``sandbox_config.inline_file_bytes``): a download saves the file
-in the workspace (``drive/<file id>/<name>``) and answers with its path, carrying the content only
-for short text, and an upload that pastes binary content or long text is refused with the file API
-command that sends the file instead.
+the workspace and the simulated file apps (Google Drive, Box, SharePoint, OneDrive) over HTTP
+instead of through the model's context. Their own content tools keep it out too
+(``sandbox_config.inline_file_bytes``): a download saves the file in the workspace
+(``<app folder>/<file id>/<name>``, ``FILE_APPS``) and answers with its path, carrying the content
+only for short text, and an upload that pastes binary content or long text is refused with the file
+API command that sends the file instead.
 
 What a sandbox reads of this server names a company's API, never the environment behind it or Gym:
 the variables, routes, guide, answers and session cookie (``get_session_cookie_name``), and with the
@@ -70,10 +71,10 @@ import shlex
 import socket
 import tempfile
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from functools import cache, partial
+from functools import cache
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -161,11 +162,11 @@ class OfficeEnvSandboxConfig(SandboxConfig):
     inline_file_bytes: int | None = Field(
         default=DEFAULT_INLINE_FILE_BYTES,
         ge=0,
-        description="Keep Drive file content out of the conversation: a download (download_file, export_file, "
-        "get_revision) saves the file in the workspace under drive/ and answers with its path, carrying the content "
-        "only for a text file of at most this many bytes; an upload (create_file, update_file) that pastes binary "
-        "content, or text over this many bytes, is refused with the file API command that sends the file. None "
-        "answers and takes content in full, as without a sandbox",
+        description="Keep the file apps' content (Google Drive, Box, SharePoint, OneDrive) out of the conversation: "
+        "a download saves the file in the workspace under the app's folder and answers with its path, carrying the "
+        "content only for a text file of at most this many bytes; an upload that pastes binary content, or text over "
+        "this many bytes, is refused with the file API command that sends the file. None answers and takes content "
+        "in full, as without a sandbox",
     )
 
     @model_validator(mode="after")
@@ -304,11 +305,51 @@ _SEEDED_TOOLS: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar
     "officeenv_seeded_tools", default=None
 )
 
-# File transfer between an episode's sandbox and an app's files: the ops each verb maps to.
-FILE_OPS: dict[str, dict[str, str]] = {
-    "gdrive": {"download": "download_file", "create": "create_file", "update": "update_file"},
-}
 MAX_UPLOAD_BYTES = 20_000_000
+
+
+@dataclass(frozen=True)
+class FileApp:
+    """An app whose files move between a sandbox's workspace and the app: the workspace folder its downloads land
+    in, and its ops that answer a file's content (``downloads``) and that take content to store (``uploads``)."""
+
+    label: str
+    folder: str
+    downloads: tuple[str, ...]
+    uploads: tuple[str, ...]
+    note: str  # the guide's line on the app's file API calls
+
+
+FILE_APPS: dict[str, FileApp] = {
+    "gdrive": FileApp(
+        "Google Drive",
+        "drive",
+        downloads=("download_file", "export_file", "get_revision"),
+        uploads=("create_file", "update_file"),
+        note="parent optional; add &mime_type=<type> to the upload URL for another file type",
+    ),
+    "box": FileApp(
+        "Box",
+        "box",
+        downloads=("get_file_content",),
+        uploads=("upload_file", "upload_file_version"),
+        note="parent optional (the root, 0); a name the folder already holds is refused",
+    ),
+    "sharepoint": FileApp(
+        "SharePoint",
+        "sharepoint",
+        downloads=("get_item_content",),
+        uploads=("upload_content",),
+        note="parent required (a folder's id, or a library root's); a name the folder holds gets a new version",
+    ),
+    "onedrive": FileApp(
+        "OneDrive",
+        "onedrive",
+        downloads=("get_content", "get_version_content"),
+        uploads=("upload_file",),
+        note="parent optional (your drive's root); a name the folder holds gets a new version",
+    ),
+}
 
 # What a sandbox reads of this server names a company's API, never the environment behind it or Gym: the variables
 # that name the episode's file API, its route, and the guide.
@@ -319,50 +360,61 @@ GUIDE_NAME = "README.md"
 FILES_GUIDE = f"""# Company apps
 
 The company's apps are your tools, one per operation of an app. File content moves between this
-workspace and Google Drive over HTTP, without going through the conversation, byte for byte: text
-files (CSV, TSV, JSON, Markdown) and binary ones (XLSX workbooks, PDFs, images) alike.
+workspace and the file apps over HTTP, without going through the conversation, byte for byte: text
+files (CSV, TSV, JSON, Markdown) and binary ones (XLSX workbooks, PDFs, images) alike. <app> is
+{{codes}}.
 
-    # download a Drive file's content
+    # download a file's content
     curl -sf -H "Authorization: Bearer ${API_TOKEN_ENV}" \\
-      "${API_URL_ENV}{FILES_ROUTE}/gdrive/<file_id>" -o <local path>
+      "${API_URL_ENV}{FILES_ROUTE}/<app>/<file id>" -o <local path>
 
-    # upload a local file as a new Drive file (parent folder id optional)
+    # upload a local file as a new file in a folder
     curl -sf -X POST -H "Authorization: Bearer ${API_TOKEN_ENV}" --data-binary @<local path> \\
-      "${API_URL_ENV}{FILES_ROUTE}?app=gdrive&name=<file name>&parent=<folder id>"
+      "${API_URL_ENV}{FILES_ROUTE}?app=<app>&name=<file name>&parent=<folder id>"
 
-    # replace an existing Drive file's content
+    # replace an existing file's content
     curl -sf -X PUT -H "Authorization: Bearer ${API_TOKEN_ENV}" --data-binary @<local path> \\
-      "${API_URL_ENV}{FILES_ROUTE}/gdrive/<file_id>"
+      "${API_URL_ENV}{FILES_ROUTE}/<app>/<file id>"
 
-The file name's extension sets the file type (.csv, .xlsx, .pdf, ...); add &mime_type=<type> to
-the upload URL for another. Uploads are limited to {MAX_UPLOAD_BYTES // 1_000_000} MB. Find file and
-folder ids with the Drive tools (list or search files). A request that fails returns the app's
-error as JSON.
+The file name's extension sets the file type (.csv, .xlsx, .pdf, ...).
+{{notes}}
+Find file and folder ids with the apps' tools (list or search files). Uploads are limited to
+{MAX_UPLOAD_BYTES // 1_000_000} MB. A request that fails returns the app's error as JSON.
 """
 
-CONTENT_GUIDE = """Downloading a file with the Drive tools saves it in this workspace at drive/<file id>/<name>
-(the answer's savedTo); the answer also carries the content only for a text file of at most {limit}
-bytes. An upload with the Drive tools takes pasted content only as text of at most {limit} bytes:
-send any other file with the commands above.
+CONTENT_GUIDE = """Downloading a file with the apps' tools saves it in this workspace (the answer's savedTo):
+
+{folders}
+
+The answer also carries the content only for a text file of at most {limit} bytes. An upload with
+the apps' tools takes pasted content only as text of at most {limit} bytes: send any other file
+with the commands above.
 """
 
 
-def workspace_guide(content_limit: int | None = DEFAULT_INLINE_FILE_BYTES) -> str:
-    """The workspace guide for an episode: how files move, and where Drive downloads land when file content stays
-    out of the conversation (``content_limit``, see ContentInWorkspace; None: it does not)."""
+def workspace_guide(
+    content_limit: int | None = DEFAULT_INLINE_FILE_BYTES, apps: tuple[str, ...] = tuple(FILE_APPS)
+) -> str:
+    """The workspace guide for an episode whose file ``apps`` (FILE_APPS) are connected: how files move, and where
+    downloads land when file content stays out of the conversation (``content_limit``, see ContentInWorkspace; None:
+    it does not)."""
+    shown = [FILE_APPS[app] for app in apps]
+    guide = FILES_GUIDE.format(
+        codes=", ".join(f"{app} ({FILE_APPS[app].label})" for app in apps),
+        notes="".join(f"{spec.label}: {spec.note}.\n" for spec in shown),
+    )
     if content_limit is None:
-        return FILES_GUIDE
-    return FILES_GUIDE + "\n" + CONTENT_GUIDE.format(limit=content_limit)
+        return guide
+    width = max(len(f"{spec.folder}/<file id>/<name>") for spec in shown) + 3
+    folders = "\n".join(f"    {f'{spec.folder}/<file id>/<name>':<{width}}{spec.label}" for spec in shown)
+    return guide + "\n" + CONTENT_GUIDE.format(folders=folders, limit=content_limit)
 
 
-WORKSPACE_GUIDE = workspace_guide()
-
-# Drive's ops that answer a file's content, and those that take content to store. In a sandboxed episode the content
-# moves through the workspace instead (ContentInWorkspace): bytes in the conversation cost the model their tokens on
-# every later request, and a model that copies them by hand gets them wrong.
-CONTENT_DOWNLOADS = frozenset({("gdrive", "download_file"), ("gdrive", "export_file"), ("gdrive", "get_revision")})
-CONTENT_UPLOADS = frozenset({("gdrive", "create_file"), ("gdrive", "update_file")})
-DOWNLOADS_DIR = "drive"  # in the workdir: drive/<file id>/<name>
+# The file apps' ops that answer a file's content, and those that take content to store. In a sandboxed episode the
+# content moves through the workspace instead (ContentInWorkspace): bytes in the conversation cost the model their
+# tokens on every later request, and a model that copies them by hand gets them wrong.
+CONTENT_DOWNLOADS = frozenset((app, op) for app, spec in FILE_APPS.items() for op in spec.downloads)
+CONTENT_UPLOADS = frozenset((app, op) for app, spec in FILE_APPS.items() for op in spec.uploads)
 PREVIEW_CHARS = 2000  # the start of a text file too long to answer inline
 EXPORT_EXTENSIONS = {
     "text/plain": ".txt",
@@ -373,14 +425,20 @@ EXPORT_EXTENSIONS = {
     "application/pdf": ".pdf",
 }
 
-# What Drive's file-content ops do in a sandboxed episode (ContentInWorkspace), said in place of OfficeEnv's own
-# descriptions, which tell of content carried in the answer or in the call (contentBase64, content_base64).
+_SAVED = (
+    "the answer gives the file's path (savedTo) and size (savedBytes), and carries the text itself (content) only for "
+    "a text file of at most {limit} bytes; a longer text file comes with its start (preview), a binary file with its "
+    "path alone."
+)
+_PASTED = (
+    "Content goes in this call only as text of at most {limit} bytes: send any other file from the workspace with "
+    "the file API ({guide})."
+)
+# What the file apps' content ops do in a sandboxed episode (ContentInWorkspace), said in place of OfficeEnv's own
+# descriptions, which tell of content carried in the answer or in the call (contentBase64, content_base64). Literal
+# braces are doubled: the text is formatted with the limit and the guide's path.
 CONTENT_DESCRIPTIONS: dict[tuple[str, str], str] = {
-    ("gdrive", "download_file"): (
-        "Download a file's content (alt=media) into the workspace: the answer gives the file's path (savedTo) and "
-        "size (savedBytes), and carries the text itself (content) only for a text file of at most {limit} bytes; a "
-        "longer text file comes with its start (preview), a binary file with its path alone."
-    ),
+    ("gdrive", "download_file"): "Download a file's content (alt=media) into the workspace: " + _SAVED,
     ("gdrive", "export_file"): (
         "Export a Google Doc/Sheet/Slides as text/plain, text/csv, text/html, application/pdf… into the workspace: "
         "the answer gives the exported file's path (savedTo) and size (savedBytes), and carries the text itself "
@@ -399,11 +457,44 @@ CONTENT_DESCRIPTIONS: dict[tuple[str, str], str] = {
         "or upload new content: content goes in this call only as text of at most {limit} bytes; send any other file "
         "from the workspace with the file API ({guide})."
     ),
+    ("box", "get_file_content"): (
+        "Download a file's content (GET /files/{{id}}/content), optionally a given version, into the workspace: "
+        + _SAVED
+    ),
+    ("box", "upload_file"): (
+        "Upload a new file (POST /files/content) into parent_id ('0' = root); same name → 409 item_name_in_use. "
+        "Returns {{total_count, entries: [file]}}. " + _PASTED
+    ),
+    ("box", "upload_file_version"): (
+        "Upload a new version of a file (POST /files/{{id}}/content); version_number increases and file_version "
+        "changes; optionally rename. " + _PASTED
+    ),
+    ("sharepoint", "get_item_content"): (
+        "A file's content (GET /drives/{{drive-id}}/items/{{item-id}}/content), saved in the workspace: " + _SAVED
+    ),
+    ("sharepoint", "upload_content"): (
+        "Upload a file's content by path, or by parent folder + name (PUT /drives/{{drive-id}}/root:/path:/content); "
+        "an existing file gets a new version (conflict_behavior replace, the default), fails (fail) or the upload is "
+        "renamed (rename). " + _PASTED
+    ),
+    ("onedrive", "get_content"): (
+        "A file's content (GET /me/drive/items/{{item-id}}/content, or by path), saved in the workspace: " + _SAVED
+    ),
+    ("onedrive", "get_version_content"): (
+        "The content of one version of a file (GET /me/drive/items/{{item-id}}/versions/{{version-id}}/content), "
+        "saved in the workspace: " + _SAVED
+    ),
+    ("onedrive", "upload_file"): (
+        "Upload a file's content (PUT /me/drive/root:/path:/content, PUT /me/drive/items/{{parent-id}}:/{{name}}:/"
+        "content): by path, by parent folder + name, or item_id for an existing file. A file already there gets a new "
+        "version (conflict_behavior replace, the default), or the call fails (fail) or the upload is renamed "
+        "(rename). " + _PASTED
+    ),
 }
 
 
 def content_description(app: str, op: str, description: str, limit: int | None, *, guide: str) -> str:
-    """A tool's description as a sandboxed episode reads it: Drive's file-content ops say what they do there
+    """A tool's description as a sandboxed episode reads it: the file apps' content ops say what they do there
     (CONTENT_DESCRIPTIONS, ``guide`` the workspace guide's path); every other op, and every op when content moves
     through the conversation (``limit`` None), keeps OfficeEnv's. The tool's app label (``[Google Drive] ``) stays."""
     text = CONTENT_DESCRIPTIONS.get((app, op))
@@ -414,7 +505,7 @@ def content_description(app: str, op: str, description: str, limit: int | None, 
 
 
 def _path_part(name: Any, fallback: str) -> str:
-    """A Drive name or id as one segment of a workspace path: '/' (a Drive name is no path) and NUL replaced, at
+    """A file's name or id as one segment of a workspace path: '/' (a file name is no path) and NUL replaced, at
     most 200 bytes, the extension kept."""
     text = str(name if name is not None else "").replace("/", "_").replace("\0", "").strip()
     if text in ("", ".", ".."):
@@ -434,23 +525,37 @@ def _preview(text: str) -> str:
     return head
 
 
+def _version_folder(app: str, op: str, params: Mapping[str, Any], answer: Mapping[str, Any]) -> str | None:
+    """The folder under a file's own that keeps the download of one of its revisions or versions, if it is one."""
+    if (app, op) == ("gdrive", "get_revision"):
+        return f"revisions/{_path_part(answer.get('version'), 'revision')}"
+    if (app, op) == ("box", "get_file_content") and params.get("version_id"):
+        return f"versions/{_path_part(answer.get('version_number') or params['version_id'], 'version')}"
+    if (app, op) == ("onedrive", "get_version_content"):
+        return f"versions/{_path_part(answer.get('id') or params.get('version_id'), 'version')}"
+    return None
+
+
 def saved_download(
+    app: str,
     op: str,
     params: Mapping[str, Any],
     answer: Mapping[str, Any],
     *,
     folder: str,
     limit: int,
-    name_of: Callable[[str], str | None],
+    file_id: str,
+    name: str | None,
 ) -> tuple[dict[str, Any], str, bytes] | None:
-    """A Drive answer carrying a file's content, as a sandboxed episode gets it, with where the file is saved and
-    its bytes; None for an answer without content. The answer gives the file's path in the workspace (``savedTo``,
-    under ``folder``: ``<file id>/<name>``, a revision under ``<file id>/revisions/<version>/``) and its size
-    (``savedBytes``) in place of the content, which stays only when it is text of at most ``limit`` bytes; longer
-    text gets its start (``preview``), binary content nothing but the path."""
-    if isinstance(answer.get("contentBase64"), str):
+    """A file app's answer carrying a file's content (``app``'s ``op``), as a sandboxed episode gets it, with where
+    the file is saved and its bytes; None for an answer without content. The answer gives the file's path in the
+    workspace (``savedTo``, under ``folder``: ``<file id>/<name>``, a revision or version under its own folder) and
+    its size (``savedBytes``) in place of the content, which stays only when it is text of at most ``limit`` bytes;
+    longer text gets its start (``preview``), binary content nothing but the path."""
+    encoded = answer.get("contentBase64", answer.get("content_base64"))  # Box's key is content_base64
+    if isinstance(encoded, str):
         try:
-            data, text = base64.b64decode(answer["contentBase64"], validate=True), None
+            data, text = base64.b64decode(encoded, validate=True), None
         except (binascii.Error, ValueError):
             return None
     elif isinstance(answer.get("content"), str):
@@ -458,18 +563,17 @@ def saved_download(
         data = text.encode("utf-8")
     else:
         return None
-    file_id = str(params.get("file_id") or answer.get("id") or "file")
     base = f"{folder}/{_path_part(file_id, 'file')}"
-    if op == "get_revision":
-        version = _path_part(answer.get("version"), "revision")
-        target = f"{base}/revisions/{version}/{_path_part(name_of(file_id), file_id)}"
-    elif op == "export_file":  # a Docs editor file as another type: its name gets the type's extension
-        name = _path_part(answer.get("name"), file_id)
+    name = _path_part(name, _path_part(file_id, "file"))
+    if (app, op) == (
+        "gdrive",
+        "export_file",
+    ):  # a Docs editor file as another type: its name gets the type's extension
         extension = EXPORT_EXTENSIONS.get(str(answer.get("mimeType")), "")
-        target = f"{base}/{name if name.lower().endswith(extension) else name + extension}"
-    else:
-        target = f"{base}/{_path_part(answer.get('name'), file_id)}"
-    out = {key: value for key, value in answer.items() if key not in ("content", "contentBase64")}
+        name = name if name.lower().endswith(extension) else name + extension
+    version = _version_folder(app, op, params, answer)
+    target = f"{base}/{version}/{name}" if version else f"{base}/{name}"
+    out = {key: value for key, value in answer.items() if key not in ("content", "contentBase64", "content_base64")}
     out["savedTo"] = target
     out["savedBytes"] = len(data)
     if text is not None and len(data) <= limit:
@@ -482,8 +586,109 @@ def saved_download(
     return out, target, data
 
 
-def pasted_content_refusal(op: str, params: Mapping[str, Any], limit: int, *, guide: str) -> str | None:
-    """Why a sandboxed episode's Drive upload may not carry its content in the call (binary content, or text over
+def _rows(world: Any, app: str, collection: str) -> Mapping[str, dict[str, Any]]:
+    """An app's rows of one collection in a session's world, or none when the app is not connected."""
+    try:
+        return world.collection(app, collection).rows
+    except Exception:  # an app the episode does not connect has no collections
+        return {}
+
+
+def _named_drives(world: Any, app: str, drive_id: Any, site: Any = None) -> set[str] | None:
+    """The drives a call names: ``drive_id``, an id or, as SharePoint takes it, a library's name (within ``site``,
+    an id or a name, when given); None when the call names no drive."""
+    if not drive_id:
+        return None
+    drives = _rows(world, app, "drives")
+    if str(drive_id) in drives:
+        return {str(drive_id)}
+    wanted = str(drive_id).strip().lower()
+    names = {"documents", "shared documents"} if wanted in ("documents", "shared documents") else {wanted}
+    sites = _rows(world, app, "sites")
+
+    def in_site(row: Mapping[str, Any]) -> bool:
+        own = sites.get(row.get("siteId"), {})
+        return not site or str(site).strip().lower() in {
+            str(value).lower() for value in (row.get("siteId"), own.get("name"), own.get("displayName")) if value
+        }
+
+    return {rid for rid, row in drives.items() if str(row.get("name") or "").lower() in names and in_site(row)}
+
+
+def drive_item_at(world: Any, app: str, path: Any, *, drive_id: Any = None, site: Any = None) -> dict[str, Any] | None:
+    """The live SharePoint or OneDrive item at ``path`` (``/Folder/name``, ``/`` for a root), in the drive a call
+    names (``drive_id``, ``site``) when it names one, or None when no single item is there."""
+    rows = _rows(world, app, "driveItems")
+    drives = _named_drives(world, app, drive_id, site)
+    want = [part.lower() for part in str(path or "").strip("/").split("/") if part]
+    found = []
+    for row in rows.values():
+        if row.get("deleted") or (drives is not None and row.get("driveId") not in drives):
+            continue
+        names, current = [], row
+        while current is not None and current.get("parent") is not None:
+            names.append(str(current.get("name") or "").lower())
+            current = rows.get(current["parent"])
+        if names[::-1] == want:
+            found.append(row)
+    return found[0] if len(found) == 1 else None
+
+
+def download_identity(
+    world: Any, app: str, op: str, params: Mapping[str, Any], answer: Mapping[str, Any]
+) -> tuple[str, str | None]:
+    """The id and name of the file a content download is of: the answer's own, but for a revision or version, whose
+    answer names neither, the file's row in the session's world."""
+    if (app, op) == ("gdrive", "get_revision"):
+        file_id = str(params.get("file_id") or "")
+        return file_id, _rows(world, "gdrive", "files").get(file_id, {}).get("name")
+    if (app, op) == ("onedrive", "get_version_content"):
+        row = _rows(world, "onedrive", "driveItems").get(str(params.get("item_id") or "")) or drive_item_at(
+            world, "onedrive", params.get("path"), drive_id=params.get("drive_id")
+        )
+        if row is None:  # the version answered, so the item is there; a path it cannot place keeps its own name
+            return "file", posixpath.basename(str(params.get("path") or "")) or None
+        return str(row.get("id")), row.get("name")
+    own = params.get("file_id") if app == "gdrive" else None
+    return str(own or answer.get("id") or params.get("file_id") or params.get("item_id") or "file"), answer.get("name")
+
+
+def _upload_target(world: Any, app: str, op: str, params: Mapping[str, Any]) -> tuple[str | None, dict[str, str]]:
+    """Where a pasted upload's content goes, said as the file API says it: the file it replaces (an id, sent with
+    PUT), or the query of a new file (POST: name, parent, and Drive's mime_type)."""
+    if (app, op) in (("gdrive", "update_file"), ("box", "upload_file_version")):
+        return str(params.get("file_id") or "<file_id>"), {}
+    if (app, op) == ("onedrive", "upload_file") and params.get("item_id"):
+        return str(params["item_id"]), {}
+    path = str(params.get("path") or "")
+    query = {"name": str(params.get("name") or posixpath.basename(path) or "<file_name>")}
+    if app == "gdrive":
+        parents = params.get("parents")
+        if isinstance(parents, list) and parents:
+            query["parent"] = str(parents[0])
+        if params.get("mime_type"):
+            query["mime_type"] = str(params["mime_type"])
+    elif app == "box":
+        if params.get("parent_id") not in (None, "", "0"):
+            query["parent"] = str(params["parent_id"])
+    elif params.get("parent_id"):
+        query["parent"] = str(params["parent_id"])
+    elif path.strip("/").count("/") or app == "sharepoint":  # a folder's path, or SharePoint, which needs a folder
+        folder = drive_item_at(
+            world,
+            app,
+            posixpath.dirname("/" + path.strip("/")),
+            drive_id=params.get("drive_id"),
+            site=params.get("site"),
+        )
+        query["parent"] = str(folder["id"]) if folder is not None else "<folder_id>"
+    return None, query
+
+
+def pasted_content_refusal(
+    app: str, op: str, params: Mapping[str, Any], limit: int, *, guide: str, world: Any = None
+) -> str | None:
+    """Why a sandboxed episode's upload may not carry its content in the call (binary content, or text over
     ``limit`` bytes), with the file API command that sends the file instead; None when it may."""
     if params.get("content_base64"):
         held = "binary content"
@@ -492,19 +697,15 @@ def pasted_content_refusal(op: str, params: Mapping[str, Any], limit: int, *, gu
     else:
         return None
     send = f'-H "Authorization: Bearer ${API_TOKEN_ENV}" --data-binary @<local path>'
-    if op == "update_file":
-        file_id = quote(str(params.get("file_id") or "<file_id>"), safe="<>_")
-        command = f'curl -sf -X PUT {send} "${API_URL_ENV}{FILES_ROUTE}/gdrive/{file_id}"'
-        after = " (then update_file without content for any other change)"
+    file_id, query = _upload_target(world, app, op, params)
+    if file_id is not None:
+        command = f'curl -sf -X PUT {send} "${API_URL_ENV}{FILES_ROUTE}/{app}/{quote(file_id, safe="<>_")}"'
     else:
-        query = f"app=gdrive&name={quote(str(params.get('name') or '<file name>'), safe='<>')}"
-        parents = params.get("parents")
-        if isinstance(parents, list) and parents:
-            query += f"&parent={quote(str(parents[0]), safe='')}"
-        if params.get("mime_type"):
-            query += f"&mime_type={quote(str(params['mime_type']), safe='')}"
-        command = f'curl -sf -X POST {send} "${API_URL_ENV}{FILES_ROUTE}?{query}"'
-        after = ""
+        args = "&".join(f"{key}={quote(value, safe='<>')}" for key, value in query.items())
+        command = f'curl -sf -X POST {send} "${API_URL_ENV}{FILES_ROUTE}?app={app}&{args}"'
+    after = (
+        " (then update_file without content for any other change)" if (app, op) == ("gdrive", "update_file") else ""
+    )
     return (
         f"File content is not pasted into a call in this sandbox ({held}). Write the file in the workspace and send "
         f"it with the file API ({guide}){after}:\n  {command}"
@@ -512,60 +713,73 @@ def pasted_content_refusal(op: str, params: Mapping[str, Any], limit: int, *, gu
 
 
 class ContentInWorkspace:
-    """A sandboxed episode's exposure with Drive file content kept out of the conversation; everything else is
+    """A sandboxed episode's exposure with the file apps' content kept out of the conversation; everything else is
     the session's own exposure, which it wraps. A download saves the file in the workspace and answers with its
     path (``saved_download``), and an upload that pastes its content is refused with the file API command that
     sends the file (``pasted_content_refusal``, an app error the session answers as any other). Saving is the
     route's: ``format_result`` queues the file on the episode, and the tool route writes it into the sandbox before
     it answers (``OfficeEnvResourcesServer._save_downloads``). The file API's own calls (``_Episode.direct``) pass
-    as they are."""
+    as they are, and an error they meet is kept with its HTTP status for the file API to answer with. With no
+    ``limit``, content moves through the conversation and only the file API's errors are kept."""
 
     def __init__(
-        self,
-        inner: Any,
-        episode: "_Episode",
-        *,
-        limit: int,
-        folder: str,
-        guide: str,
-        name_of: Callable[[str], str | None],
+        self, inner: Any, episode: "_Episode", *, limit: int | None, folder: str, guide: str, world: Any
     ) -> None:
         self._inner = inner
         self._episode = episode
         self._limit = limit
         self._folder = folder
         self._guide = guide
-        self._name_of = name_of
+        self._world = world
 
-    def __getattr__(self, name: str) -> Any:  # tools, describe, format_error: the session's exposure
-        if name.startswith("__") or name in ("_inner", "_episode", "_limit", "_folder", "_guide", "_name_of"):
+    def __getattr__(self, name: str) -> Any:  # tools, describe: the session's exposure
+        if name.startswith("__") or name in ("_inner", "_episode", "_limit", "_folder", "_guide", "_world"):
             raise AttributeError(name)
         return getattr(self._inner, name)
 
     def parse(self, tool_name: str, args: dict[str, Any]) -> Any:
         parsed = self._inner.parse(tool_name, args)
-        if isinstance(parsed, Invocation) and (parsed.app, parsed.op) in CONTENT_UPLOADS and not self._episode.direct:
-            refusal = pasted_content_refusal(parsed.op, parsed.params, self._limit, guide=self._guide)
+        if (
+            self._limit is not None
+            and isinstance(parsed, Invocation)
+            and (parsed.app, parsed.op) in CONTENT_UPLOADS
+            and not self._episode.direct
+        ):
+            refusal = pasted_content_refusal(
+                parsed.app, parsed.op, parsed.params, self._limit, guide=self._guide, world=self._world
+            )
             if refusal is not None:
                 self._episode.uploads_refused += 1
                 raise InvalidRequest(refusal, code="upload_from_workspace")
         return parsed
 
     def format_result(self, inv: Any, result: dict[str, Any]) -> Any:
-        if (inv.app, inv.op) in CONTENT_DOWNLOADS and isinstance(result, dict) and not self._episode.direct:
+        if (
+            self._limit is not None
+            and (inv.app, inv.op) in CONTENT_DOWNLOADS
+            and isinstance(result, dict)
+            and not self._episode.direct
+        ):
+            file_id, name = download_identity(self._world, inv.app, inv.op, inv.params, result)
             saved = saved_download(
-                inv.op, inv.params, result, folder=self._folder, limit=self._limit, name_of=self._name_of
+                inv.app,
+                inv.op,
+                inv.params,
+                result,
+                folder=f"{self._folder}/{FILE_APPS[inv.app].folder}",
+                limit=self._limit,
+                file_id=file_id,
+                name=name,
             )
             if saved is not None:
                 result, target, data = saved
                 self._episode.saves.append((target, data))
         return self._inner.format_result(inv, result)
 
-
-def _drive_file_name(session: Any, file_id: str) -> str | None:
-    """A Drive file's name in a session's world (a revision's answer does not carry it)."""
-    row = session.world.collection("gdrive", "files").rows.get(file_id)
-    return row.get("name") if isinstance(row, dict) else None
+    def format_error(self, inv: Any, err: Any) -> Any:
+        if self._episode.direct:  # the file API answers with the app's HTTP status
+            self._episode.direct_status = getattr(err, "status", None)
+        return self._inner.format_error(inv, err)
 
 
 RELAY_SOURCE = (Path(__file__).parent / "sandbox" / "relay.py").read_text(encoding="utf-8")
@@ -685,6 +899,7 @@ class _Episode:
     saves: list[tuple[str, bytes]] = field(default_factory=list)  # (path, bytes) the current call saved
     folders: set[str] = field(default_factory=set)  # folders made in the sandbox for them
     direct: bool = False  # a file API call is under way: its content moves as it is
+    direct_status: int | None = None  # the HTTP status of the error that call met, if any
 
     def usage(self) -> dict[str, float]:
         """What the episode moved through its workspace instead of the conversation, as verify metrics."""
@@ -842,19 +1057,16 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return f"{self.config.sandbox_config.workdir.rstrip('/')}/{GUIDE_NAME}"
 
     def _keep_content_in_workspace(self, session_id: str, episode: _Episode) -> None:
-        """Move the episode's Drive file content through its workspace (ContentInWorkspace), unless
-        ``inline_file_bytes`` is None."""
-        limit = self.config.sandbox_config.inline_file_bytes
-        if limit is None:
-            return
+        """Move the episode's file content through its workspace (ContentInWorkspace), unless ``inline_file_bytes``
+        is None; either way the file API's calls answer with the app's HTTP status."""
         session = self.service.store.get(session_id)
         session.exposure = ContentInWorkspace(
             session.exposure,
             episode,
-            limit=limit,
-            folder=f"{self.config.sandbox_config.workdir.rstrip('/')}/{DOWNLOADS_DIR}",
+            limit=self.config.sandbox_config.inline_file_bytes,
+            folder=self.config.sandbox_config.workdir.rstrip("/"),
             guide=self._guide_path(),
-            name_of=partial(_drive_file_name, session),
+            world=session.world,
         )
 
     async def _lend_sandbox(self, session_id: str, episode: _Episode, *, task_id: str) -> None:
@@ -863,7 +1075,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         if not config.image:
             raise ValueError("Set sandbox_config.image to the episode sandbox image (see sandbox/Dockerfile)")
         named_configs = get_global_config_dict()
-        files = {self._guide_path(): workspace_guide(config.inline_file_bytes)}
+        connected = tuple(app for app in FILE_APPS if any(tool.startswith(f"{app}_") for tool in episode.tools))
+        files = {self._guide_path(): workspace_guide(config.inline_file_bytes, connected or tuple(FILE_APPS))}
         if config.host_relay:
             files[RELAY_PATH] = RELAY_SOURCE
         spec = config.spec(
@@ -1082,20 +1295,77 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         if episode is not None and episode.grading:
             raise HTTPException(status_code=409, detail="The task has ended: its files are closed")
 
-    def _file_call(self, session_id: str, app_name: str, verb: str, args: dict[str, Any]) -> dict[str, Any]:
-        ops = FILE_OPS.get(app_name)
-        if ops is None:
-            raise HTTPException(status_code=404, detail="Not Found")  # files move for FILE_OPS' apps only
+    def _file_op(
+        self,
+        session_id: str,
+        app: str,
+        verb: str,
+        *,
+        file_id: str | None = None,
+        name: str | None = None,
+        parent: str | None = None,
+        mime_type: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """The app's op and arguments, content aside, for a file API call: ``verb`` download or update (the file
+        ``file_id``) or create (``name`` in the folder ``parent``). Files and folders are named by id alone; where
+        an op also wants the item's library, folder or name (SharePoint, OneDrive), they are read from the world.
+        ``mime_type`` is Drive's alone."""
+        if app == "gdrive":
+            typed = {"mime_type": mime_type} if mime_type else {}
+            if verb == "download":
+                return "download_file", {"file_id": file_id}
+            if verb == "update":
+                return "update_file", {"file_id": file_id, **typed}
+            return "create_file", {"name": name, **({"parents": [parent]} if parent else {}), **typed}
+        if app == "box":
+            if verb == "download":
+                return "get_file_content", {"file_id": file_id}
+            if verb == "update":
+                return "upload_file_version", {"file_id": file_id}
+            return "upload_file", {"name": name, "parent_id": parent or "0"}
+        session = self.service.store.get(session_id)
+        rows = _rows(session.world, app, "driveItems") if session is not None else {}
+        row = rows.get(parent if verb == "create" else file_id or "")
+        if row is None and (app == "sharepoint" or (verb == "create" and parent)):
+            if verb == "create" and not parent:
+                message = (
+                    "Name the folder to upload into: add &parent=<folder id> (a folder's id, or a library root's)"
+                )
+                raise HTTPException(status_code=400, detail={"error": {"code": "invalid_request", "message": message}})
+            missing = parent if verb == "create" else file_id
+            raise HTTPException(
+                status_code=404, detail={"error": {"code": "not_found", "message": f"No item {missing}"}}
+            )
+        drive = {"drive_id": row["driveId"]} if row is not None else {}
+        if app == "sharepoint":
+            if verb == "download":
+                return "get_item_content", {**drive, "item_id": file_id}
+            if verb == "update":  # SharePoint uploads name a file by its folder and name: a new version of it
+                return "upload_content", {**drive, "parent_id": row["parent"], "name": row["name"]}
+            return "upload_content", {**drive, "parent_id": parent, "name": name}
+        if verb == "download":
+            return "get_content", {**drive, "item_id": file_id}
+        if verb == "update":
+            return "upload_file", {**drive, "item_id": file_id}
+        return "upload_file", {**drive, "parent_id": parent, "name": name} if parent else {"path": f"/{name}"}
+
+    def _file_call(
+        self, session_id: str, app_name: str, verb: str, content: Mapping[str, str] | None = None, **where: Any
+    ) -> dict[str, Any]:
+        if app_name not in FILE_APPS:
+            raise HTTPException(status_code=404, detail="Not Found")  # files move for FILE_APPS' apps only
+        op, args = self._file_op(session_id, app_name, verb, **where)
         episode = self._episodes.get(session_id)
         if episode is not None:  # the file API moves the content itself
-            episode.direct = True
+            episode.direct, episode.direct_status = True, None
         try:
-            reply = self.service.call(session_id, f"{app_name}_{ops[verb]}", json.dumps(args))
+            reply = self.service.call(session_id, f"{app_name}_{op}", json.dumps({**args, **(content or {})}))
         finally:
+            status = None
             if episode is not None:
-                episode.direct = False
+                episode.direct, status = False, episode.direct_status
         body = reply.body if isinstance(reply.body, dict) else json.loads(reply.body)
-        status = reply.status if reply.status != 200 else _error_status(body)
+        status = reply.status if reply.status != 200 else status or _error_status(body)
         if status is not None:
             raise HTTPException(status_code=status, detail=body)
         return body
@@ -1112,7 +1382,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return HTTPException(status_code=502, detail=f"Could not {doing} in the workspace")
 
     async def _save_downloads(self, session_id: str, episode: _Episode | None) -> None:
-        """Write into the episode's sandbox the files its call's Drive downloads saved (ContentInWorkspace), before
+        """Write into the episode's sandbox the files its call's downloads saved (ContentInWorkspace), before
         the route answers that they are there, as mode 644. The queue is taken before the first await, so a call
         writes only its own files. A file that cannot be written fails the call (502): because of what the
         workspace holds, or because the provider failed (``_provider_failed``)."""
@@ -1178,8 +1448,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             return {"content_base64": base64.b64encode(data).decode("ascii")}
 
     async def download_file(self, request: Request, app_name: str, file_id: str) -> Response:
-        body = self._file_call(self._file_session(request), app_name, "download", {"file_id": file_id})
-        content, encoded = body.get("content"), body.get("contentBase64")
+        body = self._file_call(self._file_session(request), app_name, "download", file_id=file_id)
+        content, encoded = body.get("content"), body.get("contentBase64", body.get("content_base64"))
         if isinstance(content, str):  # a text file: its UTF-8 bytes
             data, media_type = content.encode("utf-8"), "text/plain"
         elif isinstance(encoded, str):  # a binary file: its bytes as the app keeps them
@@ -1197,24 +1467,22 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     ) -> JSONResponse:
         session_id = self._file_session(request)
         self._refuse_once_grading(session_id)
-        args: dict[str, Any] = {"name": name, **await self._content_args(request)}
+        content = await self._content_args(request)
         self._refuse_once_grading(session_id)  # verification may have begun while the body streamed in
-        if parent:
-            args["parents"] = [parent]
-        if mime_type:
-            args["mime_type"] = mime_type
-        return JSONResponse(self._file_call(session_id, app, "create", args))
+        return JSONResponse(
+            self._file_call(session_id, app, "create", content, name=name, parent=parent, mime_type=mime_type)
+        )
 
     async def replace_file(
         self, request: Request, app_name: str, file_id: str, mime_type: str | None = None
     ) -> JSONResponse:
         session_id = self._file_session(request)
         self._refuse_once_grading(session_id)
-        args: dict[str, Any] = {"file_id": file_id, **await self._content_args(request)}
+        content = await self._content_args(request)
         self._refuse_once_grading(session_id)  # verification may have begun while the body streamed in
-        if mime_type:
-            args["mime_type"] = mime_type
-        return JSONResponse(self._file_call(session_id, app_name, "update", args))
+        return JSONResponse(
+            self._file_call(session_id, app_name, "update", content, file_id=file_id, mime_type=mime_type)
+        )
 
 
 if __name__ == "__main__":
