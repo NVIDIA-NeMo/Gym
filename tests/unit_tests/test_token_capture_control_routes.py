@@ -216,7 +216,7 @@ async def test_client_validates_a_manifest_rollout_id_before_sending(monkeypatch
 
     async def request(method, path, **kwargs):
         sent.append(path)
-        return _Response(200, {"rollout_id": "r1", "records": [], "failures": []})
+        return _Response(200, {"capture_key": "r1", "records": [], "failures": []})
 
     monkeypatch.setattr(control, "_request", request)
 
@@ -231,9 +231,19 @@ async def test_client_rejects_a_manifest_for_a_different_rollout(monkeypatch):
     control = RolloutControlClient("http://model", auth_token=TOKEN, request_timeout_s=1.0)
 
     async def request(method, path, **kwargs):
-        return _Response(200, {"rollout_id": "r2", "records": [], "failures": []})
+        return _Response(200, {"capture_key": "r2", "records": [], "failures": []})
 
     monkeypatch.setattr(control, "_request", request)
 
     with pytest.raises(ValueError, match="r2"):
         await control.manifest("r1")
+
+
+@pytest.mark.asyncio
+async def test_closing_a_retired_rollout_does_not_recreate_its_ledger(client, ledger):
+    await ledger.begin_call("r1", "inflight")
+    await ledger.retire(["r1"])
+    response = client.post(f"{CONTROL_ROUTE_PREFIX}/rollouts/r1/close-admission", headers=AUTH)
+    assert response.status_code == 410
+    with pytest.raises(RolloutRetiredError):
+        await ledger.manifest("r1")

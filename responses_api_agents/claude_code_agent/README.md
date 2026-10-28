@@ -231,8 +231,9 @@ sandbox_install_timeout_seconds: 600
 session_close_timeout_seconds: 60
 ```
 
-The image must include Linux Python **3.8+**, `tar`, and libraries required by the
-native Claude binary. Seed probes the sandbox's architecture and libc, downloads
+The image must include coreutils, `gzip`, `tar`, and the libraries the Claude binary
+requires; it needs no Python. Seed installs a missing `bash` on a root image with `apk` or
+`apt-get`, and otherwise fails with a message that names it. Seed probes the sandbox's architecture and libc, downloads
 and caches the matching Linux x64/arm64 release on the **Gym host**, then compresses
 and uploads it in bounded pieces through the sandbox provider's file transfer API.
 The sandbox needs no internet access for runtime setup. The Gym host needs HTTPS

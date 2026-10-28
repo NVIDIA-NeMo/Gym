@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+- benchmarks/skillsbench/harbor.yaml
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+uv_cache_dir: /tmp/skillsbench-uv-${oc.env:SLURM_JOB_ID,local}
+skillsbench_harbor_agent:
+  responses_api_agents:
+    harbor_agent_general:
+      sandbox_provider: sandbox
+      job:
+        environment:
+          type: null
+          import_path: benchmarks.skillsbench.environment:SkillsBenchSandboxEnvironment
+          kwargs:
+            skill_mode: ${oc.env:SKILLSBENCH_SKILL_MODE,with-skill}
+            sandbox_metadata:
+              harbor-benchmark: skillsbench
+            sandbox_ttl_s: 21600
+            sandbox_ready_timeout_s: 1200
+            default_exec_timeout_s: 1800
+            allow_unenforced_internet_isolation: true

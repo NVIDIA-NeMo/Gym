@@ -85,7 +85,6 @@ class StirrupSessionState(AgentSessionState):
             await upload_text(self.session.sandbox, path=input_path, text=json.dumps(payload))
             return SandboxCommand(
                 argv=[SANDBOX_PYTHON, f"{_PACKAGE_DIR}/sandbox_runner.py", input_path, output_path],
-                python=SANDBOX_PYTHON,
             )
 
         async def collect() -> dict[str, Any]:

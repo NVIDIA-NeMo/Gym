@@ -224,6 +224,25 @@ def test_tool_calls_and_reasoning_skips_non_dict_output_items():
     assert _tool_calls_and_reasoning(anth) == ([{"call_id": "t", "name": "g", "arguments": {"b": 2}}], None)
 
 
+def test_tool_calls_and_reasoning_records_custom_tool_calls():
+    from nemo_gym.observability.model_calls import _tool_calls_and_reasoning
+
+    patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n"
+    resp = {
+        "output": [
+            {"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": patch},
+            {"type": "function_call", "call_id": "c2", "name": "shell", "arguments": '{"command": "ls"}'},
+        ]
+    }
+    assert _tool_calls_and_reasoning(resp) == (
+        [
+            {"call_id": "c1", "name": "apply_patch", "arguments": {"input": patch}},
+            {"call_id": "c2", "name": "shell", "arguments": {"command": "ls"}},
+        ],
+        None,
+    )
+
+
 def _capture_exchange(dialect, model_server, usage, response):
     return {
         "model_call_id": f"call-{model_server}",
@@ -358,7 +377,7 @@ def test_merge_capture_reports_observation_join_failure(tmp_path, monkeypatch):
     def fail_association(*_args, **_kwargs):
         raise RuntimeError("association failed")
 
-    monkeypatch.setattr("nemo_gym.observability.model_calls.join_model_call_observations", fail_association)
+    monkeypatch.setattr("nemo_gym.observability.model_calls.join_agent_model_calls", fail_association)
     merge_model_call_capture_into_record(record, [tmp_path])
 
     assert [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]] == ["agent_observation_join_failed"]
@@ -521,6 +540,89 @@ def test_extract_token_stats_anthropic_fully_cached_zero_base():
     assert stats["cache_creation_tokens"] == 0
     empty = extract_token_stats({"output_tokens": 12, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0})
     assert (empty["tokens_in"], empty["tokens_total"], empty["cache_creation_tokens"]) == (None, None, 0)
+
+
+# One row per usage shape: (usage, tokens_in, tokens_total, cache_creation_tokens).
+_USAGE_SHAPES = {
+    "responses": ({"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}, 100, 120, None),
+    "responses cached subset": (
+        {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 80}, "output_tokens": 20},
+        100,
+        120,
+        None,
+    ),
+    "chat completions": ({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}, 100, 120, None),
+    "chat completions cached subset": (
+        {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 80}, "completion_tokens": 20},
+        100,
+        120,
+        None,
+    ),
+    "anthropic messages with cache": (
+        {"input_tokens": 20, "cache_read_input_tokens": 70, "cache_creation_input_tokens": 10, "output_tokens": 20},
+        100,
+        120,
+        10,
+    ),
+    "anthropic messages fully cached": ({"cache_read_input_tokens": 100, "output_tokens": 20}, 100, 120, None),
+    "anthropic messages zero cache, no input count": (
+        {"cache_read_input_tokens": 0, "output_tokens": 20},
+        None,
+        None,
+        None,
+    ),
+    # NVIDIA-NeMo/Gym#4721: a gateway adds Anthropic-style cache fields to Chat Completions usage.
+    "mixed, cache read": (
+        {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "cache_read_input_tokens": 80},
+        100,
+        120,
+        None,
+    ),
+    "mixed, cache write": (
+        {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120, "cache_creation_input_tokens": 80},
+        100,
+        120,
+        80,
+    ),
+    "mixed, prompt and input counts": (
+        {"prompt_tokens": 100, "input_tokens": 20, "cache_read_input_tokens": 80, "completion_tokens": 20},
+        100,
+        120,
+        None,
+    ),
+    "anthropic messages, nothing cached": (
+        {"input_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 20},
+        100,
+        120,
+        0,
+    ),
+    # A count that is not a non-negative integer is ignored rather than trusted.
+    "malformed prompt count": (
+        {"prompt_tokens": "100", "input_tokens": 20, "cache_read_input_tokens": 80, "output_tokens": 20},
+        100,
+        120,
+        None,
+    ),
+    "no usage": ({}, None, None, None),
+    "usage is not a mapping": (None, None, None, None),
+}
+
+
+@pytest.mark.parametrize(
+    ("usage", "tokens_in", "tokens_total", "cache_creation"), _USAGE_SHAPES.values(), ids=_USAGE_SHAPES
+)
+def test_extract_token_stats_counts_the_cache_once_in_every_usage_shape(
+    usage, tokens_in, tokens_total, cache_creation
+):
+    from nemo_gym.observability.model_calls import extract_token_stats
+
+    stats = extract_token_stats(usage)
+
+    assert (stats["tokens_in"], stats["tokens_total"], stats["cache_creation_tokens"]) == (
+        tokens_in,
+        tokens_total,
+        cache_creation,
+    )
 
 
 def test_extract_token_stats_openai_cached_not_double_counted():
