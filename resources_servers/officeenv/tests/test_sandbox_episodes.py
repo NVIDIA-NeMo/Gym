@@ -6,9 +6,12 @@ Sandboxes come from a fake provider, so these tests start no container. Environm
 without a sandbox and the MCP exposure itself are tested in test_app.py."""
 
 import asyncio
+import base64
 import io
 import ipaddress
 import json
+import os
+import stat
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -34,10 +37,13 @@ from resources_servers.officeenv.app import (
     OfficeEnvResourcesServer,
     OfficeEnvResourcesServerConfig,
     OfficeEnvSandboxConfig,
+    _path_part,
     egress_urls,
     is_trusted_caller,
     relay_ports,
+    saved_download,
     tools_exposure_catalog,
+    workspace_guide,
 )
 
 
@@ -142,16 +148,19 @@ BOOK = workbook([["vendor", "total"], ["Acme", 10.5], ["Globex", 4.25]])
 
 
 class FakeSandbox:
-    """A sandbox provider stand-in: records what each sandbox was started with, ran and when it stopped."""
+    """A sandbox provider stand-in: records what each sandbox was started with, ran, was given and when it stopped."""
 
     started: list["FakeSandbox"] = []
     stopped: list["FakeSandbox"] = []
-    fail_on: str | None = None  # "start", "serialize" or "stop": that step raises
+    fail_on: str | None = None  # "start", "serialize", "upload" or "stop": that step raises
+    refusing: tuple[str, ...] = ()  # commands that start with one of these exit 1
     on_stop: Callable[[], None] | None = None  # runs as a sandbox stops
 
     def __init__(self, provider_config: dict) -> None:
         self.provider_config = provider_config
         self.commands: list[str] = []
+        self.files: dict[str, bytes] = {}  # what the server uploaded into it, by path
+        self.modes: dict[str, int] = {}  # the mode of each upload's local file
 
     async def start(self, spec) -> None:
         self.spec = spec
@@ -163,9 +172,16 @@ class FakeSandbox:
         await self.start(spec)
         await setup(self)
 
-    async def exec(self, command: str, timeout_s: float | None = None) -> SimpleNamespace:
+    async def exec(self, command: str, cwd: str | None = None, timeout_s: float | None = None) -> SimpleNamespace:
         self.commands.append(command)
-        return SimpleNamespace(error_type=None, return_code=0, stdout="", stderr="")
+        refused = command.startswith(FakeSandbox.refusing)
+        return SimpleNamespace(error_type=None, return_code=int(refused), stdout="", stderr="refused" * refused)
+
+    async def upload(self, local_path: str, remote_path: str) -> None:
+        if FakeSandbox.fail_on == "upload":
+            raise RuntimeError("the sandbox is gone")
+        self.files[remote_path] = Path(local_path).read_bytes()
+        self.modes[remote_path] = stat.S_IMODE(os.stat(local_path).st_mode)
 
     async def serialize(self) -> dict:
         if FakeSandbox.fail_on == "serialize":
@@ -183,6 +199,7 @@ class FakeSandbox:
 @pytest.fixture
 def sandboxes(monkeypatch) -> type[FakeSandbox]:
     FakeSandbox.started, FakeSandbox.stopped, FakeSandbox.fail_on, FakeSandbox.on_stop = [], [], None, None
+    FakeSandbox.refusing = ()
     monkeypatch.setattr(officeenv_app, "AsyncSandbox", FakeSandbox)
     monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: {"sandbox": {"docker": {}}})
     return FakeSandbox
@@ -642,6 +659,246 @@ def test_the_file_api_refuses_other_tokens_apps_and_oversized_uploads(sandboxes,
 
         assert client.post("/close_session", json=close_body(), cookies=seeded.cookies).status_code == 200
         assert client.get("/officeenv/files/gdrive/F_LEDGER", headers=auth).status_code == 401  # revoked at close
+
+
+# Drive file content stays out of a sandboxed episode's conversation (sandbox_config.inline_file_bytes).
+
+LONG = "invoice_id,vendor,amount\n" + "".join(f"INV-{n},Vendor {n % 7},{n}.25\n" for n in range(600))
+BOOK_B64 = base64.b64encode(BOOK).decode()
+POLICY = "Book economy.\n"
+
+
+def content_spec() -> dict:
+    """SPEC with a workbook, a long CSV (its name holding a '/') and a Google Doc beside the short ledger."""
+    spec = json.loads(json.dumps(SPEC))
+    spec["apps"]["gdrive"]["data"]["files"] += [
+        {"id": "F_BOOK", "name": "ledger.xlsx", "parents": ["F_FIN"], "owner": ME, "contentBase64": BOOK_B64},
+        {"id": "F_LONG", "name": "Q3/Q4 ledger.csv", "parents": ["F_FIN"], "owner": ME, "content": LONG},
+        {
+            "id": "F_DOC",
+            "name": "Travel policy",
+            "mimeType": "application/vnd.google-apps.document",
+            "parents": ["F_FIN"],
+            "owner": ME,
+            "content": POLICY,
+        },
+    ]
+    return spec
+
+
+def seed_with_content(client: TestClient) -> tuple:
+    """Seed content_spec() and return the seed's answer, a function that calls a tool over MCP and reads its JSON
+    output, and the tools' descriptions as the episode lists them."""
+    seeded = client.post("/seed_session", json=seed_body(content_spec()))
+    assert seeded.status_code == 200, seeded.text
+    token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+
+    def call(tool: str, /, **arguments: object) -> dict:
+        result = rpc(client, "tools/call", {"name": tool, "arguments": arguments}, token).json()["result"]
+        return result.get("structuredContent") or json.loads(result["content"][0]["text"])
+
+    listed = rpc(client, "tools/list", {}, token).json()["result"]["tools"]
+    return seeded, call, {tool["name"]: tool["description"] for tool in listed}
+
+
+def test_a_download_saves_the_file_in_the_workspace_and_answers_with_its_path(sandboxes) -> None:
+    with mcp_client(make_server()) as client:
+        seeded, call, _ = seed_with_content(client)
+        (sandbox,) = sandboxes.started
+
+        book = call("gdrive_download_file", file_id="F_BOOK")
+        assert "contentBase64" not in book and "content" not in book, book
+        assert book["savedTo"] == "/workspace/drive/F_BOOK/ledger.xlsx" and book["savedBytes"] == len(BOOK)
+        assert "binary content" in book["note"] and "preview" not in book
+        assert sandbox.files["/workspace/drive/F_BOOK/ledger.xlsx"] == BOOK  # byte for byte
+        assert "mkdir -p /workspace/drive/F_BOOK" in sandbox.commands
+        # readable whoever the harness runs as, executable by no one, whatever mode the provider writes
+        assert sandbox.modes[book["savedTo"]] == 0o644
+        assert "chmod 644 /workspace/drive/F_BOOK/ledger.xlsx" in sandbox.commands
+
+        short = call("gdrive_download_file", file_id="F_LEDGER")  # short text: inline as well
+        assert short["content"] == LEDGER and short["savedTo"] == "/workspace/drive/F_LEDGER/ledger.csv"
+        assert sandbox.files[short["savedTo"]] == LEDGER.encode()
+
+        long = call("gdrive_download_file", file_id="F_LONG")  # a Drive name is no path
+        assert "content" not in long and long["savedTo"] == "/workspace/drive/F_LONG/Q3_Q4 ledger.csv"
+        assert sandbox.files[long["savedTo"]] == LONG.encode()
+        assert LONG.startswith(long["preview"]) and long["preview"].endswith("\n") and len(long["preview"]) <= 2000
+
+        revision = call("gdrive_get_revision", file_id="F_BOOK", revision_id="1")
+        assert revision["savedTo"] == "/workspace/drive/F_BOOK/revisions/1/ledger.xlsx"
+        assert sandbox.files[revision["savedTo"]] == BOOK
+        exported = call("gdrive_export_file", file_id="F_DOC", mime_type="text/plain")
+        assert exported["content"] == POLICY and exported["savedTo"] == "/workspace/drive/F_DOC/Travel policy.txt"
+        assert sandbox.commands.count("mkdir -p /workspace/drive/F_BOOK") == 1  # a file's folder is made once
+
+        result = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
+        assert result["sandbox_files_saved"] == 5.0 and result["sandbox_uploads_refused"] == 0.0
+        assert result["sandbox_bytes_saved"] == float(2 * len(BOOK) + len(LEDGER) + len(LONG) + len(POLICY))
+
+
+def test_an_upload_that_pastes_its_content_is_refused_with_the_file_api_command(sandboxes) -> None:
+    server = make_server()
+    with mcp_client(server) as client:
+        seeded, call, _ = seed_with_content(client)
+
+        pasted = call("gdrive_create_file", name="Q3 totals.xlsx", parents=["F_FIN"], content_base64=BOOK_B64)
+        assert pasted["error"]["code"] == "upload_from_workspace", pasted
+        assert (
+            'curl -sf -X POST -H "Authorization: Bearer $OFFICEENV_API_TOKEN" --data-binary @<local path> '
+            '"$OFFICEENV_API_URL/officeenv/files?app=gdrive&name=Q3%20totals.xlsx&parent=F_FIN"'
+        ) in pasted["error"]["message"]
+        too_long = call("gdrive_create_file", name="big.csv", content=LONG)
+        assert "text over 8192 bytes" in too_long["error"]["message"]
+        replaced = call("gdrive_update_file", file_id="F_LEDGER", content_base64=BOOK_B64)
+        assert "-X PUT" in replaced["error"]["message"]
+        assert '"$OFFICEENV_API_URL/officeenv/files/gdrive/F_LEDGER"' in replaced["error"]["message"]
+        # short text still goes in the call, and the file API takes what the tools refused
+        assert call("gdrive_create_file", name="totals.csv", parents=["F_FIN"], content=TOTALS)["name"] == "totals.csv"
+        auth = file_auth(server)
+        sent = client.post(
+            "/officeenv/files", params={"app": "gdrive", "name": "big.xlsx"}, content=BOOK, headers=auth
+        )
+        assert sent.status_code == 200, sent.text
+        assert client.get(f"/officeenv/files/gdrive/{sent.json()['id']}", headers=auth).content == BOOK
+        assert sandboxes.started[0].files == {}  # the file API writes nothing into the sandbox
+
+        result = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
+        assert result["reward"] == 1.0 and result["sandbox_uploads_refused"] == 3.0
+
+
+def test_tool_descriptions_and_the_guide_say_where_file_content_goes(sandboxes) -> None:
+    catalog = tools_exposure_catalog()
+    with mcp_client(make_server()) as client:
+        _, _, described = seed_with_content(client)
+        download = described["gdrive_download_file"]
+        assert download.startswith("[Google Drive] Download a file's content (alt=media) into the workspace")
+        assert "at most 8192 bytes" in download and "contentBase64" not in download
+        create = described["gdrive_create_file"]
+        assert "file API (/workspace/OFFICEENV.md)" in create and "content_base64" not in create
+        assert described["gdrive_list_files"] == catalog["gdrive_list_files"]["description"]  # OfficeEnv's own
+        guide = sandboxes.started[0].spec.files["/workspace/OFFICEENV.md"]
+        assert guide == WORKSPACE_GUIDE and "drive/<file id>/<name>" in guide and "at most 8192" in guide
+    assert "drive/<file id>" not in workspace_guide(None)
+
+
+def test_with_no_limit_file_content_moves_through_the_conversation(sandboxes) -> None:
+    catalog = tools_exposure_catalog()
+    with mcp_client(make_server(sandbox_config={**IMAGE, "inline_file_bytes": None})) as client:
+        seeded, call, described = seed_with_content(client)
+        assert call("gdrive_download_file", file_id="F_BOOK")["contentBase64"] == BOOK_B64
+        created = call("gdrive_create_file", name="totals.xlsx", parents=["F_FIN"], content_base64=BOOK_B64)
+        assert created["name"] == "totals.xlsx" and sandboxes.started[0].files == {}
+        assert "drive/<file id>" not in sandboxes.started[0].spec.files["/workspace/OFFICEENV.md"]
+        assert described["gdrive_download_file"] == catalog["gdrive_download_file"]["description"]
+        verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
+        assert verified["sandbox_files_saved"] == 0.0 and verified["sandbox_uploads_refused"] == 0.0
+
+
+def test_a_download_the_sandbox_cannot_take_fails_the_call(sandboxes) -> None:
+    with mcp_client(make_server()) as client:
+        seeded, _, _ = seed_with_content(client)
+        sandboxes.fail_on = "upload"
+        got = client.post("/gdrive_download_file", json={"file_id": "F_BOOK"}, cookies=seeded.cookies)
+        assert got.status_code == 502 and "/workspace/drive/F_BOOK/ledger.xlsx" in got.text
+        assert "the sandbox is gone" not in got.text and "Error" not in got.text  # the provider's words stay logged
+        sandboxes.fail_on = None  # the next call writes only its own file
+        again = client.post("/gdrive_download_file", json={"file_id": "F_LEDGER"}, cookies=seeded.cookies)
+        assert again.status_code == 200
+        assert set(sandboxes.started[0].files) == {"/workspace/drive/F_LEDGER/ledger.csv"}
+        # the provider failed, not the policy: the episode's reward is masked
+        verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
+        assert verified["mask_sample"] is True and verified["failure_kind"] == "provider_unavailable"
+        assert "the sandbox is gone" in verified["failure_reason"]
+
+
+def test_a_save_the_workspace_is_in_the_way_of_fails_the_call_and_is_graded(sandboxes) -> None:
+    """A file where the download's folder goes, or a folder at the file's path: what the workspace holds is the
+    model's doing, so the call fails (502) and the episode is graded as usual."""
+    with mcp_client(make_server()) as client:
+        seeded, _, _ = seed_with_content(client)
+        sandboxes.refusing = ("mkdir",)
+        got = client.post("/gdrive_download_file", json={"file_id": "F_BOOK"}, cookies=seeded.cookies)
+        assert got.status_code == 502 and "ledger.xlsx in the workspace: its folder could not be made" in got.text
+        sandboxes.refusing = ("test ! -d",)
+        got = client.post("/gdrive_download_file", json={"file_id": "F_BOOK"}, cookies=seeded.cookies)
+        assert got.status_code == 502 and "ledger.xlsx in the workspace: a folder is there" in got.text
+        verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
+        assert not verified["mask_sample"] and verified["failure_kind"] is None, verified
+
+
+def test_verification_waits_for_a_call_saving_its_download(sandboxes, monkeypatch) -> None:
+    """/verify stops the sandbox under the episode's lock, which a call holds until its downloads are in the
+    sandbox: a call under way when verification begins saves its file, and the sandbox stops after."""
+    server = make_server()
+    run = FakeSandbox.exec
+    stopping: list[asyncio.Task] = []
+
+    async def exec_as_verification_begins(sandbox: FakeSandbox, command: str, **options: object) -> SimpleNamespace:
+        if command.startswith("mkdir") and not stopping:  # /verify comes in as the call saves its download
+            stopping.append(asyncio.create_task(server._stop_before_grading("rs-1")))
+            for _ in range(5):
+                await asyncio.sleep(0)
+        return await run(sandbox, command, **options)
+
+    with mcp_client(server) as client:
+        seeded, _, _ = seed_with_content(client)
+        sandbox = sandboxes.started[0]
+        held = []  # what the sandbox held as it stopped
+        sandboxes.on_stop = lambda: held.append(set(sandbox.files))
+        monkeypatch.setattr(FakeSandbox, "exec", exec_as_verification_begins)
+        got = client.post("/gdrive_download_file", json={"file_id": "F_BOOK"}, cookies=seeded.cookies)
+        assert got.status_code == 200, got.text
+        verified = client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies)  # after the stop under way
+        assert verified.status_code == 200 and not verified.json()["mask_sample"], verified.text
+        assert held == [{"/workspace/drive/F_BOOK/ledger.xlsx"}]  # the file saved, then the sandbox stopped, once
+
+
+def test_a_download_whose_path_holds_a_folder_fails_the_call(sandboxes) -> None:
+    """A folder at the file's path would take the copy inside it, and the answer would name the folder."""
+    with mcp_client(make_server()) as client:
+        seeded, _, _ = seed_with_content(client)
+        sandboxes.refusing = ("test ! -d",)  # the model made a folder where the file goes
+        got = client.post("/gdrive_download_file", json={"file_id": "F_BOOK"}, cookies=seeded.cookies)
+        assert got.status_code == 502 and "/workspace/drive/F_BOOK/ledger.xlsx in the workspace: a folder is there" in got.text
+        assert sandboxes.started[0].files == {}
+
+
+def test_a_saved_download_whose_mode_cannot_be_set_is_answered(sandboxes) -> None:
+    with mcp_client(make_server()) as client:
+        seeded, _, _ = seed_with_content(client)
+        sandboxes.refusing = ("chmod",)
+        got = client.post("/gdrive_download_file", json={"file_id": "F_BOOK"}, cookies=seeded.cookies)
+        assert got.status_code == 200 and json.loads(got.text)["savedTo"] == "/workspace/drive/F_BOOK/ledger.xlsx"
+        assert sandboxes.started[0].files["/workspace/drive/F_BOOK/ledger.xlsx"] == BOOK
+
+
+def test_without_a_sandbox_file_content_moves_as_before(sandboxes) -> None:
+    """An episode without a sandbox, and a plain row's seed even in sandbox mode, answer and take file content in
+    full, with OfficeEnv's descriptions."""
+    catalog = tools_exposure_catalog()
+    with mcp_client(make_server(sandbox_provider=None)) as client:
+        seeded, call, described = seed_with_content(client)
+        book = call("gdrive_download_file", file_id="F_BOOK")
+        assert book["contentBase64"] == BOOK_B64 and "savedTo" not in book
+        assert call("gdrive_download_file", file_id="F_LONG")["content"] == LONG
+        assert call("gdrive_create_file", name="t.xlsx", content_base64=BOOK_B64)["name"] == "t.xlsx"
+        assert described["gdrive_download_file"] == catalog["gdrive_download_file"]["description"]
+        assert "sandbox_files_saved" not in client.post("/verify", json=VERIFY_BODY, cookies=seeded.cookies).json()
+    with mcp_client(make_server()) as client:
+        row = {"responses_create_params": {"input": []}, "officeenv": content_spec(), "task_id": "sandbox-files"}
+        seeded = client.post("/seed_session", json=row)
+        assert seeded.status_code == 200, seeded.text
+        got = client.post("/gdrive_download_file", json={"file_id": "F_BOOK"}, cookies=seeded.cookies).json()
+        assert got["contentBase64"] == BOOK_B64 and "savedTo" not in got and not sandboxes.started
+
+
+def test_workspace_paths_take_one_segment_per_name() -> None:
+    assert _path_part("Q3/Q4 notes.txt", "F1") == "Q3_Q4 notes.txt"
+    assert _path_part("..", "F1") == "F1" and _path_part(None, "F1") == "F1" and _path_part(" ", "F1") == "F1"
+    long = "é" * 300 + ".xlsx"
+    assert _path_part(long, "F1").endswith(".xlsx") and len(_path_part(long, "F1").encode()) <= 200
+    assert saved_download("list_files", {}, {"files": []}, folder="/w", limit=10, name_of=lambda _: None) is None
 
 
 # Guarding a server that sandboxes can reach.

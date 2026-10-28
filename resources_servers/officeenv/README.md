@@ -157,7 +157,26 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
    the workspace documents the file API (`GET`/`PUT /officeenv/files/{app}/{file_id}`,
    `POST /officeenv/files?app=&name=&parent=&mime_type=`). Text and binary files (an XLSX
    workbook, say) move byte for byte; uploads are limited to 20 MB;
-3. ends when Pi's run ends: `finish_tool_names: [user_complete_task]`, its timeout, or the model
+3. keeps Drive file content out of the conversation on its tools too
+   (`sandbox_config.inline_file_bytes`, 8192 by default):
+   - a download (`download_file`, `export_file`, `get_revision`) saves the file in the workspace
+     at `drive/<file id>/<name>` (a revision under `revisions/<version>/`, an export with its
+     type's extension), mode 644, and answers with `savedTo` and `savedBytes`. The answer carries
+     the content as well only for a text file of at most `inline_file_bytes` bytes; a longer text
+     gets its first 2,000 characters as `preview`, a binary file nothing but its path;
+   - `create_file` and `update_file` refuse binary content, and text over `inline_file_bytes`
+     bytes, pasted into the call (`upload_from_workspace`), with the file API command that sends
+     the file instead;
+   - the five tools are described as they behave here, in place of OfficeEnv's words
+     (`contentBase64`, `content_base64`), and `OFFICEENV.md` says the same. `/verify` reports
+     `sandbox_files_saved`, `sandbox_bytes_saved` and `sandbox_uploads_refused`.
+
+   The file API, short text, calls without content and episodes without a sandbox are unchanged;
+   `inline_file_bytes: null` restores full answers. The server wraps the episode's OfficeEnv
+   session for this (`ContentInWorkspace`), so OfficeEnv itself is unchanged. A model that pulls a
+   workbook through the tool reads its bytes as base64 on every later request, and one that copies
+   file content by hand gets it wrong: in earlier pilots, models did both;
+4. ends when Pi's run ends: `finish_tool_names: [user_complete_task]`, its timeout, or the model
    stopping. `/verify` first closes the episode's tools and file API and stops its sandbox, then
    grades the world as for any row: a process the harness left running in the background can act
    until verification starts, but not while the world is graded. A failed stop is logged and

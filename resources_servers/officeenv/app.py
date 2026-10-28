@@ -34,7 +34,11 @@ With ``sandbox_provider`` set, each Environment Server episode also gets a sandb
 sandbox providers, lent to the harness (``SandboxAccess``) and stopped before the episode is graded.
 The sandbox gets the episode's file API in ``OFFICEENV_API_URL`` and ``OFFICEENV_API_TOKEN``
 (``OFFICEENV.md`` in the workspace documents it), so file content moves between the workspace and
-the simulated apps over HTTP instead of through the model's context. A sandbox can reach this
+the simulated apps over HTTP instead of through the model's context. Drive's own file-content tools
+keep it out too (``sandbox_config.inline_file_bytes``): a download saves the file in the workspace
+(``drive/<file id>/<name>``) and answers with its path, carrying the content only for short text, and
+an upload that pastes binary content or long text is refused with the file API command that sends
+the file instead. A sandbox can reach this
 server, so sandbox mode guards it: seeding, closing, verification, the app catalog and the tool
 routes refuse callers other than this node and ``trusted_networks``, which leaves sandboxes the MCP
 endpoint and the file API; and session cookies and MCP tokens are signed with a per-process secret
@@ -55,28 +59,33 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 import shlex
 import socket
+import tempfile
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
-from functools import cache
+from dataclasses import dataclass, field, replace
+from functools import cache, partial
 from pathlib import Path
 from secrets import token_urlsafe
 from typing import TYPE_CHECKING, Any, ClassVar
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from officeenv.apps import available, get_app_class
 from officeenv.artifacts import ArtifactStore
+from officeenv.errors import InvalidRequest
 from officeenv.exposure import Catalog, ToolsExposure
+from officeenv.exposure.base import Invocation
 from officeenv.service import EpisodeService, Reply
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxConfig
 from nemo_gym.sandbox.agent_tools import restricted_network_policy
 from nemo_gym.sandbox.config import resolve_provider_config
@@ -124,6 +133,10 @@ class LengthPenaltyConfig(BaseModel):
     token_scale: float = Field(default=200000.0, gt=0)
 
 
+# The most bytes of a text file a sandboxed episode's Drive answer carries inline (sandbox_config.inline_file_bytes)
+DEFAULT_INLINE_FILE_BYTES = 8192
+
+
 class OfficeEnvSandboxConfig(SandboxConfig):
     """The sandbox lent to each Environment Server episode when ``sandbox_provider`` is set."""
 
@@ -138,6 +151,15 @@ class OfficeEnvSandboxConfig(SandboxConfig):
         default=False,
         description="Refuse the sandbox every outbound connection except to this server and the model servers "
         "(OpenSandbox's egress policy, which this sets as provider_options.network_policy); OpenSandbox only",
+    )
+    inline_file_bytes: int | None = Field(
+        default=DEFAULT_INLINE_FILE_BYTES,
+        ge=0,
+        description="Keep Drive file content out of the conversation: a download (download_file, export_file, "
+        "get_revision) saves the file in the workspace under drive/ and answers with its path, carrying the content "
+        "only for a text file of at most this many bytes; an upload (create_file, update_file) that pastes binary "
+        "content, or text over this many bytes, is refused with the file API command that sends the file. None "
+        "answers and takes content in full, as without a sandbox",
     )
 
     @model_validator(mode="after")
@@ -282,29 +304,262 @@ FILE_OPS: dict[str, dict[str, str]] = {
 }
 MAX_UPLOAD_BYTES = 20_000_000
 
-WORKSPACE_GUIDE = f"""# OfficeEnv workspace
+# What a sandbox reads of this server: the variables that name the episode's file API, its route, and the guide.
+API_URL_ENV, API_TOKEN_ENV = "OFFICEENV_API_URL", "OFFICEENV_API_TOKEN"
+FILES_ROUTE = "/officeenv/files"
+GUIDE_NAME = "OFFICEENV.md"
+
+FILES_GUIDE = f"""# OfficeEnv workspace
 
 Business apps are tools on your MCP server. File content moves between this workspace and
 Google Drive over HTTP, without going through the conversation, byte for byte: text files
 (CSV, TSV, JSON, Markdown) and binary ones (XLSX workbooks, PDFs, images) alike.
 
     # download a Drive file's content
-    curl -sf -H "Authorization: Bearer $OFFICEENV_API_TOKEN" \\
-      "$OFFICEENV_API_URL/officeenv/files/gdrive/<file_id>" -o <local path>
+    curl -sf -H "Authorization: Bearer ${API_TOKEN_ENV}" \\
+      "${API_URL_ENV}{FILES_ROUTE}/gdrive/<file_id>" -o <local path>
 
     # upload a local file as a new Drive file (parent folder id optional)
-    curl -sf -X POST -H "Authorization: Bearer $OFFICEENV_API_TOKEN" --data-binary @<local path> \\
-      "$OFFICEENV_API_URL/officeenv/files?app=gdrive&name=<file name>&parent=<folder id>"
+    curl -sf -X POST -H "Authorization: Bearer ${API_TOKEN_ENV}" --data-binary @<local path> \\
+      "${API_URL_ENV}{FILES_ROUTE}?app=gdrive&name=<file name>&parent=<folder id>"
 
     # replace an existing Drive file's content
-    curl -sf -X PUT -H "Authorization: Bearer $OFFICEENV_API_TOKEN" --data-binary @<local path> \\
-      "$OFFICEENV_API_URL/officeenv/files/gdrive/<file_id>"
+    curl -sf -X PUT -H "Authorization: Bearer ${API_TOKEN_ENV}" --data-binary @<local path> \\
+      "${API_URL_ENV}{FILES_ROUTE}/gdrive/<file_id>"
 
 The file name's extension sets the file type (.csv, .xlsx, .pdf, ...); add &mime_type=<type> to
 the upload URL for another. Uploads are limited to {MAX_UPLOAD_BYTES // 1_000_000} MB. Find file and
 folder ids with the Drive tools (list or search files). A request that fails returns the app's
 error as JSON.
 """
+
+CONTENT_GUIDE = """Downloading a file with the Drive tools saves it in this workspace at drive/<file id>/<name>
+(the answer's savedTo); the answer also carries the content only for a text file of at most {limit}
+bytes. An upload with the Drive tools takes pasted content only as text of at most {limit} bytes:
+send any other file with the commands above.
+"""
+
+
+def workspace_guide(content_limit: int | None = DEFAULT_INLINE_FILE_BYTES) -> str:
+    """The workspace guide for an episode: how files move, and where Drive downloads land when file content stays
+    out of the conversation (``content_limit``, see ContentInWorkspace; None: it does not)."""
+    if content_limit is None:
+        return FILES_GUIDE
+    return FILES_GUIDE + "\n" + CONTENT_GUIDE.format(limit=content_limit)
+
+
+WORKSPACE_GUIDE = workspace_guide()
+
+# Drive's ops that answer a file's content, and those that take content to store. In a sandboxed episode the content
+# moves through the workspace instead (ContentInWorkspace): bytes in the conversation cost the model their tokens on
+# every later request, and a model that copies them by hand gets them wrong.
+CONTENT_DOWNLOADS = frozenset({("gdrive", "download_file"), ("gdrive", "export_file"), ("gdrive", "get_revision")})
+CONTENT_UPLOADS = frozenset({("gdrive", "create_file"), ("gdrive", "update_file")})
+DOWNLOADS_DIR = "drive"  # in the workdir: drive/<file id>/<name>
+PREVIEW_CHARS = 2000  # the start of a text file too long to answer inline
+EXPORT_EXTENSIONS = {
+    "text/plain": ".txt",
+    "text/html": ".html",
+    "text/markdown": ".md",
+    "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
+    "application/pdf": ".pdf",
+}
+
+# What Drive's file-content ops do in a sandboxed episode (ContentInWorkspace), said in place of OfficeEnv's own
+# descriptions, which tell of content carried in the answer or in the call (contentBase64, content_base64).
+CONTENT_DESCRIPTIONS: dict[tuple[str, str], str] = {
+    ("gdrive", "download_file"): (
+        "Download a file's content (alt=media) into the workspace: the answer gives the file's path (savedTo) and "
+        "size (savedBytes), and carries the text itself (content) only for a text file of at most {limit} bytes; a "
+        "longer text file comes with its start (preview), a binary file with its path alone."
+    ),
+    ("gdrive", "export_file"): (
+        "Export a Google Doc/Sheet/Slides as text/plain, text/csv, text/html, application/pdf… into the workspace: "
+        "the answer gives the exported file's path (savedTo) and size (savedBytes), and carries the text itself "
+        "(content) only when it is text of at most {limit} bytes."
+    ),
+    ("gdrive", "get_revision"): (
+        "A revision's metadata, with its content saved in the workspace: the answer gives the file's path (savedTo) "
+        "and size (savedBytes), and carries the text itself (content) only for a text file of at most {limit} bytes."
+    ),
+    ("gdrive", "create_file"): (
+        "Create a file or, with the folder mimeType, a folder; you become its owner. Content goes in this call only "
+        "as text of at most {limit} bytes: upload any other file from the workspace with the file API ({guide})."
+    ),
+    ("gdrive", "update_file"): (
+        "Update a file's metadata (rename, describe, star, trash/restore), move it with add_parents/remove_parents, "
+        "or upload new content: content goes in this call only as text of at most {limit} bytes; send any other file "
+        "from the workspace with the file API ({guide})."
+    ),
+}
+
+
+def content_description(app: str, op: str, description: str, limit: int | None, *, guide: str) -> str:
+    """A tool's description as a sandboxed episode reads it: Drive's file-content ops say what they do there
+    (CONTENT_DESCRIPTIONS, ``guide`` the workspace guide's path); every other op, and every op when content moves
+    through the conversation (``limit`` None), keeps OfficeEnv's. The tool's app label (``[Google Drive] ``) stays."""
+    text = CONTENT_DESCRIPTIONS.get((app, op))
+    if text is None or limit is None:
+        return description
+    label = description[: description.index("] ") + 2] if description.startswith("[") and "] " in description else ""
+    return label + text.format(limit=limit, guide=guide)
+
+
+def _path_part(name: Any, fallback: str) -> str:
+    """A Drive name or id as one segment of a workspace path: '/' (a Drive name is no path) and NUL replaced, at
+    most 200 bytes, the extension kept."""
+    text = str(name if name is not None else "").replace("/", "_").replace("\0", "").strip()
+    if text in ("", ".", ".."):
+        text = fallback
+    if len(text.encode("utf-8")) > 200:
+        stem, ext = posixpath.splitext(text)
+        ext = ext if len(ext.encode("utf-8")) <= 20 else ""
+        text = stem.encode("utf-8")[: 200 - len(ext.encode("utf-8"))].decode("utf-8", "ignore") + ext
+    return text
+
+
+def _preview(text: str) -> str:
+    """The start of a text file: at most PREVIEW_CHARS characters, ending at a line break when it holds one."""
+    head = text[:PREVIEW_CHARS]
+    if len(text) > PREVIEW_CHARS and "\n" in head:
+        head = head[: head.rindex("\n") + 1]
+    return head
+
+
+def saved_download(
+    op: str,
+    params: Mapping[str, Any],
+    answer: Mapping[str, Any],
+    *,
+    folder: str,
+    limit: int,
+    name_of: Callable[[str], str | None],
+) -> tuple[dict[str, Any], str, bytes] | None:
+    """A Drive answer carrying a file's content, as a sandboxed episode gets it, with where the file is saved and
+    its bytes; None for an answer without content. The answer gives the file's path in the workspace (``savedTo``,
+    under ``folder``: ``<file id>/<name>``, a revision under ``<file id>/revisions/<version>/``) and its size
+    (``savedBytes``) in place of the content, which stays only when it is text of at most ``limit`` bytes; longer
+    text gets its start (``preview``), binary content nothing but the path."""
+    if isinstance(answer.get("contentBase64"), str):
+        try:
+            data, text = base64.b64decode(answer["contentBase64"], validate=True), None
+        except (binascii.Error, ValueError):
+            return None
+    elif isinstance(answer.get("content"), str):
+        text = answer["content"]
+        data = text.encode("utf-8")
+    else:
+        return None
+    file_id = str(params.get("file_id") or answer.get("id") or "file")
+    base = f"{folder}/{_path_part(file_id, 'file')}"
+    if op == "get_revision":
+        version = _path_part(answer.get("version"), "revision")
+        target = f"{base}/revisions/{version}/{_path_part(name_of(file_id), file_id)}"
+    elif op == "export_file":  # a Docs editor file as another type: its name gets the type's extension
+        name = _path_part(answer.get("name"), file_id)
+        extension = EXPORT_EXTENSIONS.get(str(answer.get("mimeType")), "")
+        target = f"{base}/{name if name.lower().endswith(extension) else name + extension}"
+    else:
+        target = f"{base}/{_path_part(answer.get('name'), file_id)}"
+    out = {key: value for key, value in answer.items() if key not in ("content", "contentBase64")}
+    out["savedTo"] = target
+    out["savedBytes"] = len(data)
+    if text is not None and len(data) <= limit:
+        out["content"] = text
+    else:
+        held = "binary content" if text is None else f"{len(data)} bytes of text, over the {limit} shown inline"
+        out["note"] = f"The content is not in this answer ({held}): the file is at savedTo. Work on it with code."
+        if text is not None:
+            out["preview"] = _preview(text)
+    return out, target, data
+
+
+def pasted_content_refusal(op: str, params: Mapping[str, Any], limit: int, *, guide: str) -> str | None:
+    """Why a sandboxed episode's Drive upload may not carry its content in the call (binary content, or text over
+    ``limit`` bytes), with the file API command that sends the file instead; None when it may."""
+    if params.get("content_base64"):
+        held = "binary content"
+    elif isinstance(params.get("content"), str) and len(params["content"].encode("utf-8")) > limit:
+        held = f"text over {limit} bytes"
+    else:
+        return None
+    send = f'-H "Authorization: Bearer ${API_TOKEN_ENV}" --data-binary @<local path>'
+    if op == "update_file":
+        file_id = quote(str(params.get("file_id") or "<file_id>"), safe="<>_")
+        command = f'curl -sf -X PUT {send} "${API_URL_ENV}{FILES_ROUTE}/gdrive/{file_id}"'
+        after = " (then update_file without content for any other change)"
+    else:
+        query = f"app=gdrive&name={quote(str(params.get('name') or '<file name>'), safe='<>')}"
+        parents = params.get("parents")
+        if isinstance(parents, list) and parents:
+            query += f"&parent={quote(str(parents[0]), safe='')}"
+        if params.get("mime_type"):
+            query += f"&mime_type={quote(str(params['mime_type']), safe='')}"
+        command = f'curl -sf -X POST {send} "${API_URL_ENV}{FILES_ROUTE}?{query}"'
+        after = ""
+    return (
+        f"File content is not pasted into a call in this sandbox ({held}). Write the file in the workspace and send "
+        f"it with the file API ({guide}){after}:\n  {command}"
+    )
+
+
+class ContentInWorkspace:
+    """A sandboxed episode's exposure with Drive file content kept out of the conversation; everything else is
+    the session's own exposure, which it wraps. A download saves the file in the workspace and answers with its
+    path (``saved_download``), and an upload that pastes its content is refused with the file API command that
+    sends the file (``pasted_content_refusal``, an app error the session answers as any other). Saving is the
+    route's: ``format_result`` queues the file on the episode, and the tool route writes it into the sandbox before
+    it answers (``OfficeEnvResourcesServer._save_downloads``). The file API's own calls (``_Episode.direct``) pass
+    as they are."""
+
+    def __init__(
+        self,
+        inner: Any,
+        episode: "_Episode",
+        *,
+        limit: int,
+        folder: str,
+        guide: str,
+        name_of: Callable[[str], str | None],
+    ) -> None:
+        self._inner = inner
+        self._episode = episode
+        self._limit = limit
+        self._folder = folder
+        self._guide = guide
+        self._name_of = name_of
+
+    def __getattr__(self, name: str) -> Any:  # tools, describe, format_error: the session's exposure
+        if name.startswith("__") or name in ("_inner", "_episode", "_limit", "_folder", "_guide", "_name_of"):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+    def parse(self, tool_name: str, args: dict[str, Any]) -> Any:
+        parsed = self._inner.parse(tool_name, args)
+        if isinstance(parsed, Invocation) and (parsed.app, parsed.op) in CONTENT_UPLOADS and not self._episode.direct:
+            refusal = pasted_content_refusal(parsed.op, parsed.params, self._limit, guide=self._guide)
+            if refusal is not None:
+                self._episode.uploads_refused += 1
+                raise InvalidRequest(refusal, code="upload_from_workspace")
+        return parsed
+
+    def format_result(self, inv: Any, result: dict[str, Any]) -> Any:
+        if (inv.app, inv.op) in CONTENT_DOWNLOADS and isinstance(result, dict) and not self._episode.direct:
+            saved = saved_download(
+                inv.op, inv.params, result, folder=self._folder, limit=self._limit, name_of=self._name_of
+            )
+            if saved is not None:
+                result, target, data = saved
+                self._episode.saves.append((target, data))
+        return self._inner.format_result(inv, result)
+
+
+def _drive_file_name(session: Any, file_id: str) -> str | None:
+    """A Drive file's name in a session's world (a revision's answer does not carry it)."""
+    row = session.world.collection("gdrive", "files").rows.get(file_id)
+    return row.get("name") if isinstance(row, dict) else None
+
 
 RELAY_SOURCE = (Path(__file__).parent / "sandbox" / "relay.py").read_text(encoding="utf-8")
 RELAY_PATH = "/opt/officeenv/relay.py"
@@ -414,6 +669,23 @@ class _Episode:
     sandbox: AsyncSandbox | None = None
     access: SandboxAccess | None = None
     grading: bool = False
+    provider_failure: str | None = None  # the first sandbox operation the provider failed (_provider_failed)
+    # Drive content kept out of the conversation (ContentInWorkspace): files saved in the workspace instead, and
+    # uploads refused for pasting their content
+    files_saved: int = 0
+    bytes_saved: int = 0
+    uploads_refused: int = 0
+    saves: list[tuple[str, bytes]] = field(default_factory=list)  # (path, bytes) the current call saved
+    folders: set[str] = field(default_factory=set)  # folders made in the sandbox for them
+    direct: bool = False  # a file API call is under way: its content moves as it is
+
+    def usage(self) -> dict[str, float]:
+        """What the episode moved through its workspace instead of the conversation, as verify metrics."""
+        return {
+            "sandbox_files_saved": float(self.files_saved),
+            "sandbox_bytes_saved": float(self.bytes_saved),
+            "sandbox_uploads_refused": float(self.uploads_refused),
+        }
 
 
 class OfficeEnvResourcesServer(SimpleResourcesServer):
@@ -538,6 +810,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             episode = self._episodes[session_id]
             if new:
                 try:
+                    self._keep_content_in_workspace(session_id, episode)
                     await self._lend_sandbox(session_id, episode, task_id=body.task_id.task_id)
                 except BaseException:
                     del self._episodes[session_id]
@@ -545,13 +818,32 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
                     raise
         return ResourcesSeedSessionResponse(resources_session_id=session_id, sandbox_access=episode.access)
 
+    def _guide_path(self) -> str:
+        return f"{self.config.sandbox_config.workdir.rstrip('/')}/{GUIDE_NAME}"
+
+    def _keep_content_in_workspace(self, session_id: str, episode: _Episode) -> None:
+        """Move the episode's Drive file content through its workspace (ContentInWorkspace), unless
+        ``inline_file_bytes`` is None."""
+        limit = self.config.sandbox_config.inline_file_bytes
+        if limit is None:
+            return
+        session = self.service.store.get(session_id)
+        session.exposure = ContentInWorkspace(
+            session.exposure,
+            episode,
+            limit=limit,
+            folder=f"{self.config.sandbox_config.workdir.rstrip('/')}/{DOWNLOADS_DIR}",
+            guide=self._guide_path(),
+            name_of=partial(_drive_file_name, session),
+        )
+
     async def _lend_sandbox(self, session_id: str, episode: _Episode, *, task_id: str) -> None:
-        """Start the episode's sandbox with ``OFFICEENV.md`` and the episode's file API in its environment."""
+        """Start the episode's sandbox with the workspace guide and the episode's file API in its environment."""
         config = self.config.sandbox_config
         if not config.image:
             raise ValueError("Set sandbox_config.image to the episode sandbox image (see sandbox/Dockerfile)")
         named_configs = get_global_config_dict()
-        files = {f"{config.workdir.rstrip('/')}/OFFICEENV.md": WORKSPACE_GUIDE}
+        files = {self._guide_path(): workspace_guide(config.inline_file_bytes)}
         if config.host_relay:
             files[RELAY_PATH] = RELAY_SOURCE
         spec = config.spec(
@@ -564,9 +856,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         )
         token = token_urlsafe(32)
         files_api_url = self.config.files_api_url or f"http://{self.config.host}:{self.config.port}"
-        spec = replace(
-            spec, env={**spec.env, "OFFICEENV_API_URL": files_api_url.rstrip("/"), "OFFICEENV_API_TOKEN": token}
-        )
+        spec = replace(spec, env={**spec.env, API_URL_ENV: files_api_url.rstrip("/"), API_TOKEN_ENV: token})
         provider_config = resolve_provider_config(self.config.sandbox_provider, named_configs)
         if config.block_internet:
             # Fails closed for a provider without network policies, or a server a sandbox cannot reach.
@@ -700,11 +990,16 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         if self.service.store.get(session_id) is None:
             raise ResourcesSessionLostError("This session has ended.")
         episode = self._episodes.get(session_id)
-        if episode is not None and episode.grading:
-            raise HTTPException(
-                status_code=409, detail="This episode's verification has started; its tools are closed"
-            )
-        reply = self.service.call(session_id, tool_name, await request.body())
+        body = await request.body()
+        # Verification stops the sandbox under the episode's lock, which a call holds until its downloads are in the
+        # sandbox: a call under way when verification begins finishes first, and one that comes later is refused.
+        async with self._locks.setdefault(session_id, asyncio.Lock()):
+            if episode is not None and episode.grading:
+                raise HTTPException(
+                    status_code=409, detail="This episode's verification has started; its tools are closed"
+                )
+            reply = self.service.call(session_id, tool_name, body)
+            await self._save_downloads(session_id, episode)
         return Response(content=reply.text(), media_type="application/json", status_code=reply.status)
 
     async def verify(
@@ -714,6 +1009,15 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_before_grading(session_id)
         result = self.service.verify(session_id)
+        episode = self._episodes.get(session_id) if self.config.sandbox_provider is not None else None
+        if episode is not None:  # what the sandboxed episode moved through its workspace instead of the conversation
+            result = result | episode.usage()
+            if episode.provider_failure is not None:  # the reward would measure the sandbox, not the policy
+                result = result | {
+                    "mask_sample": True,
+                    "failure_kind": PROVIDER_UNAVAILABLE,
+                    "failure_reason": episode.provider_failure,
+                }
         if result.get("officeenv_failure") == "no_session":
             # Never seeded, verified already, closed, or gone with a restart: the world went with
             # it, so the reward would measure the environment, not the policy.
@@ -728,7 +1032,13 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         if catchall is None:
             return []
         catalog = tools_exposure_catalog()
-        return [catchall.tool(name, tool["parameters"], tool["description"]) for name, tool in catalog.items()]
+        limit = self.config.sandbox_config.inline_file_bytes if self.config.sandbox_provider is not None else None
+        tools = []
+        for name, tool in catalog.items():
+            app, _, op = name.partition("_")
+            description = content_description(app, op, tool["description"], limit, guide=self._guide_path())
+            tools.append(catchall.tool(name, tool["parameters"], description))
+        return tools
 
     def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str] | None:
         """The tools of the episode this request seeded: its MCP token admits only those."""
@@ -757,12 +1067,81 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         ops = FILE_OPS.get(app_name)
         if ops is None:
             raise HTTPException(status_code=404, detail=f"File transfer serves {sorted(FILE_OPS)}, not {app_name!r}")
-        reply = self.service.call(session_id, f"{app_name}_{ops[verb]}", json.dumps(args))
+        episode = self._episodes.get(session_id)
+        if episode is not None:  # the file API moves the content itself
+            episode.direct = True
+        try:
+            reply = self.service.call(session_id, f"{app_name}_{ops[verb]}", json.dumps(args))
+        finally:
+            if episode is not None:
+                episode.direct = False
         body = reply.body if isinstance(reply.body, dict) else json.loads(reply.body)
         status = reply.status if reply.status != 200 else _error_status(body)
         if status is not None:
             raise HTTPException(status_code=status, detail=body)
         return body
+
+    @staticmethod
+    def _provider_failed(session_id: str, episode: _Episode, doing: str, exc: BaseException) -> HTTPException:
+        """The answer (502) to a call whose sandbox operation ``doing`` the provider failed: it raised, or could not
+        run its command, whatever the workspace holds. The model reads none of the provider's words: they go to the
+        server's log and the episode's failure_reason. The episode's verification is masked as provider_unavailable,
+        since its reward would measure the sandbox, not the policy."""
+        LOGGER.error("Could not %s in the sandbox of OfficeEnv session %s", doing, session_id, exc_info=exc)
+        if episode.provider_failure is None:
+            episode.provider_failure = f"Could not {doing} in the sandbox: {type(exc).__name__}: {exc}"[:500]
+        return HTTPException(status_code=502, detail=f"Could not {doing} in the workspace")
+
+    async def _save_downloads(self, session_id: str, episode: _Episode | None) -> None:
+        """Write into the episode's sandbox the files its call's Drive downloads saved (ContentInWorkspace), before
+        the route answers that they are there, as mode 644. The queue is taken before the first await, so a call
+        writes only its own files. A file that cannot be written fails the call (502): because of what the
+        workspace holds, or because the provider failed (``_provider_failed``)."""
+        if episode is None or not episode.saves:
+            return
+        saves, episode.saves = episode.saves, []
+        for target, data in saves:
+            try:
+                folder = posixpath.dirname(target)
+                if folder not in episode.folders:
+                    made = await episode.sandbox.exec(f"mkdir -p {shlex.quote(folder)}", cwd="/", timeout_s=60)
+                    if made.error_type is not None:
+                        raise RuntimeError(f"mkdir: {made.error_type} {(made.stderr or '')[-300:]}")
+                    if made.return_code != 0:  # the workspace is in the way: a file where a folder goes
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Could not save {target} in the workspace: its folder could not be made",
+                        )
+                    episode.folders.add(folder)
+                # a folder at the file's path would take the copy inside it, and savedTo would name the folder
+                free = await episode.sandbox.exec(f"test ! -d {shlex.quote(target)}", cwd="/", timeout_s=60)
+                if free.error_type is not None:
+                    raise RuntimeError(f"test: {free.error_type} {(free.stderr or '')[-300:]}")
+                if free.return_code != 0:
+                    raise HTTPException(
+                        status_code=502, detail=f"Could not save {target} in the workspace: a folder is there"
+                    )
+                with tempfile.TemporaryDirectory() as staging:  # named as the file, wherever a copy lands
+                    staged = Path(staging) / posixpath.basename(target)
+                    staged.write_bytes(data)
+                    os.chmod(staged, 0o644)  # readable whoever the agent runs as (a copy may keep the mode)
+                    await episode.sandbox.upload(str(staged), target)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise self._provider_failed(session_id, episode, f"save {target}", exc) from exc
+            episode.files_saved += 1
+            episode.bytes_saved += len(data)
+        # An upload need not keep the staged file's mode (OpenSandbox's writes 755): a downloaded file is data,
+        # readable by anyone and executable by no one, as Docker's copy leaves it.
+        paths = " ".join(shlex.quote(target) for target, _ in saves)
+        try:
+            done = await episode.sandbox.exec(f"chmod 644 {paths}", cwd="/", timeout_s=60)
+            problem = None if done.error_type is None and done.return_code == 0 else (done.stderr or "")[-300:]
+        except Exception as exc:  # the files are there: their mode is no reason to fail the call
+            problem = f"{type(exc).__name__}: {exc}"
+        if problem is not None:
+            LOGGER.warning("Could not chmod %s in the sandbox of OfficeEnv session %s: %s", paths, session_id, problem)
 
     @staticmethod
     async def _content_args(request: Request) -> dict[str, str]:
