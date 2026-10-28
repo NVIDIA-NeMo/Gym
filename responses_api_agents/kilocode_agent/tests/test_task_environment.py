@@ -15,16 +15,16 @@ from pathlib import Path
 
 import pytest
 
-from responses_api_agents.kilocode_agent import sandbox_runner
+from responses_api_agents.kilocode_agent.tests.test_sandbox import stage_locally
 
 
-PLUGIN = Path(sandbox_runner.__file__).with_name("task_environment.mjs")
+PLUGIN = Path(__file__).parents[1] / "task_environment.mjs"
 TASK_DIRECTORIES = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the Kilo plugin")
 @pytest.mark.parametrize("custom_xdg", [False, True])
-def test_shell_environment_keeps_task_files_after_session_close(tmp_path: Path, custom_xdg: bool) -> None:
+async def test_shell_environment_keeps_task_files_after_session_close(tmp_path: Path, custom_xdg: bool) -> None:
     session, workdir, home = tmp_path / "session", tmp_path / "task", tmp_path / "task-home"
     for directory in (session, workdir, home):
         directory.mkdir()
@@ -45,14 +45,14 @@ execFileSync("/bin/sh", ["-c", 'mkdir -p "$XDG_CONFIG_HOME"; printf task > "$HOM
 console.log(JSON.stringify({cliHome: process.env.HOME, cliConfig: process.env.XDG_CONFIG_HOME, tool: output.env}));
 """
     )
-    (session / "input.json").write_text(json.dumps({"command": [shutil.which("node"), str(session / "probe.mjs")]}))
+    argv = await stage_locally(session, workdir, [shutil.which("node"), str(session / "probe.mjs")])
     # No task directories leak in from the agent-server host.
     env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
     env["HOME"] = str(home)
     if custom_xdg:
         env["XDG_CONFIG_HOME"] = str(tmp_path / "task-config")
     result = subprocess.run(
-        [sys.executable, "-I", sandbox_runner.__file__, str(session), str(workdir)],
+        argv,
         env=env,
         capture_output=True,
         text=True,
@@ -102,7 +102,7 @@ def test_invalid_task_environment_cannot_acknowledge_hook_initialization(tmp_pat
     assert not (tmp_path / "task-environment.ready").exists()
 
 
-def test_runner_removes_stale_task_environment_receipt_before_launch(tmp_path: Path) -> None:
+async def test_runner_removes_stale_task_environment_receipt_before_launch(tmp_path: Path) -> None:
     session, workdir = tmp_path / "session", tmp_path / "task"
     session.mkdir()
     workdir.mkdir()
@@ -111,9 +111,8 @@ def test_runner_removes_stale_task_environment_receipt_before_launch(tmp_path: P
     mcp_receipt = session / "required-mcp.ready"
     mcp_receipt.write_text('["tools"]')
     command = [sys.executable, "-c", "print('Kilo continued without loading the hook')"]
-    (session / "input.json").write_text(json.dumps({"command": command}))
     result = subprocess.run(
-        [sys.executable, "-I", sandbox_runner.__file__, str(session), str(workdir)],
+        await stage_locally(session, workdir, command),
         capture_output=True,
         text=True,
         timeout=30,
@@ -171,6 +170,20 @@ def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, 
         assert receipt.read_text() == "ready\n"
     else:
         assert not receipt.exists()
+
+
+@pytest.mark.parametrize("home", ["/task/a\tb", "/task/new\nline", '/task/"quoted"\\back'])
+def test_recorded_task_directories_are_valid_json(tmp_path: Path, home: str) -> None:
+    from shlex import quote
+
+    from responses_api_agents.kilocode_agent.sandbox import _ACTIVATION_SETUP
+
+    env = {"PATH": os.environ["PATH"], "HOME": home, "XDG_CONFIG_HOME": f"{home}\x01\x1fconfig"}
+    setup = f"session={quote(str(tmp_path))}\n{_ACTIVATION_SETUP}"
+    result = subprocess.run(["bash", "-c", setup], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    recorded = json.loads((tmp_path / "task-env.json").read_text())
+    assert recorded["HOME"] == home and recorded["XDG_CONFIG_HOME"] == f"{home}\x01\x1fconfig"
 
 
 def _plugin_probe(
@@ -368,7 +381,7 @@ def _mcp_preflight_server(*, unavailable: bool) -> Iterator[tuple[str, list[dict
 
 
 @pytest.mark.parametrize("behavior", ["connected", "unavailable", "missing_tool_hook"])
-def test_pinned_cli_mcp_preflight_uses_grant_without_inference(tmp_path: Path, behavior: str) -> None:
+async def test_pinned_cli_mcp_preflight_uses_grant_without_inference(tmp_path: Path, behavior: str) -> None:
     binary = os.environ.get("GYM_TEST_KILO_BINARY")
     if binary is None:
         pytest.skip("Set GYM_TEST_KILO_BINARY to the pinned Kilo 7.4.15 executable")
@@ -379,15 +392,6 @@ def test_pinned_cli_mcp_preflight_uses_grant_without_inference(tmp_path: Path, b
     shutil.copyfile(PLUGIN, plugin)
     if behavior == "missing_tool_hook":
         plugin.write_text(plugin.read_text().replace('"tool.definition":', '"unused.tool.definition":'))
-    (session / "input.json").write_text(
-        json.dumps(
-            {
-                "command": [binary, "debug", "agent", "build", "--print-logs"],
-                "required_mcp_servers": ["task.tools"],
-                "mcp_preflight": True,
-            }
-        )
-    )
     env = {
         **os.environ,
         "HOME": str(tmp_path / "task-home"),
@@ -397,38 +401,36 @@ def test_pinned_cli_mcp_preflight_uses_grant_without_inference(tmp_path: Path, b
     version = subprocess.run([binary, "--version"], env=env, capture_output=True, text=True, timeout=60)
     assert version.returncode == 0 and version.stdout.strip() == "7.4.15"
     with _mcp_preflight_server(unavailable=behavior == "unavailable") as (url, mcp_requests, model_requests):
-        (session / "kilo.json").write_text(
-            json.dumps(
-                {
-                    "model": "nemo/fixture",
-                    "provider": {
-                        "nemo": {
-                            "npm": "@ai-sdk/openai-compatible",
-                            "options": {"baseURL": f"{url}/model/v1", "apiKey": "EMPTY"},
-                            "models": {"fixture": {"name": "fixture"}},
-                        }
-                    },
-                    "mcp": {
-                        "task.tools": {
-                            "type": "remote",
-                            "url": f"{url}/mcp",
-                            "headers": {"Authorization": "Bearer fixture-token"},
-                            "enabled": True,
-                            "oauth": False,
-                            "timeout": 2000,
-                        }
-                    },
-                    "plugin": [plugin.as_uri()],
+        config = {
+            "model": "nemo/fixture",
+            "provider": {
+                "nemo": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {"baseURL": f"{url}/model/v1", "apiKey": "EMPTY"},
+                    "models": {"fixture": {"name": "fixture"}},
                 }
-            )
+            },
+            "mcp": {
+                "task.tools": {
+                    "type": "remote",
+                    "url": f"{url}/mcp",
+                    "headers": {"Authorization": "Bearer fixture-token"},
+                    "enabled": True,
+                    "oauth": False,
+                    "timeout": 2000,
+                }
+            },
+            "plugin": [plugin.as_uri()],
+        }
+        argv = await stage_locally(
+            session,
+            workdir,
+            [binary, "debug", "agent", "build", "--print-logs"],
+            config=json.dumps(config),
+            required_mcp_servers=("task.tools",),
+            mcp_preflight=True,
         )
-        result = subprocess.run(
-            [sys.executable, "-I", sandbox_runner.__file__, str(session), str(workdir)],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=90,
-        )
+        result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=90)
     assert model_requests == [], "MCP preflight must not consume model inference"
     assert (session / "task-environment.ready").read_text() == "ready\n"
     receipt = session / "required-mcp.ready"

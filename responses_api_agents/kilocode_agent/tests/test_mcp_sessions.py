@@ -12,7 +12,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FAILED, SandboxSession
+from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
 from nemo_gym.base_responses_api_agent import AgentSessionSetupError
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -365,8 +366,10 @@ class FakeSandbox:
 
     def __init__(self, *, mcp_connected: bool = True, exit_code: int | None = 0) -> None:
         self.mcp_connected = mcp_connected
-        # None: the supervisor's deadline stopped the runner before it recorded an exit.
+        # Kilo's status in the cleanup receipt; None means the supervisor's deadline stopped it.
         self.exit_code = exit_code
+        # False: the runner fails before starting Kilo, so Kilo writes nothing.
+        self.runner_starts = True
         self.files: dict[str, str] = {}
         self.launches: list[dict] = []
         self.commands: list[str] = []
@@ -379,23 +382,26 @@ class FakeSandbox:
         if "rm -f --" in command:
             for path in shlex.split(command.split("rm -f --", 1)[1]):
                 self.files.pop(path, None)
-        elif "--receipt" in command and "process_supervisor" in command:
+        elif "--receipt" in command and SUPERVISOR_FILE in command:
             supervisor = re.search(r"--receipt (\S+)/cleanup\.json", command).group(1)
             payload = json.loads(self.files[f"{ROOT}/input.json"])
-            self.launches.append({"supervisor": supervisor, **payload})
+            argv = re.search(r"^command=\((.*)\)$", self.files[f"{ROOT}/params.sh"], re.MULTILINE).group(1)
+            self.launches.append({"supervisor": supervisor, "command": shlex.split(argv), **payload})
+            if not self.runner_starts:
+                self.files[f"{supervisor}/cleanup.json"] = json.dumps(receipt(return_code=HARNESS_RUNNER_FAILED))
+                return SandboxExecResult(return_code=0, stdout="", stderr="")
+            # The runner's setup drops receipts left by an earlier invocation before starting Kilo.
             self.files.pop(f"{ROOT}/required-mcp.ready", None)
             self.files[f"{ROOT}/task-environment.ready"] = "ready\n"
             if self.mcp_connected:
                 self.files[f"{ROOT}/required-mcp.ready"] = json.dumps(payload["required_mcp_servers"])
             self.files[f"{ROOT}/stdout.jsonl"] = "" if payload["mcp_preflight"] else TEXT
             self.files[f"{ROOT}/stderr.log"] = "task.tools connect failed: Bearer task-token"
-            if self.exit_code is not None:
-                self.files[f"{ROOT}/exit.json"] = json.dumps(self.exit_code)
             timed_out = self.exit_code is None
             self.files[f"{supervisor}/cleanup.json"] = json.dumps(
-                receipt(return_code=-15 if timed_out else 0, timed_out=timed_out)
+                receipt(return_code=143 if timed_out else self.exit_code, timed_out=timed_out)
             )
-        elif "--snapshot" in command:
+        elif "kilo.db" in command:
             return SandboxExecResult(return_code=1, stdout="", stderr="no database")
         return SandboxExecResult(return_code=0, stdout="", stderr="")
 
@@ -417,7 +423,16 @@ def _preflight_state(sandbox: FakeSandbox) -> KiloSandboxSession:
     )
 
 
-async def test_preflight_rearms_supervisor_and_activation_never_reads_preflight_outputs() -> None:
+async def _activate(session: KiloSandboxSession) -> KiloArtifacts:
+    return await session.session.execute(
+        stage_activation=lambda: session.stage_activation(command=["kilo", "run"], config="{}"),
+        collect=session.collect_artifacts,
+        timeout=5,
+        close_timeout=1,
+    )
+
+
+async def test_preflight_rearms_supervisor_and_activation_reads_shared_runtime() -> None:
     sandbox = FakeSandbox()
     session = _preflight_state(sandbox)
     await session.prepare_mcp(config='{"mcp": {}}', timeout=5, close_timeout=1)
@@ -427,19 +442,12 @@ async def test_preflight_rearms_supervisor_and_activation_never_reads_preflight_
     assert sandbox.launches[0]["command"] == [*session.kilo_argv, "debug", "agent", "build"]
     assert sandbox.launches[0]["mcp_preflight"] is True
 
-    # The activation times out before the runner records an exit; the preflight's exit 0 must not stand in.
-    sandbox.exit_code = None
-    artifacts = await session.session.execute(
-        stage_activation=lambda: session.stage_activation(command=["kilo", "run"], config="{}"),
-        collect=session.collect_artifacts,
-        timeout=5,
-        close_timeout=1,
-    )
+    artifacts = await _activate(session)
     assert sandbox.launches[1]["supervisor"] == f"{ROOT}/activation"
     assert sandbox.launches[1]["command"] == ["kilo", "run"] and sandbox.launches[1]["mcp_preflight"] is False
-    assert f"{ROOT}/activation/process_supervisor" in sandbox.files
+    assert f"{ROOT}/activation/{SUPERVISOR_FILE}" in sandbox.files
     assert sandbox.files[f"{ROOT}/kilo.json"] == "{}"
-    assert artifacts.stdout == TEXT and artifacts.exit_code is None
+    assert artifacts.stdout == TEXT and artifacts.exit_code == 0
     assert artifacts.task_environment_ready and artifacts.required_mcp_ready
 
     await session.close(timeout=1)
@@ -447,6 +455,18 @@ async def test_preflight_rearms_supervisor_and_activation_never_reads_preflight_
     removal = [command for command in sandbox.commands if "rm -rf" in command]
     assert removal and ROOT in removal[-1] and "/activation" not in removal[-1]
     sandbox.disconnect.assert_awaited_once()
+
+
+async def test_activation_whose_runner_never_starts_does_not_report_preflight_outputs() -> None:
+    sandbox = FakeSandbox()
+    session = _preflight_state(sandbox)
+    await session.prepare_mcp(config='{"mcp": {}}', timeout=5, close_timeout=1)
+    sandbox.runner_starts = False
+    with pytest.raises(RuntimeError, match="did not produce readable artifacts"):
+        await _activate(session)
+    assert session.session.artifacts is None
+    assert f"{ROOT}/required-mcp.ready" not in sandbox.files
+    assert f"{ROOT}/task-environment.ready" not in sandbox.files
 
 
 @pytest.mark.parametrize("mcp_connected,exit_code", [(False, 0), (True, 1), (True, None)])
@@ -488,7 +508,6 @@ async def test_collected_diagnostics_redact_grant_headers_before_logging(caplog:
         side_effect=[
             TEXT,
             "MCP request Authorization=Bearer task-token; token=task-token",
-            "1",
             '{"hostname": "sandbox", "pid": 42}',
             "ready\n",
             '["task.tools"]',
