@@ -11,6 +11,9 @@ config_paths:
   - resources_servers/finance_task_tree_sdg/configs/leak_removal.yaml
   - resources_servers/finance_task_tree_sdg/configs/answer_gen.yaml
   - resources_servers/finance_task_tree_sdg/configs/adjudicate.yaml
+  - resources_servers/finance_task_tree_sdg/configs/leaf_profile.yaml
+  - resources_servers/finance_task_tree_sdg/configs/probe.yaml
+  - resources_servers/finance_task_tree_sdg/configs/doc_match.yaml
   - resources_servers/big_finance/configs/big_finance.yaml
 
 policy_base_url: http://127.0.0.1:18000/v1
