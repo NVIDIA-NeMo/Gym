@@ -21,11 +21,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 import yaml
+from harbor.agents.agent_auth_resolution import ResolvedModelConnection
 from harbor.agents.factory import AgentFactory
 from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.hermes import Hermes
 from harbor.models.job.config import JobConfig
+from harbor.models.model_api_format import ModelApiFormat
 from omegaconf import OmegaConf
 
 from benchmarks.skill_trigger.profiles import CodexGuidance, HermesCompat, HermesGuidance
@@ -69,9 +71,19 @@ def test_configs_use_existing_bridge_and_native_harbor_agents(profile):
     assert job.verifier.import_path == "benchmarks.skill_trigger.verifier:SkillOpeningVerifier"
 
 
-def test_hermes_guidance_changes_only_one_setting():
-    base = yaml.safe_load(Hermes._build_config_yaml("fixture", 7))
-    actual = yaml.safe_load(HermesGuidance._build_config_yaml("fixture", 7))
+@pytest.mark.parametrize("custom_connection", [False, True])
+def test_hermes_guidance_changes_only_one_setting(custom_connection):
+    connection = (
+        ResolvedModelConnection(
+            provider="openai",
+            model_api_format=ModelApiFormat.OPENAI_CHAT_COMPLETIONS,
+            resolved_base_url="https://example.invalid/v1",
+        )
+        if custom_connection
+        else None
+    )
+    base = yaml.safe_load(Hermes._build_config_yaml("fixture", 7, connection=connection))
+    actual = yaml.safe_load(HermesGuidance._build_config_yaml("fixture", 7, connection=connection))
     assert actual["agent"].pop("tool_use_enforcement") is True
     assert actual == base
 

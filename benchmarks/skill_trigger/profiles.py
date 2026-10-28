@@ -24,6 +24,7 @@ import tempfile
 from pathlib import Path
 
 import yaml
+from harbor.agents.agent_auth_resolution import ResolvedModelConnection
 from harbor.agents.installed.codex import Codex, CodexOptions
 from harbor.agents.installed.hermes import Hermes
 from harbor.environments.base import BaseEnvironment, ExecResult
@@ -90,8 +91,10 @@ class HermesGuidance(HermesCompat):
         return "skill-trigger-hermes-guidance"
 
     @staticmethod
-    def _build_config_yaml(model: str, max_turns: int | None = None) -> str:
+    def _build_config_yaml(
+        model: str, max_turns: int | None = None, *, connection: ResolvedModelConnection | None = None
+    ) -> str:
         # Harbor 0.25.0 constructs this config internally; it has no override for this setting.
-        config = yaml.safe_load(Hermes._build_config_yaml(model, max_turns))
+        config = yaml.safe_load(Hermes._build_config_yaml(model, max_turns, connection=connection))
         config.setdefault("agent", {})["tool_use_enforcement"] = True
         return yaml.safe_dump(config)
