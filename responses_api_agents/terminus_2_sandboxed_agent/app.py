@@ -61,14 +61,9 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import (
-    SESSION_ID_KEY,
-    get_response_json,
-    get_server_url,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
-)
+from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
     ShellExitedError,

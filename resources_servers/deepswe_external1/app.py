@@ -30,7 +30,8 @@ from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.failure_kinds import VERIFIER_ERROR
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.app import (
     AgentSandboxSession,
     DeepSWEResourcesServer,

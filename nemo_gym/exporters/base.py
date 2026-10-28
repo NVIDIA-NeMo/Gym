@@ -28,8 +28,8 @@ from pydantic import TypeAdapter, ValidationError
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.secret_utils import recursively_hide_secrets
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.path_utils import exporter_run_id_path_for
 from nemo_gym.run_artifacts import RunArtifacts
+from nemo_gym.utils.path_utils import exporter_run_id_path_for
 
 
 logger = logging.getLogger(__name__)

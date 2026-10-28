@@ -26,7 +26,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
             selected.add(adapter)
         elif path.startswith(("nemo_gym/cli/", "nemo_gym/tasks/")) and path not in (
             "nemo_gym/cli/__init__.py",
-            "nemo_gym/cli/_compat.py",
+            "nemo_gym/utils/compat.py",
             "nemo_gym/cli/utils.py",
         ):
             # Probes construct their own rows and call the collector directly.

@@ -22,7 +22,8 @@ from nemo_gym.base_environment_server import (
 )
 from nemo_gym.config.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 
 
 _UNUSED_LIMITS = frozenset(

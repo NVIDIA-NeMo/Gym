@@ -894,7 +894,7 @@ layers = [
     # core/
     "nemo_gym.failure_kinds : nemo_gym.rollout_correlation",
     # utils/
-    "nemo_gym.cli._compat : nemo_gym.cli._venv_setup : nemo_gym.decorators : nemo_gym.install_lock : nemo_gym.path_utils",
+    "nemo_gym.utils",
     # config/
     "nemo_gym.config",
 ]
@@ -904,7 +904,6 @@ ignore_imports = [
     "nemo_gym.atif_export -> nemo_gym.openai_utils",
     "nemo_gym.atif_reverification -> nemo_gym.openai_utils",
     "nemo_gym.base_resources_server -> nemo_gym.openai_utils",
-    "nemo_gym.comparison.loading -> nemo_gym.cli.utils",
     "nemo_gym.exporters.base -> nemo_gym.batch_status",
     "nemo_gym.exporters.base -> nemo_gym.rollout_collection",
     "nemo_gym.exporters.mlflow -> nemo_gym.rollout_collection",

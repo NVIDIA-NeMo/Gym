@@ -43,6 +43,6 @@ def test_sidecar_source_dir_holds_the_go_module() -> None:
 
 
 def test_venv_setup_script_is_found_by_module_name() -> None:
-    origin = Path(importlib.util.find_spec("nemo_gym.cli._venv_setup").origin)
+    origin = Path(importlib.util.find_spec("nemo_gym.utils.venv_setup").origin)
     assert origin.is_file()
     assert "SETUP_COMPLETE_MARKER" in origin.read_text()

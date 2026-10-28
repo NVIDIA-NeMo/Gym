@@ -145,6 +145,13 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/config/secret_utils"
   - source: "/nemo/gym/nemo-gym/nemo_gym/server_metadata"
     destination: "/nemo/gym/nemo-gym/nemo_gym/config/server_metadata"
+  # Library reference pages of modules moved into nemo_gym/utils (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/decorators"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/utils/decorators"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/path_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/utils/path_utils"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/install_lock"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/utils/install_lock"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

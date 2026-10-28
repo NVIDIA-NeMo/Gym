@@ -54,15 +54,15 @@ from typing import TYPE_CHECKING, Any
 
 from nemo_gym.config.global_config import TASK_SOURCE_KEY_NAME
 from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, QUALITY_SUMMARY_SOURCES_KEY, ROLLOUT_VERDICTS_FILENAME
-from nemo_gym.path_utils import (
+from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
+from nemo_gym.tasks.harbor.validation_report import _iter_validation_rows, _validation_key
+from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
     failures_path_for,
     materialized_path_for,
     run_summary_path_for,
 )
-from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
-from nemo_gym.tasks.harbor.validation_report import _iter_validation_rows, _validation_key
 
 
 if TYPE_CHECKING:

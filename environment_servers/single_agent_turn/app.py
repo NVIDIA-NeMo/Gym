@@ -53,12 +53,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
     VerifierInvocation,
 )
-from nemo_gym.server_utils import (
-    get_response_json,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
-    rollout_path_prefix,
-)
+from nemo_gym.server_utils import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
@@ -71,6 +66,7 @@ from nemo_gym.tool_access import (
     MCPToolAccess,
     ToolAccess,
 )
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 
 
 class SessionHandles(BaseModel):

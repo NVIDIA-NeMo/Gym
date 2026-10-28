@@ -68,6 +68,7 @@ from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
 from nemo_gym._checkpoint.settings import checkpoint_settings
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.config_types import (
     DEFAULT_UVICORN_BACKLOG,
     ROLLOUT_PATH_PREFIX,
@@ -80,7 +81,6 @@ from nemo_gym.config.config_types import (
 from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
-    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
@@ -121,6 +121,14 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
+from nemo_gym.utils.server_process import (
+    _has_injected_global_config_env,
+    get_nemo_gym_fastapi_num_workers,
+    is_nemo_gym_fastapi_worker,
+    set_is_nemo_gym_fastapi_entrypoint,
+    set_is_nemo_gym_fastapi_worker,
+    set_nemo_gym_fastapi_num_workers,
+)
 
 
 try:
@@ -1170,10 +1178,6 @@ class ServerClient(BaseModel):
         return f"http://{host}:{server_config_dict.port}"
 
 
-def _has_injected_global_config_env() -> bool:
-    return getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME) is not None
-
-
 SESSION_ID_KEY = "session_id"
 
 
@@ -1338,37 +1342,6 @@ def maybe_ray_cluster_exit():  # pragma: no cover
 
 
 atexit.register(maybe_ray_cluster_exit)
-
-# These environment variables are the ONLY environment variables that Gym uses. Please do not set these, they are only used here to pass information
-# from main proc to child procs under FastAPI/uvicorn parallelism
-IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
-IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "IS_NEMO_GYM_FASTAPI_ENTRYPOINT"
-NEMO_GYM_FASTAPI_NUM_WORKERS = "NEMO_GYM_FASTAPI_NUM_WORKERS"
-
-
-def is_nemo_gym_fastapi_worker() -> bool:  # pragma: no cover
-    return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
-
-
-def set_is_nemo_gym_fastapi_worker() -> None:  # pragma: no cover
-    environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
-
-
-def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:  # pragma: no cover
-    return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
-
-
-def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:  # pragma: no cover
-    environ[IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME] = file
-
-
-def get_nemo_gym_fastapi_num_workers() -> int:  # pragma: no cover
-    return int(getenv(NEMO_GYM_FASTAPI_NUM_WORKERS, "1"))
-
-
-def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no cover
-    environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
-
 
 #: Base class name -> the Gym server-type directory it lives in. Matched against the MRO
 #: rather than imported, because base_resources_server and friends import *this* module.
@@ -2336,3 +2309,7 @@ def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -
         set_global_aiohttp_client(cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict))
 
     return server_client
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)
