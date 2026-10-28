@@ -562,6 +562,7 @@ async def request(
     _control: bool = False,
     _resend_after_disconnect: bool = True,
     _on_transport_failure: Callable[[Exception], None] | None = None,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -584,6 +585,11 @@ async def request(
 
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
     server may already have received it. A connection that was never made is still retried.
+
+    ``_read_body=True`` reads the body before returning. A reply cut off mid-body is sent again only within a
+    ``_max_num_tries`` or ``_max_connection_retries`` bound, and only when resending is allowed. Otherwise the
+    response is returned, and reading it raises the error, so the caller's failure handling (for collection, its
+    rollout attempt budget) decides whether the request runs again.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
@@ -611,6 +617,7 @@ async def request(
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
+            _read_body=_read_body,
             **kwargs,
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
@@ -630,6 +637,7 @@ async def request(
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
+            _read_body=_read_body,
             **kwargs,
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
@@ -650,6 +658,7 @@ async def _traced_request(
     _control: bool = False,
     _resend_after_disconnect: bool = True,
     _on_transport_failure: Callable[[Exception], None] | None = None,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -694,6 +703,7 @@ async def _traced_request(
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
+            _read_body=_read_body,
             **kwargs,
         )
 
@@ -763,6 +773,7 @@ async def _request_with_retries(
     _control: bool = False,
     _resend_after_disconnect: bool = True,
     _on_transport_failure: Callable[[Exception], None] | None = None,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
@@ -777,7 +788,20 @@ async def _request_with_retries(
             if _max_num_tries is not None:
                 explicit_tries += 1
             try:
-                return await client.request(method=method, url=url, **kwargs)
+                response = await client.request(method=method, url=url, **kwargs)
+                if _read_body:
+                    try:
+                        await response.read()
+                    except Exception as error:
+                        if _resend_after_disconnect and (
+                            _max_num_tries is not None or _max_connection_retries is not None
+                        ):
+                            raise  # Retried below within the caller's bound.
+                        # Unbounded, each resend would start another episode. The reply goes back unread, and the
+                        # caller's read raises this error at its own failure boundary, with the reply's status.
+                        if _on_transport_failure is not None:
+                            _on_transport_failure(error)
+                return response
             except ServerDisconnectedError as error:
                 if _on_transport_failure is not None:
                     _on_transport_failure(error)
@@ -1075,6 +1099,8 @@ class ServerClient(BaseModel):
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
             and not (self.checkpoint_enabled() and url_path == "/run"),
+            # Collection reads the whole /run reply, so a reply cut off mid-body counts as a failed attempt.
+            _read_body=url_path == "/run",
             **kwargs,
         )
 
