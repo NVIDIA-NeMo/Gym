@@ -871,7 +871,7 @@ def test_startup_logs_the_deprecation_notice(caplog) -> None:
     assert len(notices) == 1
     (notice,) = notices
     assert "responses_api_agents/harbor_agent is deprecated" in notice
-    assert (
-        "environment_servers/harbor" in notice and "https://docs.nvidia.com/nemo/gym/main/data/harbor-tasks" in notice
-    )
+    assert "environment_servers/harbor" in notice
+    # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
+    assert "docs.nvidia.com" not in notice
     assert server.sem is not None

@@ -247,7 +247,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
         self._worker_http_config = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config)
         logger.warning(
             "responses_api_agents/harbor_agent_general is deprecated: new work should run Harbor tasks through the "
-            "harbor environment server (environment_servers/harbor, https://docs.nvidia.com/nemo/gym/main/data/harbor-tasks). "
+            "harbor environment server (environment_servers/harbor, see its README.md). "
             "It is removed once the benchmarks still using it have moved to the Harbor task format."
         )
 
