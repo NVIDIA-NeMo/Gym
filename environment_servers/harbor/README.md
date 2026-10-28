@@ -791,7 +791,7 @@ to run with the run-wide deadline alone. Sandboxes are normally stopped as soon 
 
 Before `test.sh` runs, in either mode, the server writes the agent transcript to `/logs/agent/trajectory.json`
 in ATIF v1.7 (the version Harbor 0.22 and 0.23 read), exported from the Gym transcript by
-`nemo_gym.atif_export.transcript_to_atif`. Harnesses that feed terminal output back as user turns (Terminus)
+`nemo_gym.trajectory.atif_export.transcript_to_atif`. Harnesses that feed terminal output back as user turns (Terminus)
 export with those turns as the previous step's observation. Shapes a model causes still export and are
 graded: a turn cut off inside its reasoning (a reasoning item no answer follows) becomes an agent step with
 an empty message and `extra.nemo_gym.incomplete: max_output_tokens`, several reasoning segments join with

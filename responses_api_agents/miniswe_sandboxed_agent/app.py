@@ -37,11 +37,11 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.transfer import SandboxUnavailableError
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,

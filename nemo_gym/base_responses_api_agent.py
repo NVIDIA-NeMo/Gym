@@ -76,13 +76,13 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.tool_access import ToolAccess
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
 
 
 LOG = logging.getLogger(__name__)

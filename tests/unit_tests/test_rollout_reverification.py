@@ -23,7 +23,6 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.atif_reverification import AtifProjectionError
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
@@ -72,6 +71,7 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils.path_utils import aggregation_sources_path_for
 
 

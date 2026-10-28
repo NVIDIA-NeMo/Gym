@@ -48,7 +48,6 @@ from environment_servers.harbor.session import (
     resolve_env_templates,
 )
 from nemo_gym import __version__
-from nemo_gym.atif_export import encode_atif_trajectory, transcript_to_atif
 from nemo_gym.core import failure_kinds
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.episode_types import BaseEpisodeRequest
@@ -69,6 +68,7 @@ from nemo_gym.tasks.harbor.digest import is_ignored
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborTaskStep, HarborVerifier
 from nemo_gym.tasks.harbor.python_verifier import VerifierShim, write_shim
 from nemo_gym.tasks.harbor.task import HarborTurn
+from nemo_gym.trajectory.atif_export import encode_atif_trajectory, transcript_to_atif
 
 
 LOGGER = logging.getLogger(__name__)

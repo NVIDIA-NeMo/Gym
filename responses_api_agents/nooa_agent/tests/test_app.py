@@ -22,7 +22,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import AgentEpisode, AgentObservationBundle, TrajectoryRecord
 from responses_api_agents.nooa_agent import app as app_module
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunResult

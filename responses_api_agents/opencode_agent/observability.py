@@ -10,7 +10,7 @@ from sqlite3 import Row
 from typing import Any
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,
     ObservationGap,

@@ -18,7 +18,12 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.trajectory.trajectory_record import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    ToolCallObservation,
+)
 
 
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)

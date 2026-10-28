@@ -24,7 +24,7 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
+from nemo_gym.trajectory.trajectory_record import AgentEpisode, AgentObservationBundle
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     AGENT_TIMEOUT_METADATA_KEY,

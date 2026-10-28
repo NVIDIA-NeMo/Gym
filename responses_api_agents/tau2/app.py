@@ -52,7 +52,7 @@ from nemo_gym.core.responses_api_types import (
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.responses_converter import chat_completion_usage_to_response_usage
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.tau2.observability import build_tool_observations
 from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items

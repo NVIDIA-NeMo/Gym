@@ -62,15 +62,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    AgentObservationBundle,
-    ContextCompactionObservation,
-    ObservationGap,
-    SandboxObservation,
-    ToolCallObservation,
-    TrajectoryRecord,
-)
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.agent_tools import (
     restricted_network_policy,
@@ -80,6 +71,15 @@ from nemo_gym.sandbox.agent_tools import (
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.trajectory.trajectory_record import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ObservationGap,
+    SandboxObservation,
+    ToolCallObservation,
+    TrajectoryRecord,
+)
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (

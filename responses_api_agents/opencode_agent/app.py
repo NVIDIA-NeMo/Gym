@@ -65,7 +65,10 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
+from nemo_gym.sandbox.access import DirectSandboxConnection
+from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.trajectory.trajectory_record import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -73,9 +76,6 @@ from nemo_gym.rollout_observability import (
     SandboxObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,

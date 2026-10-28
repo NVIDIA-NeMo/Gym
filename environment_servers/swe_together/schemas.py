@@ -16,8 +16,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
+from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
 
 
 class CandidateTurn(BaseModel):

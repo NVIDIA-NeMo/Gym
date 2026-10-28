@@ -37,7 +37,6 @@ from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.agent_tools import (
     restricted_network_policy,
@@ -47,6 +46,7 @@ from nemo_gym.sandbox.agent_tools import (
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.trajectory.trajectory_record import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.pi_agent.app import (
     MCP_SETUP_ERROR_EXIT_CODE,

@@ -626,7 +626,7 @@ def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tm
     from nemo_gym.base_responses_api_model import ModelCallRecord
     from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
     from nemo_gym.rollout_collection import _build_trajectory_record
-    from nemo_gym.rollout_observability import (
+    from nemo_gym.trajectory.trajectory_record import (
         AgentObservationBundle,
         TrajectoryRecord,
         join_agent_model_calls,

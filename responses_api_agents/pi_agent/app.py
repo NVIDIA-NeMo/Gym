@@ -61,7 +61,12 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
+from nemo_gym.sandbox.access import DirectSandboxConnection
+from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.tool_access import MCPToolAccess, ToolAccess
+from nemo_gym.trajectory.trajectory_record import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -70,11 +75,6 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_global_config_dict
-from nemo_gym.tool_access import MCPToolAccess, ToolAccess
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 

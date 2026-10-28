@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     ContextCompactionObservation,
     ToolCallObservation,

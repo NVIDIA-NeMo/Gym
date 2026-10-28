@@ -27,7 +27,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
+from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, TrajectoryTurn
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymLLM,

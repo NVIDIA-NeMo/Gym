@@ -74,7 +74,9 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.session_routing import SESSION_OWNER_HEADER
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -83,8 +85,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.session_routing import SESSION_OWNER_HEADER
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 
 

@@ -30,21 +30,6 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator
 
 from nemo_gym import __version__
-from nemo_gym.atif_json import json_values_equal as _json_values_equal
-from nemo_gym.atif_json import strict_json_loads as _strict_json_loads
-from nemo_gym.atif_v1_7 import (
-    ATIF_SCHEMA_VERSION,
-    AtifAgent,
-    AtifContent,
-    AtifContentPart,
-    AtifFinalMetrics,
-    AtifObservation,
-    AtifObservationResult,
-    AtifStep,
-    AtifStepMetrics,
-    AtifToolCall,
-    AtifTrajectoryV1_7,
-)
 from nemo_gym.config.config_types import ConfigError, RunExportConfig
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
@@ -61,7 +46,22 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.rollout_observability import ModelCallRef, TrajectoryModelCall, TrajectoryRecord
+from nemo_gym.trajectory.atif_json import json_values_equal as _json_values_equal
+from nemo_gym.trajectory.atif_json import strict_json_loads as _strict_json_loads
+from nemo_gym.trajectory.atif_v1_7 import (
+    ATIF_SCHEMA_VERSION,
+    AtifAgent,
+    AtifContent,
+    AtifContentPart,
+    AtifFinalMetrics,
+    AtifObservation,
+    AtifObservationResult,
+    AtifStep,
+    AtifStepMetrics,
+    AtifToolCall,
+    AtifTrajectoryV1_7,
+)
+from nemo_gym.trajectory.trajectory_record import ModelCallRef, TrajectoryModelCall, TrajectoryRecord
 
 
 class AtifExportError(ConfigError):

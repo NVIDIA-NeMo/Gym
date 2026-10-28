@@ -25,7 +25,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseInputItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -34,7 +35,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
-from nemo_gym.sandbox import AsyncSandbox
 from responses_api_agents.miniswe_sandboxed_agent.bootstrap import bootstrap_assets
 
 

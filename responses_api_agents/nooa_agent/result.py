@@ -7,7 +7,7 @@ import aiohttp
 from openai.types.responses.response_error import ResponseError
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
 from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
 from responses_api_agents.nooa_agent.runner import NOOARunResult
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason

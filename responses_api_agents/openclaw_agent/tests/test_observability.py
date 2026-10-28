@@ -10,7 +10,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,

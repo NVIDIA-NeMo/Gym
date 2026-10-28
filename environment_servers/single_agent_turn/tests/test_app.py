@@ -37,9 +37,9 @@ from nemo_gym.core.episode import EpisodeId, TaskId, current_rollout_id
 from nemo_gym.core.failure_kinds import MODEL_TRANSPORT_ERROR
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.episode_types import MaterializedTask
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnResponse, SingleAgentTurnTaskInput
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
 
 
 class _Cookie:

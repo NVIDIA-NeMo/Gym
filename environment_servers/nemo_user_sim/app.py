@@ -63,7 +63,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,

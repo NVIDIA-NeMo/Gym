@@ -10,7 +10,7 @@ from harbor.llms.base import LLMResponse
 
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory.trajectory_record import (
     ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,

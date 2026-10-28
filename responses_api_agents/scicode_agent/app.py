@@ -60,7 +60,7 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.metrics_config import Stat
 from nemo_gym.prompt import PromptConfig, load_prompt_config
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     ModelCallRef,
     ObservationGap,

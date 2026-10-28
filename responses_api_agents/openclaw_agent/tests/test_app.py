@@ -36,7 +36,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ObservationGap
+from nemo_gym.trajectory.trajectory_record import AgentInvocation, ObservationGap
 from responses_api_agents.openclaw_agent.app import (
     OpenClawAgent,
     OpenClawAgentConfig,

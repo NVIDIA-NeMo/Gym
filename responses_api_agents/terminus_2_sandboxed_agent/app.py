@@ -54,16 +54,16 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymSummary,
 )
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox.access import DirectSandboxConnection
+from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.trajectory.trajectory_record import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (

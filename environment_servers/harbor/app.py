@@ -87,7 +87,6 @@ from environment_servers.harbor.verifier import (
 from nemo_gym import RESULTS_DIR
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.atif_export import AtifExportError
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -116,7 +115,6 @@ from nemo_gym.core.episode import TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
@@ -138,6 +136,8 @@ from nemo_gym.tasks.harbor.task_data import (
 )
 from nemo_gym.tasks.harbor.verifier_env import TESTS_DOCKERFILE
 from nemo_gym.tool_access import MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
+from nemo_gym.trajectory.atif_export import AtifExportError
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 
 

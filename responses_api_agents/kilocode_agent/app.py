@@ -59,11 +59,16 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
+from nemo_gym.trajectory.trajectory_record import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    SandboxObservation,
+)
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo

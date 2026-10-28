@@ -33,7 +33,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
+from nemo_gym.trajectory.trajectory_record import ModelCallRef, ObservationGap
 
 
 class GymModelClient(Protocol):

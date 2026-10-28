@@ -10,7 +10,7 @@ import yaml
 from nooa_bench.bench_agent import TaskResult
 
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
