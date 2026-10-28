@@ -8060,9 +8060,9 @@ class TestCodexRequests:
 
     def test_keepalive_streams_are_refused_on_the_native_responses_path(self) -> None:
         # vLLM issues the native path's response ids, which a keepalive stream cannot announce in advance.
-        server, _ = self._server(is_responses_native=True, stream_keepalive_s=0.02)
-        with raises(ValueError, match="stream_keepalive_s"):
-            server.setup_webserver()
+        # The config refuses it when it loads, before a local engine starts, not only in setup_webserver.
+        with raises(ValueError, match="stream_keepalive_s applies to the Chat Completions conversion"):
+            self._server(is_responses_native=True, stream_keepalive_s=0.02)
 
     def test_non_streaming_request_forwards_the_effort_too(self) -> None:
         server, client = self._server(forward_unvalidated_reasoning_effort=True)
@@ -8306,6 +8306,9 @@ class TestCodexRequests:
     def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
         with raises(ValueError, match="requires is_responses_native=false"):
             self._server(inline_tool_output_images=True, is_responses_native=True)
+        # /v1/completions takes text-only messages, so every inlined image would be refused.
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(inline_tool_output_images=True, use_completions_api=True)
 
     @mark.parametrize(
         ("overrides", "content"),
