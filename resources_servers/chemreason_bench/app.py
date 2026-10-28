@@ -28,6 +28,10 @@ from nemo_gym.base_resources_server import (
 )
 
 
+# A task row this server cannot score, so its masked zero says nothing about the model.
+INVALID_TASK = "chemreason_bench:invalid_task"
+
+
 class ChemReasonBenchResourcesServerConfig(BaseResourcesServerConfig):
     # Nothing is carried between verifications: scoring is a pure function of the
     # reply and the row. This is not a claim that arbitrary model output reproduces
@@ -114,11 +118,23 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         # downstream score as well as out of compute_metrics.
         if not isinstance(task_type, str) or task_type not in M.TASK_TYPES:
             return ChemReasonBenchVerifyResponse(
-                **payload, reward=0.0, status="bad_task_type", harness_failure=True, mask_sample=True
+                **payload,
+                reward=0.0,
+                status="bad_task_type",
+                harness_failure=True,
+                mask_sample=True,
+                failure_kind=INVALID_TASK,
+                failure_reason="The row's task_type is missing or is not a ChemReasonBench task type",
             )
         if not isinstance(ground_truth, dict):
             return ChemReasonBenchVerifyResponse(
-                **payload, reward=0.0, status="bad_ground_truth", harness_failure=True, mask_sample=True
+                **payload,
+                reward=0.0,
+                status="bad_ground_truth",
+                harness_failure=True,
+                mask_sample=True,
+                failure_kind=INVALID_TASK,
+                failure_reason="The row's ground_truth is not an object",
             )
 
         # Optional: a wrong-typed value degrades to empty rather than failing the row.
@@ -129,7 +145,13 @@ class ChemReasonBenchResourcesServer(SimpleResourcesServer):
         if body.protocol == "lm":
             if task_type not in M.DUAL_PROTOCOL_TASKS:
                 return ChemReasonBenchVerifyResponse(
-                    **payload, reward=0.0, status="no_lm_protocol", harness_failure=True, mask_sample=True
+                    **payload,
+                    reward=0.0,
+                    status="no_lm_protocol",
+                    harness_failure=True,
+                    mask_sample=True,
+                    failure_kind=INVALID_TASK,
+                    failure_reason=f"Task type {task_type} has no lm protocol",
                 )
             prediction = to_prediction_lm(
                 task_type, body.response.output_text, _first_output_logprobs(body.response), options

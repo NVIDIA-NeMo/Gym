@@ -11,7 +11,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import SimpleResourcesServer
+from nemo_gym.base_resources_server import SimpleResourcesServer, lost_session_verification
+from nemo_gym.failure_kinds import VERIFIER_ERROR
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import (
@@ -159,12 +160,20 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 osworld_score=result.score,
                 mask_sample=False,
             )
-        except Exception:
+        except SessionNotFoundError:
+            return OSWorldVerifyResponse(
+                **body.model_dump(),
+                osworld_score=0.0,
+                **lost_session_verification(f"OSWorld session {session_id} was not found at verify"),
+            )
+        except Exception as error:
             return OSWorldVerifyResponse(
                 **body.model_dump(),
                 reward=0.0,
                 osworld_score=0.0,
                 mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=f"OSWorld evaluation raised {type(error).__name__}: {str(error)[-2000:]}",
             )
         finally:
             await self._manager.close_session(session_id)
