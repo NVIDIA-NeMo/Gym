@@ -25,6 +25,7 @@ from resources_servers.terminal_bench_4.models import (
     ResourcesSessionVerifyRequest,
     SeedSessionResponse,
 )
+from resources_servers.terminal_bench_4.tests.test_environment import make_environment
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "terminal_bench_4"
@@ -383,6 +384,24 @@ async def test_failed_close_keeps_its_fence_past_the_retry_window(harness, monke
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
     assert harness.server._close_expiry[seed.resources_session_id] == 1300
     assert all(environment.closed for environment in harness.environments)
+
+
+async def test_close_retries_a_failed_task_sandbox_deletion(harness, tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "monotonic", lambda: 0.0)
+    seed = harness.seed()
+    await harness.server.seed_session(SimpleNamespace(session={}), seed)
+    session = next(iter(harness.server._sessions.values()))
+    # The real wrapper, whose callers share one teardown task.
+    session.environment, box, _, _ = make_environment(tmp_path, monkeypatch)
+    await session.environment.start()
+    box.stop.side_effect = [RuntimeError("provider unavailable"), None]
+    with pytest.raises(HTTPException) as error:
+        await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
+    assert error.value.status_code == 503
+    assert seed.resources_session_id not in harness.server._close_expiry
+    await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
+    assert box.stop.await_count == 2 and lifecycle.released(session)
+    assert harness.server._close_expiry[seed.resources_session_id] == 300
 
 
 async def test_completed_close_records_expire_without_retry_renewal(harness, monkeypatch) -> None:
