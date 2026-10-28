@@ -5,6 +5,7 @@
 import asyncio
 import shlex
 import shutil
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -20,6 +21,11 @@ from nemo_gym.sandbox.providers.registry import get_provider_class
 pytestmark = pytest.mark.sandbox
 
 
+class AwaitableSandbox(SimpleNamespace):
+    def __await__(self):
+        return self.wait().__await__()
+
+
 class SDKTimeout(Exception):
     pass
 
@@ -30,11 +36,11 @@ class SDKNotFound(Exception):
 
 @pytest.fixture
 def backend(monkeypatch):
-    sandbox = SimpleNamespace(
+    sandbox = AwaitableSandbox(
         sandbox_id="cw-test",
         status="running",
         start=AsyncMock(),
-        wait=Mock(),
+        wait=AsyncMock(),
         exec=AsyncMock(return_value=SimpleNamespace(stdout="nemo-gym-ready", stderr="", returncode=0)),
         stop=AsyncMock(),
         write_file=AsyncMock(),
@@ -95,7 +101,7 @@ async def test_facade_lifecycle_and_resource_mapping(backend):
     assert kwargs["network"] == {"deny_egress": True}
     assert kwargs["auth"]["headers"] == {"Authorization": "Bearer test-key"}
     assert "max_timeout_seconds" not in kwargs
-    sandbox.wait.assert_called_once_with(timeout=56)
+    sandbox.wait.assert_awaited_once_with()
     sandbox.stop.assert_awaited_once_with(missing_ok=True, wait_for_ready=False)
     sdk.Sandbox.delete.assert_awaited_once_with(
         "cw-test", base_url=None, auth=kwargs["auth"], timeout_seconds=3700, missing_ok=True
@@ -391,7 +397,7 @@ async def test_readiness_budget_includes_start_acceptance(backend):
     with pytest.raises(TimeoutError):
         await provider.create(SandboxSpec(image="task", ready_timeout_s=0.001))
     sdk.Sandbox.delete.assert_awaited_once()
-    sandbox.wait.assert_not_called()
+    sandbox.wait.assert_not_awaited()
 
 
 def test_missing_sdk_gives_install_instruction(monkeypatch):
@@ -555,3 +561,82 @@ def test_installed_sdk_detach_contract():
     # CoreWeave exposes no public detach. Guard the sole private SDK method
     # needed to close an attached client's channels without stopping its owner.
     assert callable(sdk.Sandbox._cleanup_channels)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["cancel", "timeout"])
+async def test_readiness_wait_is_cancelled_before_allocation_cleanup(backend, ending):
+    sandbox, sdk, provider = backend
+    entered, finished = asyncio.Event(), asyncio.Event()
+
+    async def waiting():
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            finished.set()
+
+    async def delete(*args, **kwargs):
+        assert finished.is_set(), "readiness must stop before deleting its sandbox"
+
+    sandbox.wait.side_effect = waiting
+    sdk.Sandbox.delete.side_effect = delete
+    task = asyncio.create_task(
+        provider.create(SandboxSpec(image="task", ready_timeout_s=0.05 if ending == "timeout" else 60))
+    )
+    async with asyncio.timeout(1):
+        await entered.wait()
+    if ending == "cancel":
+        task.cancel()
+    with pytest.raises(asyncio.CancelledError if ending == "cancel" else TimeoutError):
+        await task
+    assert finished.is_set()
+    sandbox.wait.assert_awaited_once()
+    sdk.Sandbox.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup", [None, "not-callable"])
+async def test_disconnect_reports_incompatible_sdk_without_stopping_owner(backend, cleanup):
+    sandbox, sdk, provider = backend
+    provider._attached.append(sandbox)
+    if cleanup is None:
+        del sandbox._cleanup_channels
+    else:
+        sandbox._cleanup_channels = cleanup
+    with pytest.raises(RuntimeError, match="Install cwsandbox==1.21.0"):
+        await provider.aclose()
+    assert provider._attached == [sandbox]
+    sandbox.stop.assert_not_awaited()
+    sdk.Sandbox.delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_installed_sdk_readiness_cancellation_reaches_sdk_loop(monkeypatch):
+    sdk = pytest.importorskip("cwsandbox")
+    sandbox = sdk.Sandbox(container_image="ubuntu:24.04")
+    entered, cancelled = threading.Event(), threading.Event()
+
+    async def started():
+        pass
+
+    async def waiting():
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    # Keep the SDK's real cross-loop await machinery, without allocating a sandbox.
+    monkeypatch.setattr(sandbox, "_ensure_started_async", started)
+    monkeypatch.setattr(sandbox, "_wait_until_running_async", waiting)
+    task = asyncio.ensure_future(sandbox)
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(cancelled.wait, 2)
+    finally:
+        task.cancel()
+        await asyncio.to_thread(sandbox._cleanup_channels)
