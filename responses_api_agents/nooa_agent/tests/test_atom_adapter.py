@@ -143,3 +143,56 @@ async def test_adapter_unwraps_atoms_turn_failure_to_the_strategy_error():
 
     with pytest.raises(RuntimeError):
         await invoke_atom(SimpleNamespace(solve=other), NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+
+@pytest.mark.asyncio
+async def test_atom_root_and_child_sessions_route_through_gym(tmp_path: Path, monkeypatch):
+    """A root that delegates: the child is its own model-calling session, both share Gym's client and
+    cookies, and the child's result flows back into the root's. Ported from Elisa Martinez Abad's #5178."""
+    monkeypatch.chdir(tmp_path)
+    config = atom_config()
+    code = [
+        "child = await self.delegate('offline child', 'return child evidence')\n"
+        "return_result(Done(explanation='root', result=TaskResult(solution_description='root', "
+        "evidence=child.result.evidence, how_to_verify='offline', report='native root and child')))",
+        "return_result(Done(explanation='child', result=TaskResult(solution_description='child', "
+        "evidence='native child evidence', how_to_verify='offline', report='child')))",
+    ]
+    calls: list[dict] = []
+
+    async def post(**kwargs):
+        calls.append(kwargs)
+        assert len(calls) <= 2
+        out = NeMoGymResponseFunctionToolCall(
+            id=f"f{len(calls)}",
+            call_id=f"c{len(calls)}",
+            name="python_cell",
+            arguments=json.dumps({"code": code[len(calls) - 1]}),
+        )
+        return FakeHTTPResponse(model_response(out, response_id=f"r{len(calls)}"))
+
+    runner = InProcessNOOARunner(
+        invocation=NOOAInvocationConfig.model_validate(
+            config.nooa.model_dump() | {"init_kwargs": {"sessions_dir": str(tmp_path / "sessions")}}
+        ),
+        server_client=SimpleNamespace(post=post),
+        model_server_name="policy",
+        max_policy_calls=2,
+        context_window=1048576,
+    )
+    result = await runner.run(
+        NOOARunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input="offline native fixture", max_output_tokens=131072
+            ),
+            model_url_path="/fixture/v1/responses",
+            model_cookies={"session": "fixture"},
+        )
+    )
+    assert result.return_value.evidence == "native child evidence"
+    assert result.termination_reason is None
+    assert len(calls) == len(result.trajectory.turns) == 2
+    assert len(result.trajectory.invocations) >= 2  # the child is observed as its own invocation
+    assert all(call["server_name"] == "policy" and call["url_path"] == "/fixture/v1/responses" for call in calls)
+    assert all(call["json"].max_output_tokens == 131072 for call in calls)
+    assert all(call["cookies"]["session"] == "fixture" for call in calls)

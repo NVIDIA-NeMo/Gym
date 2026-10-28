@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - benchmarks/terminal_bench_2_1/nooa.yaml
+
+terminal_bench_2_1_nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      nooa:
+        agent_class: nooa_atom.gym:AtomHarness
+        invocation_adapter: responses_api_agents.nooa_agent.atom_adapter:invoke_atom
+        execution_mode: sandboxed
+        init_kwargs:
+          turn_method: handle_batch
