@@ -30,10 +30,10 @@ from lcb_integration.testing_util import MockStdinWithBuffer
 from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.failure_kinds import VERIFIER_ERROR
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
 
 

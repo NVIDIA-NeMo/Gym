@@ -22,9 +22,9 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent
 from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent import (
     ReasoningSearchDeepAgent,

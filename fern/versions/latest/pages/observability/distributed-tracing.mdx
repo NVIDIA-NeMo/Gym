@@ -27,7 +27,7 @@ NeMo Gym uses W3C Trace Context, the standard OpenTelemetry mechanism. Two halve
 work.
 
 **Outbound.** Every cross-server call in NeMo Gym goes through one function,
-`nemo_gym.server_utils.request()`. NeMo Gym bans `httpx` for async HTTP precisely so that
+`nemo_gym.client.http_client.request()`. NeMo Gym bans `httpx` for async HTTP precisely so that
 this stays true, which means there is exactly one place to inject trace context. The
 function starts a CLIENT span and writes a `traceparent` header identifying it:
 

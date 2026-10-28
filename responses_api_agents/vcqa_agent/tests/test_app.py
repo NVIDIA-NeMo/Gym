@@ -27,8 +27,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.vcqa_agent import judge as judge_mod
 from responses_api_agents.vcqa_agent import sandbox as sandbox_mod
 from responses_api_agents.vcqa_agent import tools as tools_mod

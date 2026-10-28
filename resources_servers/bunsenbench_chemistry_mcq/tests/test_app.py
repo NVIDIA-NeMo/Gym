@@ -5,10 +5,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetricsRequest
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from resources_servers.bunsenbench_chemistry_mcq.app import (
     BunsenChemResourcesServer,
     BunsenChemResourcesServerConfig,

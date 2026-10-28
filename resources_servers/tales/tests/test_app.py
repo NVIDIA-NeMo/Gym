@@ -18,8 +18,8 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from resources_servers.gymnasium import EnvResetRequest
 from resources_servers.tales.app import (
     TALESResourcesServer,

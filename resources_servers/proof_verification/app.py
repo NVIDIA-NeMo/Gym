@@ -20,6 +20,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.client.http_client import get_response_json
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -27,7 +28,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.judge import reraise_judge_errors
-from nemo_gym.server_utils import get_response_json
 
 
 LOG = logging.getLogger(__name__)
@@ -312,7 +312,7 @@ class ProofVerificationResourcesServer(SimpleResourcesServer):
 
     async def _call_judge_internal(self, user_content: str) -> tuple[str, int]:
         """Call judge through Gym's server_client (judge model managed by Gym/Ray)."""
-        from nemo_gym.server_utils import raise_for_status
+        from nemo_gym.client.http_client import raise_for_status
 
         server_name = self.config.judge_model_server.name
         model = self.config.judge_model_name or server_name

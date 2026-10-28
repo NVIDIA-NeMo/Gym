@@ -37,6 +37,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import get_first_server_config_dict, get_global_config_dict
 from nemo_gym.core.responses_api_types import (
@@ -51,7 +52,6 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_models.vllm_model.app import VLLMConverter
 
 

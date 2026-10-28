@@ -37,6 +37,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from pytest import approx, fixture
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -45,7 +46,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.ugphysics_judge.app import (
     UGPhysicsJudgeResourcesServer,
     UGPhysicsJudgeResourcesServerConfig,

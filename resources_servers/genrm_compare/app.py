@@ -52,6 +52,8 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import (
@@ -59,7 +61,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,

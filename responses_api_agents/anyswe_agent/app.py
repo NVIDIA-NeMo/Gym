@@ -34,12 +34,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client.server_client import apply_rollout_prefix
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import get_first_server_config_dict
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import apply_rollout_prefix
 
 
 class SWEBenchMetrics(BaseModel):

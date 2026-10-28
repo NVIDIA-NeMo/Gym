@@ -48,6 +48,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.http_client import raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import (
@@ -66,7 +67,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import raise_for_status
 
 
 LOG = logging.getLogger(__name__)

@@ -23,11 +23,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.harness_agent.app import (
     _RUN_CONTEXT,
     HarnessAgent,

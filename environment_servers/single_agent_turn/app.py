@@ -31,6 +31,8 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
+from nemo_gym.client.server_client import rollout_path_prefix
 from nemo_gym.config.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
@@ -53,7 +55,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
     VerifierInvocation,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,

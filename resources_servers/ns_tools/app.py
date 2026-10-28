@@ -46,8 +46,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ResourcesServerRef
-from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 logger = logging.getLogger(__name__)

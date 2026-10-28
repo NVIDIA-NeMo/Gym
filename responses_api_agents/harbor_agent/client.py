@@ -15,7 +15,7 @@
 import json
 from asyncio import run
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client.server_client import ServerClient
 
 
 async def main():

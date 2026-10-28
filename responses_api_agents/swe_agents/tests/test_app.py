@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef, OmegaConf
 from nemo_gym.config.global_config import CACHE_DIR_KEY_NAME
 from nemo_gym.core.episode import rollout_context
@@ -33,7 +34,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
     AgentPromptOverride,

@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_science import prepare as preparation
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import global_config
 from nemo_gym.config.config_types import AggregateMetricsRequest
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -21,7 +22,6 @@ from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.sandbox import SandboxExecResult, create_provider, resolve_provider_config
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 from resources_servers.terminal_bench_4 import environment as environment_module
 from resources_servers.terminal_bench_4 import shared_logs as shared_logs_module

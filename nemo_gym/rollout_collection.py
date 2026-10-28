@@ -143,17 +143,17 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
-from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
-from nemo_gym.server_utils import (
-    ServerClient,
+from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
-from nemo_gym.server_utils import (
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
+from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 from nemo_gym.skills import SkillsConfig, load_skill_directory
 from nemo_gym.task_materialization import TASK_ID_FIELDS
 from nemo_gym.token_id_capture import (

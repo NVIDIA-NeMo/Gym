@@ -49,6 +49,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.client.http_client import get_response_json
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -56,7 +58,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.judge import JudgeError, call_judge, reraise_judge_errors
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
 from resources_servers.sec_local_index.html_text import html_to_text
 from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch

@@ -11,8 +11,8 @@ import pytest
 from PIL import Image
 from starlette.responses import Response
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
 from resources_servers.image_tools import (
     has_malformed_image_tool_markup,
 )

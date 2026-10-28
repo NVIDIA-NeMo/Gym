@@ -36,6 +36,7 @@ from nemo_gym.base_responses_api_model import (
     install_model_call_capture,
     make_capture_store,
 )
+from nemo_gym.client.server_client import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
 from nemo_gym.core.responses_api_types import (
@@ -44,7 +45,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.observability.model_calls import read_model_call_records
-from nemo_gym.server_utils import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.token_id_capture.replay import replay_context
 
 

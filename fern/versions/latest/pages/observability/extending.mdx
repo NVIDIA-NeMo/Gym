@@ -12,7 +12,7 @@ Before you add a single line, your server already produces:
 - A SERVER span per HTTP request, named after the route, from FastAPI auto-instrumentation.
 - `gym.verify` around your `verify()` implementation, if it is a resources server.
 - A CLIENT span for every outbound call your server makes through
-  `nemo_gym.server_utils.request()`.
+  `nemo_gym.client.http_client.request()`.
 - `http.server.duration`, dimensioned by route, method, and status, while traces are exported.
 
 Add your own spans when you want to name a phase *inside* one of those, such as the parse

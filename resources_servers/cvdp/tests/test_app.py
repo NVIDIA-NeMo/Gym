@@ -21,8 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxExecResult
-from nemo_gym.server_utils import ServerClient
 from resources_servers.cvdp.app import (
     CVDPResourcesServer,
     CVDPResourcesServerConfig,

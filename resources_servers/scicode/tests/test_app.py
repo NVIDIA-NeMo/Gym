@@ -23,8 +23,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import resources_servers.scicode.app as app
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from resources_servers.scicode.app import (
     ScicodeResourcesServer,
     ScicodeResourcesServerConfig,

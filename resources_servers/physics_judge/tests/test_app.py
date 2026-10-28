@@ -28,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pytest import approx, fixture, raises
 from starlette.testclient import TestClient
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -36,7 +37,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient
 from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (
     PhysicsJudgeResourcesServer,

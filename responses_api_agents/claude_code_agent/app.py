@@ -45,6 +45,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
+from nemo_gym.client.server_client import apply_rollout_prefix
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.core.responses_api_types import (
@@ -65,7 +67,6 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json

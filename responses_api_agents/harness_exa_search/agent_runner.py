@@ -90,9 +90,9 @@ async def main() -> None:
     from fastapi import Request
 
     try:
+        from nemo_gym.client.server_client import ServerClient
         from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
         from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-        from nemo_gym.server_utils import ServerClient
     except ModuleNotFoundError as exc:
         # This runs against the nemo-gym the sandbox image installed, which can predate the package
         # reorganization (#5166). A missing dependency other than nemo_gym still fails here.

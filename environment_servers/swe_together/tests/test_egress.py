@@ -24,7 +24,6 @@ from environment_servers.swe_together.egress_policy import (
     registry_decision,
     workspace_packages_script,
 )
-from nemo_gym import server_utils
 
 
 @pytest.mark.parametrize(
@@ -296,7 +295,7 @@ async def test_failed_package_scan_does_not_register_a_policy(tmp_path, monkeypa
 @pytest_asyncio.fixture
 async def controller_http_client(monkeypatch):
     async with ClientSession() as client:
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: client)
         yield client
 
 

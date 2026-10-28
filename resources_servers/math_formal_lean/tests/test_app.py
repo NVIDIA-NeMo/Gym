@@ -17,13 +17,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.math_formal_lean.app import (
     REFINEMENT_PROMPT_TEMPLATE,
     MathFormalLeanResourcesServer,

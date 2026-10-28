@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import Request
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -24,7 +25,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.toolsandbox.app import ToolSandboxResourcesServer, _ServerClientUser
 from resources_servers.toolsandbox.schemas import (
     ToolSandboxCloseRequest,

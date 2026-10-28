@@ -34,13 +34,13 @@ import pytest
 import yaml
 from pytest import approx
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.spartqa import app as spartqa_app
 from resources_servers.spartqa.app import (
     BOTH_LABEL,

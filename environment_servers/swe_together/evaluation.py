@@ -22,13 +22,14 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text, upload_text
-from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
 PROMPTS = Path(__file__).with_name("prompts")

@@ -48,6 +48,7 @@ import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import (
     AmbiguousEnvironmentServerError,
     BaseServerConfig,
@@ -119,7 +120,7 @@ from nemo_gym.rollout_collection import (
 )
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
-from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
+from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -1717,7 +1718,7 @@ class TestRolloutCollection:
             else ServerDisconnectedError()
         )
         transport.request = AsyncMock(side_effect=[failure, FakeResponse(200, {"reward": 1})])
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: transport)
         monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
         run = RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests)
         if retry_requests or connection_refused:
@@ -7411,7 +7412,7 @@ class TestRunExamplesAclose:
             )
             monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda *args: server_client)
             async with ClientSession() as session:
-                monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+                monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", session)
                 completions = RolloutCollectionHelper().run_examples(
                     [self._row(0)], max_resident_tasks=max_resident_tasks
                 )

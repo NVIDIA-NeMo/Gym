@@ -21,6 +21,7 @@ from aiohttp import ClientResponseError
 from fastapi import HTTPException
 from starlette.responses import Response
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import (
@@ -29,7 +30,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.conversational_tool_use_simulation.app import (
     NG_FAILURE_CLASS_KEY,
     TRANSIENT_FAILURE_CLASS,

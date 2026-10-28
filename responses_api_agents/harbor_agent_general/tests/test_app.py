@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 from harbor.models.trajectories import Trajectory
 
+import nemo_gym.client.http_client
 from responses_api_agents.harbor_agent_general import app
 from responses_api_agents.harbor_agent_general.app import HarborAgent, HarborVerifyResponse
 
@@ -388,14 +389,14 @@ def test_worker_initializes_and_flushes_telemetry_inside_runtime_environment(mon
 
     from opentelemetry import trace
 
-    from nemo_gym import server_utils
-
     events = []
     loop = asyncio.new_event_loop()
     monkeypatch.setattr(app, "_RAY_WORKER_EVENT_LOOP", loop)
     monkeypatch.setattr(app, "_RAY_WORKER_HTTP_CONFIG", None)
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-    monkeypatch.setattr(server_utils, "get_global_config_dict", lambda **kwargs: pytest.fail("Worker parsed Hydra"))
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(
+        nemo_gym.client.http_client, "get_global_config_dict", lambda **kwargs: pytest.fail("Worker parsed Hydra")
+    )
     monkeypatch.setattr(
         app,
         "init_telemetry",
@@ -429,8 +430,8 @@ def test_worker_initializes_and_flushes_telemetry_inside_runtime_environment(mon
         assert events == [("init", "1"), ("run", "example"), ("flush", "1")]
         assert "NEMO_GYM_OTEL_ENABLED" not in os.environ
     finally:
-        if server_utils.is_global_aiohttp_client_setup():
-            loop.run_until_complete(server_utils.get_global_aiohttp_client().close())
+        if nemo_gym.client.http_client.is_global_aiohttp_client_setup():
+            loop.run_until_complete(nemo_gym.client.http_client.get_global_aiohttp_client().close())
         loop.close()
 
 
@@ -440,14 +441,15 @@ def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
     import httpx
     from aiohttp import web
 
-    from nemo_gym import server_utils
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 
     loop = asyncio.new_event_loop()
     monkeypatch.setattr(app, "_RAY_WORKER_EVENT_LOOP", loop)
     monkeypatch.setattr(app, "_RAY_WORKER_HTTP_CONFIG", None)
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-    monkeypatch.setattr(server_utils, "get_global_config_dict", lambda **kwargs: pytest.fail("Worker parsed Hydra"))
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(
+        nemo_gym.client.http_client, "get_global_config_dict", lambda **kwargs: pytest.fail("Worker parsed Hydra")
+    )
     monkeypatch.setattr(app, "init_telemetry", lambda **kwargs: None)
     sessions = []
     connections = []
@@ -468,7 +470,7 @@ def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
     runner, url = loop.run_until_complete(start_server())
 
     async def run_job(config, task_name):
-        session = server_utils.get_global_aiohttp_client()
+        session = nemo_gym.client.http_client.get_global_aiohttp_client()
         assert session._loop is asyncio.get_running_loop()
         assert session.connector.limit == 7
         assert session.connector.limit_per_host == 3
@@ -493,6 +495,6 @@ def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
             app.harbor_job_worker._function({}, "third", {}, {"global_aiohttp_connector_limit": 8})
     finally:
         loop.run_until_complete(runner.cleanup())
-        if server_utils.is_global_aiohttp_client_setup():
-            loop.run_until_complete(server_utils.get_global_aiohttp_client().close())
+        if nemo_gym.client.http_client.is_global_aiohttp_client_setup():
+            loop.run_until_complete(nemo_gym.client.http_client.get_global_aiohttp_client().close())
         loop.close()

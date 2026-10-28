@@ -46,6 +46,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.failure_kinds import (
@@ -83,7 +84,6 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages

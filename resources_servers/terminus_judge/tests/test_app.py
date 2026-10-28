@@ -19,6 +19,7 @@ import orjson
 import pytest
 from pytest import fixture
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -28,7 +29,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.terminus_judge.app import (
     FailureCode,
     TerminusJudgeResourcesServer,

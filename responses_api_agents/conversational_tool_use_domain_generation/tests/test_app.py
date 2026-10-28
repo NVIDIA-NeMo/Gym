@@ -23,10 +23,10 @@ import pytest
 from fastapi import Request
 from omegaconf import OmegaConf
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.conversational_tool_use_domain_generation.app import (
     FOLLOWUP_INSTRUCTION,
     DomainGenerationAgent,

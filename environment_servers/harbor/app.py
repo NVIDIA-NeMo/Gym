@@ -103,6 +103,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
@@ -118,7 +119,6 @@ from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_met
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.cli import ORACLE_AGENT

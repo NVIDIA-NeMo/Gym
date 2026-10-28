@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from pytest import approx
 
 from nemo_gym.base_resources_server import ReverifyMode
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -13,7 +14,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.widesearch.app import (
     WideSearchConfig,
     WideSearchServer,

@@ -25,6 +25,7 @@ import pytest
 import yaml
 from fastapi import Request
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -34,7 +35,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation, ToolCallObservation
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.pi_agent.app import (
     PiAgent,
     PiAgentConfig,

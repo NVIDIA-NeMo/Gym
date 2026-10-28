@@ -20,6 +20,7 @@ from pydantic import ConfigDict, Field, PositiveInt
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.core.responses_api_types import (
@@ -35,7 +36,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 LOG = logging.getLogger(__name__)

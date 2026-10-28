@@ -50,6 +50,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
 )
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -69,7 +70,6 @@ from nemo_gym.core.responses_api_types import (
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.simple_agent.app import (

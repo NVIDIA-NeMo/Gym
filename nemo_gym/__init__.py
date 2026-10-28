@@ -202,10 +202,10 @@ _LAZY_EXPORTS: dict[str, str] = {
     "BaseResponsesAPIModelConfig": "base_responses_api_model",
     "SimpleResponsesAPIModel": "base_responses_api_model",
     # Common server-client utilities
-    "ServerClient": "server_utils",
-    "raise_for_status": "server_utils",
-    "get_response_json": "server_utils",
-    "SESSION_ID_KEY": "server_utils",
+    "ServerClient": "client.server_client",
+    "raise_for_status": "client.http_client",
+    "get_response_json": "client.http_client",
+    "SESSION_ID_KEY": "client.server_client",
     # Author-facing config and metrics types
     "BaseServerConfig": "config.config_types",
     "BaseRunServerInstanceConfig": "config.config_types",

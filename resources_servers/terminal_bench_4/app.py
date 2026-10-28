@@ -21,10 +21,10 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode import rollout_context
 from nemo_gym.core.failure_kinds import VERIFIER_ERROR
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
-from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.environment import EnvironmentConfig, ExecLimitConfigurationError

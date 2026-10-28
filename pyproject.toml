@@ -889,8 +889,10 @@ layers = [
     "nemo_gym.atif_export : nemo_gym.atif_json : nemo_gym.atif_reverification : nemo_gym.atif_v1_7 : nemo_gym.rollout_observability",
     # sandbox/
     "nemo_gym.sandbox.access : nemo_gym.sandbox.adapters : nemo_gym.sandbox.api : nemo_gym.sandbox.attribution : nemo_gym.sandbox.compose_config : nemo_gym.sandbox.compose_fields : nemo_gym.sandbox.compose_volumes : nemo_gym.sandbox.config : nemo_gym.sandbox.observability : nemo_gym.sandbox.providers : nemo_gym.sandbox.shell : nemo_gym.sandbox.transfer : nemo_gym.sandbox.utils",
+    # client/
+    "nemo_gym.client",
     # telemetry/
-    "nemo_gym.profiling : nemo_gym.telemetry",
+    "nemo_gym.telemetry",
     # core/
     "nemo_gym.core",
     # utils/
@@ -901,20 +903,18 @@ layers = [
 # Imports that point up the order today.
 # Each one goes away with the split or move that resolves it, and this list may only shrink.
 ignore_imports = [
-    "nemo_gym.exporters.base -> nemo_gym.batch_status",
-    "nemo_gym.exporters.base -> nemo_gym.rollout_collection",
-    "nemo_gym.exporters.mlflow -> nemo_gym.rollout_collection",
+    "nemo_gym.client.server_client -> nemo_gym._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.exporters",
     "nemo_gym.config.global_config -> nemo_gym.h2_ping_sidecar.config",
     "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
-    "nemo_gym.judge -> nemo_gym.server_utils",
+    "nemo_gym.exporters.base -> nemo_gym.batch_status",
+    "nemo_gym.exporters.base -> nemo_gym.rollout_collection",
+    "nemo_gym.exporters.mlflow -> nemo_gym.rollout_collection",
     "nemo_gym.rollout_observability -> nemo_gym.observability.model_calls",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.tasks.harbor.digest",
     "nemo_gym.sandbox.compose_config -> nemo_gym.tasks.harbor.digest",
-    "nemo_gym.sandbox.providers._http_transport -> nemo_gym.server_utils",
-    "nemo_gym.sandbox.providers.e2b._sdk -> nemo_gym.server_utils",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.main",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.utils",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.rollout_collection",

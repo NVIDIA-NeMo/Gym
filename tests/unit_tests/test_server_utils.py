@@ -40,6 +40,20 @@ from yarl import URL
 
 import nemo_gym.config.global_config
 import nemo_gym.server_utils
+from nemo_gym.client.http_client import (
+    GlobalAIOHTTPAsyncClientConfig,
+    _format_upstream_error_log,
+    _make_keepalive_socket_factory,
+    _set_tcp_keepalive,
+    format_exception_with_response_body,
+    raise_for_status,
+)
+from nemo_gym.client.server_client import (
+    NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
+    NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
+    ConnectionError,
+    ServerClient,
+)
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
 from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
@@ -48,27 +62,17 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import (
-    NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
-    NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
     BaseServerConfig,
     ClientDisconnectCancellationMiddleware,
-    ConnectionError,
     DictConfig,
-    GlobalAIOHTTPAsyncClientConfig,
     HeadServer,
     KeepaliveHttpToolsProtocol,
-    ServerClient,
     SimpleServer,
     UvicornProxyHeadersConfig,
-    _format_upstream_error_log,
     _log_validation_exception,
-    _make_keepalive_socket_factory,
-    _set_tcp_keepalive,
     _validation_exception_handler,
-    format_exception_with_response_body,
     initialize_ray,
-    raise_for_status,
 )
 from nemo_gym.telemetry import connection_pool
 from nemo_gym.telemetry.connection_pool import connection_pool_capacity, report_connection_pool_capacity
@@ -120,7 +124,7 @@ class TestRequestRetries:
         monkeypatch.setattr("nemo_gym.telemetry.contrib.inject_trace_context", lambda headers: None)
 
         with raises(failure_type) as exc_info:
-            await nemo_gym.server_utils.request(
+            await nemo_gym.client.http_client.request(
                 "POST",
                 "http://server.test/step",
                 _internal=internal,
@@ -151,7 +155,7 @@ class TestRequestRetries:
         monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
         monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
 
-        actual = await nemo_gym.server_utils.request("POST", "http://server.test/step", _internal=internal)
+        actual = await nemo_gym.client.http_client.request("POST", "http://server.test/step", _internal=internal)
 
         assert actual is response
         assert send.await_count == 2
@@ -175,14 +179,14 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
 
         try:
-            nemo_gym.server_utils.global_aiohttp_client_exit()
+            nemo_gym.client.http_client.global_aiohttp_client_exit()
         finally:
             owner_loop.close()
 
         assert client.closed
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY is False
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY is False
 
     async def test_global_aiohttp_client_exit_from_owner_loop_is_non_blocking(self, monkeypatch: MonkeyPatch) -> None:
         owner_loop = asyncio.get_running_loop()
@@ -199,11 +203,11 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
 
-        nemo_gym.server_utils.global_aiohttp_client_exit()
+        nemo_gym.client.http_client.global_aiohttp_client_exit()
 
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY is False
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY is False
         await asyncio.sleep(0)
         assert client.closed
 
@@ -223,15 +227,15 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
 
         try:
-            nemo_gym.server_utils.global_aiohttp_client_exit()
+            nemo_gym.client.http_client.global_aiohttp_client_exit()
         finally:
             owner_loop.close()
 
         assert data_client.closed
         assert control_client.closed
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT is None
-        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT is None
+        assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_LOOP is None
 
     async def test_raise_for_status_preserves_message_across_process_boundary(self) -> None:
         headers = CIMultiDictProxy(
@@ -343,10 +347,10 @@ class TestServerUtils:
 
     def test_global_aiohttp_client_request_debug_enabled(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
-        assert not nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
+        assert not nemo_gym.client.http_client.is_global_aiohttp_client_request_debug_enabled()
 
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
-        assert nemo_gym.server_utils.is_global_aiohttp_client_request_debug_enabled()
+        assert nemo_gym.client.http_client.is_global_aiohttp_client_request_debug_enabled()
 
     def test_ServerClient_load_head_server_config(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig(
@@ -579,7 +583,7 @@ class TestServerUtils:
 
     @mark.parametrize("tracing_enabled", [False, True])
     @mark.parametrize("internal", [False, True])
-    @mark.parametrize("error_type", [RuntimeError, ClientOSError, nemo_gym.server_utils.ServerDisconnectedError])
+    @mark.parametrize("error_type", [RuntimeError, ClientOSError, nemo_gym.client.http_client.ServerDisconnectedError])
     async def test_explicit_transport_attempt_cap_disables_request_retry(
         self,
         monkeypatch: MonkeyPatch,
@@ -591,7 +595,7 @@ class TestServerUtils:
         client = self._mock_global_client(monkeypatch, error_type("transport failed"), failures=None)
 
         with raises(error_type, match="transport failed"):
-            await nemo_gym.server_utils.request(
+            await nemo_gym.client.http_client.request(
                 method="POST",
                 url="https://example.test",
                 _internal=internal,
@@ -606,7 +610,7 @@ class TestServerUtils:
     ) -> None:
         client = self._mock_global_client(monkeypatch, ClientOSError(), failures=0)
         with raises(ValueError, match="_max_num_tries must be at least 1"):
-            await nemo_gym.server_utils.request("POST", "https://example.test", _max_num_tries=attempt_cap)
+            await nemo_gym.client.http_client.request("POST", "https://example.test", _max_num_tries=attempt_cap)
         client.request.assert_not_awaited()
 
     @mark.parametrize("tracing_enabled", [False, True])
@@ -620,7 +624,7 @@ class TestServerUtils:
         client.request = AsyncMock(
             side_effect=[
                 RuntimeError("generic failure"),
-                nemo_gym.server_utils.ClientOSError("socket failure"),
+                nemo_gym.client.http_client.ClientOSError("socket failure"),
                 "must not be reached",
             ]
         )
@@ -636,10 +640,10 @@ class TestServerUtils:
         )
 
         with raises(
-            nemo_gym.server_utils.ClientOSError,
+            nemo_gym.client.http_client.ClientOSError,
             match="socket failure",
         ):
-            await nemo_gym.server_utils.request(
+            await nemo_gym.client.http_client.request(
                 method="POST",
                 url="https://example.test",
                 _max_num_tries=2,
@@ -705,7 +709,7 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
 
         try:
-            client = nemo_gym.server_utils.get_global_aiohttp_client()
+            client = nemo_gym.client.http_client.get_global_aiohttp_client()
         except SystemExit as e:
             fail(f"get_global_aiohttp_client parsed the process argv as Gym CLI overrides and exited: {e!r}")
 
@@ -732,7 +736,7 @@ class TestServerUtils:
             skip_load_from_dotenv=True,
         )
 
-        client = nemo_gym.server_utils.get_global_aiohttp_client(global_config_dict_parser_config=parser_config)
+        client = nemo_gym.client.http_client.get_global_aiohttp_client(global_config_dict_parser_config=parser_config)
         try:
             assert (client.connector.limit, client.connector.limit_per_host) == (7, 3)
         finally:
@@ -1289,7 +1293,7 @@ class TestServerUtils:
         report = MagicMock()
         monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
 
-        client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        client = nemo_gym.client.http_client.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
         try:
             assert type(client.connector) is TCPConnector
             assert client.trace_configs == []
@@ -1305,7 +1309,7 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: False)
         monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
 
-        client = nemo_gym.server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        client = nemo_gym.client.http_client.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
         try:
             assert isinstance(client.connector, connection_pool.QueueTimedTCPConnector)
             assert client.trace_configs == []
@@ -1419,7 +1423,7 @@ class TestServerUtils:
         from fastapi.testclient import TestClient
         from starlette.middleware.sessions import SessionMiddleware
 
-        from nemo_gym.server_utils import SESSION_ID_KEY
+        from nemo_gym.client.server_client import SESSION_ID_KEY
 
         class TestSimpleServer(SimpleServer):
             def setup_webserver(self):
@@ -2162,7 +2166,7 @@ class TestServerUtils:
         """
         client = MagicMock()
         # The most any test needs is MAX_NUM_TRIES + 3 calls.
-        allowed_calls = nemo_gym.server_utils.MAX_NUM_TRIES + 6
+        allowed_calls = nemo_gym.client.http_client.MAX_NUM_TRIES + 6
         attempts = 0
 
         def request(*_args, **_kwargs):
@@ -2187,7 +2191,7 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
         client = self._mock_global_client(monkeypatch, ClientOSError(), failures=None)
         with raises(ClientOSError):
-            await nemo_gym.server_utils.request(
+            await nemo_gym.client.http_client.request(
                 "POST", "http://dead-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
             )
         assert client.request.await_count == expected_attempts
@@ -2201,7 +2205,7 @@ class TestServerUtils:
         client = self._mock_global_client(monkeypatch, TimeoutError("upstream timed out"), failures=None)
 
         with raises(TimeoutError, match="upstream timed out"):
-            await nemo_gym.server_utils.request(
+            await nemo_gym.client.http_client.request(
                 "POST", "http://slow-host:1/v1", _max_num_tries=attempt_cap, _max_connection_retries=3
             )
 
@@ -2209,7 +2213,7 @@ class TestServerUtils:
 
     async def test_request_connection_retries_unbounded_by_default(self, monkeypatch: MonkeyPatch) -> None:
         client = self._mock_global_client(monkeypatch, ClientOSError(), failures=4)
-        response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")
+        response = await nemo_gym.client.http_client.request("POST", "http://flaky-host:1/v1")
         assert response is client.success_response
         assert client.request.await_count == 5
 
@@ -2220,10 +2224,10 @@ class TestServerUtils:
         monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
         client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=None)
         # Above MAX_NUM_TRIES, so the test can tell the cap apart from MAX_NUM_TRIES.
-        cap = nemo_gym.server_utils.MAX_NUM_TRIES + 2
+        cap = nemo_gym.client.http_client.MAX_NUM_TRIES + 2
 
         with raises(RuntimeError, match="boom"):
-            await nemo_gym.server_utils.request(
+            await nemo_gym.client.http_client.request(
                 "POST", "http://head:1/v1", _internal=True, _max_connection_retries=cap
             )
 
@@ -2233,10 +2237,10 @@ class TestServerUtils:
     async def test_request_internal_callers_without_a_cap_retry_past_max_num_tries(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
     ) -> None:
-        failures = nemo_gym.server_utils.MAX_NUM_TRIES + 2
+        failures = nemo_gym.client.http_client.MAX_NUM_TRIES + 2
         client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=failures)
 
-        response = await nemo_gym.server_utils.request("POST", "http://head:1/v1", _internal=True)
+        response = await nemo_gym.client.http_client.request("POST", "http://head:1/v1", _internal=True)
 
         assert response is client.success_response
         assert client.request.await_count == failures + 1
@@ -2248,11 +2252,11 @@ class TestServerUtils:
         client = self._mock_global_client(monkeypatch, RuntimeError("boom"), failures=None)
 
         with raises(RuntimeError, match="boom"):
-            await nemo_gym.server_utils.request("POST", "http://model:1/v1")
+            await nemo_gym.client.http_client.request("POST", "http://model:1/v1")
 
-        assert client.request.await_count == nemo_gym.server_utils.MAX_NUM_TRIES
+        assert client.request.await_count == nemo_gym.client.http_client.MAX_NUM_TRIES
         out = capsys.readouterr().out
-        assert out.count("Hit an exception while making a request") == nemo_gym.server_utils.MAX_NUM_TRIES
+        assert out.count("Hit an exception while making a request") == nemo_gym.client.http_client.MAX_NUM_TRIES
 
 
 _SPOOFED_HOST = "203.0.113.99"

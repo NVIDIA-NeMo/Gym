@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 from pytest import approx
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -26,7 +27,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.server_utils import ServerClient
 from resources_servers.iheval.app import (
     IHEvalResourcesServer,
     IHEvalResourcesServerConfig,

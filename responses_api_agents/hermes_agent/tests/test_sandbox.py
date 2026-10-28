@@ -21,10 +21,10 @@ from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agen
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.supervisor_client import CLEANUP_PHASE_COUNT, STOP_REQUEST_FILE, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     AGENT_TIMEOUT_METADATA_KEY,

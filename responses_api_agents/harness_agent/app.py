@@ -36,6 +36,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
+from nemo_gym.client.server_client import trace_context_path_segment
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import get_first_server_config_dict
 from nemo_gym.core.responses_api_types import (
@@ -46,7 +48,6 @@ from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
 
 
 LOG = logging.getLogger(__name__)

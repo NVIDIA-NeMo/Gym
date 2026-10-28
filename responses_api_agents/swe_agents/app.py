@@ -56,6 +56,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.server_client import apply_rollout_prefix
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import (
     CACHE_DIR_KEY_NAME,
@@ -69,8 +70,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.profiling import Profiler
-from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.telemetry.profiling import Profiler
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,

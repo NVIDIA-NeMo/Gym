@@ -66,6 +66,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.client.server_client import SESSION_ID_KEY, get_server_url
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
@@ -73,7 +74,6 @@ from nemo_gym.deliverables import is_deliverable
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,

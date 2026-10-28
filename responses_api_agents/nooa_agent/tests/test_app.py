@@ -14,6 +14,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
 )
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
@@ -22,7 +23,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent import app as app_module
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunResult

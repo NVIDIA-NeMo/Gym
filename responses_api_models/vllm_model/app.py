@@ -45,6 +45,8 @@ from nemo_gym.base_responses_api_model import (
     is_propagated_refusal,
     start_model_execution,
 )
+from nemo_gym.client.http_client import _redacted_url
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.responses_api_types import (
     REQUIRED_TOKEN_METADATA_FIELDS,
@@ -63,7 +65,6 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url
 from nemo_gym.token_id_capture import (
     CaptureContext,
     capture_engine_refusal,

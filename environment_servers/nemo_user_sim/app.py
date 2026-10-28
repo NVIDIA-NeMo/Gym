@@ -44,6 +44,8 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
+from nemo_gym.client.http_client import format_exception_with_response_body, get_response_json, raise_for_status
+from nemo_gym.client.http_client import request as http_request
 from nemo_gym.config.config_types import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
@@ -62,8 +64,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
-from nemo_gym.server_utils import format_exception_with_response_body, get_response_json, raise_for_status
-from nemo_gym.server_utils import request as http_request
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,

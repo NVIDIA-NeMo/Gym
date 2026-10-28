@@ -28,13 +28,13 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.openair_congestion.app import (
     OpenAirCongestionEnv,
     OpenAirCongestionResourcesServerConfig,

@@ -29,9 +29,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 
 
 # ----------------------------

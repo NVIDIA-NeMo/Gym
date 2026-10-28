@@ -34,10 +34,10 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode import EpisodeId
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.mcp_auto_exposure import MCPTool
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.partner_if.app import (

@@ -8,8 +8,8 @@ import pytest
 from app import WmtTranslationResourcesServer, WmtTranslationResourcesServerConfig, WmtTranslationVerifyRequest
 from in22_metrics import clean_in22_response, compute_in22_metrics, corpus_metrics, normalize_in22
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 
 
 def _response(text: str) -> NeMoGymResponse:

@@ -19,11 +19,12 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServerConfig,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.episode_types import MaterializedTask
-from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
+from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 

@@ -35,6 +35,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -48,7 +49,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.cline_agent.setup_cline import ensure_cline
 
 

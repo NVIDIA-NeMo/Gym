@@ -42,6 +42,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.http_client import raise_for_status
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.responses_api_types import (
@@ -78,7 +80,6 @@ from nemo_gym.sandbox.agent_tools import (
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (

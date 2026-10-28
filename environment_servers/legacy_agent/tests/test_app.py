@@ -12,8 +12,9 @@ from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef
-from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
+from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 
 
 class _Upstream:

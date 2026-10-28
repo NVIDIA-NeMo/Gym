@@ -48,6 +48,7 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
+from nemo_gym.client.http_client import request
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.config.global_config import (
     DISALLOWED_PORTS_KEY_NAME,
@@ -63,7 +64,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import request
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 
 

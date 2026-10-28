@@ -18,11 +18,11 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServerConfig,
 )
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 from responses_api_agents.nooa_agent import resource_tools
 from responses_api_agents.nooa_agent.app import NOOAAgent

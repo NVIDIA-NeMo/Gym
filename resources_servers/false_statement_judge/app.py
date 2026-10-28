@@ -43,6 +43,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.client.http_client import get_response_json
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
@@ -53,7 +54,6 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.server_utils import get_response_json
 
 
 _DEFAULT_JUDGE_PROMPT_PATH = str(Path(__file__).parent / "prompts" / "judge.yaml")

@@ -14,9 +14,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetricsRequest
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
 from resources_servers.chemcotbench.app import (
     ChemCoTBenchResourcesServer,

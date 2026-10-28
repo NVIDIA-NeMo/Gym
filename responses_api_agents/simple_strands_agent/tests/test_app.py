@@ -10,12 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_strands_agent.app import (
     SimpleStrandsAgent,
     SimpleStrandsAgentConfig,

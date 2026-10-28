@@ -37,6 +37,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     SimpleResourcesServer,
 )
+from nemo_gym.client.http_client import request
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -45,7 +47,6 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import RETRY_ERROR_CODES
-from nemo_gym.server_utils import SESSION_ID_KEY, request
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 

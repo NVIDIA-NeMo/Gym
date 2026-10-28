@@ -21,8 +21,8 @@ from app import (
     ToolCallMultiRewardVerifyRequest,
 )
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 
 
 WEATHER_TOOLS = [

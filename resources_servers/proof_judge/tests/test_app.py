@@ -3,8 +3,8 @@
 
 from unittest.mock import MagicMock
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.server_utils import ServerClient
 from resources_servers.proof_judge.app import (
     ProofWithJudgeResourcesServer,
     ProofWithJudgeResourcesServerConfig,

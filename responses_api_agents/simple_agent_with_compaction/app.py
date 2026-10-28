@@ -33,6 +33,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.http_client import get_response_json, raise_for_status
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
@@ -51,7 +53,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from responses_api_agents.simple_agent_with_compaction.compaction import (
     ContextCompactedResponse,
     ContextCompactedTransportResponse,

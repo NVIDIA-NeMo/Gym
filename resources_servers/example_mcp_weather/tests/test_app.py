@@ -19,6 +19,7 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -26,7 +27,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherGetWeatherRequest,
     ExampleMCPWeatherResourcesServer,

@@ -22,13 +22,13 @@ from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 def response_output_items(policy_outputs: list[Any]) -> list[Any]:

@@ -27,48 +27,48 @@ from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
 from functools import partial
-from importlib import import_module
 from importlib.util import find_spec
 from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, ClassVar, List, Optional, TextIO, Tuple, Type
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
-import orjson
-import requests
 import uvicorn
 from aiohttp import (
-    ClientConnectorError,
-    ClientOSError,
-    ClientResponse,
     ClientResponseError,
-    ClientSession,
-    ClientTimeout,
-    DummyCookieJar,
-    ServerDisconnectedError,
 )
-from aiohttp.client import _RequestOptions
 from anyio import create_task_group
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, PrivateAttr, model_validator
-from requests.exceptions import ConnectionError
+from pydantic import BaseModel, PositiveInt, PrivateAttr, model_validator
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import Match
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
-from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.client.http_client import (
+    GlobalAIOHTTPAsyncClientConfig,
+    _detach_global_aiohttp_clients,
+    _format_upstream_error_log,
+    _set_tcp_keepalive,
+    global_aiohttp_client_exit,
+    is_global_aiohttp_client_request_debug_enabled,
+)
+from nemo_gym.client.server_client import (
+    _TRACEPARENT_PATTERN,
+    SESSION_ID_KEY,
+    ServerClient,
+    ServerStatus,
+)
 from nemo_gym.config.config_types import (
     DEFAULT_UVICORN_BACKLOG,
     ROLLOUT_PATH_PREFIX,
@@ -76,29 +76,16 @@ from nemo_gym.config.config_types import (
     TRACE_CONTEXT_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
-    HeadServerUnreachableError,
 )
 from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
-    HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     UVICORN_TIMEOUT_WORKER_HEALTHCHECK,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
-    maybe_get_global_config_dict,
 )
-from nemo_gym.core.episode import (
-    VERIFIER_INVOCATION_HEADER,
-    current_rollout_id,
-    current_verifier_invocation_id,
-    maybe_rollout_id_from_run_body,
-    rollout_context,
-)
-from nemo_gym.profiling import Profiler
+from nemo_gym.core.episode import rollout_context
 from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, scope_with_routed_path
 from nemo_gym.session_routing import (
     SESSION_CLAIM_SCOPE_KEY,
@@ -107,22 +94,21 @@ from nemo_gym.session_routing import (
     create_session_socket_dir,
     install_session_routing,
 )
-from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.connection_pool import (
-    QueueTimedTCPConnector,
-    build_connection_pool_connector,
     connection_pool_capacity,
     report_connection_pool_capacity,
-    reset_server_name,
-    set_server_name,
 )
 from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
+from nemo_gym.telemetry.profiling import (
+    Profiler,
+    ProfilingMiddlewareConfig,
+)
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
 from nemo_gym.utils.server_process import (
     _has_injected_global_config_env,
-    get_nemo_gym_fastapi_num_workers,
     is_nemo_gym_fastapi_worker,
     set_is_nemo_gym_fastapi_entrypoint,
     set_is_nemo_gym_fastapi_worker,
@@ -138,13 +124,6 @@ except ImportError:  # the telemetry extra is optional; without the SDK there is
 
 logger = logging.getLogger(__name__)
 
-_GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
-_GLOBAL_AIOHTTP_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
-_GLOBAL_AIOHTTP_CLIENT_CONFIG: Optional["GlobalAIOHTTPAsyncClientConfig"] = None
-_GLOBAL_AIOHTTP_CONTROL_CLIENT: Union[None, ClientSession] = None
-_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
-_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY: bool = False
-_UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 # Bound both the raw request prefix and its escaped representation to 4 KiB.
 _VALIDATION_ERROR_LOG_BODY_CHARS = 4096
 _VALIDATION_ERROR_LOG_MAX_ERRORS = 20
@@ -307,129 +286,6 @@ async def _validation_exception_handler(request: Request, exc: RequestValidation
     return await request_validation_exception_handler(request, exc)
 
 
-NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
-NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
-
-
-class _PickleSafeRequestInfo(NamedTuple):
-    url: str
-    method: str
-    headers: CIMultiDict[str]
-    real_url: str
-
-
-class GlobalAIOHTTPAsyncClientConfig(BaseModel):
-    global_aiohttp_connector_limit: int = Field(
-        default=100 * 1024,
-        ge=0,
-        description="Per-server connection budget divided across FastAPI workers; 0 is unlimited.",
-    )
-    global_aiohttp_connector_limit_per_host: int = Field(
-        default=1024,
-        ge=0,
-        description="Per-server, per-host connection budget divided across FastAPI workers; 0 is unlimited.",
-    )
-    global_aiohttp_intended_concurrency: Optional[int] = Field(
-        default=None,
-        gt=0,
-        description="Optional per-server expected concurrent HTTP requests used for capacity warnings.",
-    )
-    global_aiohttp_intended_concurrency_per_host: Optional[int] = Field(
-        default=None,
-        gt=0,
-        description="Optional per-server expected concurrent HTTP requests to one host used for capacity warnings.",
-    )
-    # Control calls (checkpoint coordination, generation cuts) use their own pool,
-    # so long-running data calls that hold every data connection to a host cannot starve them.
-    global_aiohttp_control_connector_limit: int = Field(default=256, ge=0)
-    global_aiohttp_control_connector_limit_per_host: int = Field(default=64, ge=0)
-
-    global_aiohttp_client_request_debug: bool = False
-
-    # Bounds match the Linux kernel limits; values outside them make setsockopt fail with EINVAL.
-    global_aiohttp_tcp_keepalive_idle_seconds: int = Field(
-        default=60,
-        ge=1,
-        le=32767,
-        description=(
-            "TCP_KEEPIDLE: seconds a socket must be idle before the kernel starts sending keepalive probes. "
-            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
-        ),
-    )
-    global_aiohttp_tcp_keepalive_interval_seconds: int = Field(
-        default=10,
-        ge=1,
-        le=32767,
-        description=(
-            "TCP_KEEPINTVL: seconds between successive keepalive probes. "
-            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
-        ),
-    )
-    global_aiohttp_tcp_keepalive_probes: int = Field(
-        default=3,
-        ge=1,
-        le=127,
-        description=(
-            "TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection. "
-            "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
-        ),
-    )
-
-
-def get_global_aiohttp_client(
-    global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
-    global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
-) -> ClientSession:
-    global _GLOBAL_AIOHTTP_CLIENT
-
-    if _GLOBAL_AIOHTTP_CLIENT is not None:
-        return _GLOBAL_AIOHTTP_CLIENT
-
-    # Read only a config this process already has, cached or injected through NEMO_GYM_CONFIG_DICT; never parse
-    # its argv here, which in a Ray task worker exits the process. A process with neither gets the default client
-    # limits: env.yaml and +global_aiohttp_* do not reach it. An explicit parser config or class still parses.
-    global_config_dict = maybe_get_global_config_dict()
-    if global_config_dict is None and (
-        global_config_dict_parser_config is not None or global_config_dict_parser_cls is not GlobalConfigDictParser
-    ):
-        global_config_dict = get_global_config_dict(
-            global_config_dict_parser_config=global_config_dict_parser_config,
-            global_config_dict_parser_cls=global_config_dict_parser_cls,
-        )
-    if global_config_dict is None:
-        cfg = GlobalAIOHTTPAsyncClientConfig()
-    else:
-        cfg = GlobalAIOHTTPAsyncClientConfig.model_validate(global_config_dict)
-
-    return set_global_aiohttp_client(cfg)
-
-
-def _set_tcp_keepalive(sock: socket.socket, idle_seconds: int, interval_seconds: int, probes: int) -> None:
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    for opt, opt_value in (
-        # macOS has no TCP_KEEPIDLE; CPython exposes its equivalent as TCP_KEEPALIVE.
-        (getattr(socket, "TCP_KEEPIDLE", getattr(socket, "TCP_KEEPALIVE", None)), idle_seconds),
-        (getattr(socket, "TCP_KEEPINTVL", None), interval_seconds),
-        (getattr(socket, "TCP_KEEPCNT", None), probes),
-    ):
-        if opt is not None:
-            sock.setsockopt(socket.IPPROTO_TCP, opt, opt_value)
-
-
-def _make_keepalive_socket_factory(
-    idle_seconds: int,
-    interval_seconds: int,
-    probes: int,
-):
-    def factory(addr_info) -> socket.socket:
-        family, type_, proto, _canonname, _sockaddr = addr_info
-        sock = socket.socket(family=family, type=type_, proto=proto)
-        _set_tcp_keepalive(sock, idle_seconds, interval_seconds, probes)
-        return sock
-
-    return factory
-
-
 class KeepaliveHttpToolsProtocol(HttpToolsProtocol):
     """Uvicorn's httptools protocol with TCP keepalive on every accepted connection.
 
@@ -454,93 +310,6 @@ class KeepaliveHttpToolsProtocol(HttpToolsProtocol):
         super().connection_made(transport)
 
 
-def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
-    assert not is_global_aiohttp_client_setup(), (
-        "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
-    )
-
-    num_workers = get_nemo_gym_fastapi_num_workers()
-    capacity = connection_pool_capacity(cfg, num_workers)
-    if not is_nemo_gym_fastapi_worker():
-        report_connection_pool_capacity(cfg, capacity)
-    connector = build_connection_pool_connector(
-        limit=capacity.total,
-        limit_per_host=capacity.per_host,
-        keepalive_timeout=15.0,
-        socket_factory=_make_keepalive_socket_factory(
-            idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
-            interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
-            probes=cfg.global_aiohttp_tcp_keepalive_probes,
-        ),
-    )
-    client_session = ClientSession(
-        connector=connector,
-        timeout=ClientTimeout(),
-        cookie_jar=DummyCookieJar(),
-    )
-
-    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG, _GLOBAL_AIOHTTP_CLIENT_LOOP
-    _GLOBAL_AIOHTTP_CLIENT = client_session
-    _GLOBAL_AIOHTTP_CLIENT_CONFIG = cfg
-    _GLOBAL_AIOHTTP_CLIENT_LOOP = asyncio.get_running_loop()
-
-    global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
-    _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
-
-    global _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
-    _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = isinstance(connector, QueueTimedTCPConnector)
-
-    return _GLOBAL_AIOHTTP_CLIENT
-
-
-def get_global_aiohttp_control_client() -> ClientSession:  # pragma: no cover
-    """The reserved pool for control calls, created on first use next to the data client."""
-    global _GLOBAL_AIOHTTP_CONTROL_CLIENT
-    if _GLOBAL_AIOHTTP_CONTROL_CLIENT is None or _GLOBAL_AIOHTTP_CONTROL_CLIENT.closed:
-        get_global_aiohttp_client()
-        cfg = _GLOBAL_AIOHTTP_CLIENT_CONFIG or GlobalAIOHTTPAsyncClientConfig()
-        _GLOBAL_AIOHTTP_CONTROL_CLIENT = ClientSession(
-            connector=build_connection_pool_connector(
-                limit=cfg.global_aiohttp_control_connector_limit,
-                limit_per_host=cfg.global_aiohttp_control_connector_limit_per_host,
-                keepalive_timeout=15.0,
-                socket_factory=_make_keepalive_socket_factory(
-                    idle_seconds=cfg.global_aiohttp_tcp_keepalive_idle_seconds,
-                    interval_seconds=cfg.global_aiohttp_tcp_keepalive_interval_seconds,
-                    probes=cfg.global_aiohttp_tcp_keepalive_probes,
-                ),
-            ),
-            timeout=ClientTimeout(),
-            cookie_jar=DummyCookieJar(),
-        )
-    return _GLOBAL_AIOHTTP_CONTROL_CLIENT
-
-
-def is_global_aiohttp_client_setup() -> bool:  # pragma: no cover
-    return _GLOBAL_AIOHTTP_CLIENT is not None
-
-
-def is_global_aiohttp_client_request_debug_enabled() -> bool:
-    return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
-
-
-def _detach_global_aiohttp_clients() -> list[ClientSession]:
-    """Clear the process-wide data and control clients and return the ones still open."""
-
-    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP, _GLOBAL_AIOHTTP_CONTROL_CLIENT
-    global _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
-    clients = [
-        client
-        for client in (_GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CONTROL_CLIENT)
-        if client is not None and not client.closed
-    ]
-    _GLOBAL_AIOHTTP_CLIENT = None
-    _GLOBAL_AIOHTTP_CLIENT_LOOP = None
-    _GLOBAL_AIOHTTP_CONTROL_CLIENT = None
-    _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = False
-    return clients
-
-
 async def close_global_aiohttp_client() -> None:
     """Close the process-wide data and control clients on their owning event loop."""
 
@@ -548,636 +317,10 @@ async def close_global_aiohttp_client() -> None:
         await client.close()
 
 
-def global_aiohttp_client_exit():  # pragma: no cover
-    # The control pool is created on demand from requests running on the data client's loop.
-    owner_loop = _GLOBAL_AIOHTTP_CLIENT_LOOP
-    clients = _detach_global_aiohttp_clients()
-    if not clients:
-        return
-
-    async def close_client() -> None:
-        for client in clients:
-            await client.close()
-
-    if owner_loop is None or owner_loop.is_closed():
-        # aiohttp has no owner-loop work left once the loop is closed, but the
-        # coroutine must still run so the session transitions to closed.
-        asyncio.run(close_client())
-        return
-
-    try:
-        running_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        running_loop = None
-
-    if running_loop is owner_loop:
-        owner_loop.create_task(close_client())
-    elif owner_loop.is_running():
-        asyncio.run_coroutine_threadsafe(close_client(), owner_loop).result(timeout=5)
-    else:
-        owner_loop.run_until_complete(close_client())
-
-
 atexit.register(global_aiohttp_client_exit)
 
 
-# This is not intended to be changed. If you want to increase this, we should probably figure out how to improve server-side robustness.
-MAX_NUM_TRIES = 3
-
-_NUM_SERVER_DISCONNECTED_ERROR: int = 0
-_NUM_CLIENT_OS_ERROR: int = 0
-DISCONNECTED_CLIENT_OS_PRINT_INTERVAL: int = 100
-DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different scenarios previously:
-1. Too many open connections and not enough sockets due to the file descriptor limit being hit.
-    - Increase ulimit.
-    - Bash example: https://github.com/NVIDIA-NeMo/RL/blob/de55be7777bbf034c04e41c40382c44725e8aa4b/ray.sub#L81
-    - Python example: https://github.com/NVIDIA-NeMo/Gym/blob/c74ffddb3d8190cd717508b0830916b19a26e6cd/nemo_gym/server_utils.py#L495
-2. Depending on the serving framework and config, the server may be overloaded and is dropping connections.
-    - Increase adapter server replicas."""
-
-
-async def request(
-    method: str,
-    url: str,
-    _internal: bool = False,
-    _max_connection_retries: Optional[int] = None,
-    _server_name: Optional[str] = None,
-    _max_num_tries: Optional[int] = None,
-    _control: bool = False,
-    _resend_after_disconnect: bool = True,
-    **kwargs: Unpack[_RequestOptions],
-) -> ClientResponse:  # pragma: no cover
-    """Make an outbound HTTP call through Gym's shared aiohttp client.
-
-    This is the only place Gym talks to another server, so it is also the only place
-    trace context has to be injected: every agent -> model and agent -> resources hop goes
-    through here. `CLAUDE.md` bans httpx precisely to keep it that way.
-
-    ``_server_name`` is the bounded logical destination label for pool metrics: a configured
-    ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
-    service, or ``None`` for the fallback label ``external``. It is retained across retries
-    and redirects and is not forwarded to aiohttp.
-
-    ``_max_num_tries`` caps this call's total attempts on every exception path. It replaces the
-    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, unbounded for
-    internal ones). A ``_max_connection_retries`` limit still applies as well.
-
-    ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
-    server may already have received it. A connection that was never made is still retried.
-    """
-    if _max_num_tries is not None and _max_num_tries < 1:
-        raise ValueError("_max_num_tries must be at least 1")
-
-    # Faster JSON dumps than the default aiohttp json
-    if kwargs.get("json"):
-        kwargs["data"] = orjson.dumps(kwargs.pop("json"))
-        kwargs.setdefault("headers", dict())
-        kwargs["headers"]["Content-Type"] = "application/json"
-
-    # Gate first: a disabled site costs one frozenset lookup and nothing else. Gym runs at
-    # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
-    # The span and its `traceparent` are the only outputs, so they are skipped while traces are off.
-    traced = is_span_group_enabled(GymSpanGroup.HTTP_CLIENT) and is_trace_exporter_active()
-    send = _traced_request if traced else _request_with_retries
-    counts = request_counts()
-    if counts is None:
-        return await send(
-            method,
-            url,
-            _internal=_internal,
-            _max_num_tries=_max_num_tries,
-            _max_connection_retries=_max_connection_retries,
-            _server_name=_server_name,
-            _control=_control,
-            _resend_after_disconnect=_resend_after_disconnect,
-            **kwargs,
-        )
-    # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
-    counts.outbound_in_flight += 1
-    try:
-        return await send(
-            method,
-            url,
-            _internal=_internal,
-            _max_num_tries=_max_num_tries,
-            _max_connection_retries=_max_connection_retries,
-            _server_name=_server_name,
-            _control=_control,
-            _resend_after_disconnect=_resend_after_disconnect,
-            **kwargs,
-        )
-    finally:
-        counts.outbound_in_flight -= 1
-
-
-async def _traced_request(
-    method: str,
-    url: str,
-    _internal: bool = False,
-    _max_connection_retries: Optional[int] = None,
-    _server_name: Optional[str] = None,
-    _max_num_tries: Optional[int] = None,
-    _control: bool = False,
-    _resend_after_disconnect: bool = True,
-    **kwargs: Unpack[_RequestOptions],
-) -> ClientResponse:  # pragma: no cover
-    """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
-
-    Uses `nemo_gym.telemetry.spans.client_span` rather than nemo-lens's `managed_span`
-    because the latter cannot set `SpanKind` — see that module for why an INTERNAL span
-    is wrong on a cross-service hop.
-
-    Injection happens inside the span so the header carries *this* span as the parent —
-    the receiving server's FastAPI instrumentation extracts it and its SERVER span becomes
-    our child. That edge is what makes one rollout a single trace across three processes.
-
-    Retries reuse the same span rather than starting one per attempt: the caller asked for
-    one logical request, and the retry count is recorded as an attribute instead.
-    """
-    from nemo_gym.telemetry.contrib import inject_trace_context
-    from nemo_gym.telemetry.spans import client_span
-
-    with client_span(f"HTTP {method.upper()}") as span:
-        headers = kwargs.get("headers")
-        # aiohttp accepts several mapping types here; normalise to a dict we can inject into
-        # without mutating a caller's object.
-        headers = dict(headers) if headers else {}
-        inject_trace_context(headers)
-        kwargs["headers"] = headers
-
-        if span is not None:
-            attributes = {
-                "http.request.method": method.upper(),
-                "url.full": _redacted_url(url),
-                "nemo.gym.rollout.id": current_rollout_id(),
-            }
-            safe_set_span_attributes(span, attributes)
-
-        response = await _request_with_retries(
-            method,
-            url,
-            _internal=_internal,
-            _max_num_tries=_max_num_tries,
-            _max_connection_retries=_max_connection_retries,
-            _server_name=_server_name,
-            _control=_control,
-            _resend_after_disconnect=_resend_after_disconnect,
-            **kwargs,
-        )
-
-        if span is not None:
-            safe_set_span_attributes(span, {"http.response.status_code": response.status})
-        return response
-
-
-def _redacted_url(url: str) -> str:
-    """Strip the query string from a URL before it becomes a span attribute.
-
-    Query strings in Gym carry API keys and, on rollout-prefixed routes, task content.
-    The path is the useful part for a trace; the query is a leak waiting to happen.
-    """
-    return url.split("?", 1)[0]
-
-
-def _format_upstream_error_body(content: Any) -> str:
-    """Render a bounded upstream error body without hiding its useful traceback."""
-    if isinstance(content, bytes):
-        prefix = content[: _UPSTREAM_ERROR_LOG_BODY_CHARS * 4].decode("utf-8", errors="replace")
-        truncated = len(content) > _UPSTREAM_ERROR_LOG_BODY_CHARS * 4
-    else:
-        prefix = str(content)
-        truncated = False
-
-    truncated = truncated or len(prefix) > _UPSTREAM_ERROR_LOG_BODY_CHARS
-    return prefix[:_UPSTREAM_ERROR_LOG_BODY_CHARS] + ("…" if truncated else "")
-
-
-def format_exception_with_response_body(error: BaseException) -> str:
-    """Format an exception, appending its bounded HTTP response body when available.
-
-    ``str(ClientResponseError)`` names only the status, reason phrase, and URL. The upstream server's own reason,
-    such as an agent's ``AgentSeedRejectedError`` detail, is in the body that ``raise_for_status`` keeps on
-    ``response_content``.
-    """
-    content = getattr(error, "response_content", None) if isinstance(error, ClientResponseError) else None
-    if not content:
-        return str(error)
-    return f"{error}: {_format_upstream_error_body(content)}"
-
-
-def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> str:
-    request_info = error.request_info
-    upstream_url = getattr(request_info, "real_url", None)
-    if upstream_url is None:
-        upstream_url = getattr(request_info, "url", None)
-    upstream_url = _redacted_url(str(upstream_url)) if upstream_url is not None else "unknown"
-    return (
-        "🚨 [upstream_request_failed] "
-        f"server={server_name} method={getattr(request_info, 'method', 'unknown')} "
-        f"url={upstream_url} status={error.status}\n"
-        f"Response content: {_format_upstream_error_body(error.response_content)}"
-    )
-
-
-async def _request_with_retries(
-    method: str,
-    url: str,
-    _internal: bool = False,
-    _max_connection_retries: Optional[int] = None,
-    _server_name: Optional[str] = None,
-    _max_num_tries: Optional[int] = None,
-    _control: bool = False,
-    _resend_after_disconnect: bool = True,
-    **kwargs: Unpack[_RequestOptions],
-) -> ClientResponse:  # pragma: no cover
-    client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
-    # Initialization stays inside the client span and sets the metrics flag before it is read.
-    token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
-    try:
-        num_tries = 1
-        explicit_tries = 0
-        retries = 0
-        retry_start = time.monotonic()
-        while True:
-            if _max_num_tries is not None:
-                explicit_tries += 1
-            try:
-                return await client.request(method=method, url=url, **kwargs)
-            except ServerDisconnectedError:
-                if not _resend_after_disconnect:
-                    raise
-                global _NUM_SERVER_DISCONNECTED_ERROR
-                _NUM_SERVER_DISCONNECTED_ERROR += 1
-                retries += 1
-                if _max_num_tries is not None and explicit_tries >= _max_num_tries:
-                    raise
-                if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                    print(
-                        f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                        f"Hit {_NUM_SERVER_DISCONNECTED_ERROR} global `ServerDisconnectedError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                        flush=True,
-                    )
-
-                # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
-                if _max_connection_retries is not None and retries >= _max_connection_retries:
-                    raise
-
-                await asyncio.sleep(0.5)
-            except ClientOSError as error:
-                if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
-                    raise
-                global _NUM_CLIENT_OS_ERROR
-                _NUM_CLIENT_OS_ERROR += 1
-                retries += 1
-                if _max_num_tries is not None and explicit_tries >= _max_num_tries:
-                    raise
-                if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
-                    print(
-                        f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
-                        f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
-                        flush=True,
-                    )
-
-                if _max_connection_retries is not None and retries >= _max_connection_retries:
-                    raise
-
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-                    print_exc()
-                if not _resend_after_disconnect:
-                    # A connection that was never made is a ClientOSError, handled above;
-                    # anything else may have sent it.
-                    raise
-
-                # num_tries only advances on the default path, so count explicit attempts when capped.
-                attempts = explicit_tries if _max_num_tries is not None else num_tries
-                if _max_connection_retries is not None and attempts >= _max_connection_retries:
-                    raise
-
-                if _max_num_tries is not None:
-                    if explicit_tries >= _max_num_tries:
-                        raise
-                else:
-                    # Internal calls skip this print and the MAX_NUM_TRIES limit, since the head server shuts
-                    # everything down if a Gym server fails. They still advance `num_tries`, so the
-                    # `_max_connection_retries` check above stops them. Connection errors count in `retries`.
-                    if not _internal:
-                        print(
-                            f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
-Sleeping 0.5s and retrying...
-"""
-                        )
-                        if num_tries >= MAX_NUM_TRIES:
-                            raise e
-
-                    num_tries += 1
-
-                await asyncio.sleep(0.5)
-    finally:
-        if token is not None:
-            reset_server_name(token)
-
-
-async def raise_for_status(response: ClientResponse, content: Optional[bytes] = None) -> None:  # pragma: no cover
-    if not response.ok:
-        if content is None:
-            content = await response.content.read()
-        if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
-            # Not the full `request_info`: its headers carry `Authorization: Bearer <api key>`.
-            request_info = response.request_info
-            print(f"""Request info: {request_info.method} {_redacted_url(str(request_info.real_url))}
-Response content: {content}""")
-
-        try:
-            response.raise_for_status()
-        except ClientResponseError as e:
-            # Set the response content here so we have access to it down the line.
-            e.response_content = content
-            # aiohttp stores unpicklable multidict proxies in this exception.
-            # Preserve request details as pickle-safe values for cross-process propagation.
-            request_info = e.request_info
-            e.request_info = _PickleSafeRequestInfo(
-                url=str(request_info.url),
-                method=request_info.method,
-                headers=CIMultiDict(request_info.headers),
-                real_url=str(request_info.real_url),
-            )
-            e.history = ()
-            e.headers = CIMultiDict(e.headers) if e.headers is not None else None
-            e.args = (e.request_info, e.history)
-            raise e
-
-
-async def get_response_json(response: ClientResponse) -> Any:
-    return orjson.loads(await response.read())
-
-
 DEFAULT_HEAD_SERVER_PORT = 11000
-
-ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
-
-
-def _connectable_client_host(host: str) -> str:
-    """Return a connectable client host for a server bind address."""
-
-    if host == "0.0.0.0":
-        return "127.0.0.1"
-    if host in {"::", "[::]"}:
-        return "[::1]"
-    return host
-
-
-class ServerClient(BaseModel):
-    head_server_config: BaseServerConfig
-
-    global_config_dict: DictConfig
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    # Resolved base URLs, cached by server name.
-    _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
-    _checkpoint_enabled: Optional[bool] = PrivateAttr(default=None)
-
-    def model_post_init(self, context: Any) -> None:
-        # Validate the ``checkpoint:`` block once, when the client is built at startup, rather than on every request.
-        self.checkpoint_enabled()
-
-    def checkpoint_enabled(self) -> bool:
-        """Return whether the global ``checkpoint:`` block enables partial-rollout checkpointing."""
-        if self._checkpoint_enabled is None:
-            self._checkpoint_enabled = checkpoint_settings(self.global_config_dict) is not None
-        return self._checkpoint_enabled
-
-    @staticmethod
-    def _client_host(host: str) -> str:
-        """Return a connectable host for a server bind address.
-
-        Wildcard addresses are valid for binding a server but are not valid
-        advertised client targets. In particular, proxy-aware HTTP clients can
-        route ``0.0.0.0`` through an external proxy instead of reaching the
-        local server.
-        """
-        return _connectable_client_host(host)
-
-    def assistant_message_header(self, model_server_name: str) -> bytes | None:
-        """Read the optional header property of harnesses using this model server.
-
-        The property lives on the harness package so model workers need not import
-        an agent's app or install its runtime dependencies.
-        """
-        headers = set()
-        for instance in self.global_config_dict.values():
-            if not isinstance(instance, (dict, DictConfig)):
-                continue
-            for harness, config in instance.get("responses_api_agents", {}).items():
-                model = config.get("model_server") or {}
-                if model.get("name") != model_server_name or model.get("type") != "responses_api_models":
-                    continue
-                package = import_module(f"responses_api_agents.{harness}")
-                header = getattr(package, "_assistant_message_header", None)
-                if header is not None:
-                    headers.add(header.lower())
-        if len(headers) > 1:
-            raise ValueError(f"Harnesses using model server {model_server_name!r} declare different assistant headers")
-        return next(iter(headers), None)
-
-    @classmethod
-    def load_head_server_config(cls) -> BaseServerConfig:
-        global_config_dict = get_global_config_dict()
-        server_config_dict = global_config_dict[HEAD_SERVER_KEY_NAME]
-        config = BaseServerConfig.model_validate(server_config_dict)
-        return config
-
-    @classmethod
-    def load_from_global_config(cls, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":
-        """Build a client from the fully resolved global config.
-
-        Gym-launched server processes reuse the config injected by their parent.
-        Other processes fetch the config from the head server.
-        """
-        if head_server_config is None:
-            head_server_config = cls.load_head_server_config()
-
-        if _has_injected_global_config_env():
-            return cls(
-                head_server_config=head_server_config,
-                global_config_dict=get_global_config_dict(),
-            )
-
-        # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
-        head_server_host = _connectable_client_host(head_server_config.host)
-        head_server_url = f"http://{head_server_host}:{head_server_config.port}"
-        try:
-            response = requests.get(
-                f"{head_server_url}/global_config_dict_yaml",
-            )
-        except ConnectionError as e:
-            # requests' ConnectionError also covers proxy and name-resolution failures; keep the real reason
-            # (with its traceback) for --verbose, since the ConfigError below is printed without its cause.
-            logger.debug(
-                "Could not fetch the global config from the head server at %s", head_server_url, exc_info=True
-            )
-            # A ConfigError so the CLI prints just this message (no traceback); the cause stays chained.
-            raise HeadServerUnreachableError(
-                f"Could not connect to the head server at {head_server_url}. Is the head server running? "
-                "Start it with: `gym env start`. If it is already running on a different host or port, pass "
-                "`++head_server.host=<host>` / `++head_server.port=<port>` so this command can find it."
-            ) from e
-
-        global_config_dict_yaml = response.content.decode()
-        global_config_dict = OmegaConf.create(json.loads(global_config_dict_yaml))
-
-        return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
-
-    async def request(
-        self,
-        server_name: str,
-        url_path: str,
-        method: str,
-        *,
-        _control: bool = False,
-        _resend_after_disconnect: bool = True,
-        **kwargs: Unpack[_RequestOptions],
-    ) -> ClientResponse:
-        """Call another server. ``_control`` sends the call over the reserved control pool."""
-        model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
-        model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
-        if model_server_base_url and server_name == model_server_name:
-            # Subprocess agents do not inherit the current rollout context.
-            # The launcher provides a model URL that already contains the rollout prefix.
-            # Use that URL instead of rebuilding it from global server configuration.
-            base_url = model_server_base_url.rstrip("/")
-        else:
-            base_url = self._resolve_base_url(server_name)
-
-        json_obj = kwargs.get("json")
-        if "json" in kwargs:
-            if isinstance(json_obj, BaseModel):
-                json_obj = json_obj.model_dump(exclude_unset=True)
-                kwargs["json"] = json_obj
-
-        # Checkpointing needs every model and resources call attributed to its rollout attempt,
-        # so it carries the rollout prefix even when observability is off.
-        attribute_rollout = (
-            self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
-        )
-        server_entry = self.global_config_dict.get(server_name)
-        rollout_id = current_rollout_id()
-        if attribute_rollout and server_entry is not None and "resources_servers" in server_entry:
-            if url_path == "/verify":
-                rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
-            if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
-                url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
-
-        if (
-            rollout_id is not None
-            and attribute_rollout
-            and server_entry is not None
-            and "responses_api_models" in server_entry
-            and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
-            and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
-        ):
-            url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
-            verifier_invocation_id = current_verifier_invocation_id()
-            if verifier_invocation_id is not None:
-                kwargs["headers"] = {
-                    **(kwargs.get("headers") or {}),
-                    VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
-                }
-
-        return await request(
-            method=method,
-            url=f"{base_url}{url_path}",
-            _internal=True,
-            _server_name=server_name,
-            _control=_control,
-            # A /run starts an episode attempt, so with checkpointing it is never sent twice.
-            # A dropped connection usually means the server's worker died mid-episode.
-            # Sending it again would run the attempt a second time,
-            # and the first run's sessions on other servers would never be freed: the second run replies,
-            # so the controller never retires the attempt.
-            _resend_after_disconnect=_resend_after_disconnect
-            and not (self.checkpoint_enabled() and url_path == "/run"),
-            **kwargs,
-        )
-
-    async def get(
-        self,
-        server_name: str,
-        url_path: str,
-        **kwargs: Unpack[_RequestOptions],
-    ) -> ClientResponse:
-        """
-        Args:
-            server_name: str
-                The name of the server you are trying to call.
-            url_path: str
-                The URL path in the server you are trying to call e.g. "/v1/responses".
-
-        """
-        return await self.request(
-            server_name=server_name,
-            url_path=url_path,
-            method="GET",
-            **kwargs,
-        )
-
-    async def post(
-        self,
-        server_name: str,
-        url_path: str,
-        **kwargs: Unpack[_RequestOptions],
-    ) -> ClientResponse:
-        """
-        Args:
-            server_name: str
-                The name of the server you are trying to call.
-            url_path: str
-                The URL path in the server you are trying to call e.g. "/v1/responses".
-
-        """
-        return await self.request(
-            server_name=server_name,
-            url_path=url_path,
-            method="POST",
-            **kwargs,
-        )
-
-    def poll_for_status(self, server_name: str, *, timeout_seconds: float = 5) -> ServerStatus:  # pragma: no cover
-        if server_name == HEAD_SERVER_KEY_NAME:
-            server_config_dict = self.global_config_dict[HEAD_SERVER_KEY_NAME]
-        else:
-            server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-
-        try:
-            requests.get(self._build_server_base_url(server_config_dict), timeout=timeout_seconds)
-            # We don't check the status code since there may not be a route at /
-            return "success"
-        except requests.exceptions.ConnectionError:
-            return "connection_error"
-        except requests.exceptions.Timeout:
-            return "timeout"
-        except Exception:
-            return "unknown_error"
-
-    def _resolve_base_url(self, server_name: str) -> str:
-        cached = self._server_base_urls.get(server_name)
-        if cached is not None:
-            return cached
-        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        base_url = self._build_server_base_url(server_config_dict)
-        self._server_base_urls[server_name] = base_url
-        return base_url
-
-    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
-        # Use the module helper so this method remains safe when borrowed by a
-        # duck-typed or mocked ServerClient.
-        host = _connectable_client_host(server_config_dict.host)
-        return f"http://{host}:{server_config_dict.port}"
-
-
-SESSION_ID_KEY = "session_id"
 
 
 class BaseServer(BaseModel):
@@ -1208,15 +351,6 @@ class BaseServer(BaseModel):
         @app.get("/", include_in_schema=False)
         async def _liveness():
             return {"status": "ok"}
-
-
-class ProfilingMiddlewareInputConfig(BaseModel):
-    # Relative to the Gym root dir.
-    profiling_results_dirpath: Optional[str] = None
-
-
-class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
-    profiling_enabled: bool = False
 
 
 class UvicornLoggingConfig(BaseModel):
@@ -1436,8 +570,6 @@ def install_request_context_isolation(app: FastAPI) -> None:
     app.middleware_stack = None
 
 
-# A W3C ``traceparent``, version 00, the only form the propagator writes.
-_TRACEPARENT_PATTERN = r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}"
 _ROLLOUT_PREFIX_PATTERN = rf"/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+(?:/{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)})?"
 _ROLLOUT_PREFIX_RE = re.compile(rf"^{_ROLLOUT_PREFIX_PATTERN}(?=/|$)")
 _TRACE_CONTEXT_PATH_RE = re.compile(
@@ -1869,7 +1001,7 @@ class SimpleServer(BaseServer):
                 return await call_next(request)
             except ClientResponseError as e:
                 assert hasattr(e, "response_content"), (
-                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
+                    "Please use `nemo_gym.client.http_client.raise_for_status` for HTTP exceptions!"
                 )
 
                 response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
@@ -2241,73 +1373,6 @@ class ServerInstanceDisplayConfig(BaseModel):
     status: Optional[ServerStatus] = None
     uptime_seconds: Optional[float] = None
     url: Optional[str] = None
-
-
-def get_server_url(server_name: str) -> str:
-    global_config_dict = get_global_config_dict()
-
-    model_server_config = get_first_server_config_dict(
-        global_config_dict,
-        server_name,
-    )
-
-    return f"http://{model_server_config['host']}:{model_server_config['port']}"
-
-
-def rollout_path_prefix(rollout_id: Optional[str], *, token_capture: bool = False) -> str:
-    """Return the leading model-server path prefix for a rollout, if available."""
-    if not rollout_id:
-        return ""
-    capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}{capture_segment}"
-
-
-def trace_context_path_segment() -> str:
-    """Return ``/ng-trace/<traceparent>`` for the current span, or ``""`` while traces are off or no span is current.
-
-    ``TraceContextPathMiddleware`` on the receiving Gym server turns it back into the header.
-    """
-    if not is_trace_exporter_active():
-        return ""
-    from nemo_gym.telemetry.contrib import inject_trace_context
-
-    carrier: dict[str, str] = {}
-    inject_trace_context(carrier)
-    traceparent = carrier.get("traceparent", "")
-    if not re.fullmatch(_TRACEPARENT_PATTERN, traceparent):
-        return ""
-    return f"/{TRACE_CONTEXT_PATH_SEGMENT}/{traceparent}"
-
-
-def apply_rollout_prefix(
-    base_url: str, rollout_id: Optional[str], *, token_capture: bool = False, trace_context: bool = True
-) -> str:
-    """Append the rollout prefix and, while traces export, the current span's trace context to a model-server root URL.
-
-    Every caller hands the result to a client Gym does not instrument (a harness in a sandbox, a
-    third-party client library), which is why the trace context travels in the URL here; Gym's own
-    clients send the ``traceparent`` header instead and use ``url_path_for_run``.
-
-    The span named is the one current when the URL is built, so pass ``trace_context=False`` for a
-    URL that is built once and reused across rollouts (a cached client): otherwise every later
-    rollout's calls would be parented to the first one's span.
-    """
-    prefix = rollout_path_prefix(rollout_id, token_capture=token_capture) if rollout_id else ""
-    if trace_context:
-        prefix += trace_context_path_segment()
-    if not prefix:
-        return base_url
-    return base_url.rstrip("/") + prefix
-
-
-def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover
-    server_client = ServerClient.load_from_global_config(head_server_config)
-
-    # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
-    if not is_global_aiohttp_client_setup():
-        set_global_aiohttp_client(cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict))
-
-    return server_client
 
 
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.

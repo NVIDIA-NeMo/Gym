@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from benchmarks.assaybench.prepare import PROMPT_CONFIG_PATH, REPO_ROOT
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetricsRequest
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import (
@@ -31,7 +32,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
-from nemo_gym.server_utils import ServerClient
 from resources_servers.assaybench.app import (
     EXTRACTION_DSPY_ANSWER,
     EXTRACTION_NONE,
