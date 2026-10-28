@@ -472,6 +472,20 @@ class GymTraceHooks:
         # usage of its own; it must not erase known totals or invent per-call zeroes.
         usages = [call.response.usage for call in state.calls if call.response is not None]
         latest_response = next((call.response for call in reversed(state.calls) if call.response is not None), None)
+        # The served id of the root agent's last completed call is the rollout's terminal: Gym's
+        # token-id capture attributes the scored chain to it, so a response that ends with a
+        # synthetic final message, or a rollout whose children made the last calls, still trains.
+        root_invocation = next((item for item in invocations.values() if item.parent_invocation_id is None), None)
+        terminal_response_id = next(
+            (
+                call.response.id
+                for call in reversed(state.calls)
+                if call.response is not None
+                and call.response.id
+                and (root_invocation is None or call.invocation_id == root_invocation.invocation_id)
+            ),
+            None,
+        )
         episode = AgentEpisode(
             response=NeMoGymResponse(
                 id=f"nooa-{rollout_id}",
@@ -486,6 +500,7 @@ class GymTraceHooks:
                 usage=(
                     NeMoGymResponseUsage.sum_from_list(usages) if all(usage is not None for usage in usages) else None
                 ),
+                metadata={"terminal_response_id": terminal_response_id} if terminal_response_id else None,
             ),
             observations=observations,
         )
