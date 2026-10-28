@@ -64,6 +64,7 @@ from nemo_gym.hf_utils import (
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.task_data import (
+    SERVER_DIR_MARKERS,
     TaskDataSchemaError,
     TaskDataValidator,
     find_server_dir,
@@ -1162,6 +1163,14 @@ This could be due to a change in how metrics are calculated, leading to outdated
         impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
+            # Say so: a schema home that resolves to no server directory used to switch the gate off silently.
+            warnings.warn(
+                f"Skipping task_data validation for {d.jsonl_fpath}: no {base_folder}/{impl_key} directory "
+                f"holding one of {', '.join(SERVER_DIR_MARKERS)} under the component search roots. Check the "
+                f"resources_server reference of {c.name} in the config, or add the server's directory to the "
+                "search roots (NEMO_GYM_EXTRA_ROOTS / --search-dir).",
+                stacklevel=2,
+            )
             return None
         try:
             adapter = load_task_data_schema(server_dir)
@@ -1206,6 +1215,13 @@ This could be due to a change in how metrics are calculated, leading to outdated
         impl_key, base_folder = home
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
+            warnings.warn(
+                f"Skipping the dataset metrics hook lookup for {c.name}: no {base_folder}/{impl_key} directory "
+                f"holding one of {', '.join(SERVER_DIR_MARKERS)} under the component search roots. Check the "
+                f"resources_server reference of {c.name} in the config, or add the server's directory to the "
+                "search roots (NEMO_GYM_EXTRA_ROOTS / --search-dir).",
+                stacklevel=2,
+            )
             return None
         try:
             return load_dataset_metrics_hook(server_dir)
