@@ -25,7 +25,7 @@ from app import (
 )
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
+from nemo_gym.judge import is_judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -33,6 +33,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "prompt_templates"
@@ -283,8 +284,9 @@ class TestJudgeIntegration:
         routes the row to the failures sidecar — no silent 0.0 fallback."""
         server, mock = _make_server()
         mock.post = AsyncMock(side_effect=ConnectionError("unavailable"))
-        with pytest.raises(JudgeError, match="unavailable"):
+        with pytest.raises(NgFailureEvent, match="unavailable") as raised:
             await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))
+        assert is_judge_failure(raised.value)
 
     async def test_judge_unparseable_returns_zero_reward(self) -> None:
         """When the judge returns garbage, reward must be 0.0 — no silent fallback."""
@@ -322,5 +324,6 @@ class TestWildguardIntegration:
         judge_failsafe routes the row to the failures sidecar — no silent 0.0."""
         server, mock = _make_server(output_format="wildguard")
         mock.post = AsyncMock(side_effect=ConnectionError("unavailable"))
-        with pytest.raises(JudgeError, match="unavailable"):
+        with pytest.raises(NgFailureEvent, match="unavailable") as raised:
             await server.verify(_make_verify_request(text="I'm sorry, no.", label="unsafe"))
+        assert is_judge_failure(raised.value)
