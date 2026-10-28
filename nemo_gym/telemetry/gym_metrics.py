@@ -564,6 +564,7 @@ ROLLOUT_HEALTH_VERDICT_INSTRUMENT = "gym.rollout.health_verdict_total"
 ROLLOUT_HEALTH_FLAGGED_INSTRUMENT = "gym.rollout.health_flagged_total"
 HEALTH_VERDICT_ATTRIBUTE = "nemo.gym.health.verdict"
 HEALTH_CHECK_ATTRIBUTE = "nemo.gym.health.check"
+HEALTH_CHECKS_ATTRIBUTE = "nemo.gym.health.checks"
 
 
 def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterable[str]) -> None:

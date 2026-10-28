@@ -134,7 +134,7 @@ uploads the supervisor at activation and owns its control files and log access; 
 confirms process cleanup, captures artifacts, then releases the provider connection or
 owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
 and interrupted activations keep captured observations after session files are removed.
-`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.sh`
 runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
 Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 `worker_exit_code_unavailable` observation gaps. When Codex fails before it starts a turn, the end
@@ -143,13 +143,15 @@ gap. Positive cleanup confirmation remains
 required; the adapter validates the captured terminal events without inventing an exit code.
 
 One shared Linux supervisor per activation fences delayed launches.
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 Services must use task-owned files rather than the temporary agent session directory.
 Close confirms the receipt before cancelling provider execution,
 then removes adapter-owned files and disconnects. Missing/negative termination evidence
@@ -157,6 +159,9 @@ blocks verification. Missing evidence stays retryable; a final negative receipt 
 the borrowed connection without making the failed activation gradable. The borrowing
 agent never destroys the sandbox.
 Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
+The supervisor is a bash script, and the runner above Codex runs as `gym-runner` (a link to the
+sandbox's `python3`) from a file without a `.py` suffix, so a task agent's `pkill -f python3`,
+`pkill python3` or `killall python3` does not end Codex, as it would not under Harbor.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit

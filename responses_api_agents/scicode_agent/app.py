@@ -50,6 +50,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
+from nemo_gym.metrics_config import Stat
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -314,9 +315,20 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                     )
                 )
             step_record["status"] = "generated"
+            # The top-level response retains only the final step. Preserve stop
+            # evidence for every generation, even when model-call capture is off.
+            step_record["response_id"] = model_response.id
+            step_record["response_status"] = last_response_json.get("status")
+            step_record["incomplete_details"] = last_response_json.get("incomplete_details")
+            step_record["error"] = last_response_json.get("error")
             step_record["usage"] = model_response.usage.model_dump() if model_response.usage is not None else None
             usage_complete = usage_complete and model_response.usage is not None
             usage = accumulate_response_usage(usage, model_response.usage)
+            if (model_response.metadata or {}).get("nemo_gym_context_window_exceeded") == "true":
+                step_record["status"] = "context_window_exceeded"
+                out_of_context = True
+                solutions[f"{body.problem_id}.{cur_step + 1}"] = OUT_OF_CONTEXT
+                continue
             generation = model_response.output_text
             extracted = extract_python_script(generation)
             previous_llm_code[cur_step] = extracted
@@ -363,6 +375,8 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 }
             )
         metrics = await super().aggregate_metrics(body)
+        # Custom repeat estimates are added after the shared headline selection.
+        metrics.key_metrics.update(self.get_key_metrics(metrics.agent_metrics))
         # NeMo Evaluator requires numeric scores. Omit unavailable values rather
         # than exporting nulls or inventing zero consumption.
         metrics.agent_metrics = {k: v for k, v in metrics.agent_metrics.items() if v is not None}
@@ -387,6 +401,12 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             for k, v in agent_metrics.items()
             if k.startswith("mean/")
             or k.startswith("subtask_accuracy")
+            or k
+            in {
+                f"{stat.across_repeats_prefix}{metric}"
+                for stat in (Stat.MEAN, Stat.CI_LOW_95, Stat.CI_HIGH_95)
+                for metric in ("subtask_accuracy", "mean/problem_accuracy")
+            }
             or k in {"generation_coverage", "token_usage_complete"}
         }
 
