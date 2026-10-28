@@ -124,7 +124,7 @@ def test_the_runtime_directory_is_keyed_by_its_inputs(monkeypatch) -> None:
 @pytest.fixture
 def host(monkeypatch, tmp_path):
     """A host whose uv records each install and writes a module into the target."""
-    monkeypatch.setattr(sandbox_python, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(sandbox_python, "_cache_dir", lambda: tmp_path / "cache")
     monkeypatch.setattr(sandbox_python.shutil, "which", lambda name: "/host/uv")
     monkeypatch.setattr(sandbox_python, "_agent_environment_pins", lambda: ("openai==1.2.3", "pillow==12.3.0"))
     host = SimpleNamespace(installs=[], fail=0)
@@ -160,6 +160,8 @@ async def test_the_host_installs_wheels_for_the_sandbox_platform(host, tmp_path)
     assert argv[argv.index("--python-version") + 1] == sandbox_python.PYTHON_VERSION
     # Only the commit-pinned harness is built from source; every dependency must be a published wheel.
     assert argv[argv.index("--only-binary") + 1] == ":all:"
+    # Files, not links into the host's uv cache, which the sandbox does not have.
+    assert argv[argv.index("--link-mode") + 1] == "copy"
     assert [argv[i + 1] for i, arg in enumerate(argv) if arg == "--no-binary"] == ["hermes-agent"]
     assert argv[-1] == _HERMES
     # The agent environment's versions are constraints, so a dependency's own extras are still installed.
@@ -209,9 +211,69 @@ async def test_the_host_build_requires_uv(host, monkeypatch) -> None:
         await runtime._site_packages_archive(SandboxPlatform("x86_64", "gnu", 35))
 
 
-class _Response:
+async def test_concurrent_seeds_share_a_failed_build_and_a_cancelled_seed_leaves_the_build_running(host) -> None:
+    runtime = SandboxPythonRuntime(harness="stirrup", requirements=("stirrup==0.1.12",), import_check="import x")
+    platform = SandboxPlatform("x86_64", "gnu", 35)
+    host.fail = 1
+
+    # Seeds waiting on a build that fails get its error rather than each running it again in turn.
+    failures = await asyncio.gather(
+        *(runtime._site_packages_archive(platform) for _ in range(3)), return_exceptions=True
+    )
+    assert len(host.installs) == 1
+    assert all(isinstance(failure, RuntimeError) for failure in failures)
+
+    first = asyncio.create_task(runtime._site_packages_archive(platform))
+    await asyncio.sleep(0)
+    second = asyncio.create_task(runtime._site_packages_archive(platform))
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert (await second).is_file()
+    assert len(host.installs) == 2
+
+
+async def test_the_host_cache_is_rebuilt_when_the_runtime_inputs_change(host, monkeypatch) -> None:
+    platform = SandboxPlatform("x86_64", "gnu", 35)
+
+    def runtime(requirement: str = "stirrup==0.1.12", overrides: tuple[str, ...] = ()) -> SandboxPythonRuntime:
+        return SandboxPythonRuntime("stirrup", (requirement,), "import x", overrides)
+
+    first = await runtime()._site_packages_archive(platform)
+    assert await runtime()._site_packages_archive(platform) == first
+    upgraded = await runtime("stirrup==0.1.13")._site_packages_archive(platform)
+    overridden = await runtime(overrides=("pillow==12.3.0",))._site_packages_archive(platform)
+    monkeypatch.setattr(sandbox_python, "_agent_environment_pins", lambda: ("openai==9.9.9",))
+    repinned = await runtime()._site_packages_archive(platform)
+
+    assert len({first, upgraded, overridden, repinned}) == 4
+    assert len(host.installs) == 4
+    assert host.installs[-1].constraints == "openai==9.9.9\n"
+
+
+def test_the_host_cache_lives_in_gyms_cache_dir(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(sandbox_python, "maybe_get_global_config_dict", lambda: {"cache_dir": str(tmp_path)})
+    assert sandbox_python._cache_dir() == tmp_path / "sandbox_python"
+
+    monkeypatch.setattr(sandbox_python, "maybe_get_global_config_dict", lambda: None)
+    assert sandbox_python._cache_dir() == sandbox_python.CACHE_DIR / "sandbox_python"
+
+
+class _Content:
     def __init__(self, body: bytes) -> None:
         self.body = body
+
+    async def iter_chunked(self, size: int):
+        for start in range(0, len(self.body), size):
+            yield self.body[start : start + size]
+
+
+class _Response:
+    def __init__(self, body: bytes, status: int = 200) -> None:
+        self.content = _Content(body)
+        self.status = status
+        self.ok = status < 400
 
     async def __aenter__(self) -> "_Response":
         return self
@@ -219,22 +281,20 @@ class _Response:
     async def __aexit__(self, *exc_info) -> None:
         return None
 
-    def raise_for_status(self) -> None:
-        pass
-
-    async def read(self) -> bytes:
-        return self.body
-
 
 @pytest.fixture
 def python_build(monkeypatch, tmp_path):
     """A download of ``body`` for the x86_64 glibc Python build, whose pinned checksum is ``pinned``."""
-    build = SimpleNamespace(body=b"python build", pinned=hashlib.sha256(b"python build").hexdigest(), urls=[])
-    monkeypatch.setattr(sandbox_python, "CACHE_DIR", tmp_path)
+    build = SimpleNamespace(
+        body=b"python build", status=200, pinned=hashlib.sha256(b"python build").hexdigest(), urls=[], requests=[]
+    )
+    monkeypatch.setattr(sandbox_python, "_cache_dir", lambda: tmp_path)
+    monkeypatch.delenv("UV_PYTHON_INSTALL_MIRROR", raising=False)
 
     async def request(method: str, url: str, **kwargs) -> _Response:
         build.urls.append(url)
-        return _Response(build.body)
+        build.requests.append(kwargs)
+        return _Response(build.body, build.status)
 
     monkeypatch.setattr(sandbox_python, "request", request)
     monkeypatch.setattr(sandbox_python, "_PYTHON_SHA256", {"x86_64/gnu": build.pinned})
@@ -266,6 +326,36 @@ async def test_a_python_build_that_does_not_match_its_pin_is_not_cached(python_b
         await sandbox_python._python_archive(SandboxPlatform("x86_64", "musl"))
 
     assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_failed_download_is_not_cached_and_the_next_seed_retries(python_build, tmp_path) -> None:
+    platform = SandboxPlatform("x86_64", "gnu", 35)
+    python_build.status = 404
+
+    # An HTTP error carries no response_content, so it must not reach the server's middleware as one.
+    with pytest.raises(RuntimeError, match="failed with HTTP 404"):
+        await sandbox_python._python_archive(platform)
+    assert list(tmp_path.iterdir()) == []
+
+    python_build.status = 200
+    assert (await sandbox_python._python_archive(platform)).read_bytes() == python_build.body
+    # Connection failures end after a few attempts instead of retrying until the seed times out.
+    assert [request["_max_num_tries"] for request in python_build.requests] == [3, 3]
+
+
+async def test_the_python_build_comes_through_the_hosts_proxy_and_mirror(python_build, monkeypatch) -> None:
+    for name in ("no_proxy", "NO_PROXY", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.internal:3128")
+    monkeypatch.setenv("UV_PYTHON_INSTALL_MIRROR", "https://mirror.internal/python-build-standalone/")
+
+    await sandbox_python._python_archive(SandboxPlatform("x86_64", "gnu", 35))
+
+    assert python_build.urls == [
+        "https://mirror.internal/python-build-standalone/20260805/"
+        "cpython-3.13.14%2B20260805-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    ]
+    assert python_build.requests[0]["proxy"] == "http://proxy.internal:3128"
 
 
 def _add(tar: tarfile.TarFile, name: str, text: str = "", mode: int = 0o644) -> None:
@@ -393,3 +483,84 @@ async def test_a_runtime_that_fails_its_check_is_never_published(task) -> None:
         await runtime.install(task.sandbox, timeout_s=60)
 
     assert os.listdir(runtime.directory) == ["home"]
+
+
+async def _until(condition, timeout_s: float = 30) -> None:
+    async with asyncio.timeout(timeout_s):
+        while not condition():
+            await asyncio.sleep(0.02)
+
+
+@pytest.mark.sandbox
+async def test_a_runtime_another_seed_accepted_is_never_set_aside(task) -> None:
+    runtime = _runtime(task)
+    gate, checking = task.root / "gate", task.root / "checking"
+    # A broken runtime whose first check fails only once the test opens the gate; later checks fail at once.
+    broken = Path(runtime.python)
+    broken.parent.mkdir(parents=True)
+    broken.write_text(
+        "#!/bin/sh\n"
+        f"if mkdir {shlex.quote(str(task.root / 'first-check'))} 2>/dev/null; then\n"
+        f"    touch {shlex.quote(str(checking))}\n"
+        f"    while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.02; done\n"
+        "fi\n"
+        "exit 1\n"
+    )
+    broken.chmod(0o755)
+
+    first = asyncio.create_task(runtime.install(task.sandbox, timeout_s=60))
+    await _until(checking.exists)
+    # The second seed must not publish over the first seed's pending decision; if it does return, its runtime is
+    # what its session runs, so it must survive the first seed's decision.
+    second = asyncio.create_task(runtime.install(task.sandbox, timeout_s=60))
+    done, _ = await asyncio.wait({second}, timeout=2)
+    accepted = Path(runtime.directory) / "python/ACCEPTED"
+    if done:
+        await second
+        accepted.touch()
+    gate.touch()
+    await asyncio.wait_for(asyncio.gather(first, second), 60)
+
+    assert accepted.exists() or not done
+    assert await runtime.is_installed(task.sandbox)
+    assert sorted(os.listdir(runtime.directory)) == ["home", "python"]
+
+
+@pytest.mark.sandbox
+async def test_a_failed_upload_leaves_no_setup_directory_and_the_next_seed_installs(task, monkeypatch) -> None:
+    runtime = _runtime(task)
+    upload = task.sandbox.upload
+
+    async def interrupted(source: Path, destination: str) -> None:
+        if destination.endswith("/site-packages.tar.gz"):
+            raise OSError("upload interrupted")
+        await upload(source, destination)
+
+    monkeypatch.setattr(task.sandbox, "upload", interrupted)
+    with pytest.raises(OSError, match="upload interrupted"):
+        await runtime.install(task.sandbox, timeout_s=60)
+    # The Python archive had arrived; the attempt's setup directory is gone with it.
+    assert os.listdir(runtime.directory) == []
+
+    monkeypatch.setattr(task.sandbox, "upload", upload)
+    await runtime.install(task.sandbox, timeout_s=60)
+    assert await runtime.is_installed(task.sandbox)
+    assert sorted(os.listdir(runtime.directory)) == ["home", "python"]
+
+
+@pytest.mark.sandbox
+async def test_a_seed_that_times_out_during_upload_removes_its_setup_directory(task, monkeypatch) -> None:
+    runtime = _runtime(task)
+    upload = task.sandbox.upload
+
+    async def stalled(source: Path, destination: str) -> None:
+        await upload(source, destination)
+        if destination.endswith("/python.tar.gz"):
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(task.sandbox, "upload", stalled)
+    with pytest.raises(TimeoutError, match="Installing the fake Python runtime took longer than 1 s"):
+        await runtime.install(task.sandbox, timeout_s=1)
+
+    assert os.listdir(runtime.directory) == []
+    assert not await runtime.is_installed(task.sandbox)

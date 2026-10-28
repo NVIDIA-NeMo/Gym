@@ -8,7 +8,8 @@ pinned python-build-standalone CPython and checks its SHA-256, then installs the
 platform with ``uv`` into a separate site-packages archive. Packages are pinned to the versions installed in this
 Agent Server's environment, so the sandbox runs the versions the adapter is tested with. Requirements given as
 direct URLs, such as a harness pinned to a commit, are built from source on the host; every other package must
-publish a wheel for the sandbox's platform. Both archives are cached on the host.
+publish a wheel for the sandbox's platform. Both archives are cached on the host under ``sandbox_python`` in Gym's
+``cache_dir``.
 
 In the sandbox, ``install_python_runtime.sh`` unpacks the archives in a private directory, checks that the runtime
 imports the harness, and renames it into place, so a concurrent seed never sees a partial runtime. The runtime
@@ -28,15 +29,19 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import urllib.request
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from aiohttp import ClientTimeout
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
+from nemo_gym import CACHE_DIR
+from nemo_gym.global_config import CACHE_DIR_KEY_NAME, maybe_get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_utils import request
 
@@ -53,12 +58,10 @@ _PYTHON_SHA256 = {
     "x86_64/musl": "c6b77767b2c97ce77c21496909396b6e056b96220b2cda45f2c93b654376dd93",  # pragma: allowlist secret
     "aarch64/musl": "960738ebde53abeceb5452b71c2217d50452023e3baf2439dc57290d07930637",  # pragma: allowlist secret
 }
-_PYTHON_URL = (
-    "https://github.com/astral-sh/python-build-standalone/releases/download/{release}/"
-    "cpython-{version}%2B{release}-{arch}-unknown-linux-{libc}-install_only_stripped.tar.gz"
-)
+# uv's UV_PYTHON_INSTALL_MIRROR replaces this base, as it does for uv's own Python downloads; the pins still apply.
+_PYTHON_DOWNLOADS = "https://github.com/astral-sh/python-build-standalone/releases/download"
+_PYTHON_FILE = "cpython-{version}%2B{release}-{arch}-unknown-linux-{libc}-install_only_stripped.tar.gz"
 _SITE_PACKAGES = f"python/lib/python{PYTHON_VERSION.rsplit('.', 1)[0]}/site-packages"
-CACHE_DIR = Path("~/.cache/nemo_gym/sandbox_python").expanduser()
 _INSTALLER = Path(__file__).with_name("install_python_runtime.sh")
 # Kernel, machine, then "musl" or the glibc version. musl images ship the loader under /lib/ld-musl-*.so.1.
 _PLATFORM_PROBE = (
@@ -68,8 +71,8 @@ _PLATFORM_PROBE = (
 _MACHINES = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
 # glibc 2.17 is the oldest python-build-standalone supports; uv names these manylinux levels in --python-platform.
 _MANYLINUX_LEVELS = (40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 28, 17)
-# One lock per cached archive, so concurrent cold-cache seeds in this process share one build.
-_BUILD_LOCKS: dict[Path, asyncio.Lock] = {}
+# The build in progress for each cached archive, so concurrent cold-cache seeds in this process share one build.
+_BUILDS: dict[Path, asyncio.Task[None]] = {}
 
 
 @dataclass(frozen=True)
@@ -127,11 +130,38 @@ def _agent_environment_pins() -> tuple[str, ...]:
     return tuple(sorted(pins.values()))
 
 
+def _cache_dir() -> Path:
+    """Where the host keeps the archives: ``sandbox_python`` under Gym's ``cache_dir``."""
+    configured = (maybe_get_global_config_dict() or {}).get(CACHE_DIR_KEY_NAME)
+    return Path(configured or CACHE_DIR) / "sandbox_python"
+
+
+def _environment_proxy(url: str) -> str | None:
+    """The proxy the host's environment names for ``url``. Gym's shared HTTP client does not read it itself."""
+    if urllib.request.proxy_bypass(urlsplit(url).hostname or ""):
+        return None
+    return urllib.request.getproxies().get(urlsplit(url).scheme)
+
+
+def _forget_build(path: Path, build: asyncio.Task[None]) -> None:
+    _BUILDS.pop(path, None)
+    # Every waiter may have been cancelled; the outcome is still consumed here.
+    if not build.cancelled():
+        build.exception()
+
+
 async def _cached(path: Path, build: Callable[[], Awaitable[None]]) -> Path:
-    """``path``, built once per host. Builders write atomically, so other processes see it whole or not at all."""
-    async with _BUILD_LOCKS.setdefault(path, asyncio.Lock()):
-        if not path.is_file():
-            await build()
+    """``path``, built once per host. Builders write atomically, so other processes see it whole or not at all.
+
+    Concurrent callers share one build and its outcome, and a caller that is cancelled leaves it running for the
+    others. A failed build is retried by the next call.
+    """
+    if not path.is_file():
+        task = _BUILDS.get(path)
+        if task is None:
+            task = _BUILDS[path] = asyncio.create_task(build())
+            task.add_done_callback(functools.partial(_forget_build, path))
+        await asyncio.shield(task)
     return path
 
 
@@ -148,16 +178,23 @@ async def _python_archive(platform: SandboxPlatform) -> Path:
     expected = _PYTHON_SHA256.get(f"{platform.arch}/{platform.libc}")
     if expected is None:
         raise RuntimeError(f"No pinned Python build for {platform.arch}/{platform.libc}")
-    url = _PYTHON_URL.format(release=_PYTHON_RELEASE, version=PYTHON_VERSION, arch=platform.arch, libc=platform.libc)
-    path = CACHE_DIR / url.rsplit("/", 1)[1].replace("%2B", "+")
+    name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=PYTHON_VERSION, arch=platform.arch, libc=platform.libc)
+    url = f"{(os.environ.get('UV_PYTHON_INSTALL_MIRROR') or _PYTHON_DOWNLOADS).rstrip('/')}/{_PYTHON_RELEASE}/{name}"
+    # A host that cannot download it can be given the file here.
+    path = _cache_dir() / name.replace("%2B", "+")
 
     async def download() -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         partial = path.with_name(f".{path.name}.{uuid4().hex}")
         try:
-            async with await request("GET", url, timeout=ClientTimeout(total=600)) as response:
-                response.raise_for_status()
-                partial.write_bytes(await response.read())
+            async with await request(
+                "GET", url, _max_num_tries=3, proxy=_environment_proxy(url), timeout=ClientTimeout(total=600)
+            ) as response:
+                if not response.ok:
+                    raise RuntimeError(f"Downloading {url} failed with HTTP {response.status}")
+                with partial.open("wb") as output:
+                    async for chunk in response.content.iter_chunked(1 << 20):
+                        await asyncio.to_thread(output.write, chunk)
             if await asyncio.to_thread(_sha256, partial) != expected:
                 raise RuntimeError(f"Checksum mismatch for {url}")
             os.replace(partial, path)
@@ -192,6 +229,18 @@ async def _run(argv: list[str], *, cwd: Path) -> None:
         raise RuntimeError(f"{argv[0]} exited with {process.returncode}: {output[-4000:]}")
 
 
+async def _discard(sandbox: AsyncSandbox, path: str) -> None:
+    """Remove ``path`` from the sandbox, best effort. Cancelling the caller does not stop the removal."""
+    removal = asyncio.ensure_future(sandbox.exec(f"rm -rf {shlex.quote(path)}", cwd="/", timeout_s=30))
+    try:
+        result = await asyncio.shield(removal)
+    except Exception:
+        LOG.warning("Could not remove %s from the sandbox", path, exc_info=True)
+        return
+    if result.return_code != 0 or result.error_type is not None:
+        LOG.warning("Could not remove %s from the sandbox: %s", path, result.error_type or result.stderr)
+
+
 def _write_archive(source: Path, archive: Path) -> None:
     with tarfile.open(archive, "w:gz") as tar:
         tar.add(source, arcname="python")
@@ -215,8 +264,10 @@ class SandboxPythonRuntime:
     def directory(self) -> str:
         """Sandbox directory keyed by everything that goes into the runtime.
 
-        A runtime found there, left by an earlier session in this sandbox or baked into the image, was built from the
-        same inputs and is reused. The adapter may keep its own harness files here, beside ``python/``.
+        A runtime found there, such as one an earlier session left in this sandbox, was built from the same inputs and
+        is reused. The key covers every index-installed version in this Agent Server's environment, so a runtime
+        baked into an image is reused only by an Agent Server environment with exactly those versions. The adapter
+        may keep its own harness files here, beside ``python/``.
         """
         inputs = [PYTHON_VERSION, _PYTHON_RELEASE, self.requirements, self.overrides, _agent_environment_pins()]
         key = hashlib.sha256(json.dumps(inputs).encode()).hexdigest()[:16]
@@ -224,6 +275,11 @@ class SandboxPythonRuntime:
 
     @property
     def python(self) -> str:
+        """The runtime's interpreter in the sandbox, once ``is_installed()`` passes or ``install()`` returns.
+
+        Run it with ``-s``: unlike a virtual environment's interpreter, it would otherwise import from the user
+        site-packages under the task's ``HOME``.
+        """
         return f"{self.directory}/python/bin/python3"
 
     async def is_installed(self, sandbox: AsyncSandbox) -> bool:
@@ -243,21 +299,35 @@ class SandboxPythonRuntime:
     async def install(self, sandbox: AsyncSandbox, *, timeout_s: float) -> None:
         """Build the runtime for the sandbox's platform on this host if needed, then upload and publish it.
 
-        ``timeout_s`` bounds the whole installation, including a build that another seed started.
+        ``timeout_s`` bounds the whole installation, including a build that another seed started. Raises
+        ``RuntimeError`` when the platform is unsupported, the host build or download fails, or the runtime fails
+        its import check in the sandbox, and ``TimeoutError`` when ``timeout_s`` runs out.
         """
-        async with asyncio.timeout(timeout_s):
-            platform = await probe_sandbox_platform(sandbox)
-            python_archive = await _python_archive(platform)
-            site_packages_archive = await self._site_packages_archive(platform)
-            setup = f"{self.directory}/.setup-{uuid4().hex}"
-            prepared = await sandbox.exec(f"mkdir -p {shlex.quote(setup)}", cwd="/", timeout_s=30)
-            if prepared.return_code != 0 or prepared.error_type is not None:
-                raise RuntimeError(prepared.stderr or prepared.stdout or f"Could not create {setup} in the sandbox")
-            await sandbox.upload(python_archive, f"{setup}/python.tar.gz")
-            await sandbox.upload(site_packages_archive, f"{setup}/site-packages.tar.gz")
-            await sandbox.upload(_INSTALLER, f"{setup}/{_INSTALLER.name}")
-            command = shlex.join(["bash", f"{setup}/{_INSTALLER.name}", self.directory, setup, self.import_check])
-            result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
+        try:
+            async with asyncio.timeout(timeout_s):
+                platform = await probe_sandbox_platform(sandbox)
+                python_archive = await _python_archive(platform)
+                site_packages_archive = await self._site_packages_archive(platform)
+                setup = f"{self.directory}/.setup-{uuid4().hex}"
+                try:
+                    prepared = await sandbox.exec(f"mkdir -p {shlex.quote(setup)}", cwd="/", timeout_s=30)
+                    if prepared.return_code != 0 or prepared.error_type is not None:
+                        raise RuntimeError(
+                            prepared.stderr or prepared.stdout or f"Could not create {setup} in the sandbox"
+                        )
+                    await sandbox.upload(python_archive, f"{setup}/python.tar.gz")
+                    await sandbox.upload(site_packages_archive, f"{setup}/site-packages.tar.gz")
+                    await sandbox.upload(_INSTALLER, f"{setup}/{_INSTALLER.name}")
+                except BaseException:
+                    await _discard(sandbox, setup)
+                    raise
+                # From here the installer's EXIT trap owns the setup directory, even if this call stops waiting.
+                command = shlex.join(["bash", f"{setup}/{_INSTALLER.name}", self.directory, setup, self.import_check])
+                result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
+        except TimeoutError as error:
+            raise TimeoutError(
+                f"Installing the {self.harness} Python runtime took longer than {timeout_s} s"
+            ) from error
         if result.return_code != 0 or result.error_type is not None:
             raise RuntimeError(
                 f"Installing the {self.harness} Python runtime failed with {result.error_type or result.return_code}: "
@@ -265,7 +335,7 @@ class SandboxPythonRuntime:
             )
 
     async def _site_packages_archive(self, platform: SandboxPlatform) -> Path:
-        path = CACHE_DIR / f"{Path(self.directory).name}-{platform.wheel_platform}.tar.gz"
+        path = _cache_dir() / f"{Path(self.directory).name}-{platform.wheel_platform}.tar.gz"
         return await _cached(path, lambda: self._build_site_packages(platform, path))
 
     async def _build_site_packages(self, platform: SandboxPlatform, destination: Path) -> None:
@@ -274,8 +344,8 @@ class SandboxPythonRuntime:
             raise RuntimeError("Building a sandbox Python runtime requires uv on the Agent Server host")
         LOG.info("Building the %s sandbox runtime for %s into %s", self.harness, platform.wheel_platform, destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".build-", dir=destination.parent) as scratch:
-            scratch = Path(scratch)
+        scratch = Path(tempfile.mkdtemp(prefix=".build-", dir=destination.parent))
+        try:
             constraints = scratch / "constraints.txt"
             constraints.write_text("".join(f"{pin}\n" for pin in _agent_environment_pins()))
             argv = [
@@ -297,6 +367,9 @@ class SandboxPythonRuntime:
                 str(constraints),
                 "--only-binary",
                 ":all:",
+                # The archive must hold files: a host UV_LINK_MODE=symlink would point it into the host's uv cache.
+                "--link-mode",
+                "copy",
             ]
             if self.overrides:
                 overrides = scratch / "overrides.txt"
@@ -308,3 +381,6 @@ class SandboxPythonRuntime:
             archive = scratch / "site-packages.tar.gz"
             await asyncio.to_thread(_write_archive, scratch / "python", archive)
             os.replace(archive, destination)
+        finally:
+            # Thousands of files; removing them on the event loop would stall every session on this server.
+            await asyncio.to_thread(shutil.rmtree, scratch, ignore_errors=True)

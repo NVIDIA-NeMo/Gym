@@ -69,8 +69,9 @@ class StirrupSessionState(AgentSessionState):
 
         async def stage() -> SandboxCommand:
             await upload_text(self.session.sandbox, path=input_path, text=json.dumps(payload))
+            # -s keeps the task's user site-packages out of the harness, as its virtual environment did.
             return SandboxCommand(
-                argv=[SANDBOX_PYTHON, f"{_PACKAGE_DIR}/sandbox_runner.py", input_path, output_path],
+                argv=[SANDBOX_PYTHON, "-s", f"{_PACKAGE_DIR}/sandbox_runner.py", input_path, output_path],
             )
 
         async def collect() -> dict[str, Any]:

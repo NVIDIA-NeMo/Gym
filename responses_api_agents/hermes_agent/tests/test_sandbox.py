@@ -746,6 +746,15 @@ async def test_stop_before_launch_closes_without_starting_a_worker(agent, state,
         await asyncio.gather(state.task, return_exceptions=True)
 
 
+async def test_the_runner_ignores_the_task_user_site_packages(state):
+    state.upload_json = AsyncMock()
+
+    command = await state.stage_activation({})
+
+    # The runtime is not a virtual environment, so only -s keeps ~/.local packages of the task out of Hermes.
+    assert command.argv[:3] == [hermes_sandbox._SANDBOX_PYTHON, "-s", hermes_sandbox._SANDBOX_RUNNER]
+
+
 def test_cleanup_and_runtime_are_independent():
     cleanup = {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None}
     assert parse_cleanup_receipt(cleanup) == cleanup

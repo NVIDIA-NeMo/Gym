@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Publishes a Python runtime that sandbox_python.py built on the Agent Server host. Runs in the task sandbox and
-# needs only bash, tar with gzip, mv and rm: no network, no uv and no Python of the task image.
+# needs only bash, tar with gzip and rm: no network, no uv and no Python of the task image.
 #
 # usage: install_python_runtime.sh RUNTIME_DIR SETUP_DIR IMPORT_CHECK
 #
@@ -23,21 +23,23 @@ mkdir -p "$HOME"
 tar -xzf "$setup_dir/python.tar.gz" -C "$setup_dir"
 tar -xzf "$setup_dir/site-packages.tar.gz" -C "$setup_dir"
 fresh=$setup_dir/python
-runtime=$runtime_dir/python
 "$fresh/bin/python3" -I -c "$import_check"
-# Ends as soon as a runtime that passes the check is in place, so one that a concurrent seed published is kept.
-for attempt in 1 2 3; do
-    "$runtime/bin/python3" -I -c "$import_check" &>/dev/null && exit 0
+# Concurrent seeds take turns on a lock over RUNTIME_DIR, held by the fresh runtime's own Python, so a runtime is
+# only set aside by a seed that saw it fail its check and never one that another seed has just published. The
+# lock is released when the process exits, however it exits.
+publish='import fcntl, os, subprocess, sys
+runtime_dir, setup_dir, check = sys.argv[1:]
+runtime = f"{runtime_dir}/python"
+fcntl.flock(os.open(runtime_dir, os.O_RDONLY), fcntl.LOCK_EX)
+try:
+    usable = subprocess.run([f"{runtime}/bin/python3", "-I", "-c", check], capture_output=True).returncode == 0
+except OSError:
+    usable = False
+if not usable:
     # A runtime that fails the check, for example one baked into the image for another platform, is set aside.
-    # A concurrent seed may move it first.
-    if [[ -e $runtime ]]; then
-        mv "$runtime" "$setup_dir/replaced-$attempt" 2>/dev/null || true
-    fi
-    # rename(2) publishes atomically and fails when a concurrent seed published first, where mv would move the
-    # fresh runtime inside the published one.
-    if [[ -e $fresh ]]; then
-        "$fresh/bin/python3" -I -c 'import os, sys; os.rename(*sys.argv[1:])' "$fresh" "$runtime" 2>/dev/null || true
-    fi
-done
-# Reports why the runtime in place still fails.
-"$runtime/bin/python3" -I -c "$import_check"
+    if os.path.lexists(runtime):
+        os.rename(runtime, f"{setup_dir}/replaced")
+    os.rename(f"{setup_dir}/python", runtime)'
+"$fresh/bin/python3" -I -c "$publish" "$runtime_dir" "$setup_dir" "$import_check"
+# Reports why the runtime in place fails, if it does.
+"$runtime_dir/python/bin/python3" -I -c "$import_check"

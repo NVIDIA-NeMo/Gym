@@ -85,8 +85,8 @@ class HermesSandboxSession(AgentSessionState):
     async def install_runtime(self, *, install_timeout: float) -> None:
         """Reuse or install the pinned runtime and stage the Hermes harness files.
 
-        The runtime directory is keyed by its inputs, so a runtime baked into the image or left by an earlier
-        session in this sandbox is reused when it passes the import check.
+        The runtime directory is keyed by its inputs, so a runtime an earlier session left in this sandbox is
+        reused when it passes the import check.
         """
         prepared = await self.session.sandbox.exec(
             f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.session_dir)}", cwd="/", timeout_s=30
@@ -147,6 +147,8 @@ class HermesSandboxSession(AgentSessionState):
         return SandboxCommand(
             argv=[
                 _SANDBOX_PYTHON,
+                # The task's user site-packages stay out of the harness, as they did in its virtual environment.
+                "-s",
                 _SANDBOX_RUNNER,
                 f"{self.session.session_dir}/input.json",
                 f"{self.session.session_dir}/output.json",
