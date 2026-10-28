@@ -987,18 +987,22 @@ def test_resolved_instances_deletes_after_all_overlays_merge() -> None:
 
 
 @pytest.mark.parametrize(
-    ("benchmark", "recipe", "resources"),
+    ("benchmark", "recipe", "resources", "dataset"),
     [
-        ("hle", "pi", "equivalence_llm_judge"),
-        ("hle", "opencode", "equivalence_llm_judge"),
-        ("hle", "pi_search", "equivalence_llm_judge"),
-        ("hle", "opencode_search", "equivalence_llm_judge"),
-        ("apex_shortlist", "pi", "math_with_judge"),
-        ("apex_shortlist", "opencode", "math_with_judge"),
+        ("hle", "pi", "equivalence_llm_judge", "hle"),
+        ("hle", "opencode", "equivalence_llm_judge", "hle"),
+        ("hle", "pi_search", "equivalence_llm_judge", "hle"),
+        ("hle", "opencode_search", "equivalence_llm_judge", "hle"),
+        ("hle_diamond", "pi", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "opencode", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "pi_search", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "opencode_search", "equivalence_llm_judge", "hle_diamond_text"),
+        ("apex_shortlist", "pi", "math_with_judge", "apex_shortlist"),
+        ("apex_shortlist", "opencode", "math_with_judge", "apex_shortlist"),
     ],
 )
 def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
-    benchmark: str, recipe: str, resources: str, monkeypatch: pytest.MonkeyPatch
+    benchmark: str, recipe: str, resources: str, dataset: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for variable in ("PI_SANDBOX_IMAGE", "OPENCODE_SANDBOX_IMAGE", "OPENSANDBOX_API_KEY", "TAVILY_API_KEY"):
         monkeypatch.setenv(variable, "test-only")
@@ -1036,7 +1040,7 @@ def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
         assert list(parsed[server_name].environment_servers) == ["legacy_agent"]
         agent = next(iter(parsed[agent_name].responses_api_agents.values()))
         assert agent.resources_server.name == resources_name
-        assert agent.datasets[0].name == benchmark
+        assert agent.datasets[0].name == dataset
         if recipe.endswith("_search"):
             assert agent.tool_servers == [{"type": "resources_servers", "name": "tavily"}]
         participants = {}
