@@ -8,7 +8,7 @@ position: 6
 
 For command options and an example, see [`gym eval export`](/main/reference/cli-commands#gym-eval-export).
 
-`gym eval export --format atif` converts the supported `ng_trajectory` version `1.0` subset into ATIF v1.7 without loading
+`gym eval export atif` converts the supported `ng_trajectory` version `1.0` subset into ATIF v1.7 without loading
 NeMo Relay. The initial converter accepts a completed root invocation with one initial system/user input phase, exactly one
 captured model call per turn, text-only output (including ordered multipart tool results), and unambiguous function-call and
 function-result relationships. Model calls may be joined by `model_call_id` or by a unique `(model_ref, response_id)`
