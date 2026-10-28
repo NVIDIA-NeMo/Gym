@@ -1313,11 +1313,21 @@ Repeat-level metrics: {repeat_level_metrics_fpath}""")
 
 @exit_cleanly_on_config_error
 def compare() -> None:  # pragma: no cover
-    from nemo_gym.eval.comparison.report import render_key_metrics_tables, summary_lines
-    from nemo_gym.eval.comparison.runner import invoked_command, run_comparison
-    from nemo_gym.eval.comparison.schema import ComparisonConfig
+    config_dict = get_global_config_dict()
+    level = config_dict.get("comparison_level", "run")
+    if level == "suite":
+        _compare_suite(config_dict)
+        return
+    if level != "run":
+        raise ConfigError("comparison_level must be 'run' or 'suite'.")
+    if "suite_fpath" in config_dict or "confidence_level" in config_dict:
+        raise ConfigError("--suite and --confidence-level require --level suite.")
 
-    config = ComparisonConfig.model_validate(get_global_config_dict())
+    from nemo_gym.comparison.report import render_key_metrics_tables, summary_lines
+    from nemo_gym.comparison.runner import invoked_command, run_comparison
+    from nemo_gym.comparison.schema import ComparisonConfig
+
+    config = ComparisonConfig.model_validate(config_dict)
 
     result, written = run_comparison(config, invoked_command())
 
@@ -2030,6 +2040,35 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
                 f"by kind: {json.dumps(member.get('failures_by_kind', {}), sort_keys=True)}; "
                 f"model-final by kind: {json.dumps(member.get('model_final_by_kind', {}), sort_keys=True)}"
             )
+
+
+def _compare_suite(config_dict: dict) -> None:
+    """Dispatch explicitly selected suite comparisons without changing run comparisons."""
+    from nemo_gym.comparison.runner import invoked_command
+    from nemo_gym.comparison.suite_report import render_suite_summary, write_suite_reports
+    from nemo_gym.comparison.suite_runner import build_suite_comparison
+    from nemo_gym.comparison.suite_schema import SuiteComparisonConfig
+
+    run_keys = (
+        "baseline_rollouts_jsonl_fpath",
+        "candidate_rollouts_jsonl_fpaths",
+        "baseline_aggregate_metrics_fpath",
+        "candidate_aggregate_metrics_fpaths",
+        "agent_name",
+        "baseline_agent_name",
+        "candidate_agent_names",
+    )
+    if any(config_dict.get(key) is not None for key in run_keys):
+        raise ConfigError("--level suite uses runs and agents from --suite; omit the run comparison input flags.")
+    if not config_dict.get("suite_fpath"):
+        raise ConfigError("--level suite requires --suite PATH.")
+    config = SuiteComparisonConfig.model_validate(config_dict)
+    result = build_suite_comparison(config, invoked_command())
+    output = Path(config.output_dirpath) if config.output_dirpath else result.suite_fpath.parent
+    written = write_suite_reports(result, output, config.report_format)
+    print(render_suite_summary(result))
+    for path in written:
+        print(f"Wrote: {path}")
 
 
 __getattr__ = moved_names_getattr(__name__)
