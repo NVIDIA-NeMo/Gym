@@ -60,6 +60,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentInvocation,
@@ -759,13 +760,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         """Validate the supported controls for a sandbox session activation."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "Pi model must match the configured model")
-        if body.max_output_tokens is not None:
-            raise HTTPException(
-                422,
-                "Pi does not support the total max_output_tokens budget; "
-                "configure the agent's max_output_tokens for a per-model-call limit instead",
-            )
-        supported = {"input", "instructions", "model"}
+        ModelCallSampling.from_request(body)
+        supported = {"input", "instructions", "model", "temperature", "top_p", "max_output_tokens"}
         for name, field in type(body).model_fields.items():
             if name in supported:
                 continue
@@ -837,6 +833,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         models = {
             "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
+        provider = models["providers"]["nemo"]
+        sampling = ModelCallSampling.from_request(body)
+        output_limit = min(self.config.max_output_tokens, body.max_output_tokens or self.config.max_output_tokens)
+        sampling = sampling.model_copy(update={"max_output_tokens": output_limit})
+        provider["baseUrl"] = model_sampling_base_url(provider["baseUrl"], sampling)
+        provider["models"][0]["maxTokens"] = output_limit
         await state.upload_json("home/.pi/agent/models.json", models)
         await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
         output_limit_extension = "output-limit.mjs"

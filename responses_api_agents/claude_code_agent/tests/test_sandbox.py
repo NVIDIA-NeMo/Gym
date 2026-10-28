@@ -599,3 +599,91 @@ async def test_close_distinguishes_borrowed_release_from_confirmed_termination(c
     remote.disconnect.assert_awaited_once()
     assert close.cleanup_confirmed is confirmed
     assert close.model_dump(mode="json")["cleanup_confirmed"] is confirmed
+
+
+@pytest.mark.parametrize("controls", [{"temperature": 0.2}, {"top_p": 0.7}, {"max_output_tokens": 128}])
+def test_training_controls_require_gym_model_server(controls):
+    with pytest.raises(HTTPException, match="require a Gym model server"):
+        agent()._validate_sandbox_request(NeMoGymResponseCreateParamsNonStreaming(input="Fix", **controls))
+
+
+@pytest.mark.parametrize("requested,expected", [(128, 128), (8192, 4096), (None, 4096)])
+@pytest.mark.asyncio
+async def test_training_controls_stage_anthropic_sampling_route(monkeypatch, tmp_path, requested, expected):
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from nemo_gym.rollout_correlation import ModelSamplingMiddleware
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"env": {"DISABLE_COMPACT": "0", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "99999"}}))
+    instance = agent(
+        model_server={"type": "responses_api_models", "name": "policy"},
+        auto_compaction=False,
+        context_window=196608,
+        max_output_tokens=4096,
+        settings=str(settings),
+    )
+    monkeypatch.setattr(
+        app.ClaudeCodeAgent, "_resolve_call_base_url", lambda self, rollout: "http://model/ng-rollout/rollout"
+    )
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+    )
+    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="Fix", temperature=0.3, top_p=0.7, max_output_tokens=requested
+    )
+    instance._validate_sandbox_request(body)
+    await instance._sandbox_response(state, body, prompt="Fix", system=None)
+    payload = execute.await_args.args[0]
+
+    async def echo(request):
+        return JSONResponse({"path": request.url.path, "body": await request.json()})
+
+    model_app = ModelSamplingMiddleware(Starlette(routes=[Route("/{path:path}", echo, methods=["POST"])]))
+    # Exercise exactly the root URL the CLI receives, including its own /v1/messages suffix.
+    with TestClient(model_app) as client:
+        for stream in (False, True):
+            for runtime_limit in (64, 8192):
+                request = {
+                    "messages": [{"role": "user", "content": "Fix"}],
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "max_tokens": runtime_limit,
+                    "stream": stream,
+                }
+                response = client.post(payload["env"]["ANTHROPIC_BASE_URL"] + "/v1/messages", json=request)
+                assert response.status_code == 200, response.text
+                assert response.json() == {
+                    "path": "/ng-rollout/rollout/v1/messages",
+                    "body": request | {"temperature": 0.3, "top_p": 0.7, "max_tokens": min(expected, runtime_limit)},
+                }
+    for env in (payload["env"], payload["settings"]["env"]):
+        assert env["DISABLE_COMPACT"] == "1"
+        assert env["DISABLE_AUTO_COMPACT"] == "1"
+        assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "196608"
+        assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096"
+
+
+@pytest.mark.asyncio
+async def test_settings_cannot_redirect_sampled_model_calls(monkeypatch, tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://uncontrolled.example"}}))
+    instance = agent(model_server={"type": "responses_api_models", "name": "policy"}, settings=str(settings))
+    monkeypatch.setattr(app.ClaudeCodeAgent, "_resolve_call_base_url", lambda self, rollout: "http://model")
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(), runtime="/runtime", session=SimpleNamespace(session_dir="/tmp/session", workdir="/app")
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    with pytest.raises(HTTPException, match="conflicts with the session's ANTHROPIC_BASE_URL"):
+        await instance._sandbox_response(
+            state, NeMoGymResponseCreateParamsNonStreaming(input="Fix", temperature=0.3), prompt="Fix", system=None
+        )
+    execute.assert_not_awaited()

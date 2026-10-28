@@ -31,6 +31,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.testing.rollout_correlation import assert_model_sampling
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest
 
 
@@ -254,7 +255,11 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert payload["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == "900"
             models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
             assert models["providers"]["nemo"]["models"][0]["maxTokens"] == agent.config.max_output_tokens
-            assert models["providers"]["nemo"]["baseUrl"] == "http://model.example:9000/ng-rollout/pi-smoke-a2/v1"
+            assert_model_sampling(
+                models["providers"]["nemo"]["baseUrl"],
+                {"max_output_tokens": agent.config.max_output_tokens},
+                routed_base_path="/ng-rollout/pi-smoke-a2/v1",
+            )
             closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
             assert closed.status_code == 200, closed.text
             observations = closed.json()["agent_observations"]
@@ -318,7 +323,7 @@ async def test_provider_error_type_blocks_setup_even_with_zero_exit(setup, stage
     assert not any(record.state is not None for record in agent._session_records.values())
 
 
-@pytest.mark.parametrize("limit", [0, -1, 128, 2**53])
+@pytest.mark.parametrize("limit", [0, -1, 2**53])
 def test_invalid_output_limit_does_not_consume_activation(setup, limit):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -457,8 +462,8 @@ def test_failed_or_partial_pi_output_is_preserved(setup, reason, expected):
 @pytest.mark.parametrize(
     "override",
     [
-        {"temperature": 0.2},
-        {"top_p": 0.9},
+        {"temperature": 3},
+        {"top_p": 0},
         {"tools": [{"type": "function", "name": "foo"}]},
         {"input": [{"role": "assistant", "content": "old turn"}]},
     ],
@@ -503,7 +508,7 @@ def test_rejected_request_does_not_consume_activation(setup):
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/pi-smoke-a2/v1/responses"
-        assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
+        assert client.post(path, json={"input": "task", "temperature": 3}).status_code == 422
         sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text
@@ -1421,9 +1426,9 @@ async def test_cancelled_http_waiter_does_not_cancel_shared_activation(setup):
 @pytest.mark.parametrize(
     "control",
     [
-        {"max_output_tokens": 128},
-        {"temperature": 0},
-        {"top_p": 1},
+        {"max_output_tokens": -1},
+        {"temperature": 3},
+        {"top_p": 0},
         {"metadata": {"ignored": "value"}},
         {"store": True},
     ],
@@ -2496,3 +2501,25 @@ def test_process_exit_before_promised_retry_is_execution_failure(setup):
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
         assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize("requested,expected", [(128, 128), (8192, 4096), (None, 4096)])
+def test_training_controls_reach_each_model_call(setup, requested, expected):
+    agent, sandbox = setup
+    agent.config.max_output_tokens = 4096
+    agent.config.auto_compaction = False
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        controls = {"temperature": 0.3, "top_p": 0.7, "max_output_tokens": requested}
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix", **controls})
+        assert response.status_code == 200, response.text
+        models = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/models.json"])
+        provider = models["providers"]["nemo"]
+        assert provider["models"][0]["maxTokens"] == expected
+        assert_model_sampling(
+            provider["baseUrl"],
+            {"temperature": 0.3, "top_p": 0.7, "max_output_tokens": expected},
+            routed_base_path="/ng-rollout/pi-smoke-a2/v1",
+        )
+        settings = json.loads(sandbox.files[f"{sandbox.directory}/home/.pi/agent/settings.json"])
+        assert settings["compaction"] == {"enabled": False}
