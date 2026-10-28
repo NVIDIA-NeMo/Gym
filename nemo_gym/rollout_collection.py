@@ -74,6 +74,7 @@ from nemo_gym.global_config import (
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
+    STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
@@ -98,6 +99,7 @@ from nemo_gym.observability.model_calls import (
     shared_capture_rollout_ids,
     snapshot_model_call_capture,
 )
+from nemo_gym.observability.token_metadata import strip_duplicate_token_metadata
 from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.path_utils import (
     aggregate_metrics_path_for,
@@ -3535,6 +3537,7 @@ class RolloutCollectionHelper(BaseModel):
         observability_enabled = observability_enabled_from_config(global_config)
         retire_captures = bool(capture_dirs) and retire_covered_model_call_captures_from_config(global_config)
         capture_retirements = CaptureRetirementBatch() if retire_captures else None
+        strip_token_metadata = bool(global_config.get(STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME, False))
         shared_capture_ids = shared_capture_rollout_ids(input_rows) if retire_captures else set()
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
@@ -3823,6 +3826,10 @@ class RolloutCollectionHelper(BaseModel):
                                 f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
                                 "mostly token-less data."
                             )
+
+                # Last change to the record: everything that copies token metadata has been built by now.
+                if strip_token_metadata and not no_result:
+                    strip_duplicate_token_metadata(result)
 
                 completed_count += 1
                 if config.retain_results_in_memory:

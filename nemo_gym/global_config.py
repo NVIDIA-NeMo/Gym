@@ -139,6 +139,7 @@ QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 RETIRE_COVERED_MODEL_CALL_CAPTURES_KEY_NAME = "retire_covered_model_call_captures"
+STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME = "strip_duplicate_token_metadata"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/token_id_capture/config.py``.
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
@@ -189,6 +190,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     RETIRE_COVERED_MODEL_CALL_CAPTURES_KEY_NAME,
+    STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,

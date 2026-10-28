@@ -5872,6 +5872,65 @@ class TestRolloutCollection:
         # The first rollout is covered, but its deletion was still queued when the run aborted.
         assert store.path_for("0-0").exists()
 
+    @pytest.mark.parametrize("strip", [False, True])
+    async def test_run_from_config_keeps_token_metadata_once_per_rollout_only_when_asked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strip: bool
+    ) -> None:
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"strip_duplicate_token_metadata": True} if strip else {},
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        output_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True
+        )
+        from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
+
+        item = {
+            "id": "msg-1",
+            "type": "message",
+            "prompt_token_ids": [101, 102],
+            "generation_token_ids": [201, 202, 203],
+            "generation_log_probs": [-0.5, -0.25, -0.125],
+        }
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                trajectory = TrajectoryRecord(
+                    task_id="0",
+                    rollout_id="0-0",
+                    turns=[
+                        TrajectoryTurn(
+                            invocation_id="root",
+                            task_id="0",
+                            rollout_id="0-0",
+                            turn_no=1,
+                            timestamp=1.0,
+                            step_count=0,
+                            answer=[dict(item)],
+                        )
+                    ],
+                )
+                result = {
+                    "response": {"output": [dict(item)]},
+                    "ng_trajectory": trajectory.model_dump(mode="json"),
+                }
+                future = Future()
+                future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        written = orjson.loads(output_fpath.read_bytes().splitlines()[0])
+        assert written["response"]["output"][0]["generation_token_ids"] == [201, 202, 203]
+        # The token ids appear once in the line that is written when stripping is on, twice otherwise.
+        assert output_fpath.read_bytes().count(b"[201,202,203]") == (1 if strip else 2)
+
     async def test_run_from_config_keeps_the_capture_file_that_several_rollouts_share(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
