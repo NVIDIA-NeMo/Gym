@@ -54,7 +54,14 @@ def agent(**kwargs):
 
 
 def state(body=None):
-    session = SimpleNamespace(workdir="/task", stop_request_path="/private/stop", artifacts=None, close=AsyncMock())
+    session = SimpleNamespace(
+        workdir="/task",
+        stop_request_path="/private/stop",
+        artifacts=None,
+        close=AsyncMock(),
+        owns_sandbox=False,
+        cleanup={"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None},
+    )
     return DeepAgentsSandboxSession(
         request=body or seed(sandbox_access=access()), session=session, sandbox_id="borrowed"
     )
@@ -242,3 +249,36 @@ def test_sessionless_activation_is_rejected():
     with TestClient(agent().setup_webserver()) as client:
         response = client.post("/v1/responses", json={"input": "task"})
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "native_status,stop_reason,error_status,timed_out,expected,error_type",
+    [
+        ("completed", None, None, False, "completed", None),
+        ("failed", None, 400, False, "failed", "ModelRequestError"),
+        ("incomplete", "wall_time", None, True, "timeout", None),
+        ("incomplete", "cancelled", None, False, "cancelled", None),
+        ("incomplete", "max_iterations", None, False, "failed", "GraphRecursionError"),
+    ],
+)
+def test_close_bundle_retains_actual_supervisor_outcome(
+    native_status, stop_reason, error_status, timed_out, expected, error_type
+):
+    instance, current = agent(), state()
+    current.session.artifacts = output() | {
+        "status": native_status,
+        "stop_reason": stop_reason,
+        "error_status": error_status,
+    }
+    current.session.cleanup["timed_out"] = timed_out
+    current.session.cleanup["return_code"] = 143 if timed_out else 0
+    bundle, _ = instance._artifacts(current)
+    (sandbox,) = [r for r in bundle.records if r.kind == "sandbox"]
+    assert sandbox.sandbox_id == "borrowed" and sandbox.provider == "sandbox"
+    assert sandbox.outcome == expected and sandbox.error_type == error_type
+    assert sandbox.exit_code == (143 if timed_out else 0)
+    assert sandbox.cpu_time_s is None and sandbox.peak_memory_mib is None
+    current.session.cleanup = None
+    bundle, _ = instance._artifacts(current)
+    assert not any(r.kind == "sandbox" for r in bundle.records)
+    assert any(g.code == "sandbox_outcome_unavailable" for g in bundle.gaps)

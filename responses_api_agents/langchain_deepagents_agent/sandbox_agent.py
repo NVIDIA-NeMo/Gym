@@ -32,7 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, TrajectoryRecord
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, SandboxObservation, TrajectoryRecord
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config
@@ -145,6 +145,39 @@ class SandboxedDeepAgent(SimpleResponsesAPIAgent):
                 "gaps": raw["gaps"],
             }
         )
+        cleanup = state.session.cleanup
+        if cleanup is not None and cleanup["cleanup_confirmed"] and state.sandbox_id:
+            outcome = "completed"
+            error_type = None
+            if cleanup["timed_out"] or raw.get("stop_reason") == "wall_time":
+                outcome = "timeout"
+            elif raw.get("stop_reason") == "cancelled":
+                outcome = "cancelled"
+            elif raw["status"] != "completed" or cleanup["return_code"] not in (None, 0):
+                outcome = "failed"
+                error_type = (
+                    "ModelRequestError"
+                    if raw.get("error_status")
+                    else "GraphRecursionError"
+                    if raw.get("stop_reason") == "max_iterations"
+                    else "HarnessError"
+                )
+            bundle.records.append(
+                SandboxObservation(
+                    role="agent",
+                    provider=(
+                        self.config.sandbox_provider
+                        if state.session.owns_sandbox
+                        else state.request.sandbox_access.connection.provider_config_ref
+                    ),
+                    sandbox_id=state.sandbox_id,
+                    outcome=outcome,
+                    exit_code=cleanup["return_code"],
+                    error_type=error_type,
+                )
+            )
+        else:
+            bundle.gaps.append(ObservationGap(code="sandbox_outcome_unavailable"))
         if raw["usages"] and any(usage is None for usage in raw["usages"]):
             bundle.gaps.append(
                 ObservationGap(code="model_usage_unavailable", detail="at least one native model call omitted usage")

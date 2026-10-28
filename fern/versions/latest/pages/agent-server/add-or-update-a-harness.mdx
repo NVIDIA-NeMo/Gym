@@ -261,6 +261,7 @@ The current adapters support the following tool sources:
 | Codex | Codex's shell and file tools. Agent sessions require `sandbox_mode: danger-full-access`, because the task sandbox supplies isolation. | `mcp` only. Each granted MCP server becomes a Codex `mcp_servers` entry with the same name. Required `direct_http` grants are rejected. | Responses (streaming) |
 | OpenCode | OpenCode's built-in tools. Session `opencode_config` permits only `permission` and `tools`. | None in agent sessions. Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
 | OpenClaw | `read`, `write`, `edit`, `exec`, and `process`. | None in agent sessions. Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
+| DeepAgents (sandbox mode) | Native filesystem, `execute`, todos, and `task` subagents. `shell_timeout_seconds` bounds each shell call. | Required HTTP and MCP grants are rejected; keep `resources_tool_transports: []`. | Responses |
 
 When a tool belongs to the task, prefer a Resources Server tool grant over a built-in harness tool. Different agents can then share one implementation, and the adapter works across environments without benchmark-specific changes. Use built-in harness tools for behavior that belongs to the harness, such as its shell or file editor. See [Tools in Agent vs. Resources Server](/main/agent-server/integrate-existing-agents#tools-in-agent-vs-resources-server).
 

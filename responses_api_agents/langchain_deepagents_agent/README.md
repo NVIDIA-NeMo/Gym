@@ -3,6 +3,68 @@
 Runs a [LangChain DeepAgents](https://python.langchain.com/docs/experimental/deep_agents/) agent as a
 native NeMo Gym agent server.
 
+## Sandboxed native graph
+
+Select [`configs/sandbox.yaml`](configs/sandbox.yaml) to run DeepAgents **0.6.12**
+inside a task sandbox. This mode targets evaluation with model/tool/turn observations;
+it does not claim training or token-ID/logprob capture. The native graph supplies
+`execute`, filesystem tools, todos, and the `task` subagent tool. Every policy,
+subagent, and summarization call uses the rollout-prefixed Gym Responses endpoint.
+The SDK's own graph, prompts, tool schema, and compaction policy are retained.
+
+Use `single_agent_turn`, with `resources_tool_transports: []`, and set its
+`agent_server.name` to `langchain_deepagents_agent`. Resources supplies a borrowed
+sandbox for TB2.1; agent close stops its processes and disconnects, and Resources
+verifies and destroys the sandbox. For a benchmark without a task sandbox, set
+`sandbox_provider` and `sandbox_config` to create an agent-owned sandbox instead.
+There is no host fallback. The existing in-process graph is described below.
+
+The adapter installs Python 3.13 and the pinned SDK stack from
+[`runtime_requirements.txt`](runtime_requirements.txt) **in the sandbox**, using
+Gym's architecture-aware uv bootstrap. The host needs `uv` on PATH. The sandbox
+needs bash, a supported Linux architecture, outbound package access, and access
+to the Gym model endpoint. Offline installations and task-user overrides are
+unsupported. The runtime stays under `/tmp/nemo-gym-deepagents-runtime-*`; private
+inputs, observations, and history stay under `/tmp/nemo-gym-deepagents-sessions/`.
+Native history is routed through `/conversation_history/` to that private directory.
+The task's working directory, `HOME`, and `XDG_*` values are preserved.
+
+Controls and limits:
+
+- `model`, `temperature`, `top_p`, `max_output_tokens`, `parallel_tool_calls`, and
+  `reasoning` apply to each internal model call. `max_input_tokens` supplies the
+  native model profile for automatic compaction. `instructions` extends the
+  configured system prompt. No benchmark-specific prompt is added.
+- `sandbox_runner_timeout_seconds` bounds the activation; a shorter seeded agent
+  budget wins. `shell_timeout_seconds` bounds native shell calls (default 120).
+  `recursion_limit` bounds the graph (default 1000). A deadline retains partial
+  evidence and reports an incomplete response; a missing native terminal tool
+  event is not fabricated.
+- Request tools, nonautomatic tool choice, `max_tool_calls`, `previous_response_id`,
+  `conversation`, and structured `text` output are rejected. Inputs must be text,
+  function calls/results, or supported reasoning items. Other Responses envelope
+  controls (background execution, storage, metadata, prompt templates, service
+  tier, cache controls, moderation, truncation, and logprobs) are not implemented
+  or forwarded. Streaming is unsupported.
+- Required HTTP/MCP tool grants and sandbox user overrides return a final 422;
+  optional unused grants are skipped. Keep one server worker. Identical activation
+  retries join the same run; changed activations and missing/closed sessions return
+  409. Checkpoint recovery restarts from input.
+- Native model/tool IDs connect root and child invocations, retries, turns, and
+  explicit compaction observations. Aggregate usage is unknown if any completed
+  model call omits usage. Only an error that ends the native graph fails the run.
+  Provider context-overflow errors remain model errors; the adapter does not
+  translate them to LangChain's more aggressive overflow retry.
+
+Validation artifacts and real-pairing results are recorded in the implementation
+PR. Full TB2.1 qualification requires all 89 tasks with eight repeats; passing the
+scripted probes alone does not establish a benchmark score.
+
+## In-process custom graphs
+
+The remaining sections describe the existing in-process mode, whose observations
+and sandbox limitations differ from the sandboxed native graph above.
+
 `app.py`'s `DeepAgentsAgent` is the generic base that should be used by your LangChain DeepAgent. 
 This base class does not define a `deepagents` graph by design, since every developer's DeepAgent 
 is different. 
