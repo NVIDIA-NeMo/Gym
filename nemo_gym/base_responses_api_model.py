@@ -87,7 +87,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
+from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, rollout_context, scope_with_routed_path
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -1487,6 +1487,7 @@ def _record(
     model_server_name: Optional[str],
     request_bytes: bytes,
     *,
+    verifier_invocation_id: Optional[str] = None,
     client_session_id: Optional[str] = None,
     client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
@@ -1528,6 +1529,8 @@ def _record(
             "request": request_body,
             "response": response_body,
         }
+        if verifier_invocation_id is not None:
+            exchange["verifier_invocation_id"] = verifier_invocation_id
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
         if execution is not None:
@@ -1749,6 +1752,9 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        verifier_invocation_id = _unique_request_header(
+            scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
+        )
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
@@ -1881,6 +1887,7 @@ class _CaptureMiddleware:
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
+                    verifier_invocation_id=verifier_invocation_id,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
@@ -1957,6 +1964,7 @@ class _CaptureMiddleware:
                     dialect,
                     model_server_name,
                     request_bytes,
+                    verifier_invocation_id=verifier_invocation_id,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,

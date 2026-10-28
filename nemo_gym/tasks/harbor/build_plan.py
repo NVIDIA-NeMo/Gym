@@ -38,7 +38,7 @@ from nemo_gym.tasks.harbor.models import HarborEnvironment
 from nemo_gym.tasks.harbor.records import MAIN_SERVICE, VERIFIER_SERVICE, read_image_configs
 from nemo_gym.tasks.harbor.registry import PLATFORM
 from nemo_gym.tasks.harbor.task import DOCKERFILE, TASK_FILE, HarborTaskConfig, is_task_folder, iter_task_folders
-from nemo_gym.tasks.harbor.verifier_env import effective_verifier_environment, verifier_build_context
+from nemo_gym.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
 
 
 if TYPE_CHECKING:
@@ -317,8 +317,9 @@ def plan_builds(
             folders.append((context, planned, config.environment))
         verifier_context = verifier_build_context(child, config)
         if verifier_context is not None:
-            # Harbor builds the verifier's environment from tests/ with the effective verifier config's settings.
-            verifier_environment = effective_verifier_environment(config)
+            # Harbor builds the verifier's environment from tests/ with the effective verifier config's settings
+            # (the task's, or the first separate step's that starts from tests/ without an image).
+            verifier_environment = verifier_build_environment(child, config)
             assert verifier_environment is not None  # verifier_build_context returned a context
             folders.append((verifier_context, [VERIFIER_SERVICE], verifier_environment))
         # Every folder is checked before any is added, so a task left out is in no entry, not even its other folder's.
