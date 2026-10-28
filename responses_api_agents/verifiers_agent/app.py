@@ -61,6 +61,26 @@ logger = logging.getLogger(__name__)
 
 _EMPTY_OUTPUT_ITEM_ID = "msg_empty"
 
+# openai exceptions that mean the model server was unreachable, timed out or answered 5xx.
+# APITimeoutError subclasses APIConnectionError; InternalServerError covers every status >= 500.
+_MODEL_SERVER_FAILURES = ("APIConnectionError", "APITimeoutError", "InternalServerError")
+
+
+def _model_server_failure(rollout_output: Mapping) -> Optional[str]:
+    """The rollout's error chain when the model server failed it, else None.
+
+    verifiers wraps every policy-call failure in ModelError and records the chain as type names
+    ("ModelError -> APITimeoutError"). Errors caused by the model's own output, or by a tool,
+    start with another name.
+    """
+    error = rollout_output.get("error")
+    if not isinstance(error, Mapping):
+        return None
+    chain = (error.get("error_chain_str") or "").split(" -> ")
+    if chain[0] != "ModelError" or not any(name in _MODEL_SERVER_FAILURES for name in chain[1:]):
+        return None
+    return error.get("error_chain_repr") or error.get("error_chain_str")
+
 
 def _as_dict(msg: Any) -> dict:
     if isinstance(msg, dict):
@@ -298,6 +318,11 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     client_max_retries: int | None = Field(
         default=None,
         description="openai SDK retry count for the policy client. None keeps the SDK default (2).",
+    )
+    fail_rollout_on_model_server_error: bool = Field(
+        default=True,
+        description="Fail /run with a 500 when the policy model server was unreachable, timed out or answered 5xx, "
+        "instead of scoring the aborted rollout. False restores scoring it.",
     )
 
 
@@ -619,6 +644,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             )
 
             rollout_output = outputs[0]
+            if self.config.fail_rollout_on_model_server_error and (failure := _model_server_failure(rollout_output)):
+                raise RuntimeError(f"Task {task_idx}: the policy model server failed the rollout: {failure}")
             reward = rollout_output.get("reward", 0.0) or 0.0
             metrics = rollout_output.get("metrics", {}) or {}
             # verifiers exports a column missing from the State as None (a typo, or the rubric never set it).

@@ -19,8 +19,18 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+import verifiers as vf
 from fastapi.testclient import TestClient
-from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
+from openai import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_TIMEOUT,
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    Timeout,
+)
+from verifiers.legacy.utils.error_utils import error_data
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
@@ -707,3 +717,79 @@ class TestSharedClientTraceContext:
         assert str(per_run.client.base_url).rstrip("/") == f"http://policy:8000/ng-rollout/2-0{self.SEGMENT}/v1"
         cached = agent.client_cache["policy_model"]
         assert str(cached.client.base_url).rstrip("/") == "http://policy:8000/v1"
+
+
+def _error_data_of(error: BaseException, cause: BaseException) -> dict:
+    """The ErrorData verifiers records on a rollout that ended with ``error`` raised from ``cause``."""
+    try:
+        try:
+            raise cause
+        except BaseException as inner:
+            raise error from inner
+    except BaseException as raised:
+        return error_data(raised)
+
+
+class TestModelServerFailure:
+    """A rollout the policy model server failed is not scored: /run returns 500, as simple_agent does."""
+
+    REQUEST = httpx.Request("POST", POLICY_URL)
+
+    def _run(self, rollout_error: dict | None, **config_overrides):
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+            **config_overrides,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: False}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            return [{"reward": 0.0, "metrics": {}, "completion": [], "trajectory": [], "error": rollout_error}]
+
+        env = MagicMock()
+        env.run_group = fake_run_group
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch.object(VerifiersAgent, "_get_env", return_value=env),
+        ):
+            return TestClient(agent.setup_webserver(), raise_server_exceptions=False).post(
+                "/run",
+                json={"task_idx": 0, "responses_create_params": {"input": [{"role": "user", "content": "hi"}]}},
+            )
+
+    def test_a_model_timeout_fails_the_run(self) -> None:
+        error = _error_data_of(vf.ModelError(), APITimeoutError(request=self.REQUEST))
+        assert error["error_chain_str"] == "ModelError -> APITimeoutError"
+        assert self._run(error).status_code == 500
+
+    def test_a_refused_connection_fails_the_run(self) -> None:
+        error = _error_data_of(vf.ModelError(), APIConnectionError(request=self.REQUEST))
+        assert self._run(error).status_code == 500
+
+    def test_a_model_server_5xx_fails_the_run(self) -> None:
+        response = httpx.Response(500, request=self.REQUEST)
+        error = _error_data_of(vf.ModelError(), InternalServerError("boom", response=response, body=None))
+        assert self._run(error).status_code == 500
+
+    def test_the_old_behaviour_is_one_flag_away(self) -> None:
+        error = _error_data_of(vf.ModelError(), APITimeoutError(request=self.REQUEST))
+        response = self._run(error, fail_rollout_on_model_server_error=False)
+        assert response.status_code == 200, response.text
+        assert response.json()["reward"] == 0.0
+
+    def test_an_error_from_the_model_output_is_still_scored(self) -> None:
+        error = _error_data_of(vf.EmptyModelResponseError(), ValueError("no content"))
+        assert self._run(error).status_code == 200
+
+    def test_a_tool_connection_error_is_still_scored(self) -> None:
+        error = _error_data_of(vf.ToolCallError(), APIConnectionError(request=self.REQUEST))
+        assert self._run(error).status_code == 200
+
+    def test_a_clean_rollout_is_scored(self) -> None:
+        assert self._run(None).status_code == 200
