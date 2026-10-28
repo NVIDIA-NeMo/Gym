@@ -71,10 +71,16 @@ def test_slurm_env_fallback() -> None:
     }
 
 
-def test_cluster_comes_from_config_or_slurm_only() -> None:
-    # Non-Slurm runs configure the cluster; there is no NEMO_GYM_* fallback for it.
+def test_cluster_falls_back_to_host_cluster_name() -> None:
+    # Slurm login nodes have no SLURM_CLUSTER_NAME; some clusters export CLUSTER_NAME instead.
+    assert resolve_attribution(environ={"CLUSTER_NAME": "host-cluster"})["cluster"] == "host-cluster"
+    environ = {"SLURM_CLUSTER_NAME": "slurm-cluster", "CLUSTER_NAME": "host-cluster"}
+    assert resolve_attribution(environ=environ)["cluster"] == "slurm-cluster"
+    assert resolve_attribution(cluster="cfg-cluster", environ=environ)["cluster"] == "cfg-cluster"
+
+
+def test_cluster_has_no_nemo_gym_env_var() -> None:
     assert "cluster" not in resolve_attribution(environ={"NEMO_GYM_CLUSTER": "env-cluster"})
-    assert resolve_attribution(cluster="k8s-cell", environ={})["cluster"] == "k8s-cell"
 
 
 def test_workload_falls_back_to_gym_config_path() -> None:
