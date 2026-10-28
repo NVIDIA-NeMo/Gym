@@ -57,7 +57,7 @@ from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GenerationCutReceipt,
 )
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
-from tests.unit_tests.test_token_capture_ledger import (
+from tests.unit_tests.models.test_token_capture_ledger import (
     ASSISTANT_1,
     ASSISTANT_2,
     USER_1,

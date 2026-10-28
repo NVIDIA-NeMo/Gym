@@ -18,7 +18,7 @@ from nemo_gym.models.token_capture.sink import (
     set_token_sink,
 )
 from nemo_gym.models.token_capture.staging.records import CaptureAdmission
-from tests.unit_tests.test_external_capture_handlers import _staged_coords
+from tests.unit_tests.models.test_external_capture_handlers import _staged_coords
 
 
 @pytest.fixture(params=["memory", "file"])
