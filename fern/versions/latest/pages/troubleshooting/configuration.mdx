@@ -284,7 +284,7 @@ A relay stays, and is listed with its reason, when:
 - the run cannot load one of its included configs.
 
 A relay that inherits another relay keeps its `_inherit_from`, and the two must switch in the same run; the script exits with 2 and names the relays when only one would switch.
-It also exits with 2 when another config merges an inheriting relay with a `legacy_agent` server while the relay it inherits switches. That config should remove the inherited servers by setting them to `null` and declare a `legacy_agent` server of its own for its harness.
+It also exits with 2 when another config merges an inheriting relay with a `legacy_agent` server while the relay it inherits switches. That config should keep the server's name, so rows keep their routing, and replace its definition, as `benchmarks/hle/opencode.yaml` does: `_delete_key: _inherit_from` detaches it from the switched relay, `_delete_key: single_agent_turn_legacy` under its `environment_servers` removes the migrated type, and a complete `legacy_agent` server fronts its harness. Set the inherited relay to `null` when nothing else in the run uses it.
 The script writes nothing when it exits with 2.
 Compare the reward profile of a switched config with the relay's before relying on it.
 
