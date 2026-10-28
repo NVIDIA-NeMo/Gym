@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
@@ -242,7 +243,7 @@ async def test_active_shared_session_retries_unknown_cleanup_before_cancelling_p
     original_download = sandbox.download
 
     async def execute(command: str, **kwargs) -> SandboxExecResult:
-        if "/process_supervisor.py" in command:
+        if f"/{SUPERVISOR_FILE}" in command:
             launched.set()
             try:
                 await asyncio.Event().wait()

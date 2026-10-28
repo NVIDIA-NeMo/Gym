@@ -7,17 +7,33 @@ description: "Run NOOA with the canonical Terminal-Bench 2.1 preparation and ver
 
 The [NOOA recipe](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/nooa.yaml)
 runs NOOA inside the task sandbox and reuses Terminal-Bench 2.1's existing preparation and resources server.
+The run wrapper composes three parts:
+
+- The reusable [benchmark profile](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1_benchmark.yaml)
+  defines the `benchmark` resources-server instance. It owns the unchanged canonical dataset and preparer,
+  using the `terminal-bench-2.1` taskset.
+- The reusable [sandboxed NOOA profile](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/nooa_agent/configs/nooa_sandboxed.yaml)
+  defines the `agent` instance with `resources_server: null`. It uses the sandbox supplied for the episode
+  and does not define an environment server of its own.
+- The generic `single_agent_turn` environment-server instance, `experiment`, binds `benchmark` and `agent`.
+
+To use another compatible harness, replace the harness profile and its settings while keeping the `agent`
+instance name. The environment server, benchmark profile, prepared data, and taskset can stay the same.
+
 Configure a sandbox provider and your policy endpoint in a private `private-policy-provider.yaml` overlay;
 the provider must support the task images and allow the sandbox to reach Gym's model server. Keep credentials
 in your local configuration. Set `use_absolute_ip: true` in that overlay and configure `default_host` when
 necessary so the advertised model URL is reachable from the sandbox, rather than loopback. Runtime installation
 also needs outbound package access unless the agent’s `runtime_wheelhouse` points to a prepared offline wheelhouse
 on the controller. The resources server owns sandbox creation, verification, and cleanup.
+Keep the private overlay last in the config list so its values take precedence. Benchmark overrides belong
+under `benchmark.resources_servers.terminal_bench_2_1`; NOOA overrides belong under
+`agent.responses_api_agents.nooa_agent`.
 
 From the repository root:
 
 ```bash
-gym eval prepare --benchmark terminal_bench_2_1/nooa
+gym eval prepare --config benchmarks/terminal_bench_2_1/nooa.yaml
 
 gym env resolve \
     --config benchmarks/terminal_bench_2_1/nooa.yaml \

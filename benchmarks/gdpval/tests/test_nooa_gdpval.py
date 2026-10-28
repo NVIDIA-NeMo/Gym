@@ -56,7 +56,7 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
     baseline = OmegaConf.merge(*baseline_configs)
     parser._recursively_swap_keys(baseline)
     resource_block = config.gdpval_resources_server.resources_servers.gdpval
-    # Preserve every canonical resources/judge/provider setting except the harness pairing and dataset declaration.
+    # Preserve every canonical resources/judge/provider setting except the dataset declaration.
     for name, block in baseline.items():
         if name not in {
             "config_paths",
@@ -68,10 +68,8 @@ def test_nooa_recipe_preserves_gdpval_tools_grading_and_dispatch(
     expected_resources = OmegaConf.to_container(baseline.gdpval_resources_server.resources_servers.gdpval)
     actual_resources = OmegaConf.to_container(resource_block)
     assert len(actual_resources.pop("datasets")) == 1
-    actual_resources.pop("allowed_agents")
-    expected_resources.pop("allowed_agents")
     assert actual_resources == expected_resources
-    assert resource_block.allowed_agents == ["nooa_agent"]
+    assert resource_block.allowed_agents == ["stirrup_agent", "pi_agent", "codex_agent", "nooa_agent"]
     assert (
         config.rollout_collection_driver == "resources_servers.gdpval.multistage_orchestrator:run_rollout_collection"
     )
