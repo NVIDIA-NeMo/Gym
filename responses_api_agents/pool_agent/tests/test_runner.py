@@ -88,6 +88,8 @@ def test_proxy_preserves_upstream_status_and_counts_only_successes(tmp_path, sta
             pass
 
         def do_POST(self):
+            # Drain the request before closing the socket to avoid a TCP reset.
+            self.rfile.read(int(self.headers["Content-Length"]))
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
