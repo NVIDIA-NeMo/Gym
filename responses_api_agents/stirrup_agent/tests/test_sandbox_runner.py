@@ -297,7 +297,7 @@ def test_a_run_that_uses_all_its_turns_without_finishing_is_incomplete(tmp_path,
     finally:
         model.close()
 
-    assert (output["observations"]["status"], output["stop_reason"]) == ("incomplete", None)
+    assert (output["observations"]["status"], output["stop_reason"]) == ("incomplete", "max_turns")
     assert len(model.requests) == 2
 
 
