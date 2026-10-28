@@ -115,22 +115,79 @@ def _identity(pid: int) -> str:
     return f"{pid} {stat.read_text().rsplit(') ', 1)[1].split()[19]}" if stat.exists() else str(pid)
 
 
-def test_number_left_by_a_killed_installer_does_not_block_the_queue_without_flock(tmp_path, binary):
+def _zombie() -> subprocess.Popen:
+    """A killed child that is not reaped yet, so /proc still lists it with its start time."""
+    process = subprocess.Popen(["sleep", "30"])
+    process.kill()
+    stat = Path(f"/proc/{process.pid}/stat")
+    deadline = time.monotonic() + 5
+    while stat.read_text().rsplit(") ", 1)[1].split()[0] != "Z":
+        assert time.monotonic() < deadline, "the killed child never became a zombie"
+        time.sleep(0.01)
+    return process
+
+
+@pytest.mark.parametrize("owner", ["exited", "zombie"])
+def test_number_left_by_a_killed_installer_does_not_block_the_queue_without_flock(tmp_path, binary, owner):
     source, checksum = binary
-    exited = subprocess.Popen(["true"])
-    exited.wait()
-    (tmp_path / "runtime.lock.d").mkdir()
-    (tmp_path / "runtime.lock.d/1").symlink_to(_identity(exited.pid))
-    result = subprocess.run(
-        ["bash", str(INSTALLER), "--version", "2.1.108", "--runtime", str(tmp_path / "runtime")]
-        + ["--sha256", checksum, "--source", str(source)],
-        env=_without_flock(tmp_path),
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert (result.returncode, result.stdout) == (0, "2.1.108 (Claude Code)\n"), result.stderr
-    assert (tmp_path / "runtime.lock.d/2.done").exists()
+    if owner == "zombie" and not Path("/proc").is_dir():
+        pytest.skip("A zombie owner is only visible through /proc")
+    process = subprocess.Popen(["true"]) if owner == "exited" else _zombie()
+    try:
+        if owner == "exited":
+            process.wait()
+        (tmp_path / "runtime.lock.d").mkdir()
+        (tmp_path / "runtime.lock.d/1").symlink_to(_identity(process.pid))
+        result = subprocess.run(
+            ["bash", str(INSTALLER), "--version", "2.1.108", "--runtime", str(tmp_path / "runtime")]
+            + ["--sha256", checksum, "--source", str(source)],
+            env=_without_flock(tmp_path),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert (result.returncode, result.stdout) == (0, "2.1.108 (Claude Code)\n"), result.stderr
+        assert (tmp_path / "runtime.lock.d/2.done").exists()
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_installer_stopped_after_losing_a_number_leaves_the_winners_ticket_open(tmp_path, binary):
+    source, checksum = binary
+    winner = subprocess.Popen(["sleep", "30"])
+    try:
+        env = _without_flock(tmp_path)
+        ln = tmp_path / "bin/ln"
+        real_ln = ln.resolve()
+        ln.unlink()
+        # Another installer links number 1 first; this installer is then stopped before it retries.
+        ln.write_text(
+            "#!/bin/bash\n"
+            "for target; do :; done\n"
+            f"if [[ $target == */runtime.lock.d/* ]]; then\n"
+            f'  {real_ln} -s "{_identity(winner.pid)}" "$target"\n'
+            '  kill -TERM "$PPID"\n'
+            "  exit 1\n"
+            "fi\n"
+            f'exec {real_ln} "$@"\n'
+        )
+        ln.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(INSTALLER), "--version", "2.1.108", "--runtime", str(tmp_path / "runtime")]
+            + ["--sha256", checksum, "--source", str(source)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode != 0
+        assert (tmp_path / "runtime.lock.d/1").readlink() == Path(_identity(winner.pid))
+        # Marking number 1 done would let the next installer run beside the live winner.
+        assert not (tmp_path / "runtime.lock.d/1.done").exists()
+    finally:
+        winner.kill()
+        winner.wait()
 
 
 def test_installer_without_flock_waits_for_a_live_lock_owner(tmp_path, binary):
