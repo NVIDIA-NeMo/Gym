@@ -9,7 +9,6 @@ import os
 import posixpath
 import shutil
 import subprocess
-import sys
 import tarfile
 
 import pytest
@@ -24,7 +23,6 @@ from responses_api_agents.opencode_agent.pinned import (
 
 
 pytestmark = pytest.mark.skipif(shutil.which("sha256sum") is None, reason="the staging steps need sha256sum")
-linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux reports a missing interpreter as 127")
 
 
 def run(script, *args, env=None):
@@ -62,7 +60,10 @@ def test_stage_executable_installs_a_checked_copy_that_runs(tmp_path):
         (b"#!/bin/sh\nexit 4\n", None, "--version exited 4"),
         # Bytes the kernel refuses to run, which the shell reports as 126.
         (b"\x7fELF\x02\x01\x01\x00\x00\x00not really a binary\n", None, "--version exited 126"),
+        # A missing interpreter, which shells report as 126 or 127: these bytes cannot run in this image either.
+        (b"#!/nonexistent/interpreter\n", None, "--version exited 12"),
     ],
+    ids=["digest", "probe", "format", "interpreter"],
 )
 def test_stage_executable_rejects_wrong_or_broken_bytes_without_installing(tmp_path, script, digest, message):
     source = tmp_path / "rg"
@@ -92,16 +93,6 @@ def test_version_check_killed_by_a_signal_stays_retryable(tmp_path):
     staged, target = stage(tmp_path, source, digest)
     assert staged.returncode == 1, staged.stderr
     assert "--version exited 137" in staged.stderr
-    assert list(target.parent.iterdir()) == []
-
-
-@linux_only
-def test_a_missing_interpreter_stays_retryable(tmp_path):
-    source = tmp_path / "rg"
-    digest = pinned(source, b"#!/nonexistent/interpreter\n")
-    staged, target = stage(tmp_path, source, digest)
-    assert staged.returncode == 1, staged.stderr
-    assert "--version exited 127" in staged.stderr
     assert list(target.parent.iterdir()) == []
 
 
