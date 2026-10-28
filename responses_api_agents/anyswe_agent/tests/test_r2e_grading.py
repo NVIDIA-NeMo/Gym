@@ -32,11 +32,13 @@ class TestR2EGrading:
                 True,
             ),
             ("test_x", "PASSED tests/a.py::TestA::test_x\n", True),
-            ("test_x", "PASSED tests/a.py::test_x\nPASSED tests/b.py::test_x\n", False),
+            ("test_x", "PASSED tests/a.py::test_x\nPASSED tests/b.py::test_x\n", True),
             ("test_x", "PASSED tests/a.py::test_x\nFAILED tests/b.py::test_x - failure\n", False),
-            ("TestA.test_x", "PASSED tests/a.py::TestA::test_x\nPASSED tests/b.py::TestA::test_x\n", False),
+            ("TestA.test_x", "PASSED tests/a.py::TestA::test_x\nPASSED tests/b.py::TestA::test_x\n", True),
+            ("TestA.test_x", "PASSED tests/a.py::TestA::test_x\nXFAIL tests/b.py::TestA::test_x\n", False),
+            ("TestA.test_x", "XFAIL tests/a.py::TestA::test_x\nXFAIL tests/b.py::TestA::test_x\n", True),
             ("test_a.py::test_x", "PASSED tests/test_a.py::test_x\n", True),
-            ("test_a.py::test_x", "PASSED one/test_a.py::test_x\nPASSED two/test_a.py::test_x\n", False),
+            ("test_a.py::test_x", "PASSED one/test_a.py::test_x\nPASSED two/test_a.py::test_x\n", True),
             (
                 "test_x",
                 "tests/a.py::test_x PASSED [ 50%]\nPASSED tests/a.py::test_x\n",
@@ -194,4 +196,71 @@ class TestR2EGrading:
             result = asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_r2e_patch(params, b"diff\n"))
 
         assert result == (resolved, None)
-        assert (tmp_path / "eval_output.txt").read_text() == log
+        assert not (tmp_path / "eval_output.txt").exists()
+
+    @pytest.mark.parametrize("dataset", ["r2e", "swebench"])
+    @pytest.mark.parametrize("save_eval_output", [None, False, True])
+    def test_eval_output_is_opt_in_without_changing_grading(
+        self, tmp_path: Path, dataset: str, save_eval_output: bool | None
+    ) -> None:
+        log = (
+            "PASSED tests/test_fix.py::test_first\n"
+            + "setup output\n" * 20_000
+            + "PASSED tests/test_fix.py::test_fixed\n"
+        )
+
+        class _FakeSandbox:
+            def __init__(self, provider, spec) -> None:
+                pass
+
+            async def start(self) -> None:
+                pass
+
+            async def stop(self) -> None:
+                pass
+
+            async def upload(self, local: Path, remote: str) -> None:
+                pass
+
+            async def exec(self, command: str, **kwargs):
+                return SimpleNamespace(return_code=0, stdout=log, stderr="", error_type=None)
+
+        options = {} if save_eval_output is None else {"save_eval_output": save_eval_output}
+        params = AnySweInstanceConfig(
+            **_config(**options).model_dump(),
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://policy:8000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+            problem_info={
+                "instance_id": "pkg__repo-1",
+                "dataset_name": "R2E-Gym/R2E-Gym-Subset" if dataset == "r2e" else "SWE-bench",
+                "instance_dict": json.dumps(
+                    {"FAIL_TO_PASS": ["tests/test_fix.py::test_first", "tests/test_fix.py::test_fixed"]}
+                ),
+            },
+            body={"input": "fix it", "model": "policy"},
+            persistent_dir=tmp_path,
+            metrics_fpath=tmp_path / "metrics.json",
+            container="registry.example.com/task:pkg__repo-1",
+        )
+
+        def get_eval_report(spec, prediction, path, **kwargs):
+            # Disabling or truncating the diagnostic artifact must not truncate the verifier's input.
+            assert Path(path).read_text() == log
+            return {params.instance_id: {"resolved": True}}
+
+        with (
+            patch("responses_api_agents.anyswe_agent.app.AsyncSandbox", _FakeSandbox),
+            patch("swebench.harness.test_spec.test_spec.make_test_spec", return_value=SimpleNamespace(eval_script="")),
+            patch("swebench.harness.grading.get_eval_report", side_effect=get_eval_report),
+        ):
+            result = asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_sandbox_patch(params, b"diff\n"))
+
+        assert result == (True, None)
+        transcript = tmp_path / "eval_output.txt"
+        if save_eval_output:
+            assert transcript.read_text() == log[-200_000:]
+        else:
+            assert not transcript.exists()

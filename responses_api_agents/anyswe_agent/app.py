@@ -201,7 +201,7 @@ def _record_test_status(statuses: Dict[str, Dict[str, str]], test: str, status: 
     test = _ANSI_ESCAPE.sub("", test).strip()
     for alias in _r2e_test_aliases(test):
         matches = statuses.setdefault(alias, {})
-        # Keep concrete identities separate so a shortened name must be unambiguous. A failing result for the
+        # Keep concrete identities separate so a shortened name cannot hide mixed outcomes. A failing result for the
         # same identity takes precedence over PASSED/XFAIL in either verbose output or the later summary.
         # SKIPPED is the weakest record: pytest prints one node id twice when a data-driven case exists in two
         # files (mypy's suites), once SKIPPED and once PASSED in either order, and a SKIPPED that stuck graded
@@ -263,7 +263,8 @@ def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
         # Match the requirement as supplied. Falling back from TestA.test_x to test_x could reward a different
         # class's passing test even when the required test never ran.
         matches = statuses.get(_ANSI_ESCAPE.sub("", test).strip(), {})
-        return next(iter(matches.values())) if len(matches) == 1 else None
+        outcomes = set(matches.values())
+        return next(iter(outcomes)) if len(outcomes) == 1 else None
 
     # Like swebench's grading, an expected failure (XFAIL) counts as passing.
     return bool(required) and all(status_of(test) in ("PASSED", "XFAIL") for test in required)
@@ -332,6 +333,7 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     agent_runtime_fetch_timeout_s: int = 600
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
+    save_eval_output: bool = False
     concurrency: int = 256
 
 
@@ -674,9 +676,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
 
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
-        # Keep the grading transcript: a reward of 0 with a real patch is otherwise indistinguishable between
-        # failing tests and a test runner that never printed per-test results.
-        (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
+        if params.save_eval_output:
+            (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
         with tempfile.NamedTemporaryFile("w", suffix=".log") as log_file:
             log_file.write(log)
             log_file.flush()
@@ -724,7 +725,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
 
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
-        (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
+        if params.save_eval_output:
+            (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
         has_lists = any(
             _as_list(instance.get(key) or instance.get(key.lower())) for key in ("FAIL_TO_PASS", "PASS_TO_PASS")
         )

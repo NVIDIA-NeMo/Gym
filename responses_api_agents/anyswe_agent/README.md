@@ -113,11 +113,11 @@ SWE-bench and SWE-bench Multilingual use the official `make_test_spec` and
 to report `PASSED` (or `XFAIL`). Required tests match pytest node ids, unittest-style
 `Class.test` names and colored output. A supplied class or file must match; it
 never falls back to an unrelated test with the same method name. Shortened or
-bare names must identify exactly one logged test, and parameter IDs are preserved.
+bare names must identify one logged test or tests that all report the same status;
+different statuses remain ambiguous. Parameter IDs are preserved.
 R2E-Gym rows without test lists are graded
 with R2E-Gym's own rule: the test-status map from the run's short test summary must
-equal the row's `expected_output_json` exactly. The grading transcript is saved as
-`eval_output.txt` next to the rollout artifacts. Statuses come from the leading
+equal the row's `expected_output_json` exactly. Statuses come from the leading
 summary token, so status words inside parameter IDs or failure diagnostics do not
 change the verdict. ANSI colors are removed consistently from logs and expected
 keys. Expected maps retain the upstream encoding: file names are omitted, every
@@ -130,6 +130,11 @@ diagnostics are removed by matching complete names observed in passing or verbos
 lines first, so teardown errors retain the same identity even with unmatched
 brackets in parameter IDs. Failure-only names still inherit pytest's text-format
 ambiguity when no complete identity was observed.
+
+Set `save_eval_output: true` to save the last 200,000 characters of the grading
+transcript as `eval_output.txt` next to the rollout artifacts. This diagnostic
+option defaults to `false` for both R2E-Gym and SWE-bench to avoid accumulating
+transcripts during training. Grading always receives the complete output.
 
 Before running an R2E-Gym image's `run_tests.sh`, the grader links the image's
 `/r2e_tests` into `/testbed`, as R2E-Gym's own runtime does.
