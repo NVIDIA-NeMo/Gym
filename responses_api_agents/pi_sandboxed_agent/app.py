@@ -20,6 +20,7 @@ import logging
 from asyncio import Semaphore
 from contextvars import ContextVar
 from copy import deepcopy
+from functools import cache
 from hashlib import sha256
 from pathlib import Path
 from shlex import join, quote
@@ -60,6 +61,17 @@ from responses_api_agents.pi_agent.app import (
 LOG = logging.getLogger(__name__)
 _RUN: ContextVar[dict[str, Any] | None] = ContextVar("pi_sandboxed_run", default=None)
 
+DEPRECATION_WARNING = (
+    "DEPRECATED: pi_sandboxed_agent runs each episode through its own legacy /run path and will be removed after "
+    "the environment-server migration. Use pi_agent with sandbox sessions under an environment server instead. "
+    "See responses_api_agents/pi_agent/README.md#configure-and-run."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    LOG.warning(DEPRECATION_WARNING)
+
 
 class PiSandboxedAgentConfig(PiAgentConfig):
     """Pi CLI settings plus provider allocation and host-side tool services."""
@@ -88,6 +100,7 @@ class PiSandboxedAgent(PiAgent):
     def model_post_init(self, __context: Any) -> None:
         # Pi is preinstalled in the sandbox image, never installed on the Gym host.
         SimpleResponsesAPIAgent.model_post_init(self, __context)
+        _warn_deprecated_once()
         self.sem = Semaphore(self.config.concurrency)
 
     def _resolve_model_base_url(self, rollout_id: str | None = None) -> str:

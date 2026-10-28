@@ -1325,3 +1325,21 @@ class TestAgentTimeout:
         # Config allows 10 s; the task declares 0.01 s, so the run times out under the task's budget.
         _, _, (response, _) = await _execute_with_harness(monkeypatch, run, metadata={"agent_timeout_sec": "0.01"})
         assert response.metadata["terminus2_outcome"] == "timeout"
+
+
+@pytest.mark.parametrize("legacy_run", [True, False])
+def test_only_the_legacy_run_configuration_logs_the_deprecation_once(caplog, legacy_run):
+    """A resources_server selects the deprecated flat /run path; episode sessions start without a warning."""
+    app_module._warn_deprecated_once.cache_clear()
+    config = _native_config()
+    if legacy_run:
+        config.resources_server = ResourcesServerRef(type="resources_servers", name="terminal_bench_2_1")
+    with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+        for _ in range(2):
+            Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == app_module.__name__]
+    assert warnings == ([app_module.DEPRECATION_WARNING] if legacy_run else [])
+    if legacy_run:
+        for phrase in ("terminus_2_sandboxed_agent", "legacy /run", "episode sessions", "README.md"):
+            assert phrase in warnings[0]

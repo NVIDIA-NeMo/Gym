@@ -28,6 +28,10 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 
 The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
 
+<Warning>
+This legacy `/run` path is deprecated and will be removed after the Environment Server migration. Do not build new benchmarks, agents, or configs on `opencode_sandboxed_agent`, `pi_sandboxed_agent`, or `hermes_sandboxed_agent`, or on the `/run` path of `terminus_2_sandboxed_agent` and `miniswe_sandboxed_agent`. Use a harness from the table above instead. Each of these agents logs a deprecation warning when it starts on this path. Episode sessions of `terminus_2_sandboxed_agent` and `miniswe_sandboxed_agent`, which [Harbor Tasks](/main/data/harbor-tasks) use, are not deprecated.
+</Warning>
+
 ## Run an integrated agent on a benchmark
 
 An experiment is a few composable YAML files: the model and provider, the benchmark, the agent, and the Environment Server that binds them. To change the agent or the benchmark, replace one file; the others stay as they are.

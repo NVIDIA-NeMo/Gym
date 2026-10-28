@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -123,6 +124,19 @@ def agent(tmp_path, monkeypatch):
     sandbox.download = AsyncMock(side_effect=download)
     server._start_sandbox = AsyncMock(return_value=sandbox)
     return server, sandbox
+
+
+def test_startup_logs_the_deprecation_once_per_process(agent, caplog):
+    server, _ = agent
+    app._warn_deprecated_once.cache_clear()
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            PiSandboxedAgent(config=server.config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == app.__name__]
+    assert warnings == [app.DEPRECATION_WARNING]
+    for phrase in ("pi_sandboxed_agent", "legacy /run", "Use pi_agent", "pi_agent/README.md"):
+        assert phrase in warnings[0]
 
 
 def request_body():

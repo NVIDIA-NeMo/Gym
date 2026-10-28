@@ -4,6 +4,7 @@
 """Exercise mini-SWE without importing a benchmark or its resource models."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -493,3 +494,27 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
     f.provider.aclose.assert_awaited_once()
     assert f.verification["termination"]["reason"] == "cancelled"
     assert not f.agent._sessions
+
+
+@pytest.mark.parametrize("legacy_run", [True, False])
+def test_only_the_legacy_run_configuration_logs_the_deprecation_once(tmp_path, caplog, legacy_run):
+    """A resources_server selects the deprecated flat /run path; episode sessions start without a warning."""
+    module._warn_deprecated_once.cache_clear()
+    config = module.MiniSWESandboxedConfig(
+        host="localhost",
+        port=1,
+        name="agent",
+        entrypoint="app.py",
+        resources_server={"type": "resources_servers", "name": "terminal_bench_4"} if legacy_run else None,
+        model_server={"type": "responses_api_models", "name": "model"},
+        artifacts_dir=tmp_path,
+    )
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        for _ in range(2):
+            module.MiniSWESandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == module.__name__]
+    assert warnings == ([module.DEPRECATION_WARNING] if legacy_run else [])
+    if legacy_run:
+        for phrase in ("miniswe_sandboxed_agent", "legacy /run", "episode sessions", "README.md#harbor-episodes"):
+            assert phrase in warnings[0]

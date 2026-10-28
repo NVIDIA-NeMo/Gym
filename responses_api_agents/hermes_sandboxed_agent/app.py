@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+from functools import cache
 from pathlib import Path
 from shlex import quote
 from time import monotonic, time
@@ -33,6 +34,19 @@ from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop, sp
 
 
 LOG = logging.getLogger(__name__)
+
+DEPRECATION_WARNING = (
+    "DEPRECATED: hermes_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
+    "after the environment-server migration. Use hermes_agent with sandbox sessions under an environment server "
+    "instead. See responses_api_agents/hermes_agent/README.md#configure-and-run."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    LOG.warning(DEPRECATION_WARNING)
+
+
 MAX_OUTPUT_BYTES = 1024 * 1024
 
 
@@ -152,6 +166,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context):
         super().model_post_init(context)
+        _warn_deprecated_once()
         self._sem = asyncio.Semaphore(self.config.concurrency)
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:

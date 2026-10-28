@@ -15,11 +15,13 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 import sys
 from asyncio import Semaphore
 from contextlib import nullcontext
 from copy import deepcopy
+from functools import cache
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -89,6 +91,20 @@ from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_VERSION,
     apply_observability_patch,
 )
+
+
+LOGGER = logging.getLogger(__name__)
+
+DEPRECATION_WARNING = (
+    "DEPRECATED: opencode_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
+    "after the environment-server migration. Use opencode_agent with sandbox sessions under an environment server "
+    "instead. See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    LOGGER.warning(DEPRECATION_WARNING)
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
@@ -555,6 +571,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        _warn_deprecated_once()
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()

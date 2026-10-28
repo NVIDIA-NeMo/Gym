@@ -1,4 +1,12 @@
 # OpenCode Sandboxed Agent
+
+> [!WARNING]
+> **Deprecated.** `opencode_sandboxed_agent` runs each episode through its own legacy `/run` path, behind a
+> `legacy_agent` environment server, and will be removed after the environment-server migration.
+> Do not build new benchmarks, agents or configs on this harness. Use
+> [`opencode_agent`](../opencode_agent/README.md#environmentserver-sessions) with sandbox sessions under an environment server instead.
+> Existing configs keep working; the agent logs a deprecation warning when it starts.
+
 ```bash
 # In terminal 1
 gym env start \
