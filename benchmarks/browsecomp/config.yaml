@@ -25,6 +25,7 @@ browsecomp_benchmark_resources_server:
       max_results: 10
       # Supplied per-run as a sharded key list so concurrent runs do not collide
       # on provider rate limits. Null here; the launcher injects the real shard.
+      exa_api_key: ${oc.select:exa_api_key,null}
       ydc_api_key: ${oc.select:ydc_api_key,null}
       # terminal mode: search/browse write pages to a per-session disk workspace
       # and the read-only bash_command tool is exposed for the model to grep/read them.
