@@ -59,8 +59,10 @@ export default async function nemoGymTurnBudget({ client }) {
   // plugin doing Object.assign onto that Proxy would copy zero keys and silently re-enable every
   // tool at the cap. All writes to this map therefore stay in one file.
   //
-  // Config alone cannot do this -- same finding as subagents (benchmarks/search/opencode.yaml:
-  // "tools.task=false alone does not do it"); the user-message tools map is the lever that works.
+  // Config alone cannot do this. `tools.bash=false` in opencode_config is a PERMISSION: the tool
+  // stays in the model's tool list and the model keeps calling it, only to be refused. The same
+  // holds for `tools.task=false` and subagents. Deleting the key from the user-message tools map,
+  // as below, is the lever that actually removes it from the surface the model sees.
   const noBash = process.env.NEMO_GYM_DISABLE_BASH === "1";
 
   return {

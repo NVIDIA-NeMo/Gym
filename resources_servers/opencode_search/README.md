@@ -28,4 +28,5 @@ of grading counts as unparsed.
 ## Config
 
 Needs `sandbox_image`, `sandbox_provider`/`sandbox_config`, and a `judge_model_server` pointing at a
-model-server block. See `configs/search.yaml`; wired up in `benchmarks/search/opencode.yaml`.
+model-server block. See `configs/opencode_search.yaml`; wired up in
+`benchmarks/browsecomp/configs/browsecomp_opencode.yaml`.
