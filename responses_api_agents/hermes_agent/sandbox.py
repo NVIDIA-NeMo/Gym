@@ -12,9 +12,9 @@ from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.agent_utils.uv_bootstrap import DEFAULT_UV_CACHE_DIR, uv_for_sandbox
-from nemo_gym.base_responses_api_agent import AgentSessionState
+from nemo_gym.agents.base_responses_api_agent import AgentSessionState
+from nemo_gym.agents.utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agents.utils.uv_bootstrap import DEFAULT_UV_CACHE_DIR, uv_for_sandbox
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.utils import read_text, upload_text
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle

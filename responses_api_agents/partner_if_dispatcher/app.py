@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import EnvironmentServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming

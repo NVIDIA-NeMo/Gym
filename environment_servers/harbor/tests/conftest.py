@@ -34,7 +34,7 @@ from environment_servers.harbor.app import (
     HarborEpisodeResponse,
 )
 from environment_servers.harbor.verifier import EXIT_RECORD_NAME
-from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentSeedSessionRequest
+from nemo_gym.agents.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentSeedSessionRequest
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.responses_api_types import NeMoGymResponse

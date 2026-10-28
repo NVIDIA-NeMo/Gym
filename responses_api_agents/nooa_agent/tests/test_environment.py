@@ -17,7 +17,7 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming

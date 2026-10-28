@@ -60,7 +60,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/prompt.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/metrics/reward_profile.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/verification/judge.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/skills.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/agents/skills.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/rollout_reverification.py @nvidia-nemo/gym_env_benchmarks
 
 # Core-Arch + RL
@@ -71,7 +71,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/models/anthropic_converter.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/chat_completions_converter.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_runtime/base_resources_server.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/base_responses_api_agent.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/agents/base_responses_api_agent.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/base_responses_api_model.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/agent_registry.py @nvidia-nemo/gym_core

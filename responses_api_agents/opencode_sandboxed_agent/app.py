@@ -32,7 +32,13 @@ from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.agent_tools import (
+    restricted_network_policy,
+    sandbox_server_url,
+    seed_mcp_servers,
+    verify_agent_response,
+)
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
@@ -58,12 +64,6 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.models.chat_completions_converter import ResponsesConverter
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.agent_tools import (
-    restricted_network_policy,
-    sandbox_server_url,
-    seed_mcp_servers,
-    verify_agent_response,
-)
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_runtime.base_resources_server import (

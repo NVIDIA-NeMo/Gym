@@ -32,7 +32,7 @@ import ray
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import apply_rollout_prefix
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import get_first_server_config_dict

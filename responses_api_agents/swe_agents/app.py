@@ -47,7 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,

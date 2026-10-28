@@ -39,10 +39,10 @@ from environment_servers.swe_together.schemas import (
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.submission import replicate_submission
 from environment_servers.swe_together.task import SOURCE_REVISION, TaskData, load_task
-from nemo_gym.agent_activation_types import (
+from nemo_gym.agents.agent_activation_types import (
     AgentContinuationRequirements,
 )
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,

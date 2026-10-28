@@ -20,7 +20,7 @@ import aiohttp
 from pydantic import ConfigDict, Field, ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,

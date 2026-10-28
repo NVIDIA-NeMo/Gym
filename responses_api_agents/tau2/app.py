@@ -34,11 +34,11 @@ from loguru import logger
 from openai.types.completion_usage import CompletionUsage
 from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client.server_client import get_server_url
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.responses_api_types import (

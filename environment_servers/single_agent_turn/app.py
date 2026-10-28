@@ -10,8 +10,8 @@ from warnings import warn
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
+from nemo_gym.agents.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,

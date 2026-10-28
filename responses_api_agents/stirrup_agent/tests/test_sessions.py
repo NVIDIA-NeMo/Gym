@@ -12,12 +12,13 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.agent_utils import uv_bootstrap
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import agent_tools
+from nemo_gym.agents.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents.utils import uv_bootstrap
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, agent_tools
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess

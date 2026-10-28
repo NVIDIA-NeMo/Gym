@@ -31,7 +31,7 @@ from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
 from pydantic import ConfigDict
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )

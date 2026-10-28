@@ -24,10 +24,10 @@ from typing import Any, Literal
 from aiohttp import ClientError, ClientTimeout
 from pydantic import Field, JsonValue
 
+from nemo_gym.agents.agent_tools import restricted_network_policy
 from nemo_gym.client.http_client import request
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxEndpoint
-from nemo_gym.sandbox.agent_tools import restricted_network_policy
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
 from resources_servers.partner_if import tool_backend, tool_runner
 from resources_servers.partner_if.task_data import ToolBackendBundle

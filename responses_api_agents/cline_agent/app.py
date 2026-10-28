@@ -29,7 +29,7 @@ from uuid import uuid4
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,

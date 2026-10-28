@@ -23,7 +23,7 @@ from typing import Any, Literal
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import TASK_INDEX_KEY_NAME

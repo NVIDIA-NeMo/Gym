@@ -23,7 +23,7 @@ from typing import Any, Literal
 from nooa import Agent
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 

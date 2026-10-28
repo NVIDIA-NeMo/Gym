@@ -11,7 +11,8 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents.base_responses_api_agent import AgentSessionState
+from nemo_gym.agents.utils.sandbox_session import (
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
@@ -20,7 +21,6 @@ from nemo_gym.agent_utils.sandbox_session import (
     SandboxSession,
     shell_assignments,
 )
-from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agents.utils.sandbox_session import SandboxSession
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.codex_agent import sandbox_runner
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession

@@ -23,8 +23,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.agents.agent_tools import restricted_network_policy
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.sandbox.agent_tools import restricted_network_policy
 from nemo_gym.trajectory.trajectory_record import AgentInvocation, SandboxObservation, ToolCallObservation
 from responses_api_agents.pi_agent.app import PiAgentRunRequest, PiMCPServerConfig
 from responses_api_agents.pi_sandboxed_agent import app

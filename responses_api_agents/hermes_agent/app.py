@@ -31,10 +31,8 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.agent_outcome import AgentOutcome
+from nemo_gym.agents.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
@@ -45,6 +43,8 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
+from nemo_gym.agents.utils.sandbox_session import SandboxSession
+from nemo_gym.agents.utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import get_global_config_dict

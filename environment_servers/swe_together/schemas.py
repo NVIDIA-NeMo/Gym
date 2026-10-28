@@ -9,7 +9,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ModelWrapValidatorHandler, PrivateAttr, model_validator
 
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
+from nemo_gym.agents.base_responses_api_agent import AgentCloseSessionResponse
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

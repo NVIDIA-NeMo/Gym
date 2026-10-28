@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.agents.utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.trajectory.trajectory_record import AgentInvocation
 from responses_api_agents.kilocode_agent.sandbox import KiloSandboxSession

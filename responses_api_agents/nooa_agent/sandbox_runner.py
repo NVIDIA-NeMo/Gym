@@ -10,8 +10,8 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.agent_utils.task_timeout import resolve_agent_timeout
+from nemo_gym.agents.utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agents.utils.task_timeout import resolve_agent_timeout
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text, upload_text
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, ObservationGap

@@ -14,13 +14,13 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.agent_utils.supervisor_client import (
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents.utils.supervisor_client import (
     DEFAULT_CLEANUP_TIMEOUT,
     SUPERVISOR_FILE,
     SUPERVISOR_SCRIPT,
     exec_timeout,
 )
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.config.global_config import get_global_config_dict

@@ -33,11 +33,11 @@ from harbor.models.trial.paths import TrialPaths
 from harbor.models.trial.result import TrialResult
 from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, ValidationInfo, field_validator, model_validator
 
-from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
 from nemo_gym.client.http_client import (
     GlobalAIOHTTPAsyncClientConfig,
     is_global_aiohttp_client_setup,

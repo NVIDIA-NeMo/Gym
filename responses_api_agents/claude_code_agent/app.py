@@ -33,9 +33,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
@@ -44,6 +42,9 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.skills import stage_skills
+from nemo_gym.agents.utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.agents.utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import apply_rollout_prefix
 from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
@@ -61,7 +62,6 @@ from nemo_gym.core.responses_api_types import (
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_runtime.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.skills import stage_skills
 from nemo_gym.trajectory.trajectory_record import (
     AgentEpisode,
     AgentObservationBundle,

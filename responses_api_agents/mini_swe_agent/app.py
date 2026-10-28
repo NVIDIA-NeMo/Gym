@@ -28,7 +28,7 @@ from minisweagent.config import builtin_config_dir, get_config_path
 from minisweagent.run.extra.swegym_runner import _main as run_swegym
 from pydantic import ConfigDict
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )

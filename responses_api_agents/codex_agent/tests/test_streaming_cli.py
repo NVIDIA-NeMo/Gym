@@ -19,7 +19,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
+from nemo_gym.agents.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.models.responses_streaming import flatten_namespace_tools, synthesize_responses_sse
 from nemo_gym.server_runtime.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer

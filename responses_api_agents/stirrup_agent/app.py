@@ -26,9 +26,9 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, model_validator
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.agent_outcome import AgentOutcome
+from nemo_gym.agents.agent_tools import sandbox_server_url
+from nemo_gym.agents.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
@@ -37,6 +37,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.utils.sandbox_session import SandboxSession
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
@@ -50,7 +51,6 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest

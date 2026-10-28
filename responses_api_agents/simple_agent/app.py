@@ -28,8 +28,8 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter, ValidationError
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
