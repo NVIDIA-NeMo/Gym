@@ -470,7 +470,9 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         deadline = monotonic() + self._agent_timeout_sec(state, body)
                         agent_started = True
                         response, termination, extra = await harness.execute(max(0, deadline - monotonic()))
-                        if monotonic() >= deadline:
+                        # A kill is read from an exit code the sandbox returned before the deadline; only collecting
+                        # its artifacts afterwards can cross it.
+                        if monotonic() >= deadline and termination.reason != "killed":
                             termination.reason = "timeout"
                 except asyncio.CancelledError:
                     termination = HarnessOutcome(reason="cancelled")
