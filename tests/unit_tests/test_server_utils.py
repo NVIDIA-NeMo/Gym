@@ -179,30 +179,43 @@ class TestRequestRetries:
         server = await asyncio.start_server(handle, "127.0.0.1", 0)
         return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/run"
 
-    async def test_reply_cut_off_mid_body_is_retried_when_resend_is_allowed(self, monkeypatch: MonkeyPatch) -> None:
-        body = b'{"reward": 1.0}'
-        server, url = await self._short_body_server(
-            [
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n" + body[:5],
-                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(body) + body,
-            ]
-        )
+    _CUT_OFF = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n" + b'{"rew'
+    _HEALTHY = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{"reward": 1.0}'
+
+    @mark.parametrize(
+        "options",
+        [{}, {"_resend_after_disconnect": False}, {"_resend_after_disconnect": False, "_max_num_tries": 2}],
+    )
+    async def test_cut_off_body_without_a_resend_bound_goes_back_to_the_caller(
+        self, monkeypatch: MonkeyPatch, options
+    ) -> None:
+        """Each /run sent starts an episode, so with no bound a cut-off reply is not resent: the caller's read raises."""
+        replies = [self._CUT_OFF, self._CUT_OFF, self._HEALTHY]
+        server, url = await self._short_body_server(replies)
         monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
         async with server, ClientSession() as session:
             monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
-            response = await nemo_gym.server_utils.request("POST", url, _internal=True, _read_body=True, json={})
-            assert await get_response_json(response) == {"reward": 1.0}
+            response = await nemo_gym.server_utils.request(
+                "POST", url, _internal=True, _read_body=True, json={}, **options
+            )
+            assert response.status == 200
+            with raises(ClientPayloadError):
+                await get_response_json(response)
+        assert len(replies) == 2  # One request, so one episode.
 
-    async def test_reply_cut_off_mid_body_is_not_resent_when_resend_is_off(self, monkeypatch: MonkeyPatch) -> None:
-        replies = [b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{}"]
+    async def test_one_cut_off_body_then_a_healthy_reply_recovers_within_the_caller_bound(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        replies = [self._CUT_OFF, self._HEALTHY]
         server, url = await self._short_body_server(replies)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
         async with server, ClientSession() as session:
             monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
-            with raises(ClientPayloadError):
-                await nemo_gym.server_utils.request(
-                    "POST", url, _internal=True, _read_body=True, _resend_after_disconnect=False, json={}
-                )
-            assert replies == []
+            response = await nemo_gym.server_utils.request(
+                "POST", url, _internal=True, _read_body=True, _max_num_tries=2
+            )
+            assert await get_response_json(response) == {"reward": 1.0}
+        assert replies == []
 
     @mark.parametrize("limits", [{"_max_num_tries": 2}, {"_max_connection_retries": 2}])
     async def test_cut_off_body_stops_at_the_configured_attempt_bound(self, monkeypatch: MonkeyPatch, limits) -> None:
@@ -215,13 +228,14 @@ class TestRequestRetries:
                 await nemo_gym.server_utils.request("POST", url, _internal=True, _read_body=True, json={}, **limits)
         assert len(replies) == 1
 
-    async def test_cancellation_during_body_read_is_not_replayed(self, monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize("limits", [{}, {"_max_num_tries": 3}])
+    async def test_cancellation_during_body_read_is_not_replayed(self, monkeypatch: MonkeyPatch, limits) -> None:
         response = MagicMock(read=AsyncMock(side_effect=asyncio.CancelledError()))
         client = MagicMock(request=AsyncMock(return_value=response))
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
         with raises(asyncio.CancelledError):
             await nemo_gym.server_utils.request(
-                "POST", "http://agent/run", _internal=True, _read_body=True, _max_num_tries=3, json={}
+                "POST", "http://agent/run", _internal=True, _read_body=True, json={}, **limits
             )
         assert client.request.await_count == 1
         assert response.read.await_count == 1

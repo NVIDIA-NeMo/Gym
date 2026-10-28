@@ -619,8 +619,10 @@ async def request(
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
     server may already have received it. A connection that was never made is still retried.
 
-    ``_read_body=True`` reads the body before returning, so a reply cut off mid-body is handled by the same
-    retry rules and limits as any other failed attempt.
+    ``_read_body=True`` reads the body before returning. A reply cut off mid-body is sent again only within a
+    ``_max_num_tries`` or ``_max_connection_retries`` bound, and only when resending is allowed. Otherwise the
+    response is returned, and reading it raises the error, so the caller's failure handling (for collection, its
+    rollout attempt budget) decides whether the request runs again.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
@@ -806,7 +808,15 @@ async def _request_with_retries(
             try:
                 response = await client.request(method=method, url=url, **kwargs)
                 if _read_body:
-                    await response.read()
+                    try:
+                        await response.read()
+                    except Exception:
+                        if _resend_after_disconnect and (
+                            _max_num_tries is not None or _max_connection_retries is not None
+                        ):
+                            raise  # Retried below within the caller's bound.
+                        # Unbounded, each resend would start another episode. The reply goes back unread, and the
+                        # caller's read raises this error at its own failure boundary, with the reply's status.
                 return response
             except ServerDisconnectedError:
                 if not _resend_after_disconnect:
