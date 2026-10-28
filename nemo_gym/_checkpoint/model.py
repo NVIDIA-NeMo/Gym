@@ -69,6 +69,7 @@ from nemo_gym._checkpoint.telemetry import checkpoint_span
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.external_capture import publish_deferred_commit
@@ -925,12 +926,12 @@ class PolicyAdmissionMiddleware:
                 )
             elif message["type"] == "http.response.body" and not ticket.response_started:
                 body = message.get("body", b"")
-                # Headers and liveness comments can precede backend completion.
+                # Headers and liveness (comments, or Responses lifecycle events) can precede backend completion.
                 # Treating them as delivered output would make prepare wait on a call whose terminal token write is
-                # blocked by the framework's snapshot fence.
+                # blocked by the framework's snapshot fence, and would skip publishing the row deferred later.
                 # Gate only the first answer chunk; after it starts,
                 # all remaining chunks must drain even while admission is closed.
-                if body and not (event_stream and body == SSE_KEEPALIVE):
+                if body and not (event_stream and (body == SSE_KEEPALIVE or is_responses_lifecycle_chunk(body))):
                     await self.gate.deliver_response(ticket)
                     # Before the answer leaves: a row exists for every answer a client receives.
                     await self.gate.publish(ticket)

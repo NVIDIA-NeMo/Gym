@@ -36,6 +36,8 @@ harbor_environment_server:
       # by `default_episode_timeout_seconds`; the sandbox lives for that budget. `false` ignores task timeouts.
       enforce_task_timeouts: true
       harness_setup_allowance_s: 300
+      # Bound on a multi-step task's per-step `workdir/setup.sh`; unset, the step's own agent budget applies.
+      step_setup_timeout_s: null
       # Sandbox and Compose group starts that fail on an image pull are retried here, with jittered backoff,
       # before the failure is reported as retryable.
       image_pull_retries: 2

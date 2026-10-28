@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from unittest.mock import MagicMock
 
@@ -12,6 +14,7 @@ from pytest import MonkeyPatch
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.transfer import TRANSFER_USER
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.tasks.harbor.publish import answer_write_command
 from responses_api_agents.harbor_oracle_agent import app as module
 from responses_api_agents.harbor_oracle_agent.app import OracleAgent, OracleAgentConfig
 
@@ -22,14 +25,24 @@ class FakeSandbox:
 
     ``result`` is what solve.sh produced: its stdout and stderr both land in the log the oracle tails.
     ``log_present=False`` models the guard exiting before the redirection created the log (no ``timeout``
-    or ``bash`` in the image).
+    or ``bash`` in the image). ``stdout_rejoin`` models a provider that rebuilds exec stdout from per-line
+    messages (OpenSandbox's foreground exec): every command's stdout goes through it.
     """
 
     result: SandboxExecResult = SandboxExecResult(stdout="Done!\n", stderr="", return_code=0)
     solution: bool = True
+    # The bytes of /solution/answer.md when the task ships one instead of solve.sh; None when it ships neither.
+    answer: str | bytes | None = None
+    # Whether the image has `base64` (GNU coreutils and BusyBox both do).
+    base64_present: bool = True
     log_present: bool = True
+    # Whether the working directory accepts the oracle's answer.md write.
+    workdir_writable: bool = True
+    stdout_rejoin: Callable[[str], str] | None = None
     execs: list[dict] = field(default_factory=list)
     uploads: list[str] = field(default_factory=list)
+    # Files the oracle's answer write left, by absolute path (resolved against the exec's cwd).
+    files: dict[str, str] = field(default_factory=dict)
     disconnected: bool = False
 
     async def exec(
@@ -45,8 +58,39 @@ class FakeSandbox:
                 "preserve_background_services": preserve_background_services,
             }
         )
+        result = await self._exec(command, cwd)
+        if self.stdout_rejoin is not None and result.stdout:
+            result = SandboxExecResult(
+                stdout=self.stdout_rejoin(result.stdout),
+                stderr=result.stderr,
+                return_code=result.return_code,
+                error_type=result.error_type,
+            )
+        return result
+
+    async def _exec(self, command, cwd):
         if command == "test -f /solution/solve.sh":
             return SandboxExecResult(stdout="", stderr="", return_code=0 if self.solution else 1)
+        if command == "test -f /solution/answer.md":
+            return SandboxExecResult(stdout="", stderr="", return_code=0 if self.answer is not None else 1)
+        if command == "base64 /solution/answer.md":
+            if not self.base64_present:
+                return SandboxExecResult(stdout="", stderr="sh: 1: base64: not found", return_code=127)
+            if self.answer is None:
+                return SandboxExecResult(stdout="", stderr="base64: /solution/answer.md: No such file", return_code=1)
+            raw = self.answer.encode() if isinstance(self.answer, str) else self.answer
+            # GNU base64 wraps at 76 columns and ends with a newline.
+            return SandboxExecResult(stdout=base64.encodebytes(raw).decode(), stderr="", return_code=0)
+        if command == module.ANSWER_WRITE_COMMAND:
+            # `cat /solution/answer.md > answer.md`: the file's bytes land in the exec's working directory.
+            assert self.answer is not None, command
+            if not self.workdir_writable:
+                return SandboxExecResult(
+                    stdout="", stderr="sh: 1: cannot create answer.md: Permission denied", return_code=1
+                )
+            raw = self.answer.encode() if isinstance(self.answer, str) else self.answer
+            self.files[f"{cwd}/answer.md"] = raw.decode("utf-8")
+            return SandboxExecResult(stdout="", stderr="", return_code=0)
         if "solve.sh" in command:
             # solve.sh output is redirected to a file in the sandbox, so the exec itself carries only the
             # exit code and the provider's own error type.
@@ -201,9 +245,191 @@ def test_task_without_solution_is_unvalidated_not_failed(monkeypatch):
 
     assert payload["metadata"] == {"oracle": "unvalidated"}
     assert "solve.sh" in payload["output"][0]["content"][0]["text"]
-    # Only the probe ran: no log folder was prepared, nothing was executed or uploaded.
-    assert [call["command"] for call in sandbox.execs] == ["test -f /solution/solve.sh"]
+    assert "answer.md" in payload["output"][0]["content"][0]["text"]
+    # Only the two probes ran: no log folder was prepared, nothing was read, executed or uploaded.
+    assert [call["command"] for call in sandbox.execs] == ["test -f /solution/solve.sh", "test -f /solution/answer.md"]
     assert sandbox.uploads == []
+
+
+def test_answer_md_is_written_to_the_workdir_and_submitted_as_the_response(monkeypatch):
+    """A task verified by its answer ships solution/answer.md: the oracle copies it to answer.md in the working
+    directory, as the task user (the file the published solve.sh writes there under Harbor's oracle), and submits it."""
+    sandbox = FakeSandbox(solution=False, answer="it's 72\n")
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"] == {"oracle": "solved", "oracle_solution": "answer", "oracle_return_code": "0"}
+    assert payload["output"][0]["content"][0]["text"] == "it's 72\n"
+    calls = [(call["command"], call["cwd"], call["user"]) for call in sandbox.execs]
+    assert calls == [
+        ("test -f /solution/solve.sh", "/", "runner"),
+        ("test -f /solution/answer.md", "/", "runner"),
+        # The read is base64 text decoded on the host, never the exec's raw stdout (`cat`).
+        ("base64 /solution/answer.md", "/", "runner"),
+        ("cat /solution/answer.md > answer.md", "/app", "runner"),
+    ]
+    # The file a workspace-reading verifier grades, in Gym as under Harbor: byte for byte the answer.
+    assert sandbox.files == {"/app/answer.md": "it's 72\n"}
+    assert sandbox.uploads == []
+
+
+def _joined_without_newlines(text: str) -> str:
+    """OpenSandbox's foreground exec as observed live: per-line messages joined with "\n", the trailing newline and
+    every CR gone ("72\n" -> "72", "r1\r\nr2\r\n" -> "r1\nr2")."""
+    return "\n".join(text.splitlines())
+
+
+def _joined_with_newlines(text: str) -> str:
+    """The provider's join over messages that still carry their newline (what its code literally does): every
+    newline doubled ("a\nb\n" -> "a\n\nb\n")."""
+    return "\n".join(text.splitlines(keepends=True))
+
+
+REJOINED_ANSWERS = ["72\n", "first\n\n\nlast line\r\nend\n", "it's 4", "x\n\n\ny\n"]
+
+
+@pytest.mark.parametrize("rejoin", [_joined_without_newlines, _joined_with_newlines])
+@pytest.mark.parametrize("answer", REJOINED_ANSWERS)
+def test_the_answer_survives_a_provider_that_rebuilds_stdout_line_by_line(monkeypatch, rejoin, answer):
+    """A provider that rebuilds exec stdout from per-line messages (OpenSandbox's foreground exec, its default) hands
+    `cat` output back with the trailing newline dropped, blank lines doubled or CRs lost. The oracle reads the answer as
+    base64 and decodes it on the host, so the file it writes and the text it submits are the answer byte for byte."""
+    # The re-join is lossy over the set (a `cat` read would have altered most of these answers; the live run did).
+    assert sum(rejoin(text) != text for text in REJOINED_ANSWERS) >= 2
+    sandbox = FakeSandbox(solution=False, answer=answer, stdout_rejoin=rejoin)
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"] == {"oracle": "solved", "oracle_solution": "answer", "oracle_return_code": "0"}
+    assert payload["output"][0]["content"][0]["text"] == answer
+    assert sandbox.files == {"/app/answer.md": answer}
+    # The base64 payload itself came back re-joined (the fake applies the join to every command's stdout).
+    read = next(call for call in sandbox.execs if call["command"] == module.ANSWER_READ_COMMAND)
+    assert read["user"] == "runner" and module.ANSWER_READ_COMMAND == "base64 /solution/answer.md"
+    assert not any(call["command"] == f"cat {module.ANSWER_FILE}" for call in sandbox.execs)
+
+
+def test_a_long_answer_is_copied_in_the_sandbox_not_passed_as_an_exec_argument(monkeypatch):
+    """The Docker provider hands an exec's command to the sandbox's shell as one argument (`docker exec ... sh -c
+    <command>`), which Linux caps at MAX_ARG_STRLEN (128 KiB on 4 KiB pages). A write command carrying the answer
+    failed with E2BIG for a 200 KiB answer where the published solve.sh, run from a file, wrote every byte. The oracle
+    copies the file inside the sandbox instead, as the task user in the working directory, whatever the answer's size."""
+    answer = "x" * (200 * 1024) + "\n"
+    sandbox = FakeSandbox(solution=False, answer=answer)
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"] == {"oracle": "solved", "oracle_solution": "answer", "oracle_return_code": "0"}
+    assert payload["output"][0]["content"][0]["text"] == answer
+    (write,) = [call for call in sandbox.execs if call["cwd"] == "/app"]
+    assert write["command"] == module.ANSWER_WRITE_COMMAND == "cat /solution/answer.md > answer.md"
+    assert write["user"] == "runner" and answer not in write["command"]
+    assert sandbox.files == {"/app/answer.md": answer}
+    # The command the published solve.sh runs, from a file, would not fit one exec argument on a standard kernel.
+    assert len(answer_write_command(answer).encode()) > 128 * 1024
+
+
+def test_an_image_without_base64_is_a_failed_oracle_naming_it(monkeypatch):
+    sandbox = FakeSandbox(solution=False, answer="72\n", base64_present=False)
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"] == {
+        "oracle": "failed",
+        "oracle_solution": "answer",
+        "oracle_return_code": "127",
+        "oracle_error_type": "answer",
+    }
+    text = payload["output"][0]["content"][0]["text"]
+    assert "the image has no `base64`" in text and "base64: not found" in text
+    # Nothing was written: the row is scored against the task's own state, with the reason visible.
+    assert sandbox.files == {}
+
+
+def test_an_answer_that_is_not_utf8_text_is_a_failed_oracle(monkeypatch):
+    sandbox = FakeSandbox(solution=False, answer=b"\xff\xfe not text")
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"] == {
+        "oracle": "failed",
+        "oracle_solution": "answer",
+        "oracle_return_code": "0",
+        "oracle_error_type": "answer",
+    }
+    assert "is not UTF-8 text" in payload["output"][0]["content"][0]["text"]
+    assert sandbox.files == {}
+
+
+def test_an_answer_the_workdir_refuses_is_a_failed_oracle_not_a_solved_one(monkeypatch):
+    sandbox = FakeSandbox(solution=False, answer="72\n", workdir_writable=False)
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+
+    payload = client.post("/v1/responses", json=RESPONSES_BODY).json()
+
+    assert payload["metadata"] == {
+        "oracle": "failed",
+        "oracle_solution": "answer",
+        "oracle_return_code": "1",
+        "oracle_error_type": "answer",
+    }
+    assert "Permission denied" in payload["output"][0]["content"][0]["text"]
+    assert sandbox.files == {}
+
+
+def test_a_lost_sandbox_on_the_answer_write_is_not_scored(monkeypatch):
+    class LostOnWrite(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
+            if command == module.ANSWER_WRITE_COMMAND:
+                return SandboxExecResult(stdout="", stderr="gone", return_code=1, error_type="timeout")
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
+
+    sandbox = LostOnWrite(solution=False, answer="72\n")
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+    with pytest.raises(module.SandboxUnavailableError, match="could not write answer.md in /app"):
+        client.post("/v1/responses", json=RESPONSES_BODY)
+
+
+@pytest.mark.parametrize(
+    ("lost_command", "message"),
+    [
+        ("test -f /solution/answer.md", "could not probe /solution/answer.md"),
+        ("base64 /solution/answer.md", "could not read /solution/answer.md"),
+    ],
+)
+def test_a_lost_sandbox_answering_the_answer_probe_or_read_is_not_scored(monkeypatch, lost_command, message):
+    class LostOnAnswer(FakeSandbox):
+        async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None, **kwargs):
+            if command == lost_command:
+                return SandboxExecResult(stdout="", stderr="gone", return_code=1, error_type="timeout")
+            return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, **kwargs)
+
+    sandbox = LostOnAnswer(solution=False, answer="72\n")
+    agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
+    client = TestClient(agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
+    with pytest.raises(module.SandboxUnavailableError, match=message):
+        client.post("/v1/responses", json=RESPONSES_BODY)
+    assert sandbox.files == {}
 
 
 def test_sandbox_default_user_runs_the_solution_when_the_task_names_none(monkeypatch):
