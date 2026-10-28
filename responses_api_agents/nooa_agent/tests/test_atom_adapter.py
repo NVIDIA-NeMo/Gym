@@ -41,7 +41,7 @@ def test_atom_config_resolves_the_harness_and_adapter():
     config = atom_config()
     agent_class, adapter = validate_invocation(config.nooa)
     assert agent_class is atom_gym.AtomHarness and adapter is invoke_atom
-    assert config.nooa.init_kwargs == {"turn_method": "handle_orchestrate"}
+    assert config.nooa.init_kwargs == {"turn_method": "handle_batch"}
 
 
 @pytest.mark.asyncio

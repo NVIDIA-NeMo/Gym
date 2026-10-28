@@ -26,8 +26,8 @@ requirements file.
 `configs/nooa_atom_agent.yaml` runs Atom (`nooa_atom.gym:AtomHarness` with
 `responses_api_agents.nooa_agent.atom_adapter:invoke_atom`). The harness runs one Atom session per rollout
 the way the TUI does, with Gym's model client as the only model: the root turn method is
-`init_kwargs.turn_method` (`handle_orchestrate` by default, so the root may delegate to child agents, each a
-model-calling session recorded under its own invocation; `handle_batch` runs a single agent), the task is the
+`init_kwargs.turn_method` (`handle_batch` by default: one agent works the task unattended; `handle_orchestrate`
+lets the root delegate to child agents, each a model-calling session recorded under its own invocation), the task is the
 first prompt, and the session's `Done` outcome carries the `TaskResult`. Gym's instrumentation hooks are carried
 into every session loop, so Atom's `python_cell` executions and tool calls are observed like any agent's. Atom
 needs the `nooa-atom` package from the pinned NOOA revision; it runs in the task sandbox under
