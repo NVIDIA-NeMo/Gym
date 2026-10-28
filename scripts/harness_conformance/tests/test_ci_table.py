@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Missing CI evidence produces an unavailable row without discarding other measurements."""
+"""Tier counts retain completed checks even when the probe reports execution errors."""
 
 import json
 import subprocess
@@ -41,7 +41,7 @@ def ci_evidence(tmp_path):
                     {
                         "scenario": s.name,
                         "verdict": "not_fulfilled",
-                        "checks": [{"id": "calls.outcome", "kind": "schema", "status": "fail"}],
+                        "checks": [{"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "fail"}],
                     }
                     for s in ci_table.SCENARIOS
                 ],
@@ -73,15 +73,26 @@ def test_ci_renders_same_table_without_retaining_json(ci_evidence):
     )
     assert [p.name for p in output.parent.iterdir()] == ["table.mdx"]
     text = output.read_text()
-    assert "`pi` | Failed | 0/7" in text and "`hermes` | Passed | 7/7" in text
+    assert "`pi` | 0/7 | — | —" in text and "`hermes` | 7/7 | — | —" in text
     assert "`calls.outcome` | ✗" in text and "<sub>Updated" in text
     assert "Generation report" not in text and "Unit-test gates" not in text
 
 
 @pytest.mark.parametrize(
-    "problem", ["sha", "missing", "partial", "scenarios", "identifier", "missing_verdict", "invalid_verdict"]
+    "problem",
+    [
+        "sha",
+        "missing",
+        "partial",
+        "scenarios",
+        "identifier",
+        "missing_verdict",
+        "invalid_verdict",
+        "missing_tier",
+        "tier",
+    ],
 )
-def test_ci_invalid_evidence_is_reported_as_unavailable(ci_evidence, problem):
+def test_ci_invalid_evidence_renders_dashes_without_discarding_other_harnesses(ci_evidence, problem):
     artifacts, probes, summary, output = ci_evidence
     if problem == "sha":
         (probes / "ci-result.json").write_text(json.dumps({"harness": "pi", "sha": "b" * 40, "status": "failed"}))
@@ -95,6 +106,10 @@ def test_ci_invalid_evidence_is_reported_as_unavailable(ci_evidence, problem):
         del summary["harnesses"]["pi"]["scenarios"][0]["verdict"]
     elif problem == "invalid_verdict":
         summary["harnesses"]["pi"]["scenarios"][0]["verdict"] = "invalid"
+    elif problem == "missing_tier":
+        del summary["harnesses"]["pi"]["scenarios"][0]["checks"][0]["tier"]
+    elif problem == "tier":
+        summary["harnesses"]["pi"]["scenarios"][0]["checks"][0]["tier"] = "P3"
     else:
         summary["harnesses"]["pi"]["scenarios"][0]["checks"][0]["id"] = "<script>"
     (probes / "conformance_summary.json").write_text(json.dumps(summary))
@@ -104,9 +119,27 @@ def test_ci_invalid_evidence_is_reported_as_unavailable(ci_evidence, problem):
         output=output,
         run_url="https://github.com/NVIDIA-NeMo/Gym/actions/runs/12/attempts/2",
     )
-    assert "`pi` | Unavailable | —" in output.read_text()
-    assert "`hermes` | Passed | 7/7" in output.read_text()
+    assert "`pi` | — | — | —" in output.read_text()
+    assert "`hermes` | 7/7 | — | —" in output.read_text()
     assert "### `pi`" not in output.read_text()
+
+
+def test_ci_execution_errors_do_not_hide_completed_check_results(ci_evidence):
+    artifacts, probes, summary, output = ci_evidence
+    (probes / "ci-result.json").write_text(json.dumps({"harness": "pi", "sha": COMMIT, "status": "unavailable"}))
+    for scenario in summary["harnesses"]["pi"]["scenarios"][:5]:
+        scenario["verdict"] = "fulfilled"
+        scenario["checks"][0]["status"] = "pass"
+    summary["harnesses"]["pi"]["scenarios"][-1]["execution"] = {"returncode": 1, "timed_out": False}
+    (probes / "conformance_summary.json").write_text(json.dumps(summary))
+
+    ci_table.render_ci(artifacts=artifacts, commit=COMMIT, output=output, run_url="https://example.com/run")
+
+    text = output.read_text()
+    assert "`pi` | 5/7 | — | —" in text
+    assert "`hermes` | 7/7 | — | —" in text
+    assert "### `pi`" in text and "`calls.outcome` | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗" in text
+    assert "Unavailable" not in text and "Passed" not in text and "Failed" not in text
 
 
 def test_ci_renderer_does_not_import_probe_runtime_modules():
@@ -148,4 +181,4 @@ def test_ci_command_downloads_its_own_attempt_and_has_unambiguous_output(tmp_pat
         == 0
     )
     assert len(calls) == 1 and calls[0][1]["run_id"] == "12" and calls[0][1]["attempt"] == "2"
-    assert "Unavailable" in output.read_text()
+    assert "`pi` | — | — | —" in output.read_text()
