@@ -1827,8 +1827,9 @@ def _build_response(
         if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
             raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
         exact_fields.pop("media_assets")
-        # Exact model calls, including parser retries, are the trainable units.
-        # Semantic step messages remain available through trajectory_transitions.
+        # Ordinary output is the loss-membership carrier. Exact sidecars retain
+        # every model call, including parser retries, while output contains only
+        # calls the agent accepted as executable actions.
         output = exact_fields.pop("model_call_output")
         if exact_trace_transport_version == 3:
             # The schema-3 sidecar and canonical output arrays retain all
@@ -1836,10 +1837,12 @@ def _build_response(
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
     terminal_response_id: Optional[str] = None
+    accepted_call_references: List[Dict[str, str]] = []
     if served_call_output and not capabilities["exact_model_call_evidence"] and model_calls:
         # An empty accepted history is meaningful; never replace it with
         # parser-normalized step text that cannot identify captured calls.
         output, terminal_response_id = _served_model_call_output(model_calls)
+        accepted_call_references = _accepted_call_references(model_calls)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1903,6 +1906,13 @@ def _build_response(
     if terminal_response_id is not None:
         # Names the scored (last) generation by the id the model server served.
         response_fields["terminal_response_id"] = terminal_response_id
+    if accepted_call_references:
+        # NeMo-RL resolves these served response IDs against capture records.
+        # Keeping membership separate from response.output means rejected
+        # retries remain in the capture manifest as exact context evidence.
+        response_fields["ng_trajectory"] = {
+            "turns": [{"model_calls": accepted_call_references}]
+        }
     # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
     response_fields |= _admission_failure_fields(result, runtime_admission)
     sandbox_start_failure = result.get("sandbox_start_failure")
@@ -1957,6 +1967,31 @@ def _served_model_call_output(
     if not terminal_accepted and terminal_response_id is None:
         raise ValueError("Rejected terminal call has no served response_id; cannot attribute the captured reward")
     return output, terminal_response_id
+
+
+def _accepted_call_references(model_calls: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Served response IDs of the generations ``_served_model_call_output`` returns, in call order.
+
+    NeMo-RL joins these against capture records, which stays unambiguous even
+    when parser retries have identical content. Partial references would be
+    rejected, so a member without a served ID leaves content matching in charge.
+    """
+
+    references: List[Dict[str, str]] = []
+    for model_call in model_calls:
+        if model_call.get("accepted") is not True:
+            continue
+        response = model_call.get("response")
+        if not isinstance(response, Mapping):
+            continue
+        raw_content = response.get("raw_content")
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        response_id = response.get("response_id")
+        if not isinstance(response_id, str) or not response_id:
+            return []
+        references.append({"response_id": response_id})
+    return references
 
 
 # Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest

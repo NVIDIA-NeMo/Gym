@@ -86,6 +86,12 @@ PRE_DONE_CHECKLIST = """Before returning computer.terminate with status=success,
 If any item is not verified, take one corrective or verification action instead of terminating."""
 STEP_TEMPLATE = "# Step {step_num}:\n"
 TEXT_HISTORY_TEMPLATE = "## Thought:\n{thought}\n\n## Action:\n{action}\n"
+TEXT_HISTORY_CODE_TEMPLATE = "\n## Code:\n```python\n{code}\n```\n"
+# normalized: Thought + Action everywhere (benchmark contract).
+# raw_live: served output inside the live window; compacted turns normalized.
+# raw_full: raw_live, plus the policy's original Code in compacted turns.
+_ASSISTANT_HISTORY_REPLAY_MODES = frozenset({"normalized", "raw_live", "raw_full"})
+_RAW_ASSISTANT_HISTORY_REPLAY_MODES = frozenset({"raw_live", "raw_full"})
 ASSISTANT_HISTORY_TEMPLATE_THINKING = "<think>\n{thought}\n</think>\n## Action:\n{action}\n"
 ASSISTANT_HISTORY_TEMPLATE_NON_THINKING = "## Thought:\n{thought}\n\n## Action:\n{action}\n"
 
@@ -533,8 +539,13 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
     coordinate_type = normalized["coordinate_type"]
     if coordinate_type not in {"relative", "absolute", "qwen25"}:
         raise ValueError(f"Unsupported coordinate_type: {coordinate_type}")
+    assistant_history_replay = options.get("assistant_history_replay", "normalized")
+    if assistant_history_replay not in _ASSISTANT_HISTORY_REPLAY_MODES:
+        raise ValueError(
+            "assistant_history_replay must be 'normalized', 'raw_live' or 'raw_full'"
+        )
     retry_temperature = normalized["parse_retry_temperature"]
-    return {
+    result = {
         "coordinate_type": coordinate_type,
         "thinking": bool(normalized["thinking"]),
         "parse_retries": max(1, int(normalized["parse_retries"])),
@@ -544,6 +555,11 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
         "repeated_action_warning_threshold": max(0, int(normalized["repeated_action_warning_threshold"])),
         "repeated_action_window": max(1, int(normalized["repeated_action_window"])),
     }
+    # Keep the published normalized benchmark contract byte-identical while
+    # assigning raw replay its own explicit semantic identity.
+    if assistant_history_replay != "normalized":
+        result["assistant_history_replay"] = assistant_history_replay
+    return result
 
 
 @dataclass(frozen=True)
@@ -628,6 +644,7 @@ class NemotronV3NanoOmniAgent:
         max_live_images: int | None = None,
         history_policy: Mapping[str, Any] | HistoryPolicySpec | None = None,
         model_protocol_id: str | None = None,
+        assistant_history_replay: str = "normalized",
         platform: str = "ubuntu",
         max_tokens: int = 16384,
         top_p: float | None = 0.95,
@@ -657,6 +674,7 @@ class NemotronV3NanoOmniAgent:
                 "pre_done_checklist": pre_done_checklist,
                 "repeated_action_warning_threshold": repeated_action_warning_threshold,
                 "repeated_action_window": repeated_action_window,
+                "assistant_history_replay": assistant_history_replay,
             }
         )
         if action_space != "pyautogui":
@@ -694,6 +712,9 @@ class NemotronV3NanoOmniAgent:
         self.max_live_images = self.history_policy.high_water
         self.model_protocol = resolve_nemotron_protocol(model_protocol_id)
         self.model_protocol_id = self.model_protocol.protocol_id
+        self.assistant_history_replay = behavior_options.get(
+            "assistant_history_replay", "normalized"
+        )
         self.max_steps = max_steps
         self.client_password = client_password
         self.thinking = behavior_options["thinking"]
@@ -766,10 +787,50 @@ class NemotronV3NanoOmniAgent:
         return context
 
     def _assistant_history(self, cot: Dict[str, Any]) -> str:
+        if self.assistant_history_replay in _RAW_ASSISTANT_HISTORY_REPLAY_MODES:
+            raw_output = cot.get("raw_output")
+            if not isinstance(raw_output, str) or not raw_output:
+                raise ValueError(
+                    f"{self.assistant_history_replay} history is missing the served assistant output"
+                )
+            return raw_output
         return self.assistant_history_template.format(
             thought=cot.get("thought", ""),
             action=cot.get("action", ""),
         )
+
+    def _text_history(self, cot: Dict[str, Any]) -> str:
+        text = self.model_protocol.text_history_template.format(
+            thought=cot.get("thought", ""),
+            action=cot.get("action", ""),
+        )
+        if self.assistant_history_replay != "raw_full":
+            return text
+        # Replay the policy's own coordinates, not the screen-projected
+        # execution code, so compacted history matches what the model wrote.
+        code = cot.get("original_code")
+        if isinstance(code, str) and code:
+            text += TEXT_HISTORY_CODE_TEMPLATE.format(code=code)
+        return text
+
+    @staticmethod
+    def _served_assistant_output(response: Any) -> str:
+        """Return the assistant bytes to replay in the next live turn.
+
+        Gym's model boundary supplies ``raw_content`` with interleaved
+        reasoning preserved. Unit/standalone callers may provide the ordinary
+        OpenAI content and reasoning fields instead, so reconstruct that
+        representation only as a compatibility fallback.
+        """
+
+        if isinstance(response, Mapping):
+            raw_content = response.get("raw_content")
+            if isinstance(raw_content, str) and raw_content:
+                return raw_content
+        content, reasoning = _response_parts(response)
+        if reasoning and _THINK_RE.search(content) is None:
+            return f"<think>\n{reasoning}\n</think>\n{content}"
+        return content
 
     def _parse_retry_messages(
         self,
@@ -861,10 +922,7 @@ class NemotronV3NanoOmniAgent:
                 return ""
             history_parts = [
                 self.model_protocol.step_template.format(step_num=index + 1)
-                + self.model_protocol.text_history_template.format(
-                    thought=self.cots[index].get("thought", ""),
-                    action=self.cots[index].get("action", ""),
-                )
+                + self._text_history(self.cots[index])
                 for index in pending_text
             ]
             pending_text.clear()
@@ -1145,7 +1203,12 @@ class NemotronV3NanoOmniAgent:
         self.observations.append(obs)
         self.actions.append(low_level)
         # The returned evidence may contain several full prompts and images.
-        # Keep only parser semantics in the agent's rolling text history.
-        self.cots.append({key: value for key, value in parsed_info.items() if key != "model_calls"})
+        # Keep parser semantics for explicit compaction summaries and retain
+        # the accepted served output for exact replay inside the live window.
+        history_entry = {
+            key: value for key, value in parsed_info.items() if key != "model_calls"
+        }
+        history_entry["raw_output"] = self._served_assistant_output(response)
+        self.cots.append(history_entry)
 
         return content, actions, parsed_info

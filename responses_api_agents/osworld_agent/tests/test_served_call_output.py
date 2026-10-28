@@ -170,6 +170,17 @@ def test_capture_on_output_returns_only_accepted_generations_verbatim() -> None:
     assert len(calls) == 6
     assert calls[1]["accepted"] is False
     assert calls[1]["action"]["raw_completion"] == _SERVED["chatcmpl-2"]
+    assert dumped["ng_trajectory"] == {
+        "turns": [
+            {
+                "model_calls": [
+                    {"response_id": "chatcmpl-1"},
+                    {"response_id": "chatcmpl-3"},
+                    {"response_id": "chatcmpl-5"},
+                ]
+            }
+        ]
+    }
     # Semantic per-step evidence is unchanged.
     transitions = dumped["response"]["trajectory_transitions"]
     assert [t["action"]["raw_completion"] for t in transitions] == [
@@ -243,6 +254,14 @@ def test_capture_does_not_reuse_an_earlier_terminal_id_when_the_last_id_is_missi
     assert "terminal_response_id" not in response
 
 
+def test_member_without_a_served_id_omits_call_references() -> None:
+    result = _capture_on_result()
+    result["steps"][0]["info"]["agent"]["model_calls"][0]["response"].pop("response_id")
+    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    assert response["terminal_response_id"] == "chatcmpl-5"
+    assert "ng_trajectory" not in response
+
+
 def test_rejected_terminal_without_a_served_id_fails_closed() -> None:
     result = _capture_on_result()
     terminal = result["steps"][-1]["info"]["agent"]["model_calls"][-1]
@@ -269,6 +288,24 @@ def test_capture_on_without_call_evidence_keeps_step_messages() -> None:
 
     assert [item["id"] for item in dumped["response"]["output"]] == ["msg-step-0", "msg-step-1", "msg-step-2"]
     assert "terminal_response_id" not in dumped
+
+
+def test_capture_on_with_no_accepted_calls_returns_empty_membership() -> None:
+    result = _capture_on_result()
+    for step in result["steps"]:
+        for call in step["info"]["agent"]["model_calls"]:
+            call["accepted"] = False
+            call["parse_error"] = "bad action"
+
+    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
+    dumped = response.model_dump()
+
+    assert dumped["response"]["output"] == []
+    assert dumped["terminal_response_id"] == "chatcmpl-5"
+    assert "ng_trajectory" not in dumped
+    model_calls = dumped["response"]["trajectory_model_calls"]
+    assert len(model_calls) == 6
+    assert all(call["accepted"] is False for call in model_calls)
 
 
 @patch("openai.DefaultHttpxClient")

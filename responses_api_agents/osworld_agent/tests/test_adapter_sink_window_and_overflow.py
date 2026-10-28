@@ -49,6 +49,142 @@ def _drive(agent: NemotronV3NanoOmniAgent, steps: int) -> List[Dict[str, Any]]:
     return payloads
 
 
+def test_raw_live_history_replays_the_served_output_as_an_exact_prefix() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        max_image_history_length=3,
+        max_live_images=10,
+        assistant_history_replay="raw_live",
+        parse_retries=1,
+    )
+    payloads: List[Dict[str, Any]] = []
+    raw_outputs = [
+        f"<think>\nThought {index}\n</think>\n{GOOD}" for index in (1, 2)
+    ]
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        index = len(payloads) - 1
+        return {
+            "content": GOOD,
+            "reasoning_content": f"Thought {index + 1}",
+            "raw_content": raw_outputs[index],
+            "finish_reason": "stop",
+        }
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    for index in range(2):
+        agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+
+    first_prompt = payloads[0]["messages"]
+    second_prompt = payloads[1]["messages"]
+    assert second_prompt[: len(first_prompt)] == first_prompt
+    assert second_prompt[len(first_prompt)] == {
+        "role": "assistant",
+        "content": raw_outputs[0],
+    }
+    assert "## Code:" in second_prompt[len(first_prompt)]["content"]
+
+
+def test_raw_live_history_normalizes_only_at_a_compaction_boundary() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        history_policy={
+            "schema_version": 1,
+            "name": "hysteresis",
+            "params": {"low_water": 2, "high_water": 3},
+        },
+        assistant_history_replay="raw_live",
+        parse_retries=1,
+    )
+    payloads = _drive(agent, 4)
+    compacted_prompt = payloads[3]["messages"]
+
+    assistant_messages = [
+        message["content"]
+        for message in compacted_prompt
+        if message.get("role") == "assistant"
+    ]
+    assert assistant_messages
+    assert all("## Code:" in content for content in assistant_messages)
+
+    summaries = [
+        part["text"]
+        for message in compacted_prompt
+        for part in (message.get("content") or [])
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and "# Previous History Actions" in part.get("text", "")
+    ]
+    assert len(summaries) == 1
+    assert "## Thought:" in summaries[0]
+    assert "## Action:" in summaries[0]
+    assert "## Code:" not in summaries[0]
+
+
+def test_raw_full_history_keeps_original_code_in_compacted_turns() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        history_policy={
+            "schema_version": 1,
+            "name": "hysteresis",
+            "params": {"low_water": 2, "high_water": 3},
+        },
+        assistant_history_replay="raw_full",
+        parse_retries=1,
+    )
+    payloads = _drive(agent, 4)
+
+    first_prompt = payloads[0]["messages"]
+    second_prompt = payloads[1]["messages"]
+    assert second_prompt[: len(first_prompt)] == first_prompt
+
+    compacted_prompt = payloads[3]["messages"]
+    assistant_messages = [
+        message["content"]
+        for message in compacted_prompt
+        if message.get("role") == "assistant"
+    ]
+    assert assistant_messages
+    assert all("## Code:" in content for content in assistant_messages)
+
+    summaries = [
+        part["text"]
+        for message in compacted_prompt
+        for part in (message.get("content") or [])
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and "# Previous History Actions" in part.get("text", "")
+    ]
+    assert len(summaries) == 1
+    assert "## Thought:" in summaries[0]
+    assert "## Action:" in summaries[0]
+    assert "## Code:\n```python\npyautogui.click(0.5, 0.5)\n```" in summaries[0]
+    assert "pyautogui.click(960, 540)" not in summaries[0]
+
+
+def test_normalized_history_remains_the_benchmark_default() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=1,
+    )
+    payloads = _drive(agent, 2)
+    assistant_messages = [
+        message["content"]
+        for message in payloads[1]["messages"]
+        if message.get("role") == "assistant"
+    ]
+    assert len(assistant_messages) == 1
+    assert "## Action:" in assistant_messages[0]
+    assert "## Code:" not in assistant_messages[0]
+
+
 def test_sink_window_prompt_keeps_the_first_screenshot_and_slides_the_rest() -> None:
     agent = NemotronV3NanoOmniAgent(
         model="policy-under-test",
