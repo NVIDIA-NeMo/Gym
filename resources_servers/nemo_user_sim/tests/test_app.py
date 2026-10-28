@@ -15,7 +15,7 @@ from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.nemo_user_sim import app as usersim_app
 from resources_servers.nemo_user_sim.app import (
     PROBE_SCORERS,

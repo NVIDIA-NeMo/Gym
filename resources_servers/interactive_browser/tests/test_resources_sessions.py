@@ -32,7 +32,7 @@ from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST
 from nemo_gym.server_runtime.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 
 
 class _Browser:

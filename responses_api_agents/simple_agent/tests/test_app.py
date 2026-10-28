@@ -38,6 +38,7 @@ from nemo_gym.agents.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
 )
+from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
@@ -75,7 +76,6 @@ from nemo_gym.server_runtime.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,

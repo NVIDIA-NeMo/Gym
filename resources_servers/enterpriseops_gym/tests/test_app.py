@@ -17,7 +17,7 @@ from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxEndpoint
 from nemo_gym.server_runtime.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.enterpriseops_gym import app as app_module
 from resources_servers.enterpriseops_gym.app import (
     EnterpriseOpsGymResourcesServer,

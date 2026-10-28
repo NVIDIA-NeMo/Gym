@@ -38,7 +38,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
 )
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.swebench_pro.app import (
     SWEBenchProInstanceRequest,
     SWEBenchProResourcesServer,

@@ -20,7 +20,7 @@ from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRe
 from nemo_gym.server_runtime.mcp_auto_exposure import harvest_tools
 from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
 from nemo_gym.server_runtime.server_utils import SimpleServer
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture, load_verifier_fixture
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS

@@ -22,9 +22,9 @@ from nemo_gym.agents.base_responses_api_agent import (
     AgentSessionState,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, TrajectoryTurn
 
 

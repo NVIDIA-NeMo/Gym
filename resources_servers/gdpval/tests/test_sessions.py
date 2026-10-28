@@ -19,7 +19,7 @@ from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCr
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.server_runtime.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.server_runtime.request_handling.session_routing import install_session_routing
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
 
