@@ -1347,7 +1347,7 @@ async def test_sandbox_envelope_fallback_preserves_known_and_unknown_cache_detai
 
 
 @pytest.mark.parametrize("owned_root", ["sessions", "runtime"])
-@pytest.mark.parametrize("overlap", ["same", "ancestor", "descendant", "symlink", "dotdot"])
+@pytest.mark.parametrize("overlap", ["same", "ancestor", "descendant", "symlink", "dotdot", "root", "root_symlink"])
 def test_workdir_cannot_overlap_adapter_storage(tmp_path, owned_root, overlap):
     from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK
 
@@ -1365,6 +1365,12 @@ def test_workdir_cannot_overlap_adapter_storage(tmp_path, owned_root, overlap):
     elif overlap == "symlink":
         workdir = tmp_path / "task-alias"
         workdir.symlink_to(owned)
+    elif overlap == "root":
+        # Passes the seed's lexical rejection of "/", and resolves to it.
+        workdir = "/."
+    elif overlap == "root_symlink":
+        workdir = tmp_path / "root-alias"
+        workdir.symlink_to("/")
     else:
         workdir = owned / "repo" / ".."
     result = subprocess.run(
@@ -1376,6 +1382,21 @@ def test_workdir_cannot_overlap_adapter_storage(tmp_path, owned_root, overlap):
     )
     assert result.returncode != 0
     assert "overlaps adapter-owned storage" in result.stderr
+
+
+def test_adapter_storage_at_the_root_overlaps_any_workdir(tmp_path):
+    from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK
+
+    (tmp_path / "task").mkdir()
+    result = subprocess.run(
+        ["sh", "-c", _SANDBOX_PATH_CHECK, "_", str(tmp_path / "task"), "/", str(tmp_path / "runtime")],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=5,
+    )
+    assert result.returncode != 0
+    assert "overlaps adapter-owned storage: /" in result.stderr
 
 
 def test_workdir_validation_accepts_separate_repository_and_rejects_missing(tmp_path):

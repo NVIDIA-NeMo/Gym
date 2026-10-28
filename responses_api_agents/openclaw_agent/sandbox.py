@@ -36,9 +36,10 @@ for owned in "$@"; do
     until [ -d "${path:-/}" ]; do rest=/${path##*/}$rest path=${path%/*}; done
     owned=$(cd "${path:-/}" && pwd -P) || exit 1
     owned=${owned%/}$rest
-    case "$workdir/" in "$owned/"*) overlap=1 ;; *) overlap= ;; esac
-    case "$owned/" in "$workdir/"*) overlap=1 ;; esac
-    [ -z "$overlap" ] || { echo "OpenClaw task workdir overlaps adapter-owned storage: $owned" >&2; exit 1; }
+    # A path of / ends in its separator already; strip it so / contains every other path.
+    case "${workdir%/}/" in "${owned%/}/"*) overlap=1 ;; *) overlap= ;; esac
+    case "${owned%/}/" in "${workdir%/}/"*) overlap=1 ;; esac
+    [ -z "$overlap" ] || { echo "OpenClaw task workdir overlaps adapter-owned storage: ${owned:-/}" >&2; exit 1; }
 done
 """
 
