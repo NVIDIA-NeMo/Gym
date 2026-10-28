@@ -19,8 +19,10 @@ import shlex
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import orjson
+from aiohttp import ClientResponseError
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 from pytest import MonkeyPatch
@@ -32,7 +34,7 @@ from environment_servers.harbor.app import (
     HarborEpisodeResponse,
 )
 from environment_servers.harbor.verifier import EXIT_RECORD_NAME
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
+from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentSeedSessionRequest
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
@@ -284,6 +286,13 @@ class _Cookie:
     value = "cookie-value"
 
 
+def _http_error(status: int, message: str) -> ClientResponseError:
+    """What ``raise_for_status`` raises for a non-2xx agent reply."""
+    error = ClientResponseError(SimpleNamespace(real_url=f"http://agent/{status}"), (), status=status, message=message)
+    error.response_content = message.encode()
+    return error
+
+
 class _Response:
     ok = True
     cookies = {"session": _Cookie()}
@@ -336,6 +345,11 @@ class FakeAgentClient(ServerClient):
     trajectory: dict | None = None
     # What the seed response declares: a harness that reads the task's MCP servers and skills directory.
     supports_task_tool_context: bool = True
+    # What GET /v1/agent_sessions/capabilities and a continuation seed declare: None is a harness without
+    # multi-turn continuation (OpenCode declares one). ``capabilities_status`` 404 stands for an agent server
+    # built before the route existed.
+    continuation_capabilities: dict | None = None
+    capabilities_status: int = 200
     turn_response: dict | None = None
     # Called when the harness takes its turn, between the seed and the verification of an episode.
     turn_hooks: list = []
@@ -357,10 +371,17 @@ class FakeAgentClient(ServerClient):
             raise self.fail_with.pop(url_path)
         if url_path == "/v1/agent_sessions":
             AgentSeedSessionRequest.model_validate(body)
+            if body.get("continuation") is not None and self.continuation_capabilities is None:
+                raise _http_error(422, "Agent does not support the required multi-turn continuation mode")
             return _Response(
                 {
                     "agent_session_id": body["agent_session_id"],
                     "supports_task_tool_context": self.supports_task_tool_context,
+                    **(
+                        {"capabilities": self.continuation_capabilities}
+                        if body.get("continuation") is not None
+                        else {}
+                    ),
                 }
             )
         if url_path == "/v1/agent_sessions/close":
@@ -375,8 +396,27 @@ class FakeAgentClient(ServerClient):
             return _Response(self.turn_response or agent_response().model_dump(mode="json"))
         raise AssertionError(f"unexpected agent call {url_path}")
 
+    async def get(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        self.calls.append((server_name, url_path, kwargs))
+        if url_path == "/v1/agent_sessions/capabilities":
+            if self.capabilities_status != 200:
+                raise _http_error(self.capabilities_status, "Not Found")
+            return _Response(
+                {"supports_task_tool_context": self.supports_task_tool_context}
+                | ({"continuation": self.continuation_capabilities} if self.continuation_capabilities else {})
+            )
+        raise AssertionError(f"unexpected agent GET {url_path}")
+
     def seed_bodies(self) -> list[dict]:
         return [call[2]["json"] for call in self.calls if call[1] == "/v1/agent_sessions"]
+
+    def activation_headers(self) -> list[str | None]:
+        """The activation header of each turn call, in order (None when the turn named none)."""
+        return [
+            (call[2].get("headers") or {}).get(AGENT_ACTIVATION_HEADER)
+            for call in self.calls
+            if call[1].endswith("/v1/responses")
+        ]
 
     def paths(self) -> list[str]:
         return [call[1] for call in self.calls]

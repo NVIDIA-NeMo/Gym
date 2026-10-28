@@ -113,6 +113,7 @@ class TestDatasetInit:
         # `harbor` test package when this file is collected with environment_servers/harbor/tests.
         pytest.importorskip("harbor.models.dataset.manifest")
         pytest.importorskip("harbor.models.task.config")
+        pytest.importorskip("harbor.models.task.task")
         from harbor.models.dataset.manifest import DatasetManifest
         from harbor.models.task.config import TaskConfig
         from pydantic import ValidationError

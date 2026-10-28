@@ -857,6 +857,12 @@ AGENT_REF_KEY = "agent_ref"
 ########################################
 
 
+class RunExportConfig(BaseNeMoGymCLIConfig):
+    """Settings every `gym eval export` exporter takes; each exporter model adds its own."""
+
+    rollouts_jsonl_fpath: Path
+
+
 class ExporterConfig(BaseModel):
     """Credentials and run identity for one exporter backend.
 

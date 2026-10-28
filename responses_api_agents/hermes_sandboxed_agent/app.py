@@ -15,7 +15,12 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
-from nemo_gym.agent_utils import process_supervisor
+from nemo_gym.agent_utils.supervisor_client import (
+    DEFAULT_CLEANUP_TIMEOUT,
+    SUPERVISOR_FILE,
+    SUPERVISOR_SCRIPT,
+    exec_timeout,
+)
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -226,16 +231,17 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             (local / "request.json").write_text(json.dumps(params))
             await sandbox.upload(local / "request.json", f"{remote}/request.json")
             await sandbox.upload(Path(__file__).with_name("runner.py"), f"{remote}/runner.py")
-            await sandbox.upload(Path(process_supervisor.__file__), f"{remote}/process_supervisor.py")
+            await sandbox.upload(SUPERVISOR_SCRIPT, f"{remote}/{SUPERVISOR_FILE}")
             launched = True
             executed = await sandbox.exec(
-                f"{quote(self.config.runtime_python)} -I {quote(remote + '/process_supervisor.py')} "
-                f"--timeout {self.config.sandbox_timeout} --receipt {quote(remote + '/cleanup.json')} -- "
+                f"bash {quote(f'{remote}/{SUPERVISOR_FILE}')} "
+                f"--timeout {self.config.sandbox_timeout} --cleanup-timeout {DEFAULT_CLEANUP_TIMEOUT} "
+                f"--receipt {quote(remote + '/cleanup.json')} --stop-file {quote(remote + '/stop.request')} -- "
                 f"{quote(self.config.runtime_python)} -I {quote(remote + '/runner.py')} {quote(remote + '/request.json')} "
                 f">{quote(remote + '/output.log')} 2>&1",
                 cwd=remote,
                 # The runner owns the model budget; leave time for process cleanup.
-                timeout_s=process_supervisor.exec_timeout(timeout=self.config.sandbox_timeout),
+                timeout_s=exec_timeout(timeout=self.config.sandbox_timeout),
             )
             return_code, error_type = executed.return_code, executed.error_type
             stdout, stderr = executed.stdout or "", executed.stderr or ""

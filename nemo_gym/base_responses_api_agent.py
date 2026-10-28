@@ -189,6 +189,20 @@ class AgentSeedSessionResponse(BaseModel):
         return result
 
 
+class AgentSessionCapabilitiesResponse(BaseModel):
+    """What this adapter's sessions can do, asked before any session is seeded.
+
+    An environment server reads it to refuse a run before provisioning anything: a multi-step task whose turns
+    must continue one harness session needs ``continuation``, as Harbor's multi-step trial refuses
+    ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    supports_task_tool_context: bool = False
+    continuation: AgentContinuationCapabilities | None = None
+
+
 class AgentCloseSessionRequest(BaseModel):
     """Close agent-server state."""
 
@@ -642,8 +656,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.post("/v1/agent_sessions")(self.seed_agent_session)
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
+        app.get("/v1/agent_sessions/capabilities")(self.agent_session_capabilities)
 
         return app
+
+    async def agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
+        """Declare the session capabilities a seed would confirm, without seeding: the task-tool context and the
+        multi-turn continuation this adapter supports (``None`` for one-activation adapters and for agents that
+        implement no sessions at all)."""
+        return AgentSessionCapabilitiesResponse(
+            supports_task_tool_context=self.supports_task_tool_context(),
+            continuation=self._agent_continuation_capabilities(),
+        )
 
     async def seed_agent_session(
         self,

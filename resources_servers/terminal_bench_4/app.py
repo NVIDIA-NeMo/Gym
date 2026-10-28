@@ -103,6 +103,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         for setting, keys in (
             ("verifier_timeout_overrides", environment.verifier_timeout_overrides),
             ("task_images.by_task", environment.task_images.by_task),
+            ("compose_service_overrides", environment.compose_service_overrides),
         ):
             if unknown := sorted(set(keys) - names):
                 raise ValueError(f"environment.{setting} names tasks that {manifest_path.name} lacks: {unknown}")

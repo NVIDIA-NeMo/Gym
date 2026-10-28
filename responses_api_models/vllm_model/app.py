@@ -29,7 +29,8 @@ from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
-from pydantic import Field, PrivateAttr, model_validator
+from openai.types.shared import ReasoningEffort
+from pydantic import Field, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
 from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
 from nemo_gym.base_responses_api_model import (
@@ -39,6 +40,7 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
     _request_messages,
+    _validate_responses_params,
     context_overflow_error_fields,
     is_propagated_refusal,
     start_model_execution,
@@ -81,6 +83,31 @@ from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_ar
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
+
+# Accepts exactly the reasoning efforts the pinned OpenAI SDK lists.
+_LISTED_REASONING_EFFORT = TypeAdapter(ReasoningEffort)
+# Where `forward_unvalidated_reasoning_effort` keeps an effort the SDK does not list, between the
+# route that takes it out of the request and `_responses_to_chat_request()`, which puts it on the chat
+# request for generation and for context measurement alike.
+_UNLISTED_REASONING_EFFORT_STATE = "nemo_gym_unlisted_reasoning_effort"
+
+
+def _set_aside_unlisted_reasoning_effort(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Take a ``reasoning.effort`` the SDK does not list out of a raw Responses body.
+
+    Validation would refuse it with 422. The effort waits on ``request.state`` instead, and the
+    returned body carries the rest of ``reasoning`` unchanged.
+    """
+    reasoning = body.get("reasoning")
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    if not isinstance(effort, str) or not effort:
+        return body
+    try:
+        _LISTED_REASONING_EFFORT.validate_python(effort)
+    except ValidationError:
+        setattr(request.state, _UNLISTED_REASONING_EFFORT_STATE, effort)
+        return {**body, "reasoning": {key: value for key, value in reasoning.items() if key != "effort"}}
+    return body
 
 
 def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
@@ -376,11 +403,35 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "Chat Completions representation. Off, the conversion refuses the request, so the caller can "
             "route it to a server that serves Responses natively. On, the reporting-only fields, a "
             "non-empty `include` (every value), `reasoning.summary` and `reasoning.generate_summary`, and "
-            "a message `phase` are dropped and the request proceeds. An image part in a tool's output is "
+            "a message `phase` are dropped and the request proceeds, and so is a `reasoning.context` of "
+            "`auto` or `all_turns`: the conversion passes every reasoning item the request carries to the "
+            "engine and leaves what is rendered to its chat template. An image part in a tool's output is "
             "replaced with the text placeholder `[image omitted from tool output]`, so the model does not "
-            "see that image. Every other unrepresentable field, `reasoning.context` included, is still "
-            "refused. The setting has no effect when `is_responses_native` is on, because that path skips "
-            "the conversion."
+            "see that image, unless `inline_tool_output_images` is on. Every other unrepresentable field, a "
+            "`current_turn` reasoning context included, "
+            "is still refused. The setting has no effect when `is_responses_native` is on, because that path "
+            "skips the conversion."
+        ),
+    )
+    forward_unvalidated_reasoning_effort: bool = Field(
+        default=False,
+        description=(
+            "Forward a Responses `reasoning.effort` that the pinned OpenAI SDK does not list (for example "
+            "`max`, which the Codex CLI sends when its model catalog offers it) verbatim as the chat "
+            "`reasoning_effort`, instead of refusing the request with 422. The engine validates the value. "
+            "Efforts the SDK lists keep their existing path. Requires `is_responses_native: false` and "
+            "`use_completions_api: false`."
+        ),
+    )
+    inline_tool_output_images: bool = Field(
+        default=False,
+        description=(
+            "Send each image part of a Responses tool call output (for example from the Codex CLI's "
+            "`view_image`) to the engine as an `image_url` part of the chat tool message, instead of refusing "
+            "the request or, with `drop_unrepresentable_request_fields`, replacing the image with a text "
+            "placeholder. OpenAI's chat tool messages carry text only, but vLLM accepts image parts there and "
+            "a vision model sees the image inside the tool result. Detail `original`, which chat lacks, is "
+            "sent as `high`. Requires `is_responses_native: false`."
         ),
     )
 
@@ -477,6 +528,24 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Preserve the existing audio-first order by default. VoiceBench's legacy
     # client uses text first, which some audio model chat templates distinguish.
     audio_content_order: Literal["before_text", "after_text"] = "before_text"
+
+    @model_validator(mode="after")
+    def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
+        if self.is_responses_native:
+            for option in (
+                "forward_unvalidated_reasoning_effort",
+                "inline_tool_output_images",
+            ):
+                if getattr(self, option):
+                    raise ValueError(
+                        f"{option} applies to the Chat Completions conversion and requires is_responses_native=false"
+                    )
+        if self.forward_unvalidated_reasoning_effort and self.use_completions_api:
+            raise ValueError(
+                "forward_unvalidated_reasoning_effort requires use_completions_api=false: /v1/completions has no "
+                "reasoning_effort, so the effort would be dropped"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_prefix_supply(self) -> "VLLMModelConfig":
@@ -640,12 +709,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             app.post("/context/measure")(self.measure_context)
         return app
 
-    async def measure_context(
-        self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-    ) -> dict[str, int]:
+    async def measure_context(self, request: Request, body: dict = Body()) -> dict[str, int]:
         """Render through the generation admission path without writing capture state."""
+        # Validated as /v1/responses does, so an effort generation forwards is measured, not refused.
+        if self.config.forward_unvalidated_reasoning_effort:
+            body = _set_aside_unlisted_reasoning_effort(request, body)
+        body = _validate_responses_params(body)
         if self._external_capture_handler is None or self._capture_lineage is None:
             raise HTTPException(status_code=409, detail="measurement requires external capture")
         rollout_id = current_rollout_id()
@@ -672,7 +741,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             except CaptureInputError as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
             try:
-                chat = self._responses_to_chat_request(body)
+                chat = self._responses_to_chat_request(body, request)
                 processed = await self._prepare_chat_request(request, chat)
             except (ValueError, NotImplementedError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
@@ -693,11 +762,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
             custom_tool_strategy=self.config.custom_tool_strategy,
+            inline_tool_output_images=self.config.inline_tool_output_images,
         )
 
     def model_post_init(self, context):
         self._post_init()
         return super().model_post_init(context)
+
+    async def responses_dispatch(self, request: Request, body: dict = Body()):
+        if self.config.forward_unvalidated_reasoning_effort:
+            body = _set_aside_unlisted_reasoning_effort(request, body)
+        return await super().responses_dispatch(request, body)
 
     def _post_init(self) -> None:
         if self.config.sampling_overrides:
@@ -805,11 +880,17 @@ class VLLMModel(SimpleResponsesAPIModel):
         return tokenizer
 
     def _responses_to_chat_request(
-        self, body: NeMoGymResponseCreateParamsNonStreaming
+        self, body: NeMoGymResponseCreateParamsNonStreaming, request: Request | None = None
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
-        return self._converter.responses_to_chat_completion_create_params(
+        chat = self._converter.responses_to_chat_completion_create_params(
             body, drop_unrepresentable_request_fields=self.config.drop_unrepresentable_request_fields
         )
+        effort = getattr(request.state, _UNLISTED_REASONING_EFFORT_STATE, None) if request is not None else None
+        if self.config.forward_unvalidated_reasoning_effort and isinstance(effort, str):
+            # Assigned, not validated: the chat params type reasoning_effort with the SDK literal
+            # that does not list it. The engine validates the level instead.
+            chat.reasoning_effort = effort
+        return chat
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -818,7 +899,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             return await self._responses_native(request, body)
 
         # Response Create Params -> Chat Completion Create Params
-        chat_completion_create_params = self._responses_to_chat_request(body)
+        chat_completion_create_params = self._responses_to_chat_request(body, request)
         body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
@@ -1212,6 +1293,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             else:
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
+
+    def _mints_response_ids(self) -> bool:
+        # The Chat Completions conversion builds each response; the native path serves vLLM's.
+        return not self.config.is_responses_native
 
     def _preserve_envelope_id(self) -> bool:
         """Keep the backend envelope id only for requests with an active external-capture context."""

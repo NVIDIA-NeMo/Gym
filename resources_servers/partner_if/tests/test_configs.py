@@ -109,11 +109,24 @@ def test_the_mock_tool_example_starts_with_its_backend_and_rows():
     assert config.judge_responses_create_params.max_output_tokens == 8192
 
 
-def test_the_swe_config_validates_and_grades_the_prompt_its_agent_runs_with():
+def test_the_swe_config_hands_its_sandbox_to_opencode_without_web_subagent_or_skill_tools():
+    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
     from resources_servers.partner_if.swe_app import SWEIFConfig
-    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 
     scorer = SWEIFConfig.model_validate(server_config("swe.yaml", "partner_if_swe"))
-    agent = OpenCodeSandboxedAgentConfig.model_validate(server_config("swe.yaml", "partner_if_swe_agent"))
-    assert agent.resources_server.name == "partner_if_swe"
-    assert agent.opencode_config["agent"]["build"]["prompt"] == scorer.actor_system_prompt
+    agent = OpenCodeAgentConfig.model_validate(server_config("swe.yaml", "partner_if_swe_agent"))
+    env = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        server_config("swe.yaml", "partner_if_swe_environment_server") | {"host": "127.0.0.1", "port": 8080}
+    )
+    assert (env.resources_server.name, env.agent_server.name) == ("partner_if_swe", "partner_if_swe_agent")
+    assert env.resources_tool_transports == []
+    # Sandbox labels are deployment-specific, so a deployment adds its own.
+    assert "nemo.nvidia.com/s3-hostpath" not in scorer.sandbox_config.get("metadata", {})
+    permission = agent.opencode_config["permission"]
+    assert [permission[tool] for tool in ("webfetch", "websearch", "task", "skill")] == ["deny"] * 4
+    # The denials follow opencode_agent's allow-all, which they override, and keep its command deny-list.
+    assert list(permission).index("*") < list(permission).index("webfetch")
+    assert permission["bash"]["*git fetch*"] == "deny"
+    # OpenCode places a tools map's keys before "*" and the last matching rule wins, so a tools map would undo them.
+    assert "tools" not in agent.opencode_config

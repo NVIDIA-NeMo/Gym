@@ -3,6 +3,9 @@
 
 """Tests for GenRM model."""
 
+import pytest
+
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_models.genrm_model.app import GenRMModelConfig, GenRMModelMixin
 
 
@@ -214,3 +217,33 @@ def test_get_converter_forwards_the_custom_tool_strategy():
         custom_tool_strategy="function_bridge",
     )
     assert server.get_converter().custom_tool_strategy == "function_bridge"
+
+
+@pytest.mark.parametrize("drop", [False, True])
+def test_get_converter_forwards_inline_tool_output_images(drop: bool):
+    """With the inherited option on, a tool output's image reaches GenRM's model as an image."""
+    server = _TestServer()
+    server.config = GenRMModelConfig(
+        host="localhost",
+        port=8000,
+        entrypoint="app.py",
+        name="test_genrm_model",
+        model="test-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        vllm_serve_kwargs={"tensor_parallel_size": 1, "data_parallel_size": 2},
+        vllm_serve_env_vars={},
+        inline_tool_output_images=True,
+    )
+    image = {"type": "input_image", "image_url": "https://example.com/a.png", "detail": "high"}
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"type": "function_call_output", "call_id": "call_1", "output": [image]}]
+    )
+
+    converted = server.get_converter().responses_to_chat_completion_create_params(
+        params, drop_unrepresentable_request_fields=drop
+    )
+
+    assert converted.messages[0]["content"] == [
+        {"type": "image_url", "image_url": {"url": "https://example.com/a.png", "detail": "high"}}
+    ]

@@ -14,7 +14,7 @@ from nemo_gym.episode_types import (
     EpisodeFailure,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
+from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
 
 
 class SingleAgentTurnTaskInput(BaseModel):
@@ -69,6 +69,7 @@ class SingleAgentTurnFailure(EpisodeFailure):
     # The harness's own turns from its session close, when the run failed after taking some: rollout collection
     # keeps them on the failure row as it does on a result, instead of rebuilding turns from the captured calls.
     trajectory: TrajectoryRecord | None = Field(default=None, exclude_if=lambda value: value is None)
+    verifier_invocations: list[VerifierInvocation] | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class SingleAgentTurnRequest(BaseEpisodeRequest[SingleAgentTurnTaskInput]):

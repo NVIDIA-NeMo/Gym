@@ -11,12 +11,14 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym.agent_activation_types import AgentContinuationCapabilities
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
+    AgentSessionCapabilitiesResponse,
     AgentSessionState,
     SimpleResponsesAPIAgent,
 )
@@ -101,6 +103,37 @@ def test_base_agent_exposes_unimplemented_session_routes() -> None:
     paths = agent.setup_webserver().openapi()["paths"]
     assert "/v1/agent_sessions" in paths
     assert "/v1/agent_sessions/close" in paths
+    assert "/v1/agent_sessions/capabilities" in paths
+
+
+def test_the_capabilities_route_declares_continuation_without_seeding() -> None:
+    """An environment server asks before provisioning: a multi-step run that must continue one harness session
+    is refused up front for an adapter that answers without ``continuation``, as Harbor refuses
+    ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend."""
+
+    class _Continues(_Agent):
+        def supports_task_tool_context(self) -> bool:
+            return True
+
+        def _agent_continuation_capabilities(self):
+            return AgentContinuationCapabilities(observations=["trajectory", "timing"])
+
+    for agent_cls, expected in (
+        (_Agent, AgentSessionCapabilitiesResponse()),
+        (
+            _Continues,
+            AgentSessionCapabilitiesResponse(
+                supports_task_tool_context=True,
+                continuation=AgentContinuationCapabilities(observations=["trajectory", "timing"]),
+            ),
+        ),
+    ):
+        agent = agent_cls.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+        reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
+        assert reply.status_code == 200
+        assert AgentSessionCapabilitiesResponse.model_validate(reply.json()) == expected
+        # Asking seeds nothing.
+        assert agent._session_records == {}
 
 
 class _GrantCheckingAgent(_Agent):

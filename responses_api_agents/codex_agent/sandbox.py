@@ -92,7 +92,6 @@ class CodexSandboxSession(AgentSessionState):
         """Stage the invocation and return the Codex worker command."""
         await self.upload_json("input.json", payload)
         return SandboxCommand(
-            python="python3",
             argv=[
                 "python3",
                 "-I",

@@ -37,6 +37,11 @@ def _make_model(**config_overrides: Any) -> VLLMModelWithCompaction:
     )
 
 
+def test_rejects_forward_unvalidated_reasoning_effort() -> None:
+    with pytest.raises(ValueError, match="does not support forward_unvalidated_reasoning_effort"):
+        _make_model(forward_unvalidated_reasoning_effort=True)
+
+
 def test_tokenize_route_is_non_generating() -> None:
     assert ("POST", "/tokenize") in VLLMModelWithCompaction.non_generating_model_routes
 

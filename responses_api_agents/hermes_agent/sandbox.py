@@ -173,7 +173,6 @@ class HermesSandboxSession(AgentSessionState):
                 f"{self.session.session_dir}/input.json",
                 f"{self.session.session_dir}/output.json",
             ],
-            python=_SANDBOX_PYTHON,
         )
 
     async def collect_artifacts(self) -> dict[str, JsonValue]:

@@ -50,6 +50,15 @@ terminal_bench_science:
         # Docker isolation that separate sandboxes cannot enforce. The Compose
         # tasks' services run without it, on one network (see README).
         compose_ignored_settings: [init, read_only, tmpfs, pids_limit, cap_drop, security_opt, networks]
+        # The non-root submission service cannot edit /etc/hosts or su. Its one
+        # peer URL is passed in ASSAY_STATUS (with the v0.1 default), resolved
+        # to the assay sandbox IP; null drops the image's explicit user (see README).
+        compose_service_overrides:
+          protein-active-learning:
+            submission:
+              environment: {ASSAY_STATUS: 'http://assay:8080/status'}
+              x-sandbox: {hosts: [], resolve_environment: [ASSAY_STATUS]}
+              user: null
         sandbox_provider:
           opensandbox:
             connection:

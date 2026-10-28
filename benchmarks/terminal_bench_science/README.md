@@ -242,10 +242,13 @@ the network.
 #### `protein-active-learning` submission
 
 `submission` runs as a non-root user, and OpenSandbox rejects running commands as root in a
-non-root sandbox, so Gym cannot add its peers to `/etc/hosts`. The resources server instead
-passes its only peer URL as `ASSAY_STATUS=http://assay:8080/status`, rewritten to the `assay`
-sandbox's address. Terminal-Bench 4's `medical-claims-processing` is handled the same way, but
-its Compose file already passes that address in `BROWSER_URL`. The v0.1 `submission_server.py`
+non-root sandbox, so Gym cannot add its peers to `/etc/hosts`. The profile's
+`environment.compose_service_overrides` instead passes its only peer URL as
+`ASSAY_STATUS=http://assay:8080/status`, rewritten to the `assay` sandbox's address, and runs
+`submission` as its image's default user (see the
+[resources server README](../../resources_servers/terminal_bench_4/README.md#non-root-compose-services)).
+Terminal-Bench 4's `medical-claims-processing` is handled the same way, but its Compose file
+already passes that address in `BROWSER_URL`. The v0.1 `submission_server.py`
 hardcodes it, so build `submission` from a server that reads it from the environment with the
 same default:
 

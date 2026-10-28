@@ -2589,7 +2589,9 @@ def test_a_new_run_removes_the_previous_jobs_health_reports(tmp_path: Path, monk
     seen = {}
 
     async def collection(self, config):
-        seen["reports"] = sorted(path.name for path in tmp_path.iterdir())
+        seen["reports"] = sorted(
+            path.name for path in tmp_path.iterdir() if path.name in ("quality_summary.json", "rollout_verdicts.jsonl")
+        )
 
     monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collection)
     monkeypatch.setattr(

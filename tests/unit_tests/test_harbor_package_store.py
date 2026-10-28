@@ -139,10 +139,12 @@ class TestPackageStore:
         assert sorted(p.name for p in folder.iterdir() if p.is_dir()) == ["alpha", "beta"]
         assert content_hash(folder / "alpha") == digests["alpha"]
         manifest = tomllib.loads((folder / "manifest.toml").read_text())
-        # Derived facts only: no copy of the name or version, which live in dataset.toml.
+        # Derived facts only: no copy of the name or version, which live in dataset.toml; the reference the fetch
+        # was made from is recorded as the pins are (round 32).
         assert manifest["schema_version"] == 1
-        assert set(manifest["dataset"]) == {"source", "digest", "dataset_toml_digest"}
+        assert set(manifest["dataset"]) == {"source", "ref", "digest", "dataset_toml_digest"}
         assert manifest["dataset"]["source"] == "harbor-package-store"
+        assert manifest["dataset"]["ref"] == "harbor:terminal-bench/terminal-bench@4.0.0"
         assert manifest["dataset"]["digest"] == manifest_module.dataset_digest(
             digests, manifest["dataset"]["dataset_toml_digest"]
         )
@@ -630,15 +632,20 @@ class TestPackageStore:
 
         seen = {}
 
-        def fake_fetch(ref, root, store=None):
-            seen["ref"], seen["root"] = ref, root
-            return root / "terminal-bench-4.0.0"
+        def fake_fetch(ref, root, store=None, *, folder=None):
+            seen["ref"], seen["root"], seen["folder"] = ref, root, folder
+            return folder or root / "terminal-bench-4.0.0"
 
         monkeypatch.setattr(package_store, "fetch_package_dataset", fake_fetch)
         folder = hub.fetch_ref("harbor:terminal-bench/terminal-bench@4.0.0", tmp_path)
         assert folder == tmp_path / "terminal-bench-4.0.0"
         assert seen["ref"] == package_store.PackageRef("terminal-bench", "terminal-bench", "4.0.0")
-        assert seen["root"] == tmp_path
+        assert seen["root"] == tmp_path and seen["folder"] is None
+        # A caller that names the dataset folder (a committed entry's) passes it through to the store fetch.
+        assert hub.fetch_ref("harbor:terminal-bench/terminal-bench@4.0.0", tmp_path, folder=tmp_path / "tb4") == (
+            tmp_path / "tb4"
+        )
+        assert seen["folder"] == tmp_path / "tb4"
 
     def test_archive_is_checked_without_exclusions_but_a_noisy_folder_still_matches(self, tmp_path, monkeypatch):
         folders = {"alpha": write_task(tmp_path / "src" / "alpha")}
@@ -771,6 +778,25 @@ class TestPackageStore:
             module.fetch_package_dataset(ref, tmp_path / "datasets")
         assert sum(1 for c in calls if c[1].startswith("/storage/")) == 1
 
+    @pytest.mark.parametrize(
+        ("target", "reference"),
+        [
+            ("harbor:org/ds", "harbor:org/ds@latest"),
+            ("harbor:org/ds@latest", "harbor:org/ds@latest"),
+            ("harbor:org/ds@4.0.0", "harbor:org/ds@4.0.0"),
+            ("harbor:org/ds@sha256:" + "a" * 64, "harbor:org/ds@sha256:" + "a" * 64),
+            ("harbor:org/ds@" + "a" * 64, "harbor:org/ds@sha256:" + "a" * 64),
+        ],
+    )
+    def test_the_recorded_reference_reads_a_reference_as_the_store_does(self, target, reference):
+        """What a manifest records for a package-store fetch: ``latest`` spelled out, a digest in its ``sha256:`` form,
+        so the same dataset declared either way reads as one reference (round 32)."""
+        from nemo_gym.tasks.harbor.hub import HubRef
+        from nemo_gym.tasks.harbor.package_store import PackageRef
+
+        ref = PackageRef.of(HubRef.parse(target))
+        assert ref.package == "org/ds" and ref.reference == reference
+
     def test_folder_fetched_for_another_package_is_refused_by_its_task_pins(self, tmp_path, monkeypatch):
         """The manifest holds no copy of the dataset's name, so the per-task `package` pins (`<org>/<task>`) are
         what tell another org's dataset of the same name and tag, which lands in the same readable folder."""
@@ -779,6 +805,12 @@ class TestPackageStore:
         folder = module.fetch_package_dataset(
             module.PackageRef("terminal-bench", "terminal-bench", "4.0.0"), tmp_path / "datasets"
         )
+        manifest_before = (folder / "manifest.toml").read_text()
+        # The fetch's reference is recorded, but the check reads the pins, so a manifest written before the reference
+        # was recorded (stripped of it here) is told apart the same way.
+        recorded = 'ref = "harbor:terminal-bench/terminal-bench@4.0.0"\n'
+        assert recorded in manifest_before
+        (folder / "manifest.toml").write_text(manifest_before.replace(recorded, ""))
         manifest_before = (folder / "manifest.toml").read_text()
         assert "terminal-bench/terminal-bench" not in manifest_before  # no dataset name to compare by
         downloads_before = sum(1 for c in calls if c[1].startswith("/storage/"))
