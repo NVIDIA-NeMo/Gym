@@ -281,8 +281,21 @@ take precedence over attribution keys.
 
 `cluster` names the cluster that creates the sandboxes. Set `attribution.cluster` in the
 provider config; when it is unset, it defaults to `SLURM_CLUSTER_NAME`, which Slurm sets in
-every job. Runs outside Slurm, such as a Kubernetes driver pod, get no `cluster` label unless
-they set it.
+every job. Runs outside a Slurm job get no `cluster` label unless they set it. This includes
+runs on a Slurm login node, where `SLURM_CLUSTER_NAME` is not set, and runs in a Kubernetes
+driver pod. If the host exports its own cluster variable, read it with an OmegaConf
+interpolation. For example, a login node that sets `CLUSTER_NAME`:
+
+```yaml
+sandbox:
+  opensandbox:
+    attribution:
+      cluster: ${oc.env:CLUSTER_NAME,null}
+```
+
+A configured value takes precedence over `SLURM_CLUSTER_NAME`, so it also applies inside
+Slurm jobs. Site variables can differ from Slurm's `ClusterName`, so pick one source per
+cluster to keep labels consistent.
 
 `run` identifies one launch of the creating process: `NEMO_GYM_RUN_ID` if set, else an id
 generated per process. The resolved attribution is logged once at the first sandbox create —
