@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Two configuration-only extensions to Harbor's existing installed agents.
+"""Small compatibility and guidance extensions to Harbor's existing installed agents.
 
 Harbor owns installation, execution, skills, timeouts, and trace conversion.
-These subclasses only supply settings not exposed by Harbor 0.24.0's options.
+These subclasses supply missing guidance settings and correct the pinned Hermes version probe.
 """
 
 import hashlib
@@ -26,7 +26,7 @@ from pathlib import Path
 import yaml
 from harbor.agents.installed.codex import Codex, CodexOptions
 from harbor.agents.installed.hermes import Hermes
-from harbor.environments.base import BaseEnvironment
+from harbor.environments.base import BaseEnvironment, ExecResult
 
 
 class GuidanceOptions(CodexOptions):
@@ -58,14 +58,34 @@ class CodexGuidance(Codex):
             await environment.upload_file(path, "/tmp/skill-trigger-models.json")
 
 
-class HermesGuidance(Hermes):
+class HermesCompat(Hermes):
+    """Keep Harbor execution, using the version flag supported by Hermes v0.22.2."""
+
+    def get_version_command(self) -> str:
+        return 'export PATH="$HOME/.local/bin:$PATH"; hermes --version'
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ) -> ExecResult:
+        # Harbor 0.25.0's install command uses a nonexistent `version` subcommand.
+        if command.endswith("&& hermes version"):
+            command = command.removesuffix("hermes version") + "hermes --version"
+        return await super().exec_as_agent(environment, command=command, env=env, cwd=cwd, timeout_sec=timeout_sec)
+
+
+class HermesGuidance(HermesCompat):
     @staticmethod
     def name() -> str:
         return "skill-trigger-hermes-guidance"
 
     @staticmethod
     def _build_config_yaml(model: str, max_turns: int | None = None) -> str:
-        # Harbor 0.24.0 constructs this config internally; it has no override for this setting.
+        # Harbor 0.25.0 constructs this config internally; it has no override for this setting.
         config = yaml.safe_load(Hermes._build_config_yaml(model, max_turns))
         config.setdefault("agent", {})["tool_use_enforcement"] = True
         return yaml.safe_dump(config)

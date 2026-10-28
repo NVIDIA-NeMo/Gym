@@ -13,10 +13,10 @@ The frozen selection contains 110 positive prompts: 35 BioNeMo, 50 selected Skil
 | `pi` | Pi | 1.3.0 | Native defaults |
 | `codex` | Codex | 0.156.1 | Native defaults |
 | `codex_guidance` | Codex | 0.156.1 | Skill-usage instructions enabled in a supplied model catalog |
-| `hermes` | Hermes | 0.22.2 | Native defaults |
-| `hermes_guidance` | Hermes | 0.22.2 | Tool-use enforcement enabled |
+| `hermes` | Hermes | `v0.22.2` | Native defaults |
+| `hermes_guidance` | Hermes | `v0.22.2` | Tool-use enforcement enabled |
 
-[profiles.py](profiles.py) contains the only execution extensions: uploading the Codex guidance catalog and setting Hermes' guidance option. Harbor 0.24.0 does not expose these through its standard options. Both extensions retain Harbor's installation, execution, skill discovery, and trace conversion. There is no custom runner, inference proxy, container controller, or trace converter.
+[profiles.py](profiles.py) contains the only execution extensions: uploading the Codex guidance catalog, setting Hermes' guidance option, and correcting Harbor's Hermes version probe to `hermes --version`. The guidance settings are not exposed through Harbor 0.25.0's standard options. These extensions retain Harbor's installation, execution, skill discovery, and trace conversion. There is no custom runner, inference proxy, container controller, or trace converter.
 
 ## Scoring
 
@@ -28,11 +28,11 @@ The task has a 120-second Harbor agent timeout. Agent defaults govern reasoning,
 
 ## Prepare
 
-Use Linux with Docker, uv, and Python 3.13.14. The configurations and adapters are tested with Harbor 0.24.0. Install Gym's existing Harbor component and pin that runtime:
+Use Linux with Docker, uv, and Python 3.13.14. The configurations and adapters are tested with Harbor 0.25.0. Install Gym's existing Harbor component and pin that runtime:
 
 ```sh
 uv sync --project responses_api_agents/harbor_agent_general --python 3.13.14 --no-default-groups
-uv pip install --python responses_api_agents/harbor_agent_general/.venv/bin/python 'harbor[opensandbox]==0.24.0'
+uv pip install --python responses_api_agents/harbor_agent_general/.venv/bin/python 'harbor[opensandbox]==0.25.0'
 source responses_api_agents/harbor_agent_general/.venv/bin/activate
 ```
 

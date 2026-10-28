@@ -13,7 +13,7 @@ harbor_agent_general:
         num_repeats: 1
       job:
         agents:
-        - name: hermes
+        - import_path: benchmarks.skill_trigger.profiles:HermesCompat
           model_name: ${policy_model_name}
           kwargs:
-            version: 0.22.2
+            version: v0.22.2

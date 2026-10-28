@@ -22,12 +22,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import yaml
 from harbor.agents.factory import AgentFactory
+from harbor.agents.installed.base import BaseInstalledAgent
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.hermes import Hermes
 from harbor.models.job.config import JobConfig
 from omegaconf import OmegaConf
 
-from benchmarks.skill_trigger.profiles import CodexGuidance, HermesGuidance
+from benchmarks.skill_trigger.profiles import CodexGuidance, HermesCompat, HermesGuidance
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.harbor_agent_general.app import HarborAgentConfig
 
@@ -56,6 +57,8 @@ def test_configs_use_existing_bridge_and_native_harbor_agents(profile):
     cls = AgentFactory.get_agent_class_from_config(agent)
     cls.parse_options(agent.kwargs, agent.env)
     assert cls.capabilities.atif and cls.capabilities.skills
+    if profile.startswith("hermes"):
+        assert agent.kwargs["version"] == "v0.22.2"
     assert job.retry.max_retries == 0
     assert cfg["datasets"][0]["num_repeats"] == 1
     assert not parsed.count_failure_classes_as_zero and not parsed.count_missing_rollouts_as_zero
@@ -99,3 +102,17 @@ async def test_codex_guidance_uploads_pinned_catalog_with_one_change(tmp_path):
     path.write_text("changed")
     with patch.object(Codex, "setup", new=AsyncMock()), pytest.raises(ValueError, match="hash"):
         await agent.setup(environment)
+
+
+@pytest.mark.asyncio
+async def test_native_hermes_installer_uses_supported_version_probe(tmp_path):
+    agent = HermesCompat(logs_dir=tmp_path, model_name="openai/fixture", version="v0.22.2")
+    with (
+        patch.object(agent, "ensure_system_dependencies", new=AsyncMock()),
+        patch.object(BaseInstalledAgent, "exec_as_agent", new=AsyncMock()) as execute,
+    ):
+        await agent.install(AsyncMock())
+    command = execute.call_args.kwargs["command"]
+    assert "--branch v0.22.2" in command
+    assert command.endswith("&& hermes --version")
+    assert agent.get_version_command().endswith("hermes --version")

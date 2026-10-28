@@ -15,5 +15,5 @@ harbor_agent_general:
         agents:
         - model_name: ${policy_model_name}
           kwargs:
-            version: 0.22.2
+            version: v0.22.2
           import_path: benchmarks.skill_trigger.profiles:HermesGuidance
