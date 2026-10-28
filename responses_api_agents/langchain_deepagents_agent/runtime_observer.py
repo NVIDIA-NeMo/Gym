@@ -15,6 +15,7 @@ from uuid import UUID
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 from responses_api_agents.langchain_deepagents_agent.runtime_messages import to_gym_input
 
@@ -143,19 +144,30 @@ class DeepAgentsObserver(AsyncCallbackHandler):
     async def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
         key = str(run_id)
         record = self.tools[key]
+        # State-updating native tools (write_todos and task) return Command, not
+        # ToolMessage. Retain only their actual message for this native call.
+        messages = [output] if isinstance(output, ToolMessage) else []
+        if isinstance(output, Command) and isinstance(output.update, dict):
+            updates = output.update.get("messages", [])
+            messages = updates if isinstance(updates, list) else [updates]
+        messages = [
+            message
+            for message in messages
+            if isinstance(message, ToolMessage) and message.tool_call_id == record["tool_call_id"]
+        ]
         now = time.time()
         record.update(
             completed_at=now,
             duration_ms=max(0, (now - record["started_at"]) * 1000),
-            status="failed" if getattr(output, "status", None) == "error" else "completed",
+            status="failed" if any(message.status == "error" for message in messages) else "completed",
         )
         if key in self.shell_results:
             exit_code = self.shell_results.pop(key)
             record["status"] = "timeout" if exit_code == 124 else "failed" if exit_code else "completed"
             if exit_code:
                 record["error_type"] = "CommandTimeout" if exit_code == 124 else "CommandFailed"
-        if isinstance(output, ToolMessage):
-            self.invocations[record["invocation_id"]]["conversation"].extend(to_gym_input([output]))
+        if messages:
+            self.invocations[record["invocation_id"]]["conversation"].extend(to_gym_input(messages))
         else:
             self.gaps.append(
                 {

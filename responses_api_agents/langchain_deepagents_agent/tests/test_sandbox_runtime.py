@@ -269,6 +269,10 @@ async def test_native_subagent_models_and_tools_have_distinct_ownership(tmp_path
     tools = {t["tool_call_id"]: t for t in observer.tools.values()}
     assert tools["child-shell"]["invocation_id"] == "root/delegate"
     assert tools["delegate"]["invocation_id"] == "root"
+    assert not observer.gaps
+    outputs = [item for item in observer.invocations["root"]["conversation"] if item["type"] == "function_call_output"]
+    assert len(outputs) == 1 and outputs[0]["call_id"] == "delegate"
+    assert "child done" in outputs[0]["output"]
 
 
 @pytest.mark.asyncio
@@ -308,3 +312,77 @@ async def test_native_compaction_is_captured_and_history_is_private(tmp_path, mo
     assert len(observer.usages) == 2
     history = tmp_path / "conversation-history" / "rollout.md"
     assert history.is_file() and "turn 0" in history.read_text()
+
+
+def test_shell_empty_command_preserves_native_tool_error(tmp_path):
+    backend = sandbox_runner.SupervisedShellBackend(workdir=str(tmp_path), scratch=tmp_path, timeout=5)
+    result = backend.execute("")
+    assert result.exit_code == 1 and result.output == "Error: Command must be a non-empty string."
+
+
+def test_shell_launch_failure_remains_recoverable(tmp_path):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    backend = sandbox_runner.SupervisedShellBackend(workdir=str(workdir), scratch=tmp_path, timeout=5)
+    workdir.rmdir()
+    failed = backend.execute("printf recovered")
+    assert failed.exit_code == 1 and "FileNotFoundError" in failed.output
+    workdir.mkdir()
+    recovered = backend.execute("printf recovered")
+    assert recovered.exit_code == 0 and recovered.output == "recovered"
+
+
+@pytest.mark.asyncio
+async def test_native_state_updating_tool_retains_its_actual_message(tmp_path, monkeypatch):
+    transport = Transport(
+        [
+            Reply(
+                200,
+                response(
+                    [
+                        {
+                            "type": "function_call",
+                            "name": "write_todos",
+                            "call_id": "todo-1",
+                            "arguments": json.dumps(
+                                {"todos": [{"content": "Inspect evidence", "status": "completed"}]}
+                            ),
+                        }
+                    ],
+                    1,
+                ),
+            ),
+            Reply(
+                200,
+                response(
+                    [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "done"}],
+                        }
+                    ],
+                    2,
+                ),
+            ),
+        ]
+    )
+    monkeypatch.setattr(sandbox_runner, "model_http_session", lambda: transport)
+    observer = DeepAgentsObserver(
+        output=tmp_path / "output.json",
+        task_id="task",
+        rollout_id="rollout",
+        model_ref={"type": "responses_api_models", "name": "policy_model"},
+        sandbox_id="sandbox",
+    )
+    await sandbox_runner.run(payload(tmp_path), observer)
+    assert observer.status == "completed", observer.error
+    assert not observer.gaps
+    (tool,) = observer.tools.values()
+    assert tool["tool_name"] == "write_todos" and tool["status"] == "completed"
+    retained = [
+        item for item in observer.invocations["root"]["conversation"] if item["type"] == "function_call_output"
+    ]
+    sent = [item for item in transport.requests[1]["json"]["input"] if item["type"] == "function_call_output"]
+    assert retained == sent and len(retained) == 1
+    assert retained[0]["call_id"] == "todo-1" and "Inspect evidence" in retained[0]["output"]

@@ -55,31 +55,44 @@ class SupervisedShellBackend(LocalShellBackend):
             raise ValueError("Shell timeout must be positive")
         callbacks = ensure_config().get("callbacks")
         run_id = str(getattr(callbacks, "parent_run_id", ""))
-        with tempfile.TemporaryFile(dir=self.scratch) as output:
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                cwd=self.cwd,
-                env=self._env,
-                stdin=subprocess.DEVNULL,
-                stdout=output,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+        if not command or not isinstance(command, str):
+            self.results[run_id] = 1
+            return ExecuteResponse(output="Error: Command must be a non-empty string.", exit_code=1, truncated=False)
+        try:
+            with tempfile.TemporaryFile(dir=self.scratch) as output:
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    cwd=self.cwd,
+                    env=self._env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                try:
+                    code = process.wait(timeout=limit)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=10)
+                    code = 124
+                output.seek(0)
+                raw = output.read(self._max_output_bytes + 1)
+            self.results[run_id] = code
+            truncated = len(raw) > self._max_output_bytes
+            text = raw[: self._max_output_bytes].decode("utf-8", errors="replace")
+            if code == 124:
+                text += f"\nCommand timed out after {limit} seconds"
+            return ExecuteResponse(output=text, exit_code=code, truncated=truncated)
+        except Exception as error:
+            # Match LocalShellBackend's recoverable tool-error boundary; the graph
+            # can repair a missing working directory or retry a failed launch.
+            self.results[run_id] = 1
+            return ExecuteResponse(
+                output=f"Error executing command ({type(error).__name__}): {error}",
+                exit_code=1,
+                truncated=False,
             )
-            try:
-                code = process.wait(timeout=limit)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=10)
-                code = 124
-            output.seek(0)
-            raw = output.read(self._max_output_bytes + 1)
-        self.results[run_id] = code
-        truncated = len(raw) > self._max_output_bytes
-        text = raw[: self._max_output_bytes].decode("utf-8", errors="replace")
-        if code == 124:
-            text += f"\nCommand timed out after {limit} seconds"
-        return ExecuteResponse(output=text, exit_code=code, truncated=truncated)
 
 
 async def run(payload: dict[str, Any], observer: DeepAgentsObserver) -> None:
@@ -142,6 +155,7 @@ def main(input_path: str, output_path: str) -> None:
     runtime = {
         "pid": os.getpid(),
         "python": sys.executable,
+        "python_version": sys.version,
         "versions": {
             name: importlib.metadata.version(name)
             for name in ("deepagents", "langchain", "langchain-core", "langgraph", "aiohttp")
