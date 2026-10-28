@@ -1,0 +1,25 @@
+agent:
+  type: codex-agent
+  ptc: false
+  compaction_enabled: true
+  compaction_trigger_tokens: 900000
+  compaction_user_message_tokens: 20000
+  tools:
+  - tool: exec_command
+    config:
+      timeout: 60
+      max_timeout: 300
+  - tool: apply_patch
+  code_mode_exec_yield_time_ms: 300000
+  code_mode_wait_yield_time_ms: 100000
+  instance_template: |
+    Fix the following issue:
+
+    {{task}}
+  step_limit: 500
+model:
+  model_name: ${MIMOAGENT_MODEL_NAME:-gpt-5}
+  protocol: responses
+  model_kwargs:
+    base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+    api_key: ${OPENAI_API_KEY:-}

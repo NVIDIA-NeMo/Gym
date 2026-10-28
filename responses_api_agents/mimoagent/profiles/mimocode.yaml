@@ -1,0 +1,11 @@
+agent:
+  type: mimocode
+  thinking_effort: max
+  context_limit: 1000000
+  output_limit: 65536
+  version: 0.1.15
+model:
+  model_name: claude-opus-4-8
+  model_kwargs:
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}
