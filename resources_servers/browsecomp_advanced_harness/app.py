@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
 from pocketshell import run as pocketshell_run
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
 
@@ -53,6 +53,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
+from resources_servers.browsecomp_advanced_harness import caveman_detector
 from resources_servers.browsecomp_advanced_harness.bash_guard import (
     _bash_allowlisted,
     _bash_denylisted,
@@ -84,6 +85,44 @@ _EXA_SEARCH_TYPES = ("instant", "fast", "auto") + _EXA_DEEP_TYPES
 _EXA_DEEP_ANSWER_MAX_FRACTION = 0.5
 
 
+class CavemanPenaltyConfig(BaseModel):
+    """Telegraphic ("caveman") reasoning check, see caveman_detector/. Scoring and its response fields run on every
+    verify; only the reward change depends on enabled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # When true, a flagged rollout gets reward 0.
+    enabled: bool = False
+    # Rollout score (mean per-turn P(caveman)) at or above which the rollout is flagged.
+    threshold: float = 0.85
+    # A: feature model (default). B: masked-unigram model, also flagged at threshold (B's calibrated rollout penalty
+    # threshold is 0.72). both: flagged only when A reaches threshold and B reaches its own penalty threshold.
+    detector: str = "A"
+    # Rollouts with fewer scored reasoning turns are never flagged.
+    min_scored_turns: int = 3
+
+    @field_validator("threshold")
+    @classmethod
+    def _threshold_in_unit_interval(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError(f"caveman_penalty.threshold must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("detector")
+    @classmethod
+    def _known_detector(cls, v: str) -> str:
+        if v not in ("A", "B", "both"):
+            raise ValueError(f"caveman_penalty.detector must be A, B or both, got {v!r}")
+        return v
+
+    @field_validator("min_scored_turns")
+    @classmethod
+    def _non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"caveman_penalty.min_scored_turns must be >= 0, got {v}")
+        return v
+
+
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
     # key must be present (validated below). exclude_domains are honored by both.
@@ -98,6 +137,7 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # Per-call lines in the driver log: every search, browse, cache lookup, shell command and judge
     # call, and the per-rollout phase and cache summaries. Errors and fatal lines print regardless.
     log_tool_calls: bool = True
+    caveman_penalty: CavemanPenaltyConfig = Field(default_factory=CavemanPenaltyConfig)
     dump_session_id_to_metrics_on_exit: bool = False
     # Per-CALL phase lines for every cache get and put. Off by default: cache gets
     # run several per turn, so this is the one knob that can multiply driver-log size.
@@ -319,6 +359,17 @@ class TavilySearchVerifyResponse(TavilySearchVerifyRequest, JudgeEvaluation):
     # reward in <split>_metrics.json (nested metrics.* records are not recursed).
     num_provider_429s: int = 0
     num_provider_other_retries: int = 0
+    # Caveman check (caveman_penalty config), on every verify: rollout score (None when no reasoning turn has enough
+    # prose), number of scored turns, flag, and the judge's reward before any penalty.
+    caveman_score: Optional[float] = None
+    caveman_scored_turns: int = 0
+    caveman_flag: bool = False
+    reward_before_penalty: Optional[float] = None
+    # Monitoring: detector B's score (A vs B divergence would show gaming of the reward detector), and the mean article
+    # share and subjectless-opening share over scored turns (telegraphic text that keeps its articles evades both).
+    caveman_score_b: Optional[float] = None
+    caveman_article_rate: Optional[float] = None
+    caveman_subjectless_share: Optional[float] = None
 
 
 # Task-local accumulator for provider retry counts. The client retry loops
@@ -745,6 +796,30 @@ def _last_assistant_text(response) -> str:
             if t:
                 text = t
     return text
+
+
+def _reasoning_turns(response) -> List[str]:
+    """Text of each reasoning item (one per model call) in response.output: summary parts, then content parts."""
+    turns = []
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", None) != "reasoning":
+            continue
+        parts = [getattr(p, "text", "") or "" for p in (getattr(item, "summary", None) or [])]
+        parts += [getattr(p, "text", "") or "" for p in (getattr(item, "content", None) or [])]
+        turns.append(" ".join(parts))
+    return turns
+
+
+def caveman_check(turns: List[str], cfg: CavemanPenaltyConfig) -> dict:
+    """Detector summary of the rollout plus the penalty flag under cfg. caveman_score is detector A's score, or B's
+    when detector == "B"; detector == "both" also needs B at its own penalty threshold."""
+    summary = caveman_detector.summarize_rollout(turns)
+    score = summary["score_b"] if cfg.detector == "B" else summary["score_a"]
+    flagged = score is not None and summary["n_scored"] >= cfg.min_scored_turns and score >= cfg.threshold
+    if flagged and cfg.detector == "both":
+        score_b = summary["score_b"]
+        flagged = score_b is not None and score_b >= caveman_detector.THRESHOLDS["B"]["rollout"]["penalty"]
+    return dict(summary, score=score, flagged=flagged)
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
@@ -1449,6 +1524,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             num_provider_429s=num_provider_429s,
             num_provider_other_retries=num_provider_other_retries,
         )
+        await self._apply_caveman_check(verify_response, body.response, rid)
 
         # /verify is the end of a rollout: release its cache phase totals (else they
         # leak for the process life) and log the server-lifetime cache hit rates.
@@ -1465,6 +1541,25 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if judge_error is not None:
             raise JudgeError(judge_error)
         return verify_response
+
+    async def _apply_caveman_check(self, verify_response, response, rid) -> None:
+        """Score the rollout's reasoning and record the caveman fields; with caveman_penalty.enabled a flagged rollout
+        gets reward 0. A scoring failure is logged and leaves the reward unchanged."""
+        cfg = self.config.caveman_penalty
+        verify_response.reward_before_penalty = verify_response.reward
+        try:
+            check = await asyncio.to_thread(caveman_check, _reasoning_turns(response), cfg)
+        except Exception as e:  # noqa: BLE001 - the check must never fail a rollout
+            print(f"[browsecomp][caveman][error] rid={rid} {type(e).__name__}: {e}", flush=True)
+            return
+        verify_response.caveman_score = check["score"]
+        verify_response.caveman_scored_turns = check["n_scored"]
+        verify_response.caveman_flag = check["flagged"]
+        verify_response.caveman_score_b = check["score_b"]
+        verify_response.caveman_article_rate = check["article_rate"]
+        verify_response.caveman_subjectless_share = check["subjectless_share"]
+        if cfg.enabled and check["flagged"]:
+            verify_response.reward = 0.0
 
     ###### UTILITY FUNCTIONS ######
 

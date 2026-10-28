@@ -1,0 +1,5 @@
+{
+ "_how": "Chosen before test scoring. turn: on pooled train out-of-fold + val window scores (caveman vs normal); monitor = best F1, penalty = lowest threshold with precision >= 0.97, p95 = lowest threshold with precision >= 0.95. rollout (score = mean turn probability): from val rollouts; monitor = 0.5 (middle of the gap between normal and caveman rollouts), penalty = just above the highest-scoring val normal rollout.",
+ "A": {"turn": {"monitor": 0.66, "penalty": 0.80, "p95": 0.64}, "rollout": {"monitor": 0.5, "penalty": 0.85}},
+ "B": {"turn": {"monitor": 0.58, "penalty": 0.72, "p95": 0.62}, "rollout": {"monitor": 0.5, "penalty": 0.72}}
+}
