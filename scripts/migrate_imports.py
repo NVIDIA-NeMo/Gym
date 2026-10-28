@@ -23,12 +23,13 @@ In `.py` files it rewrites:
 
 - `from nemo_gym.old import a, b`, splitting the statement when its names moved to different modules.
 - `from nemo_gym import old_module`.
+- `from nemo_gym.old import a, b` written as text on one line, such as a code sample in docs or a template in a string.
 - Every other dotted mention of an old path.
   That covers `import nemo_gym.old`, attribute chains such as `nemo_gym.old.name`, `mock.patch` targets, and names in config strings such as `"nemo_gym.old:Class"`.
 
 In every file it also rewrites filesystem paths of moved modules, such as `nemo_gym/old.py` and `nemo_gym/old/`, as CODEOWNERS, CI path filters, and docs spell them.
 Docs, config, and CI files (`.md`, `.mdx`, `.yaml`, `.yml`, `.toml`, `.json`, `.sh`, `.txt`, `.cfg`, `.ini`, `CODEOWNERS`, `Dockerfile`, `Makefile`) get only those two text rewrites.
-Relative imports that reach a moved module are reported, not rewritten.
+Relative imports that reach a moved module are reported, not rewritten, and so is a `monkeypatch.setattr` or `patch.object` that patches a split-out name through its old module, because that patch reaches only code that still looks the name up there.
 Run `ruff check --fix` and `ruff format` on the changed files afterwards to sort the rewritten imports.
 """
 
@@ -41,8 +42,10 @@ from pathlib import Path
 from typing import Iterable, Mapping, Optional
 
 
-# Files that name old paths on purpose: the move list itself and the tests of old paths.
+# Files that name old paths on purpose: the move list itself, the tests of old paths, and the docs redirects, whose
+# sources are the URLs of moved modules.
 KEEP_OLD_PATHS = (
+    "fern/docs.yml",
     "nemo_gym/_moved_paths.py",
     "scripts/migrate_imports.py",
     "tests/unit_tests/fixtures/import_surface.json",
@@ -51,6 +54,9 @@ KEEP_OLD_PATHS = (
 )
 # Frozen docs for released versions describe the paths those releases shipped with.
 RELEASED_DOCS = re.compile(r"(^|/)fern/versions/v\d[^/]*/")
+PATCH_THROUGH_MODULE = re.compile(
+    r"(?:setattr|patch\.object)\(\s*(?P<module>[A-Za-z_][\w.]*)\s*,\s*[\"'](?P<name>\w+)[\"']"
+)
 TEXT_SUFFIXES = {".md", ".mdx", ".yaml", ".yml", ".toml", ".json", ".sh", ".txt", ".cfg", ".ini"}
 TEXT_NAMES = {"CODEOWNERS", "Dockerfile", "Makefile"}
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".ruff_cache", ".pytest_cache"}
@@ -94,7 +100,22 @@ class Migrator:
         slashed = {old.replace(".", "/"): new.replace(".", "/") for old, new in self.modules.items()}
         alternatives = "|".join(re.escape(old) for old in sorted(slashed, key=len, reverse=True))
         self._slashed = slashed
-        self._slashed_re = re.compile(rf"(?<![\w.])({alternatives})(?=\.py\b|/|(?!\w|\.\w))") if slashed else None
+        # Library reference URLs (`.../nemo-gym/nemo_gym/old`) are left alone: fern/docs.yml redirects them.
+        self._slashed_re = (
+            re.compile(rf"(?<![\w.])(?<!nemo-gym/)({alternatives})(?=\.py\b|/|(?!\w|\.\w))") if slashed else None
+        )
+        # One-line `from <module> import <names>` written as text, for modules that names were split out of.
+        alternatives = "|".join(re.escape(module) for module in sorted(self.names, key=len, reverse=True))
+        self._text_import_re = (
+            re.compile(
+                rf"^(?P<indent>[ \t]*)from (?P<module>{alternatives}) import (?P<names>[^\n#()\\]+?)(?P<comment>[ \t]*#[^\n]*)?$",
+                re.M,
+            )
+            if self.names
+            else None
+        )
+        # `monkeypatch.setattr(<old module>, "<name>", ...)` and `patch.object(...)` through a module that names left.
+        self._moved_name_owner = {name: module for module, moved in self.names.items() for name in moved}
 
     def module_path(self, module: str) -> str:
         """The current path of `module`, following module moves (longest moved prefix wins)."""
@@ -106,19 +127,22 @@ class Migrator:
         return module
 
     def rewrite_dotted(self, text: str) -> str:
-        """Rewrite dotted mentions (`nemo_gym.old.name`) and filesystem paths (`nemo_gym/old.py`) of moved code."""
+        """Rewrite dotted mentions (`nemo_gym.old.name`) and filesystem paths (`nemo_gym/old.py`) of moved code.
+
+        One-line `from <module> import <names>` text, such as a code sample in docs or a template in a string, is rewritten too.
+        """
+        if self._text_import_re is not None:
+            text = self._text_import_re.sub(self._rewrite_text_import, text)
         if self._dotted_re is not None:
             text = self._dotted_re.sub(lambda match: self._dotted[match.group(1)], text)
         if self._slashed_re is not None:
             text = self._slashed_re.sub(lambda match: self._slashed[match.group(1)], text)
         return text
 
-    def _rewrite_import_from(self, node: ast.ImportFrom, statement: str) -> Optional[str]:
-        """Rewrite one `from nemo_gym... import ...` statement, keeping its formatting when nothing splits."""
-        module = node.module
+    def _destinations(self, module: str, names: list[tuple[str, Optional[str]]]) -> dict[str, list[str]]:
+        """Group `(name, asname)` pairs imported from `module` by the module each now lives in."""
         groups: dict[str, list[str]] = {}
-        for alias in node.names:
-            name, asname = alias.name, alias.asname
+        for name, asname in names:
             if name in self.names.get(module, {}):
                 target_module, target_name = self.names[module][name]
             elif name == "*":
@@ -128,6 +152,12 @@ class Migrator:
                 target_module, _, target_name = self.module_path(f"{module}.{name}").rpartition(".")
             spelled = target_name if target_name == name and asname is None else f"{target_name} as {asname or name}"
             groups.setdefault(target_module, []).append(spelled)
+        return groups
+
+    def _rewrite_import_from(self, node: ast.ImportFrom, statement: str) -> Optional[str]:
+        """Rewrite one `from nemo_gym... import ...` statement, keeping its formatting when nothing splits."""
+        module = node.module
+        groups = self._destinations(module, [(alias.name, alias.asname) for alias in node.names])
         original = [alias.name if alias.asname is None else f"{alias.name} as {alias.asname}" for alias in node.names]
         if len(groups) == 1:
             [(target, spelled)] = groups.items()
@@ -139,6 +169,22 @@ class Migrator:
         indent = " " * node.col_offset
         lines = [f"from {target} import {', '.join(spelled)}" for target, spelled in groups.items()]
         return f"\n{indent}".join(lines)
+
+    def _rewrite_text_import(self, match: re.Match) -> str:
+        """Rewrite a one-line `from <module> import <names>` written as text, such as a code sample in docs."""
+        module = match.group("module")
+        names = []
+        for part in match.group("names").split(","):
+            name, _, asname = part.strip().partition(" as ")
+            if not name.isidentifier() or (asname and not asname.strip().isidentifier()):
+                return match.group(0)
+            names.append((name, asname.strip() or None))
+        groups = self._destinations(module, names)
+        if list(groups) == [module]:
+            return match.group(0)
+        indent, comment = match.group("indent"), match.group("comment") or ""
+        lines = [f"{indent}from {target} import {', '.join(spelled)}" for target, spelled in groups.items()]
+        return "\n".join(lines) + comment
 
     def rewrite_python(self, source: str, *, path: str = "<source>") -> tuple[str, list[str]]:
         """Return the rewritten source and notes about relative imports into moved modules."""
@@ -163,6 +209,15 @@ class Migrator:
             new = self._rewrite_import_from(node, source[start:end])
             if new is not None:
                 edits.append((start, end, new))
+        for match in PATCH_THROUGH_MODULE.finditer(source):
+            owner = self._moved_name_owner.get(match.group("name"))
+            if owner is not None and owner.rpartition(".")[2] == match.group("module").rpartition(".")[2]:
+                line = source.count("\n", 0, match.start()) + 1
+                new_module, _ = self.names[owner][match.group("name")]
+                notes.append(
+                    f"{path}:{line}: patches `{match.group('name')}` through `{match.group('module')}`, but it moved to "
+                    f"`{new_module}`; the patch reaches only code that still looks it up in the old module, so check by hand"
+                )
         for start, end, new in sorted(edits, reverse=True):
             source = source[:start] + new + source[end:]
         # Everything else: attribute chains, patch targets, and dotted strings.

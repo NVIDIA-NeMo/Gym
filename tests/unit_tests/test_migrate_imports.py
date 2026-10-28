@@ -106,6 +106,14 @@ class TestRewritePython:
         assert released.read_text() == "See `nemo_gym.server_utils`.\n"
         assert current.read_text() == "See `nemo_gym.server_runtime.server_utils`.\n"
 
+    def test_docs_redirects_are_skipped(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(migrate_imports, "_load_moves", lambda: (MODULES, NAMES))
+        redirects = tmp_path / "fern" / "docs.yml"
+        redirects.parent.mkdir()
+        redirects.write_text('  - source: "/nemo/gym/nemo-gym/nemo_gym/server_utils"\n')
+        assert migrate_imports.main([str(tmp_path)]) == 0
+        assert redirects.read_text() == '  - source: "/nemo/gym/nemo-gym/nemo_gym/server_utils"\n'
+
     def test_files_that_keep_old_paths_on_purpose_are_skipped(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(migrate_imports, "_load_moves", lambda: (MODULES, NAMES))
         kept = tmp_path / "nemo_gym" / "_moved_paths.py"
@@ -154,12 +162,51 @@ class TestRewritePython:
         once = _python(migrator, source)
         assert _python(migrator, once) == once
 
+    def test_import_written_in_a_string_is_rewritten(self, migrator) -> None:
+        source = """
+            TEMPLATE = \"\"\"
+            from nemo_gym.server_utils import SimpleServer, request  # used by the server
+            \"\"\"
+        """
+        assert _python(migrator, source) == textwrap.dedent("""
+            TEMPLATE = \"\"\"
+            from nemo_gym.server_runtime.server_utils import SimpleServer
+            from nemo_gym.client.http_client import request  # used by the server
+            \"\"\"
+        """)
+
+    def test_patch_of_a_split_out_name_through_its_old_module_is_reported(self, migrator) -> None:
+        source = (
+            "import nemo_gym.server_utils\n"
+            "def test(monkeypatch):\n"
+            '    monkeypatch.setattr(nemo_gym.server_utils, "request", None)\n'
+            '    monkeypatch.setattr(nemo_gym.server_utils, "SimpleServer", None)\n'
+        )
+        _, notes = migrator.rewrite_python(source, path="t.py")
+        assert len(notes) == 1
+        assert notes[0].startswith("t.py:3: patches `request` through `nemo_gym.server_utils`")
+
     def test_relative_import_into_moved_module_is_reported(self, migrator) -> None:
         _, warnings = migrator.rewrite_python("from . import server_utils\n", path="nemo_gym/x.py")
         assert warnings == ["nemo_gym/x.py:1: relative import may reach a moved module; check by hand"]
 
 
 class TestRewriteText:
+    def test_library_reference_urls_are_left_for_the_docs_redirects(self, migrator) -> None:
+        text = "See [ServerClient](/main/nemo-gym/nemo_gym/server_utils) in nemo_gym/server_utils.py.\n"
+        assert migrator.rewrite_dotted(text) == (
+            "See [ServerClient](/main/nemo-gym/nemo_gym/server_utils) in nemo_gym/server_runtime/server_utils.py.\n"
+        )
+
+    def test_code_sample_in_docs(self, migrator) -> None:
+        text = "```python\nfrom nemo_gym.server_utils import ServerClient, SESSION_ID_KEY\nfrom nemo_gym.openai_utils import (\n```\n"
+        assert migrator.rewrite_dotted(text) == (
+            "```python\n"
+            "from nemo_gym.client.server_client import ServerClient\n"
+            "from nemo_gym.server_runtime.server_utils import SESSION_ID_KEY\n"
+            "from nemo_gym.openai_utils import (\n```\n"
+        )
+
     def test_paths_in_codeowners_ci_and_docs(self, migrator) -> None:
         text = (
             "/nemo_gym/server_utils.py @NVIDIA-NeMo/gym_core\n"
