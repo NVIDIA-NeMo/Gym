@@ -16,7 +16,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import SAVED_CONFIG, SubmitConfig
 
 
 COMPUTE = {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}}
@@ -541,6 +541,30 @@ def test_pinned_service_host_is_deferred_to_a_driver_env_var():
     )
     assert config.driver.benchmarks["gsm8k"].run["url"] == "http://${oc.env:GYM_SERVICE_SVC_HOST}:8000/v1"
     assert config.deferred_host_services == ["svc"]
+
+
+def test_a_saved_config_still_defers_the_hosts_its_resolved_references_use():
+    cfg = _run(url="service:svc.url")
+    config = SubmitConfig.model_validate(
+        {**cfg, "compute": POOLS, "services": {"svc": {**SERVICE, "node_pool": "aux"}}}
+    )
+    resumed = SubmitConfig.model_validate(config.model_dump(mode="json"), context={SAVED_CONFIG: True})
+    assert resumed.deferred_host_services == ["svc"]
+
+
+def test_a_server_per_node_service_references_every_nodes_url():
+    pools = {
+        "cluster": {
+            **POOLS["cluster"],
+            "node_pools": {"main": {"partition": "p", "nodes": 3, "gpus_per_node": 8}},
+        }
+    }
+    service = {**SERVICE, "node_pool": "main", "server_per_node": True}
+    cfg = _run(urls="service:svc.url", host="service:svc.host")
+    config = SubmitConfig.model_validate({**cfg, "compute": pools, "services": {"svc": service}})
+    run = config.driver.benchmarks["gsm8k"].run
+    assert run["urls"] == [f"http://${{oc.env:GYM_POOL_MAIN_NODE_{i}}}:8000/v1" for i in range(3)]
+    assert run["host"] == "${oc.env:GYM_SERVICE_SVC_HOST}"
 
 
 def test_unreferenced_pinned_service_defers_nothing():

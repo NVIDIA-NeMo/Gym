@@ -17,6 +17,7 @@ import copy
 import os
 import re
 import warnings
+from dataclasses import replace
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -221,6 +222,14 @@ class VllmServiceConfig(BaseModelServiceConfig):
 
 class VllmNodeServiceConfig(VllmServiceConfig):
     server_per_node: bool = False
+    _node_count: int = PrivateAttr(default=1)
+
+    def accessors(self, name: str) -> ServiceAccessors:
+        """With one server per node, `url` is the list of every node's URL, and `host` the first node's."""
+        accessors = super().accessors(name)
+        if not self.server_per_node:
+            return accessors
+        return replace(accessors, url=self.node_urls(self._node_count))
 
     def node_host_var(self, index: int) -> str:
         """The env var the batch script exports with the host of one node of this service's pool."""
@@ -752,6 +761,7 @@ class SubmitConfig(_StrictModel):
                         "instances for the Ray Serve gateway to route; drop use_ray_serve."
                     )
                 service_nodes = 1
+                service._node_count = compute.node_pools[service.node_pool].nodes
             if isinstance(compute, SlurmComputeConfig):
                 service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
             else:
@@ -828,6 +838,15 @@ class SubmitConfig(_StrictModel):
             except ValueError as e:
                 raise ValueError(f"Benchmark '{bench_name}' run config: {e}") from None
             self._deferred_host_services |= deferred
+        # A saved config holds the resolved references, so the hosts a run needs are read back from its values.
+        runs = repr([benchmark.run for benchmark in self.driver.benchmarks.values()])
+        self._deferred_host_services |= {
+            name
+            for name, service in self.services.items()
+            if isinstance(service, BaseModelServiceConfig)
+            and service.node_pool is not None
+            and f"oc.env:{service_host_env_var(name)}" in runs
+        }
         check_host_var_collisions(self._deferred_host_services)
 
         return self

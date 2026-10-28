@@ -46,7 +46,7 @@ class ServiceAccessors:
     """A service's named fields as strings. A pinned service's host is only known once the job has nodes,
     so it is an OmegaConf reference to a driver env var and `host_deferred` is set."""
 
-    url: str
+    url: str | list[str]
     host: str
     port: str
     model: str
