@@ -19,6 +19,8 @@ In DWRL pointwise every rollout is judged on its own. The reward of a rollout is
 the judge's JSON, but it does not feed into the reward.
 """
 
+import random
+
 import pytest
 from pytest import approx
 
@@ -29,6 +31,7 @@ from resources_servers.dwrl_genrm_compare_pointwise.utils import (
     _compute_length_weights,
     aggregate_scores,
     apply_length_bonuses,
+    compute_reward,
     extract_conversation_history,
     extract_from_response_obj,
     extract_output_text,
@@ -50,7 +53,7 @@ def _response_obj(answer="", reasoning=""):
 
 
 class TestGetPromptKeyFromInput:
-    """The prompt key groups the rollouts of one prompt into a cohort."""
+    """The prompt key is the same for rollouts of the same prompt and principle."""
 
     def test_accepts_pydantic_messages(self) -> None:
         dict_messages = [{"role": "user", "content": "Hello", "type": "message"}]
@@ -400,3 +403,48 @@ class TestAggregateScores:
         )
         assert rewards == approx([0.9, 0.1])
         assert bonuses == [0.0, 0.0]
+
+
+class TestComputeReward:
+    def test_one_judge_gives_its_bt_score(self) -> None:
+        assert compute_reward([(3.0, 0.9)]) == approx(0.9)
+
+    def test_multiple_judges_are_averaged(self) -> None:
+        assert compute_reward([(3.0, 0.8), (3.0, 0.2), (3.0, 0.5)]) == approx(0.5)
+
+    def test_score_1_does_not_affect_the_reward(self) -> None:
+        assert compute_reward([(1.0, 0.6)]) == compute_reward([(-100.0, 0.6)])
+
+    def test_no_judge_results_raises(self) -> None:
+        with pytest.raises(ValueError):
+            compute_reward([])
+
+    @pytest.mark.parametrize("seed", range(20))
+    def test_equals_what_the_group_aggregation_gives_each_rollout(self, seed) -> None:
+        # compute_reward replaces aggregate_scores for a rollout judged on its own. For a whole group the two must
+        # agree exactly, so that dropping the grouping cannot change a reward.
+        rng = random.Random(seed)
+        num_responses = rng.randint(1, 8)
+        num_judges = rng.randint(1, 3)
+        judge_results = {
+            (i, j): (rng.choice([1.0, 3.0, 5.0, -100.0]), rng.random())
+            for i in range(num_responses)
+            for j in range(num_judges)
+        }
+        keys = sorted(judge_results, key=lambda key: (key[1], key[0]))  # The order the old grouped computation used
+
+        group_rewards, _, _, _ = aggregate_scores(
+            comparison_results=[judge_results[key] for key in keys],
+            comparison_metadata=keys,
+            response_objs=[_response_obj(answer=f"answer {i}") for i in range(num_responses)],
+            aggregator_method="simple_tiebreaker",
+            default_score=3.0,
+            reasoning_bonus=0.0,
+            answer_bonus=0.0,
+            top_percentile=0.2,
+            group_reasoning_length_penalty_coeff=0.0,
+            group_answer_length_penalty_coeff=0.0,
+        )
+
+        for i in range(num_responses):
+            assert compute_reward([judge_results[(i, j)] for j in range(num_judges)]) == group_rewards[i]

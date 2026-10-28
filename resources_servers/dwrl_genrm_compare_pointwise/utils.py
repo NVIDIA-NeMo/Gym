@@ -16,7 +16,7 @@
 """Utility functions for GenRM comparison server.
 
 This module provides:
-- Prompt key and conversation history extraction (for cohort grouping)
+- Prompt key and conversation history extraction
 - Comparison pair generation strategies (circular, all_pairs)
 - GenRM output parsing (JSON score extraction)
 - Response API object text extraction
@@ -72,7 +72,7 @@ class GenRMOutputParseError(ValueError):
 
 
 # =============================================================================
-# Prompt key and conversation history (for cohort-based verify)
+# Prompt key and conversation history
 # =============================================================================
 
 
@@ -90,7 +90,7 @@ def _to_jsonable_data(value: Any) -> Any:
 def get_prompt_key_from_input(input_messages: List[Any], principle: Optional[str] = None) -> str:
     """Stable key for grouping rollouts by prompt and principle.
 
-    Used by cohort-based verify to group N rollouts per prompt.
+    Not used by verify(), which judges every rollout on its own.
 
     Args:
         input_messages: Conversation input (e.g. responses_create_params.input)
@@ -500,6 +500,22 @@ def _compute_length_weights(lengths: List[int]) -> List[float]:
 # =============================================================================
 # Score Aggregation
 # =============================================================================
+
+
+def compute_reward(judge_results: List[Tuple[float, float]]) -> float:
+    """Reward of a single rollout: the mean Bradley-Terry score over its judge passes.
+
+    Each result is the `(score_1, bt_score)` pair that `_run_single_comparison` returns for one judge pass.
+    Only `bt_score` enters the reward, and nothing about any other rollout does.
+    """
+    if not judge_results:
+        raise ValueError("Cannot compute a reward without any judge results")
+    # A plain running sum, as in aggregate_scores: the builtin sum() is compensated on Python 3.12+ and would differ
+    # from the grouped computation in the last bit.
+    total = 0.0
+    for _score_1, bt_score in judge_results:
+        total += bt_score
+    return total / len(judge_results)
 
 
 def aggregate_scores(

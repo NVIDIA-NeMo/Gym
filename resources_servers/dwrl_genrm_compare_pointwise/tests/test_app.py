@@ -15,11 +15,11 @@
 """Tests for the DWRL pointwise GenRM resources server.
 
 How DWRL pointwise works, which these tests pin down:
-- verify() groups the rollouts of one prompt into a cohort of `num_rollouts_per_prompt`.
 - Every rollout is judged on its own (see `_run_single_comparison`): the judge first writes an evaluation of the
   response, then a second 1-token call reads the probability of `score_token` ("yes") from the logprobs. That
-  probability is the BT score, and it is the rollout's reward.
-- The cohort's rewards are computed when the last rollout has been judged, whatever order they finish in.
+  probability is the BT score, and the mean over the judge passes is the rollout's reward.
+- verify() returns that reward as soon as the rollout has been judged. It never waits for, or depends on, any
+  other rollout of the same prompt.
 """
 
 import asyncio
@@ -36,7 +36,6 @@ from pydantic import ValidationError
 from pytest import approx
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
@@ -56,8 +55,7 @@ from resources_servers.dwrl_genrm_compare_pointwise.app import (
     convert_to_chat_completion_format,
     flatten_to_single_turn,
 )
-from resources_servers.dwrl_genrm_compare_pointwise.cohort import CohortRegistry, MemberJudgmentFailed
-from resources_servers.dwrl_genrm_compare_pointwise.utils import extract_output_text, get_prompt_key_from_input
+from resources_servers.dwrl_genrm_compare_pointwise.utils import extract_output_text
 
 
 CONFIG_PATH = Path(__file__).parent.parent / "configs" / "dwrl_genrm_compare_pointwise.yaml"
@@ -119,17 +117,13 @@ def _make_response(text: str, response_id: str = "resp") -> NeMoGymResponse:
     )
 
 
-def _make_verify_request(
-    answer: str, prompt: str = "What is 2+2?", principle=None, **identity
-) -> GenRMCompareVerifyRequest:
-    """`identity` is any of task_index, rollout_index and prompt_id."""
+def _make_verify_request(answer: str, prompt: str = "What is 2+2?", principle=None) -> GenRMCompareVerifyRequest:
     return GenRMCompareVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
             input=[NeMoGymEasyInputMessage(role="user", content=prompt, type="message")]
         ),
         response=_make_response(answer),
         principle=principle,
-        **identity,
     )
 
 
@@ -141,7 +135,6 @@ class TestGenRMCompareConfig:
     def test_defaults(self):
         config = _make_config()
 
-        assert config.num_rollouts_per_prompt == 1
         assert config.num_judges_per_comparison == 1
         assert config.use_principle is False
         assert config.aggregator_method == "simple_tiebreaker"
@@ -171,18 +164,9 @@ class TestGenRMCompareConfig:
         with pytest.raises(ValidationError):
             _make_config(num_judges_per_comparison=0)
 
-    def test_cohorts_cannot_be_spread_over_several_worker_processes(self):
-        # The cohorts live in the memory of one process, so rollouts of the same prompt must reach the same process.
-        with pytest.raises(ValidationError, match="num_workers must be 1"):
-            _make_config(num_rollouts_per_prompt=8, num_workers=4)
-
-    @pytest.mark.parametrize("num_workers", [None, 1])
-    def test_single_worker_process_is_accepted(self, num_workers):
-        assert _make_config(num_rollouts_per_prompt=8, num_workers=num_workers).num_rollouts_per_prompt == 8
-
-    def test_several_workers_are_fine_without_cohorts(self):
-        # With one rollout per prompt verify() does not group anything.
-        assert _make_config(num_rollouts_per_prompt=1, num_workers=4).num_workers == 4
+    def test_several_worker_processes_are_accepted(self):
+        # Rollouts are judged independently, so they need not be handled by the same process.
+        assert _make_config(num_workers=4).num_workers == 4
 
     def test_packaged_config_matches_the_config_class(self):
         """configs/dwrl_genrm_compare_pointwise.yaml must stay in sync with GenRMCompareConfig."""
@@ -192,14 +176,13 @@ class TestGenRMCompareConfig:
             "dwrl_genrm_compare_pointwise"
         ]
 
-        # `???` marks the values that are supplied when the run is launched.
-        assert server_config["num_rollouts_per_prompt"] == "???"
-        server_config["num_rollouts_per_prompt"] = 8
+        # Nothing has to be supplied when the run is launched, and rollouts are not grouped by prompt.
+        assert "???" not in yaml.safe_dump(server_config)
+        assert "num_rollouts_per_prompt" not in server_config
 
         config = GenRMCompareConfig(host="localhost", port=8000, name="dwrl", **server_config)
 
         assert config.genrm_model_server.name == "dwrl_model"
-        assert config.num_rollouts_per_prompt == 8
         assert config.score_token == "yes"
         assert config.aggregator_method == "simple_tiebreaker"
         # The prompts must contain the placeholders that _run_single_comparison fills in.
@@ -241,95 +224,18 @@ class TestRequestAndResponseModels:
             **extra,
         }
 
-    def test_verify_request_identity_fields_default_to_none(self):
-        request = _make_verify_request("4")
-
-        assert request.task_index is None
-        assert request.rollout_index is None
-        assert request.prompt_id is None
-
-    def test_verify_request_reads_the_gym_index_keys(self):
+    def test_verify_request_keeps_the_index_fields_that_gym_adds_as_extras(self):
         # Gym's rollout collection stamps these keys on every row, and the agent forwards them to /verify.
         request = GenRMCompareVerifyRequest.model_validate(
-            self._verify_request_payload(**{TASK_INDEX_KEY_NAME: 7, ROLLOUT_INDEX_KEY_NAME: 2})
+            self._verify_request_payload(_ng_task_index=7, _ng_rollout_index=2)
         )
 
-        assert request.task_index == 7
-        assert request.rollout_index == 2
-
-    def test_verify_request_index_fields_use_the_gym_key_names_as_aliases(self):
-        fields = GenRMCompareVerifyRequest.model_fields
-
-        assert fields["task_index"].alias == TASK_INDEX_KEY_NAME
-        assert fields["rollout_index"].alias == ROLLOUT_INDEX_KEY_NAME
-
-    def test_verify_request_can_also_be_built_from_the_field_names(self):
-        request = GenRMCompareVerifyRequest(
-            **self._verify_request_payload(task_index=7, rollout_index=2, prompt_id="prompt-123")
-        )
-
-        assert (request.task_index, request.rollout_index, request.prompt_id) == (7, 2, "prompt-123")
+        assert request.model_extra == {"_ng_task_index": 7, "_ng_rollout_index": 2}
 
     def test_verify_request_keeps_unknown_fields(self):
         request = GenRMCompareVerifyRequest.model_validate(self._verify_request_payload(some_other_field="kept"))
 
         assert request.model_extra["some_other_field"] == "kept"
-
-    def test_verify_request_rejects_a_non_integer_task_index(self):
-        with pytest.raises(ValidationError):
-            GenRMCompareVerifyRequest.model_validate(self._verify_request_payload(**{TASK_INDEX_KEY_NAME: "seven"}))
-
-
-class TestGetVerifyCohortKey:
-    """Rollouts that belong together must get the same key, and rollouts that do not must get different keys."""
-
-    PROMPT = "What is 2+2?"
-
-    def _key(self, prompt=PROMPT, principle=None, **identity):
-        request = _make_verify_request("answer", prompt, principle, **identity)
-        return _make_server()._get_verify_cohort_key(request, request.responses_create_params.input, principle)
-
-    def _prompt_hash(self, prompt=PROMPT, principle=None):
-        messages = [NeMoGymEasyInputMessage(role="user", content=prompt, type="message")]
-        return get_prompt_key_from_input(messages, principle)
-
-    def test_without_identity_the_key_is_the_prompt_hash(self):
-        assert self._key() == self._prompt_hash()
-
-    def test_task_index_is_preferred(self):
-        assert self._key(task_index=7) == f"task_idx::7::{self._prompt_hash()}"
-
-    def test_task_index_zero_is_a_valid_task(self):
-        assert self._key(task_index=0) == f"task_idx::0::{self._prompt_hash()}"
-
-    def test_prompt_id_is_used_when_there_is_no_task_index(self):
-        assert self._key(prompt_id="prompt-123") == f"prompt_id::prompt-123::{self._prompt_hash()}"
-
-    def test_task_index_wins_over_prompt_id(self):
-        assert self._key(task_index=7, prompt_id="prompt-123") == f"task_idx::7::{self._prompt_hash()}"
-
-    def test_principle_is_part_of_the_key(self):
-        assert self._key(principle="Be concise", task_index=7) == (
-            f"task_idx::7::{self._prompt_hash(principle='Be concise')}"
-        )
-        assert self._key(principle="Be concise", task_index=7) != self._key(principle="Be thorough", task_index=7)
-
-    def test_same_prompt_in_different_tasks_gets_different_keys(self):
-        assert self._key(task_index=1) != self._key(task_index=2)
-
-    def test_same_prompt_with_different_prompt_ids_gets_different_keys(self):
-        assert self._key(prompt_id="a") != self._key(prompt_id="b")
-
-    def test_same_task_with_different_prompt_text_gets_different_keys(self):
-        assert self._key("first prompt", task_index=7) != self._key("second prompt", task_index=7)
-
-    def test_all_rollouts_of_a_task_share_one_key(self):
-        keys = {self._key(task_index=7, rollout_index=i) for i in range(8)}
-
-        assert len(keys) == 1
-
-    def test_key_is_deterministic(self):
-        assert self._key(task_index=7) == self._key(task_index=7)
 
 
 class TestInputToConversationHistory:
@@ -714,6 +620,8 @@ class FakeJudge:
     def __init__(self):
         self.gates = {}
         self.calls = []
+        self.principles = []
+        self.errors = {}  # rollout id -> exception to raise instead of returning a score
 
     def gate(self, rollout_id):
         return self.gates.setdefault(rollout_id, asyncio.Event())
@@ -721,7 +629,10 @@ class FakeJudge:
     async def __call__(self, server, conversation_history, response_obj, principle=None):
         rollout_id = int(extract_output_text(response_obj).rsplit("-", 1)[1])
         self.calls.append(rollout_id)
+        self.principles.append(principle)
         await self.gate(rollout_id).wait()
+        if rollout_id in self.errors:
+            raise self.errors[rollout_id]
         return 3.0, BT_SCORES[rollout_id]
 
 
@@ -737,29 +648,17 @@ def judge(monkeypatch):
     return fake
 
 
-@pytest.fixture(autouse=True)
-def fresh_cohorts(monkeypatch):
-    monkeypatch.setattr(app_module, "_cohorts", CohortRegistry())
-
-
 async def _settle():
     """Give every runnable task enough event loop turns to run until it blocks again."""
     for _ in range(25):
         await asyncio.sleep(0)
 
 
-async def _start(server, ids, prompt="What is 2+2?", principle=None, **identity):
-    """Start one verify() per id, in order, and let each reach its judge call.
-
-    `identity` (task_index and/or prompt_id) is sent with every request. A task_index is accompanied by the
-    rollout's own index, like the requests that Gym's rollout collection sends.
-    """
-
-    def request(i):
-        extra = dict(identity, rollout_index=i) if "task_index" in identity else identity
-        return _make_verify_request(f"rollout-{i}", prompt, principle, **extra)
-
-    tasks = [asyncio.create_task(server.verify(request(i))) for i in ids]
+async def _start(server, ids, prompt="What is 2+2?", principle=None):
+    """Start one verify() per id, in order, and let each reach its judge call."""
+    tasks = [
+        asyncio.create_task(server.verify(_make_verify_request(f"rollout-{i}", prompt, principle))) for i in ids
+    ]
     await _settle()
     return tasks
 
@@ -776,591 +675,235 @@ def _run(coro):
 
 
 def _server(num_judges=1):
-    return _make_server(_make_config(num_rollouts_per_prompt=NUM_ROLLOUTS, num_judges_per_comparison=num_judges))
+    return _make_server(_make_config(num_judges_per_comparison=num_judges))
 
 
 class TestVerify:
-    def test_single_rollout_per_prompt_returns_default_without_judging(self, judge):
+    def test_reward_is_the_bt_score_of_the_rollout(self, judge):
         async def scenario():
-            server = _make_server(_make_config(num_rollouts_per_prompt=1, default_score=-100.0))
-            return await server.verify(_make_verify_request("rollout-0"))
+            task = (await _start(_server(), [3]))[0]
+            await _release(judge, [3])
+            return await task
 
-        assert _run(scenario()).reward == -100.0
-        assert judge.calls == []
+        assert _run(scenario()).reward == approx(BT_SCORES[3])
+        assert judge.calls == [3]
+
+    def test_a_lone_rollout_is_judged(self, judge):
+        # There is no group to wait for, so one rollout per prompt is judged like any other.
+        async def scenario():
+            server = _make_server(_make_config(default_score=-100.0))
+            task = (await _start(server, [0]))[0]
+            await _release(judge, [0])
+            return await task
+
+        assert _run(scenario()).reward == approx(BT_SCORES[0])
 
     def test_response_carries_the_original_request(self, judge):
         async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS))
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*tasks)
+            task = (await _start(_server(), [2]))[0]
+            await _release(judge, [2])
+            return await task
 
-        results = _run(scenario())
-        assert extract_output_text(results[2].response.model_dump()) == "rollout-2"
-        assert results[2].responses_create_params.input[0].content == "What is 2+2?"
+        result = _run(scenario())
+        assert extract_output_text(result.response.model_dump()) == "rollout-2"
+        assert result.responses_create_params.input[0].content == "What is 2+2?"
 
-    def test_each_rollout_gets_its_own_bt_score_as_reward(self, judge):
+    def test_a_rollout_is_rewarded_without_waiting_for_the_others(self, judge):
+        # The point of the design: of 8 rollouts of one prompt only rollout 3 has been judged.
         async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS))
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*tasks)
-
-        results = _run(scenario())
-        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-        assert sorted(judge.calls) == list(range(NUM_ROLLOUTS))
-
-    def test_nothing_resolves_until_the_whole_cohort_is_judged(self, judge):
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS))
-            await _release(judge, range(NUM_ROLLOUTS - 1))
-            assert not any(t.done() for t in tasks)
-
-            await _release(judge, [NUM_ROLLOUTS - 1])
-            return await asyncio.gather(*tasks)
-
-        assert len(_run(scenario())) == NUM_ROLLOUTS
-
-    def test_last_arrival_finishing_first_does_not_trigger_extra_judge_calls(self, judge):
-        # Regression test: the last rollout to arrive used to finalize the cohort as soon as its own judgment
-        # returned, and re-judged every rollout that was still in flight (the `SHOULD_NOT_HAPPEN` log lines).
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS))
-
-            await _release(judge, [NUM_ROLLOUTS - 1])
-            assert not any(t.done() for t in tasks), "cohort finished before every rollout was judged"
-
-            await _release(judge, range(NUM_ROLLOUTS - 1))
-            return await asyncio.gather(*tasks)
-
-        results = _run(scenario())
-        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-        assert sorted(judge.calls) == list(range(NUM_ROLLOUTS))
-
-    def test_any_completion_order_gives_the_same_rewards(self, judge):
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS))
-            await _release(judge, [3, 7, 0, 5, 1, 6, 2, 4])
-            return await asyncio.gather(*tasks)
-
-        results = _run(scenario())
-        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-        assert len(judge.calls) == NUM_ROLLOUTS
-
-    def test_rollouts_arriving_after_others_were_already_judged(self, judge):
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(4))
-            await _release(judge, range(4))
-            assert not any(t.done() for t in tasks)
-
-            tasks += await _start(server, range(4, NUM_ROLLOUTS))
-            await _release(judge, range(4, NUM_ROLLOUTS))
-            return await asyncio.gather(*tasks)
-
-        results = _run(scenario())
-        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-        assert len(judge.calls) == NUM_ROLLOUTS
-
-    def test_multiple_judges_are_averaged(self, judge):
-        async def scenario():
-            server = _server(num_judges=2)
-            tasks = await _start(server, range(NUM_ROLLOUTS))
-            await _release(judge, reversed(range(NUM_ROLLOUTS)))
-            return await asyncio.gather(*tasks)
-
-        results = _run(scenario())
-        # The fake returns the same BT score for both judges of a rollout, so the average is unchanged.
-        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-        assert len(judge.calls) == 2 * NUM_ROLLOUTS
-
-    def test_same_prompt_twice_forms_two_cohorts(self, judge):
-        async def scenario():
-            server = _server()
-            first = await _start(server, range(NUM_ROLLOUTS))
-            second = await _start(server, range(NUM_ROLLOUTS))
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*first), await asyncio.gather(*second)
-
-        first, second = _run(scenario())
-        expected = approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-        assert [r.reward for r in first] == expected
-        assert [r.reward for r in second] == expected
-        assert len(judge.calls) == 2 * NUM_ROLLOUTS
-        assert app_module._cohorts.num_open == 0
-
-    def test_different_prompts_are_independent_cohorts(self, judge):
-        async def scenario():
-            server = _server()
-            a = await _start(server, range(NUM_ROLLOUTS), prompt="prompt a")
-            b = await _start(server, range(NUM_ROLLOUTS), prompt="prompt b")
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*a, *b)
-
-        assert len(_run(scenario())) == 2 * NUM_ROLLOUTS
-        assert app_module._cohorts.num_open == 0
-
-    def test_identical_prompts_from_different_tasks_are_independent_cohorts(self, judge):
-        async def scenario():
-            server = _server()
-            a = await _start(server, range(4), task_index=0)
-            b = await _start(server, range(4, NUM_ROLLOUTS), task_index=1)
-            # Same prompt text, but two tasks: two cohorts, each still filling. Without the task index both would
-            # be one cohort that is already full.
-            assert app_module._cohorts.num_open == 2
-
-            a += await _start(server, range(4, NUM_ROLLOUTS), task_index=0)
-            b += await _start(server, range(4), task_index=1)
-            assert app_module._cohorts.num_open == 0
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*a), await asyncio.gather(*b)
-
-        a, b = _run(scenario())
-        assert [r.reward for r in a] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-        assert [r.reward for r in b] == approx([BT_SCORES[i] for i in [*range(4, NUM_ROLLOUTS), *range(4)]])
-
-    def test_identical_prompts_with_different_prompt_ids_are_independent_cohorts(self, judge):
-        async def scenario():
-            server = _server()
-            a = await _start(server, range(4), prompt_id="a")
-            b = await _start(server, range(4), prompt_id="b")
-            assert app_module._cohorts.num_open == 2
-
-            a += await _start(server, range(4, NUM_ROLLOUTS), prompt_id="a")
-            b += await _start(server, range(4, NUM_ROLLOUTS), prompt_id="b")
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*a, *b)
-
-        results = _run(scenario())
-        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)] * 2)
-
-    def test_rollouts_of_one_task_join_a_single_cohort(self, judge):
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS - 1), task_index=5)
-            assert app_module._cohorts.num_open == 1
-
-            tasks += await _start(server, [NUM_ROLLOUTS - 1], task_index=5)
-            assert app_module._cohorts.num_open == 0
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*tasks)
-
-        results = _run(scenario())
-        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-
-    def test_same_prompt_with_different_principles_are_independent_cohorts(self, judge):
-        async def scenario():
-            server = _server()
-            a = await _start(server, range(NUM_ROLLOUTS), principle="Be concise")
-            await _release(judge, range(NUM_ROLLOUTS - 1))
-            b = await _start(server, range(NUM_ROLLOUTS), principle="Be thorough")
-            # Both cohorts are full, and each is still waiting for its last judgment. If `b` had been merged into
-            # `a`, `a` would hold 16 rollouts and would not be waiting for rollout 7 alone.
-            assert not any(t.done() for t in a + b)
-            assert app_module._cohorts.num_open == 0
-            await _release(judge, [NUM_ROLLOUTS - 1])
-            return await asyncio.gather(*a), await asyncio.gather(*b)
-
-        a, b = _run(scenario())
-        expected = approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-        assert [r.reward for r in a] == expected
-        assert [r.reward for r in b] == expected
-
-
-class TestVerifyRepeatedRequests:
-    """A request that repeats one that is already being handled (e.g. a client retry) must not take a slot.
-
-    If it did, the cohort would fill up without one of its real rollouts, and that rollout would wait forever in a
-    cohort of its own. A repeat is recognized by its task index, its rollout index and its response.
-    """
-
-    def test_repeat_while_the_cohort_is_still_filling(self, judge):
-        async def scenario():
-            server = _server()
-            first = await _start(server, range(NUM_ROLLOUTS - 1), task_index=0)
-            repeat = await _start(server, [3], task_index=0)
-            last = await _start(server, [NUM_ROLLOUTS - 1], task_index=0)
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*first), await asyncio.gather(*repeat), await asyncio.gather(*last)
-
-        first, repeat, last = _run(scenario())
-        assert [r.reward for r in first] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS - 1)])
-        assert repeat[0].reward == approx(BT_SCORES[3])
-        assert last[0].reward == approx(BT_SCORES[NUM_ROLLOUTS - 1])
-        # The repeat was not judged again.
-        assert sorted(judge.calls) == list(range(NUM_ROLLOUTS))
-        assert app_module._cohorts.num_active == 0
-
-    def test_repeat_after_the_cohort_has_filled_up(self, judge):
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS), task_index=0)
-            assert app_module._cohorts.num_open == 0  # Full, and being judged.
-
-            repeat = await _start(server, [5], task_index=0)
-            assert app_module._cohorts.num_open == 0  # The repeat did not start a cohort of its own.
-            assert app_module._cohorts.num_active == 1
-
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*tasks), await asyncio.gather(*repeat)
-
-        tasks, repeat = _run(scenario())
-        assert repeat[0].reward == approx(BT_SCORES[5])
-        assert tasks[5].reward == approx(BT_SCORES[5])
-        assert sorted(judge.calls) == list(range(NUM_ROLLOUTS))
-        assert app_module._cohorts.num_active == 0
-
-    def test_repeat_waits_for_the_original_when_the_original_finishes_last(self, judge):
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS), task_index=0)
-            repeat = await _start(server, [3], task_index=0)
-
-            await _release(judge, [i for i in range(NUM_ROLLOUTS) if i != 3])
-            assert not repeat[0].done()
-            assert not tasks[3].done()
-
+            tasks = await _start(_server(), range(NUM_ROLLOUTS))
             await _release(judge, [3])
-            return tasks[3].result(), repeat[0].result()
+            return [t.done() for t in tasks], tasks[3].result().reward
 
-        original, repeat = _run(scenario())
-        assert original.reward == repeat.reward == approx(BT_SCORES[3])
+        done, reward = _run(scenario())
+        assert done == [i == 3 for i in range(NUM_ROLLOUTS)]
+        assert reward == approx(BT_SCORES[3])
 
-    def test_several_repeats_all_get_the_reward(self, judge):
+    def test_a_rollout_that_never_arrives_does_not_block_the_others(self, judge):
         async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS), task_index=0)
-            repeats = await _start(server, [2, 2, 2], task_index=0)
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*tasks), await asyncio.gather(*repeats)
+            ids = [i for i in range(NUM_ROLLOUTS) if i != 5]
+            tasks = await _start(_server(), ids)
+            await _release(judge, ids)
+            return ids, await asyncio.gather(*tasks)
 
-        tasks, repeats = _run(scenario())
-        assert [r.reward for r in repeats] == approx([BT_SCORES[2]] * 3)
-        assert len(judge.calls) == NUM_ROLLOUTS
+        ids, results = _run(scenario())
+        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in ids])
 
-    def test_cancelling_a_repeat_does_not_affect_the_original_or_the_cohort(self, judge):
+    def test_any_completion_order_gives_every_rollout_its_own_reward(self, judge):
         async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS), task_index=0)
-            repeat = await _start(server, [3], task_index=0)
-
-            repeat[0].cancel()
-            await _settle()
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*tasks), await asyncio.gather(*repeat, return_exceptions=True)
-
-        tasks, repeat = _run(scenario())
-        assert isinstance(repeat[0], asyncio.CancelledError)
-        assert [r.reward for r in tasks] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
-
-    def test_cancelling_the_original_fails_the_repeat_and_not_the_cohort(self, judge):
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS), task_index=0)
-            repeat = await _start(server, [3], task_index=0)
-
-            tasks[3].cancel()
-            await _settle()
-            await _release(judge, [i for i in range(NUM_ROLLOUTS) if i != 3])
-            return await asyncio.gather(*tasks, *repeat, return_exceptions=True)
-
-        results = _run(scenario())
-        assert isinstance(results[3], asyncio.CancelledError)
-        # The repeat is not handed the neutral reward that stands in for the cancelled judgment.
-        assert isinstance(results[NUM_ROLLOUTS], MemberJudgmentFailed)
-        for i in range(NUM_ROLLOUTS):
-            if i != 3:
-                assert results[i].reward == approx(BT_SCORES[i])
-
-    def test_a_judge_error_in_the_original_fails_the_repeat_too(self, judge, monkeypatch):
-        async def flaky_judge(server, conversation_history, response_obj, principle=None):
-            if extract_output_text(response_obj) == "rollout-5":
-                raise RuntimeError("judge exploded")
-            return await judge(server, conversation_history, response_obj, principle)
-
-        monkeypatch.setattr(GenRMCompareResourcesServer, "_run_single_comparison", flaky_judge)
-
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS), task_index=0)
-            repeat = await _start(server, [5], task_index=0)
-            await _release(judge, [i for i in range(NUM_ROLLOUTS) if i != 5])
-            return await asyncio.gather(*tasks, *repeat, return_exceptions=True)
-
-        results = _run(scenario())
-        assert type(results[5]) is RuntimeError  # The original reports its own error.
-        assert isinstance(results[NUM_ROLLOUTS], MemberJudgmentFailed)
-        assert "judge exploded" in str(results[NUM_ROLLOUTS])
-        for i in range(NUM_ROLLOUTS):
-            if i != 5:
-                assert results[i].reward == approx(BT_SCORES[i])
-
-    def test_a_different_response_with_the_same_index_is_not_a_repeat(self, judge):
-        async def scenario():
-            server = _server()
-            first = await _start(server, range(NUM_ROLLOUTS - 1), task_index=0)
-            # Same task and rollout index as rollout 3, but another response: a different rollout, so it takes the
-            # last slot of the cohort.
-            different = asyncio.create_task(
-                server.verify(_make_verify_request(f"rollout-{NUM_ROLLOUTS - 1}", task_index=0, rollout_index=3))
-            )
-            await _settle()
-            await _release(judge, range(NUM_ROLLOUTS))
-            return await asyncio.gather(*first), await different
-
-        first, different = _run(scenario())
-        assert different.reward == approx(BT_SCORES[NUM_ROLLOUTS - 1])
-        assert [r.reward for r in first] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS - 1)])
-        assert sorted(judge.calls) == list(range(NUM_ROLLOUTS))
-
-    def test_without_a_rollout_index_nothing_is_a_repeat(self, judge):
-        # Callers that do not send indices behave as before: two identical requests are two members.
-        ids = [0, 1, 2, 3, 3, 4, 5, 6]
-
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, ids)
-            await _release(judge, set(ids))
+            tasks = await _start(_server(), range(NUM_ROLLOUTS))
+            order = list(range(NUM_ROLLOUTS))
+            random.Random(7).shuffle(order)
+            await _release(judge, order)
             return await asyncio.gather(*tasks)
 
         results = _run(scenario())
-        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in ids])
-        assert Counter(judge.calls)[3] == 2
+        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in range(NUM_ROLLOUTS)])
 
-    def test_the_same_rollout_in_another_task_is_not_a_repeat(self, judge):
+    def test_rollouts_arriving_after_others_were_already_rewarded(self, judge):
         async def scenario():
             server = _server()
-            a = await _start(server, [3], task_index=0)
-            b = await _start(server, [3], task_index=1)
-            assert app_module._cohorts.num_open == 2
-            for task in a + b:
-                task.cancel()
+            early = await _start(server, [0, 1])
+            await _release(judge, [0, 1])
+            early_rewards = [t.result().reward for t in early]
+            late = await _start(server, [2, 3])
+            await _release(judge, [2, 3])
+            return early_rewards, [t.result().reward for t in late]
+
+        early, late = _run(scenario())
+        assert early == approx([BT_SCORES[0], BT_SCORES[1]])
+        assert late == approx([BT_SCORES[2], BT_SCORES[3]])
+
+    def test_the_judge_is_called_once_per_rollout_and_judge_pass(self, judge):
+        async def scenario():
+            tasks = await _start(_server(num_judges=3), range(2))
+            await _release(judge, range(2))
+            return await asyncio.gather(*tasks)
+
+        _run(scenario())
+        assert Counter(judge.calls) == {0: 3, 1: 3}
+
+    def test_multiple_judges_are_averaged(self, monkeypatch):
+        scores = iter([0.2, 0.5, 0.8])
+
+        async def fake_run_single_comparison(server, conversation_history, response_obj, principle=None):
+            return 3.0, next(scores)
+
+        monkeypatch.setattr(GenRMCompareResourcesServer, "_run_single_comparison", fake_run_single_comparison)
+
+        result = _run(_server(num_judges=3).verify(_make_verify_request("rollout-0")))
+
+        assert result.reward == approx(0.5)
+
+    def test_the_principle_is_passed_to_the_judge(self, judge):
+        async def scenario():
+            tasks = await _start(_server(), [0, 1], principle="Be concise")
+            await _release(judge, [0, 1])
+            return await asyncio.gather(*tasks)
+
+        _run(scenario())
+        assert judge.principles == ["Be concise", "Be concise"]
+
+    def test_gym_index_fields_do_not_change_the_reward(self, judge):
+        # Gym stamps `_ng_task_index` and `_ng_rollout_index` on every request. Rollouts are not grouped by them.
+        async def scenario():
+            server = _server()
+            requests = [
+                GenRMCompareVerifyRequest.model_validate(
+                    {
+                        **_make_verify_request(f"rollout-{i}").model_dump(),
+                        "_ng_task_index": task_index,
+                        "_ng_rollout_index": i,
+                    }
+                )
+                for i, task_index in [(0, 0), (1, 0), (2, 1)]
+            ]
+            tasks = [asyncio.create_task(server.verify(r)) for r in requests]
             await _settle()
+            await _release(judge, [2, 0, 1])
+            return await asyncio.gather(*tasks)
 
-        _run(scenario())
+        results = _run(scenario())
+        assert [r.reward for r in results] == approx([BT_SCORES[0], BT_SCORES[1], BT_SCORES[2]])
 
-    def test_a_repeat_is_logged(self, judge, caplog):
+    def test_a_repeated_request_is_simply_judged_again(self, judge):
+        # Nothing is shared between requests, so a request delivered twice costs a second judgment and nothing else.
         async def scenario():
             server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS), task_index=4)
-            with caplog.at_level(logging.WARNING, logger=app_module.logger.name):
-                repeat = await _start(server, [3], task_index=4)
-            await _release(judge, range(NUM_ROLLOUTS))
-            await asyncio.gather(*tasks, *repeat)
+            tasks = await _start(server, [4, 4])
+            await _release(judge, [4])
+            return await asyncio.gather(*tasks)
 
-        _run(scenario())
-        messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(messages) == 1
-        assert "Repeated verify request" in messages[0]
-        assert "rollout_index=3" in messages[0] and "task_index=4" in messages[0]
-
-    def test_a_repeat_after_the_cohort_was_finalized_is_not_recognized(self, judge):
-        # Known limitation: a cohort forgets its members when it is finalized, so a repeat that arrives later is
-        # treated as a new rollout and waits in a cohort of its own. Replace this test if that is ever handled.
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS), task_index=0)
-            await _release(judge, range(NUM_ROLLOUTS))
-            await asyncio.gather(*tasks)
-            assert app_module._cohorts.num_active == 0
-
-            late = await _start(server, [3], task_index=0)
-            assert app_module._cohorts.num_open == 1
-            assert not late[0].done()
-            late[0].cancel()
-            await _settle()
-
-        _run(scenario())
-
+        results = _run(scenario())
+        assert [r.reward for r in results] == approx([BT_SCORES[4], BT_SCORES[4]])
+        assert judge.calls == [4, 4]
 
 class TestVerifyFailures:
-    def test_cancelled_rollout_does_not_block_the_cohort(self, judge):
+    def test_cancelling_a_request_does_not_affect_the_others(self, judge):
         async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS))
-            tasks[3].cancel()
+            tasks = await _start(_server(), range(NUM_ROLLOUTS))
+            tasks[2].cancel()
             await _settle()
-            await _release(judge, [i for i in range(NUM_ROLLOUTS) if i != 3])
-            return await asyncio.gather(*tasks, return_exceptions=True)
+            others = [i for i in range(NUM_ROLLOUTS) if i != 2]
+            await _release(judge, others)
+            results = await asyncio.gather(*[tasks[i] for i in others])
+            return tasks[2].cancelled(), others, results
 
-        results = _run(scenario())
-        assert isinstance(results[3], asyncio.CancelledError)
-        for i in range(NUM_ROLLOUTS):
-            if i != 3:
-                assert results[i].reward == approx(BT_SCORES[i])
+        cancelled, others, results = _run(scenario())
+        assert cancelled
+        assert [r.reward for r in results] == approx([BT_SCORES[i] for i in others])
 
-    def test_judge_error_fails_that_rollout_only(self, judge, monkeypatch):
-        async def flaky_judge(server, conversation_history, response_obj, principle=None):
-            if extract_output_text(response_obj) == "rollout-5":
-                raise RuntimeError("judge exploded")
-            return await judge(server, conversation_history, response_obj, principle)
-
-        monkeypatch.setattr(GenRMCompareResourcesServer, "_run_single_comparison", flaky_judge)
+    def test_a_judge_error_fails_that_request_only(self, judge):
+        judge.errors[2] = RuntimeError("judge exploded")
 
         async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS))
-            await _release(judge, [i for i in range(NUM_ROLLOUTS) if i != 5])
-            return await asyncio.gather(*tasks, return_exceptions=True)
-
-        results = _run(scenario())
-        assert isinstance(results[5], RuntimeError)
-        for i in range(NUM_ROLLOUTS):
-            if i != 5:
-                assert results[i].reward == approx(BT_SCORES[i])
-
-    def test_aggregation_failure_fails_every_rollout_instead_of_hanging(self, judge, monkeypatch):
-        def broken_aggregate(**kwargs):
-            raise ValueError("aggregation exploded")
-
-        monkeypatch.setattr(app_module, "aggregate_scores", broken_aggregate)
-
-        async def scenario():
-            server = _server()
-            tasks = await _start(server, range(NUM_ROLLOUTS))
+            tasks = await _start(_server(), range(NUM_ROLLOUTS))
             await _release(judge, range(NUM_ROLLOUTS))
             return await asyncio.gather(*tasks, return_exceptions=True)
 
-        assert all(isinstance(r, ValueError) for r in _run(scenario()))
+        results = _run(scenario())
+        assert isinstance(results[2], RuntimeError)
+        for i in range(NUM_ROLLOUTS):
+            if i != 2:
+                assert results[i].reward == approx(BT_SCORES[i])
 
 
 class TestVerifyRandomizedSchedules:
-    """Many cohorts in flight at once, with random arrival times, judge latencies, failures and cancellations.
-
-    The hand-written scenarios above each pin down one interleaving. This checks the invariants over many random ones:
-    - nothing hangs, whatever the order in which the judgments finish;
-    - every rollout gets its own reward, never that of another rollout;
-    - every rollout is judged exactly once per judge (no redundant judge calls);
-    - every cohort is finalized exactly once, and no cohort is left open.
-    """
+    """Random arrival orders, finish orders, judge counts, cancellations and errors: each rollout is rewarded with the
+    mean BT score of its own judgments, or fails, or is cancelled, and never depends on anything else."""
 
     NUM_SEEDS = 40
-    ROLLOUTS_PER_PROMPT = 4
 
     def test_random_schedules(self, monkeypatch):
-        state = {}
+        for seed in range(self.NUM_SEEDS):
+            self._run_seed(seed, monkeypatch)
+
+    def _run_seed(self, seed, monkeypatch):
+        rng = random.Random(seed)
+        num_judges = rng.randint(1, 3)
+        ids = list(range(NUM_ROLLOUTS))
+        rng.shuffle(ids)  # Arrival order
+        ids = ids[: rng.randint(1, NUM_ROLLOUTS)]  # Some rollouts never arrive
+        failing = {i for i in ids if rng.random() < 0.2}
+        cancelled = {i for i in ids if i not in failing and rng.random() < 0.2}
+
+        # Every judge pass of a rollout gets its own score, so the mean over passes is what the reward must be.
+        scores = {i: [rng.random() for _ in range(num_judges)] for i in ids}
+        next_pass = {i: 0 for i in ids}
+        gates = {i: asyncio.Event() for i in ids}
 
         async def fake_run_single_comparison(server, conversation_history, response_obj, principle=None):
             rollout_id = int(extract_output_text(response_obj).rsplit("-", 1)[1])
-            state["calls"][rollout_id] += 1
-            await asyncio.sleep(state["rng"].random() * 0.003)
-            if rollout_id in state["fail_ids"]:
-                raise RuntimeError(f"judge failed for rollout {rollout_id}")
-            return 3.0, state["bt"][rollout_id]
-
-        finalized = []
-        original_finalize = GenRMCompareResourcesServer._finalize_cohort
-
-        def counting_finalize(server, cohort):
-            finalized.append(cohort)
-            return original_finalize(server, cohort)
+            pass_idx = next_pass[rollout_id]
+            next_pass[rollout_id] += 1
+            await gates[rollout_id].wait()
+            if rollout_id in failing:
+                raise RuntimeError(f"judge failed for {rollout_id}")
+            return 3.0, scores[rollout_id][pass_idx]
 
         monkeypatch.setattr(GenRMCompareResourcesServer, "_run_single_comparison", fake_run_single_comparison)
-        monkeypatch.setattr(GenRMCompareResourcesServer, "_finalize_cohort", counting_finalize)
-
-        for seed in range(self.NUM_SEEDS):
-            monkeypatch.setattr(app_module, "_cohorts", CohortRegistry())
-            finalized.clear()
-            try:
-                self._run_seed(seed, state, finalized)
-            except AssertionError as e:
-                raise AssertionError(f"seed={seed}: {e}") from e
-
-    def _run_seed(self, seed, state, finalized):
-        rng = random.Random(seed)
-        n = self.ROLLOUTS_PER_PROMPT
-        num_prompts = rng.randint(1, 4)
-        repeats = rng.randint(1, 2)  # The same prompt can show up more than once; each copy needs its own cohort.
-        num_judges = rng.choice([1, 2])
-
-        # Every prompt gets `repeats * n` rollouts, so every cohort fills up.
-        members = [(prompt, k) for prompt in range(num_prompts) for k in range(repeats * n)]
-        ids = list(range(len(members)))
-        prompt_of = {rollout_id: members[rollout_id][0] for rollout_id in ids}
-        arrival_order = rng.sample(ids, len(ids))
-
-        state.update(
-            rng=rng,
-            calls=Counter(),
-            bt={rollout_id: rng.uniform(0.01, 0.99) for rollout_id in ids},
-            fail_ids={rollout_id for rollout_id in ids if rng.random() < 0.05},
-        )
-        cancel_ids = {rollout_id for rollout_id in ids if rng.random() < 0.05}
-        # How a request identifies its prompt: by hash only, by task index, or by prompt id.
-        identity_mode = rng.choice(["none", "task_index", "prompt_id"])
-        # With a task index (and so a rollout index) a request can also be delivered twice. The second delivery is made
-        # right away, i.e. while the cohort is still being handled; a cancelled request is left out because its
-        # cancellation could finalize the cohort before the repeat arrives.
-        repeat_ids = {
-            rollout_id
-            for rollout_id in ids
-            if identity_mode == "task_index" and rng.random() < 0.15 and rollout_id not in cancel_ids
-        }
 
         async def scenario():
-            server = _make_server(
-                _make_config(num_rollouts_per_prompt=n, num_judges_per_comparison=num_judges)
-            )
-            loop = asyncio.get_running_loop()
+            server = _server(num_judges)
             tasks = {}
-            repeat_tasks = {}
-            for rollout_id in arrival_order:
-                await asyncio.sleep(rng.random() * 0.003)
-                identity = {}
-                if identity_mode == "task_index":
-                    identity = dict(task_index=prompt_of[rollout_id], rollout_index=members[rollout_id][1])
-                elif identity_mode == "prompt_id":
-                    identity = dict(prompt_id=f"prompt-{prompt_of[rollout_id]}")
-                request = _make_verify_request(
-                    f"rollout-{rollout_id}", prompt=f"prompt {prompt_of[rollout_id]}", **identity
-                )
-                tasks[rollout_id] = asyncio.create_task(server.verify(request))
-                await asyncio.sleep(0)  # Let it run up to its first await: it has joined its cohort.
-                if rollout_id in repeat_ids:
-                    repeat_tasks[rollout_id] = asyncio.create_task(server.verify(request))
-                    await asyncio.sleep(0)
-                if rollout_id in cancel_ids:
-                    loop.call_later(rng.random() * 0.004, tasks[rollout_id].cancel)
-            everything = [*tasks.values(), *repeat_tasks.values()]
-            results = await asyncio.wait_for(asyncio.gather(*everything, return_exceptions=True), timeout=10)
-            return dict(zip(tasks.keys(), results)), dict(zip(repeat_tasks.keys(), results[len(tasks) :]))
+            for i in ids:
+                tasks[i] = asyncio.create_task(server.verify(_make_verify_request(f"rollout-{i}")))
+                await _settle()
+            for i in cancelled:
+                tasks[i].cancel()
+            await _settle()
+            finish_order = list(ids)
+            rng.shuffle(finish_order)
+            for i in finish_order:
+                gates[i].set()
+                await _settle()
+            return await asyncio.gather(*tasks.values(), return_exceptions=True)
 
-        try:
-            results, repeat_results = asyncio.run(scenario())
-        except (TimeoutError, asyncio.TimeoutError):
-            raise AssertionError("verify() calls hung") from None
-
-        for rollout_id, result in results.items():
-            if isinstance(result, asyncio.CancelledError):
-                assert rollout_id in cancel_ids, f"rollout {rollout_id} was cancelled without being asked to"
-            elif isinstance(result, RuntimeError):
-                assert rollout_id in state["fail_ids"], f"unexpected error for rollout {rollout_id}: {result!r}"
-            elif isinstance(result, BaseException):
-                raise AssertionError(f"unexpected {result!r} for rollout {rollout_id}")
+        results = dict(zip(ids, _run(scenario())))
+        for i in ids:
+            if i in cancelled:
+                assert isinstance(results[i], asyncio.CancelledError), (seed, i)
+            elif i in failing:
+                assert isinstance(results[i], RuntimeError), (seed, i)
             else:
-                # The reward must be this rollout's own BT score (every judge returns it, so the mean is unchanged).
-                assert result.reward == approx(state["bt"][rollout_id]), f"wrong reward for rollout {rollout_id}"
-                assert extract_output_text(result.response.model_dump()) == f"rollout-{rollout_id}"
-
-            calls = state["calls"][rollout_id]
-            if rollout_id in state["fail_ids"] or rollout_id in cancel_ids:
-                assert calls <= num_judges
-            else:
-                assert calls == num_judges, f"rollout {rollout_id} was judged {calls} times, not {num_judges}"
-
-        for rollout_id, result in repeat_results.items():
-            # A repeat gets the reward of the request it repeats, or fails if that request failed.
-            if isinstance(result, BaseException):
-                assert isinstance(result, MemberJudgmentFailed), f"unexpected {result!r} for a repeat of {rollout_id}"
-                assert rollout_id in state["fail_ids"], f"repeat of {rollout_id} failed but its original did not"
-            else:
-                assert result.reward == approx(state["bt"][rollout_id]), f"wrong reward for a repeat of {rollout_id}"
-
-        assert len(finalized) == num_prompts * repeats, "every cohort must be finalized exactly once"
-        assert len({id(cohort) for cohort in finalized}) == len(finalized)
-        assert all(cohort.is_complete for cohort in finalized)
-        assert app_module._cohorts.num_open == 0
-        assert app_module._cohorts.num_active == 0
+                assert results[i].reward == approx(sum(scores[i]) / num_judges), (seed, i)
