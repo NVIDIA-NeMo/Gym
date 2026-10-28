@@ -124,8 +124,9 @@ shared resources-session protocol instead of the contract above, as
 - `/close_session` fences the session first, so a seed still provisioning releases its
   sandboxes instead of lending them (HTTP 409), even if the close's caller stops waiting.
   It then waits for in-flight provisioning or grading, stops anything still running
-  without grading it, and fences late seeds. A sandbox that cannot be stopped fails the
-  close and keeps the fence; the provider TTL bounds it. A completed close is remembered
+  without grading it (finishing even if the caller disconnects), and fences late seeds.
+  A sandbox that cannot be stopped fails the close and keeps the fence; a repeated close
+  retries the deletion, and the provider TTL bounds it. A completed close is remembered
   for `session_close_retry_window_seconds` (default 300), so retried closes succeed and
   late seeds are rejected; set it to cover the caller's retry horizon.
 

@@ -693,8 +693,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         of lending them, even if this close's caller stops waiting. It then waits for in-flight
         provisioning or grading and stops any sandbox still running without grading it. A close
         before (or instead of) the seed fences a late seed. If a sandbox cannot be stopped, close
-        raises and keeps the fence; the provider TTL bounds the orphan. A completed close is
-        remembered for ``session_close_retry_window_seconds``.
+        raises and keeps the fence; a repeated close retries, and the provider TTL bounds the orphan.
+        A completed close is remembered for ``session_close_retry_window_seconds``.
         """
         key = body.resources_session_id
         self._expire_close_records()
