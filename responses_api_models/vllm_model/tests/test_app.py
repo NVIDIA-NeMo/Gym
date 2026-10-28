@@ -8354,6 +8354,43 @@ class TestCodexRequests:
         assert "input_image" in terminal["response"]["error"]["message"]
         client.create_chat_completion.assert_not_awaited()
 
+    URLLESS_IMAGES = [
+        {"type": "input_image", "file_id": "file-1", "detail": "auto"},
+        {"type": "input_image", "image_url": "", "detail": "auto"},
+    ]
+
+    @mark.parametrize("image", URLLESS_IMAGES, ids=["file_id", "empty_url"])
+    def test_inlining_keeps_the_placeholder_for_an_image_without_a_url(self, image: dict[str, Any]) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, inline_tool_output_images=True)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "done", "reasoning": "r"})
+        )
+        output = {**self.VIEW_IMAGE_OUTPUT, "output": [image]}
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=self._codex_body([self.USER, self.VIEW_IMAGE_CALL, output])
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"][-1]["content"] == [
+            {"type": "text", "text": "[image omitted from tool output]"}
+        ]
+
+    @mark.parametrize("image", URLLESS_IMAGES, ids=["file_id", "empty_url"])
+    def test_inlining_an_image_without_a_url_fails_without_dropping(self, image: dict[str, Any]) -> None:
+        server, client = self._server(inline_tool_output_images=True)
+        client.create_chat_completion = AsyncMock()
+        output = {**self.VIEW_IMAGE_OUTPUT, "output": [image]}
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"stream": True, "input": [self.USER, self.VIEW_IMAGE_CALL, output]}
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.failed"
+        client.create_chat_completion.assert_not_awaited()
+
 
 def _custom_tool_config(**overrides: Any) -> VLLMModelConfig:
     return VLLMModelConfig(
