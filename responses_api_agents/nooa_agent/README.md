@@ -21,6 +21,20 @@ The requirements pin all three NOOA packages: `nooa`, `nooa-cli`, and `nooa-benc
 support, and the benchmark package supplies the default BenchAgent. Gym's server installation uses this same
 requirements file.
 
+## Atom
+
+`configs/nooa_atom_agent.yaml` runs Atom (`nooa_atom.gym:AtomHarness` with
+`responses_api_agents.nooa_agent.atom_adapter:invoke_atom`). The harness runs one Atom session per rollout
+the way the TUI does, with Gym's model client as the only model: the root turn method is
+`init_kwargs.turn_method` (`handle_orchestrate` by default, so the root may delegate to child agents, each a
+model-calling session recorded under its own invocation; `handle_batch` runs a single agent), the task is the
+first prompt, and the session's `Done` outcome carries the `TaskResult`. Gym's instrumentation hooks are carried
+into every session loop, so Atom's `python_cell` executions and tool calls are observed like any agent's. Atom
+needs the `nooa-atom` package from the pinned NOOA revision; it runs in the task sandbox under
+`execution_mode: sandboxed` exactly like BenchAgent. Known limit: Gym resource tools are bound on the harness
+class, not on Atom's session agent, so tasks that rely on Resources-provided function tools should use
+BenchAgent until the tools are routed into Atom's tool surface.
+
 ## Embedded CodeAct scope
 
 Embedded CodeAct persists for the duration of one invocation. `execute_python` is not computation-only: it can
