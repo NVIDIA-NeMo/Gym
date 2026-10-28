@@ -15,6 +15,13 @@ Stirrup runs only in agent sessions, seeded by an environment server with these 
 - At most one `direct_http` tool access: the resources server's routes and the session cookies. A request with `tools`
   needs it.
 
+The sandbox must be x86_64 or aarch64 Linux with glibc 2.28 or newer, `bash`, and `tar` with gzip. musl images, such as
+Alpine, and older glibc are not supported: `imageio-ffmpeg` publishes no musllinux wheel, and the Pillow version in
+`overrides.txt` publishes only manylinux_2_28 wheels. The agent's host builds the runtime with `uv` and caches it under
+`sandbox_python` in Gym's `cache_dir`. Building needs the Python package index and the python-build-standalone
+releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python
+build can be given the file in that cache directory.
+
 The activation (`/ng-rollout/<id>/v1/responses`) runs `sandbox_runner.py` in the sandbox under Gym's process
 supervisor. The runner builds Stirrup's messages from `responses_create_params.input` and gives the model:
 

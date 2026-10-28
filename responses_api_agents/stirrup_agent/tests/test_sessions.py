@@ -467,7 +467,8 @@ def test_a_runner_that_leaves_no_valid_output_fails_the_activation(agent, client
     fake_python.write_text(
         "#!/bin/sh\n"
         '[ "$1" = -c ] && exit 0\n'
-        f"case \"$1\" in *sandbox_runner.py) printf '%s' '{output}' > \"$3\"; exit 0;; esac\n"
+        # The runner runs without the task's user site-packages.
+        f"case \"$1 $2\" in '-s '*sandbox_runner.py) printf '%s' '{output}' > \"$4\"; exit 0;; esac\n"
         f'exec {sys.executable} "$@"\n'
     )
     fake_python.chmod(0o755)
