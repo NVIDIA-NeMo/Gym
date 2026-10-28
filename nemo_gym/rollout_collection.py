@@ -3354,6 +3354,10 @@ class RolloutCollectionHelper(BaseModel):
         resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
         budget_used: Counter = Counter()
         terminal_keys: set = set()
+        # A judge failure keeps the policy answer. Running the rollout again would generate a new one,
+        # so it is gated and recovered by `gym eval reverify --judge-failed-only`, which judges the saved answer.
+        # A row without an answer, or a multi-stage row that recovery refuses, has nothing to judge and is retried.
+        judge_failed_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
@@ -3373,6 +3377,8 @@ class RolloutCollectionHelper(BaseModel):
                         budget_used[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
+                    if fr.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED and "response" in fr and "stage_index" not in fr:
+                        judge_failed_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -3382,7 +3388,7 @@ class RolloutCollectionHelper(BaseModel):
 
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
-        gated = successes_seen | terminal_keys | maxed_out
+        gated = successes_seen | terminal_keys | maxed_out | judge_failed_keys
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
@@ -3424,8 +3430,14 @@ class RolloutCollectionHelper(BaseModel):
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
 - {len(terminal_keys)} sidecar-terminal → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
+- {len(judge_failed_keys)} judge failures with a saved answer → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
+        if judge_failed_keys:
+            print(
+                f"{len(judge_failed_keys)} rollout(s) keep their saved answers after a judge failure. Judge them again "
+                "with `gym eval reverify --judge-failed-only` once the judge is available."
+            )
 
         return input_rows, rows, results, result_strs
 

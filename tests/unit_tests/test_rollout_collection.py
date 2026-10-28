@@ -8033,6 +8033,35 @@ class TestLongestFirstDispatch:
 
             assert 1 not in [r[TASK_INDEX_KEY_NAME] for r in input_rows]
 
+    def test_a_judge_failure_with_a_saved_answer_is_not_run_again(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Resume would generate a new answer; `gym eval reverify --judge-failed-only` judges the saved one."""
+        answer = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "42"}]}]}
+        failures = [
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "judge_failed",
+                "response": answer,
+            },
+            # Nothing to judge again: no saved answer, or a multi-stage row reverify cannot recover.
+            {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "judge_failed"},
+            {
+                TASK_INDEX_KEY_NAME: 3,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "judge_failed",
+                "response": answer,
+                "stage_index": 0,
+            },
+        ]
+        config = self._write_resume_state(tmp_path, failures)
+
+        input_rows, *_ = RolloutCollectionHelper()._load_from_cache(config)
+
+        assert [r[TASK_INDEX_KEY_NAME] for r in input_rows] == [0, 2, 3]
+        assert "1 judge failures with a saved answer → not retried" in capsys.readouterr().out
+
 
 class TestResubmitAttemptBudget:
     def test_a_resubmit_offset_gives_capped_rows_a_fresh_budget(
