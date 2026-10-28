@@ -41,6 +41,7 @@ from nemo_gym.tasks.harbor.records import (
     recorded_forced_tasks,
     recorded_service_images,
 )
+from nemo_gym.tasks.harbor.task_data import read_task_fields
 from nemo_gym.tasks.harbor.verifier_env import (
     TESTS_COMPOSE_FILE,
     _verifier_build_required,
@@ -146,8 +147,10 @@ class HarborTask:
     ``environment/`` build (:func:`load_task`).
 
     ``context_id`` is Harbor's environment id of ``environment/`` (:func:`~nemo_gym.tasks.harbor.digest.context_digest`,
-    the key of ``built-images.json`` and the body of the ``hb__<hash>`` image names), computed once here when the
-    task needs it (a Dockerfile that needs a build, or a Compose file) and ``None`` otherwise; ``built_images`` is
+    the key of ``built-images.json`` and the body of the ``hb__<hash>`` image names), computed once here for every
+    task with an ``environment/`` folder (the build-mode branches read it, and the Compose loader needs it at every
+    seed, for a Compose file or for the one-service group a job-level overlay extends) and ``None`` for a task
+    without one; ``built_images`` is
     every image that record holds for the context, by Compose service name (``main`` and the sidecars with a
     ``build:`` section, :func:`recorded_service_images`), ``{}`` when none is recorded. The Compose loader
     substitutes them at prepare and at seed without hashing the folder again; ``main``'s entry is applied only
@@ -179,6 +182,11 @@ class HarborTask:
     ``turns`` holds the task's ``[[steps]]`` in order; empty for a single-turn task. A multi-turn task
     never sends ``instruction`` to the agent: each turn sends its own, and the top-level file may hold
     material the agent must not see (SWE-Interact puts the full hidden specification there).
+
+    ``task_data`` is the task's own field values, read from ``task_data.json`` in its folder (a
+    parameterized task's rendered row), ``{}`` for a task without one. Materialize writes them into the
+    row's ``task_data`` beside the reserved ``_ng_*`` keys, and the dataset's ``task_data.py`` validates
+    them when it ships one (:mod:`nemo_gym.tasks.harbor.task_data`).
     """
 
     path: Path
@@ -205,6 +213,9 @@ class HarborTask:
     verifier_image_config: BaseImageConfig | None = None
     overlay_workdirs: tuple[OverlayWorkdir, ...] = ()
     turns: tuple[HarborTurn, ...] = ()
+    # The task's own field values (``task_data.json`` in its folder), written into the row's ``task_data``
+    # beside the reserved keys and validated against the dataset's ``task_data.py`` when it ships one.
+    task_data: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def needs_sandbox(self) -> bool:
@@ -370,8 +381,22 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         phases[f"steps.{step.name}.agent"] = step.agent
         phases[f"steps.{step.name}.verifier"] = step.verifier
     for name, phase in phases.items():
-        if phase.network_mode not in (None, "public") or phase.allowed_hosts:
+        if phase.network_mode in (None, "public") and not phase.allowed_hosts:
+            continue
+        if name != "verifier":
+            # The agent's sandbox is created public and a running sandbox's egress policy cannot be switched, so
+            # only the separate verifier's own sandbox can carry a phase policy (multi-step tasks verify in the
+            # agent's sandbox).
             raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
+        if config.is_shared_verifier:
+            raise HarborTaskError(
+                f"{path}: [verifier] network restrictions are not supported in Harbor's shared verifier mode: a "
+                "running sandbox's network policy cannot be changed after the agent's turn, so the restricted "
+                "policy is applied to the separate verifier's sandbox when it is created (declare "
+                '[verifier].environment_mode = "separate" or a [verifier.environment])'
+            )
+        if phase.allowed_hosts and phase.network_mode != "allowlist":
+            raise HarborTaskError(f"{path}: [verifier] allowed_hosts is only valid when network_mode='allowlist'")
     for name, environment in (
         ("environment", config.environment),
         ("verifier.environment", config.verifier.environment),
@@ -547,8 +572,12 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         sandbox_user = dockerfile_user
     else:
         sandbox_user = user
-    if has_compose_file(path):
-        # The Compose loader needs the context id (COMPOSE_PROJECT_NAME) and the built sidecars at every seed.
+    if dockerfile.parent.is_dir():
+        # The Compose loader needs the context id (COMPOSE_PROJECT_NAME) and the built sidecars at every seed: for a
+        # task with a Compose file, and for a plain image task when the deployment's job-level compose_overlay names
+        # Compose files, a run-config value the loader cannot see here. So every task with an environment/ folder
+        # pays the hash once, at load, as Harbor computes its environment id at every trial start (``environment_id``
+        # in harbor/environments/base.py, the ``hb__<id>`` main image name of ``docker.py``), never per seed.
         recorded_builds()
 
     # The separate verifier's image, by Harbor's rules (effective_verifier_environment, verifier_build_context): a
@@ -610,6 +639,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path}: {exc}") from exc
     digest = task_digest(folder_digest, dataset, path.name)
+    task_data = read_task_fields(path)
 
     return HarborTask(
         path=path,
@@ -636,6 +666,7 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         verifier_image_config=verifier_image_config,
         overlay_workdirs=overlay_workdirs,
         turns=turns,
+        task_data=task_data,
     )
 
 

@@ -960,6 +960,15 @@ def _prepare_output_fpaths(
     return OutputPaths(output=output_fpath, failures=failures_fpath)
 
 
+def _start_over_without_cache(config: RolloutReverificationConfig, output_fpaths: OutputPaths) -> None:
+    """A resume that finds neither the output nor its failures sidecar starts the output anew, so the exporters,
+    which reopened the run recorded next to it, start a new run too. Append recovery continues its output."""
+    if config.resume_from_cache and not config.append:
+        if not (output_fpaths.output.exists() or output_fpaths.failures.exists()):
+            for exporter in get_exporters():
+                exporter.start_over()
+
+
 def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]]:
     """Load the full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
 
@@ -1017,6 +1026,7 @@ class RolloutReverificationHelper(BaseModel):
                 config.overwrite,
                 config.append,
             )
+            _start_over_without_cache(config, output_fpaths)
             reverify_source_fpath = rollouts_jsonl_fpath
             rollout_predicate = None
 

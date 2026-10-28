@@ -92,7 +92,8 @@ the task folders, written by `gym dataset fetch`; on OpenSandbox the provider bl
 A Compose file's `${NAME}` resolves as Harbor's `docker compose` would: Gym's infrastructure variables, the task's
 `[environment].env`, the process environment, then `environment/.env`; a name none of them sets is an empty string
 at prepare, with one warning. The server's `compose_variables` fill such names at seed, below everything the task
-and Harbor set: each maps a name to a literal `value`, a process `env` variable, or a `model_server`, whose
+and Harbor set (in a job-level overlay file, above what the task sets: see "Job-level Compose overlay"): each maps a
+name to a literal `value`, a process `env` variable, or a `model_server`, whose
 sandbox-reachable URL with the episode's rollout prefix becomes the value (a sidecar's model calls are then
 recorded with the rollout and never become training tokens). A name still unset at seed fails the episode
 terminally, before provisioning. A document holding such values is written to a private folder removed once the
@@ -500,7 +501,7 @@ it is, the other providers cannot run commands as it.
 | Users | The image's default user and `verifier.user` are supported. Explicit `agent.user` and Dockerfile `USER` overrides are rejected at seed because sandbox access cannot yet carry the agent user. This layer has no oracle-specific exemption. |
 | Environment variables | Whole-value `${VAR}` and `${VAR:-default}` templates in environment and verifier variables resolve from the server's host environment at use time. Missing required values fail the episode before provisioning. Resolved values are not added to dataset rows, task snapshots, or the episode result. A task can still print its own environment into verifier logs. |
 | Prebuilt-image input files | `environment/` contents are uploaded to the workdir when the task has a prebuilt image and no `Dockerfile` or Compose definition. File modes are preserved. |
-| Network restrictions | Public networking only. Restricted network modes, host allowlists and deny rules are rejected by the loader rather than silently ignored. |
+| Network restrictions | `[verifier].network_mode` is enforced for separate-mode tasks on OpenSandbox: `no-network`, or `allowlist` with `allowed_hosts` of host names, `*.domain` wildcards and bare IP literals, spelled as Harbor's `normalize_allowed_hosts` admits them (no brackets or zone ids on an IPv6 literal, no wildcard over an IP literal). The separate verifier's sandbox is created under that egress policy (deny by default, the allowed hosts as allow rules in order), which replaces the deployment's `sandbox_provider_options.network_policy` for that sandbox as Harbor's explicit phase policy replaces the environment baseline, except that it may not widen it: under a deny-by-default deployment policy (`defaultAction: deny`, or none named, which OpenSandbox reads as deny), an `allowlist` task is refused at seed naming its hosts, whatever the deployment's own rules allow (there is no host matching; such a task needs an allow-by-default deployment), and `no-network` passes; the result's `verifier_network` reports the mode. The window is wider than Harbor's: Harbor applies the `[verifier]` policy around `verifier.verify()` only and starts the separate verifier environment under its baseline, whereas here the verifier sandbox lives its whole life under the policy, so the verifier image's `ENTRYPOINT` and `HEALTHCHECK` (see the Image ENTRYPOINT row) and the artifact staging run restricted too; a verifier image that needs the network when it starts passes under Harbor's `no-network` but masks as `harbor:entrypoint_failed` here, so such a task must name those hosts in `allowed_hosts`. OpenSandbox cannot switch a running sandbox from public to restricted (its egress API changes rules, never the default action; see the OpenSandbox provider page), so Harbor's `_phase_network_policy` switch has no equivalent in shared mode: the loader refuses a `[verifier]` restriction on a shared-mode task, naming the fix, and `[environment]`, `[agent]`, `[verifier.environment]` and step restrictions stay refused rather than silently ignored. A provider other than OpenSandbox, or an `allowed_hosts` entry the policy cannot express or Harbor would refuse (a CIDR range, a bracketed or zoned IPv6 literal, a `*.` wildcard over an IP literal), is refused at seed, before the rollout. |
 | Artifacts and hooks | Verifier logs are downloaded. `[[verifier.collect]]` hooks run in both modes, each in the service it names (a non-zero exit or a hook that runs past its `timeout_sec` warns, a hook the sandbox cannot run masks). In separate mode `/logs/artifacts` and the `artifacts` entries are copied into the verifier, each under its own staging root, with their `exclude` rules applied as Harbor passes them to `tar --exclude` (unanchored: `node_modules` at any depth), replacing what the verifier image ships at those paths. The verifier receives each artifact as the archive the agent's sandbox packed, so read-only, world-writable and set-id modes arrive as the agent left them; the host copy under the staging root is unpacked through a filter (widened owner modes, links kept, nothing that escapes and no device nodes) and is the gate the archive must pass plus a diagnostic, and the archive is removed once restored. A probe the sandbox cannot answer masks rather than counting as an absent artifact. |
 | Image ENTRYPOINT | Runs for a plain (non-Compose) task whose image configuration is recorded: a built image, or a pull or overlay Dockerfile whose base image is recorded, unless the Dockerfile says `ENTRYPOINT []`. The sandbox starts with the provider's keepalive; the seed then starts `ENTRYPOINT + sh -c "sleep infinity"` beside it (what Harbor's Compose `command` leaves it with) as the image's `User` in its `WorkingDir` (created for a resolved Dockerfile when the task's workdir is another), after the working directory and `/logs` exist. It then waits as `up --wait` and Harbor's `run_healthcheck()` do: the image `HEALTHCHECK` first, then `[environment.healthcheck]`, both as the image's user (the image check in its `WorkingDir`, the task check in the task workdir; a `CMD-SHELL` check runs through the image's recorded `Shell`, `/bin/sh -c` when it sets none, as the daemon runs it, so `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` fails `false | true` here too), probing the entrypoint's exit status before every attempt and once more before the hand-over. Exit non-zero before the hand-over fails the seed as a task error (terminal, with the output tail), as does a launcher whose own shell fails for the image's user or directory; a provider that cannot run the launcher is retried. Exit zero logs a warning once and the episode continues on the keepalive. At verification the status is read again: in the separate verifier's fresh sandbox a non-zero exit masks the sample as `harbor:entrypoint_failed` (under Harbor the container would have died and the trial errored); in the agent's sandbox it masks only when the exec holding the entrypoint returned on its own with that status, because the runtime folder is world-writable and the agent had the sandbox; otherwise it is recorded as `entrypoint-exit.txt` with an error in the log and the sample is scored. The holding exec lives as long as the provider allows (docker caps it at `exec.default_timeout_s`, OpenSandbox without `operations.background_exec` at `connection.request_timeout_s`); past that the entrypoint is untracked, logged once, and OpenSandbox deployments need `background_exec` for long-lived launchers. An entrypoint that is one `sleep` or `tail` command is not started. A separate verifier that runs in the task image gets that image's entrypoint and `HEALTHCHECK` because Harbor's effective verifier environment is then a copy of `[environment]` (its prebuilt verifier), never the task's healthcheck. A declared `[verifier.environment].docker_image` starts the same way when `compose-images.json` records it, which it does when that image is the base of a task's Dockerfile (this task's own, in pull or overlay mode, or another task's): its own `ENTRYPOINT` as its own `User` in its own `WorkingDir`, its own `HEALTHCHECK`, none of the Dockerfile's `RUN` lines, `USER` or `WORKDIR`, as Harbor's `up --wait` of the declared image leaves it. The separate verifier's sandbox is a plain one whatever the agent's environment: under a Compose task too, the verifier image's entrypoint runs there and its `HEALTHCHECK` gates `test.sh`, as Harbor's `up --wait` of the verifier image does. The output is kept as `entrypoint-stdout.txt` (and `verifier-entrypoint-stdout.txt`) next to the verifier logs. A prebuilt `docker_image` has no recorded configuration yet, so its entrypoint still does not run. |
 | Other features | Windows and TPU environments are unsupported. Multi-step tasks run as turns (see above). |
@@ -608,6 +609,46 @@ access for shared results. Local log-directory creation or containment failures 
 with `failure_kind: persistence_failed` and identify the affected path.
 Measured outcomes include an absolute `verifier_logs_dir` naming the collection location; that directory
 can be empty if optional log collection fails.
+
+Every run through this server (`gym dataset validate` and `gym eval run <task target>`) also leaves one
+per-run summary beside its rollouts, `<rollouts stem>_run_summary.json` (`rollouts_run_summary.json` by
+default; `nemo_gym.tasks.harbor.run_summary`), so a results folder explains itself: the command, target,
+taskset and agent; the dataset's folder, source and digests; the `task_source` the run config declares for the
+taskset (`harbor_<taskset>_agent`, known before dispatch) and, as a cross-check, the one the result rows carry
+(`rows_task_source`, `null` without rows or when they disagree); the files of the run under `files` (rollouts,
+failures, materialized inputs, aggregate metrics, the health check's `quality_summary.json` and
+`rollout_verdicts.jsonl`; the rows with the data processor's `_prepare.jsonl` and `_metrics.json` beside them;
+the collator's `<rollouts stem>/preprocessed_datasets/` folder with the `<split>.jsonl` the collector
+dispatched and its `_metrics.json`; run config, `skipped.json`, `images.json`, the verifier root), each `null`
+when the run did not write it (the aggregate metrics and the two health reports follow a completed collection,
+so they are listed only when at least as new as the rollouts file: a run that stops early leaves an earlier
+run's, and the health reports keep one name per folder whatever the `--output` stem; a fresh start, the
+default `resume_from_cache=false`, clears the rollouts, failures and materialized inputs only once its servers
+are up, so a file under those names that is unchanged since before dispatch, as after servers that failed to
+start, is an earlier run's too, its rows are not this run's and its tasks are `missing`); the files found under
+the run's names that are not its own are listed under `stale_files`, so a `null` beside a file by that name is
+explained; and, per selected task
+and repeat, its status
+(`result`, `failed` or `missing`), reward, mask and `failure_kind`, the verifier's mode, wall time, network
+and return code, the paths of its verifier log folder, `test-stdout.txt`, `trajectory.json`,
+`entrypoint-stdout.txt` and collected `artifacts/` (per turn for a multi-step task), and the input the row
+carried: its task and dataset digests and the `responses_create_params` metadata (`agent_timeout_sec`,
+`harbor_step`). Every path is relative to the summary's own folder, so a results folder moved as a whole
+still resolves (`--output` outside it gives `../` paths); a folder a row names that is not on disk is listed
+under that task's `missing_paths`, never dropped. The summary is written whatever the run did: after
+collection, and also when `gym dataset validate` dispatches nothing because no selected task has a
+`solution/` (then with no run config and no tasks, beside the `--output` the command asked for). A summary
+that cannot be written is logged without
+touching the run's outcome; a fresh `gym eval run` reads its selected rows for the summary only after the
+collector has run, inside that same guard. No judge runs on this path outside the task's own `test.sh`: a
+task that calls one inside the sandbox leaves whatever the judge wrote under `/logs/verifier`, which is the
+verifier log folder the summary names.
+
+`gym -v` / `--verbose` (the `verbose` config key, forwarded to every spun-up server) raises the log level to
+DEBUG in the CLI, this server and the oracle agent alike. At that level the server traces each episode
+(seeded, `test.sh` exit code, wall time, rewards and log folder, final score) and the oracle its `solve.sh`
+run (budget, the task user or `the sandbox default user` when the task names none, exit code); without it
+both stay quiet below WARNING.
 
 The task's `[agent].timeout_sec` reaches the harness twice: in the agent-session seed as
 `agent_timeout_sec`, next to `sandbox_access` (which also names the task's `[agent].user` as `user`, and
@@ -791,14 +832,21 @@ task's `_ng_digest`: a table that declares only them leaves every task at its ba
 table does; only `[gym.defaults]` scaling and `[gym.tasks]` overrides fold a slice in. A `domain` outside Gym's
 values is refused with the values named, like a `license` outside Gym's, so the dataset does not load until it
 is fixed (the generated entry carries the same enum). A benchmark entry names no `prepare_script`; the rows are
-written by the run that generates the entry. Gym's data preparation records the entry in a metrics sidecar
-beside the rows (`results/harbor/<taskset>/tasks_<agent>_metrics.json`, under `results/harbor/validation/` for
-`gym dataset validate`) and refuses a later run whose entry differs from it. `domain`, `verified` and
-`allowed_agents` are catalog declarations, not properties of the rows, so the sidecar leaves them out: flipping
-`verified = true` after baselining, widening `allowed_agents` or changing `domain` between two runs of one taskset
-and harness does not conflict. `type` and `license` are recorded, as for every Gym dataset; editing either between
-two runs of the same taskset and harness fails data preparation with "Found conflicting aggregate metrics", and
-the message names the sidecar to delete before running again.
+written by the run that generates the entry. Gym's data preparation records the entry, with the rows' metrics,
+in a sidecar beside the rows (`results/harbor/<taskset>/tasks_<agent>_metrics.json`, under
+`results/harbor/validation/` for `gym dataset validate`) and in the collated split's
+(`<rollouts stem>/preprocessed_datasets/<split>_metrics.json`). For a committed source dataset such a sidecar is a
+source of truth, and a later preparation that computes something else fails with "Found conflicting aggregate
+metrics". On this path it is not: the rows are regenerated from the task folder on every command and the output
+folder is reused per taskset, so each run removes the previous selection's sidecars before data preparation
+(prepare the one beside the rows as it rewrites them, a fresh start the collated one right before it dispatches)
+and the processor writes them anew. Growing the dataset, narrowing it with `--only-tasks`/`--exclude-tasks` or
+editing `type` or `license` between two runs of one taskset and harness therefore never fails, and
+`overwrite_metrics_conflicts` is never needed. A resumed run (`--resume`) keeps the collated sidecar, as its rows
+must be unchanged to resume at all; so does a run with `reuse_existing_data_preparation=true` and the collated
+input present, which skips data preparation (that run has no rows sidecar of its own: prepare removed the earlier
+one and no processor rewrote it). `domain`, `verified` and `allowed_agents` are catalog declarations,
+not properties of the rows, and the sidecar leaves them out.
 
 `allowed_agents` lists the harnesses the dataset admits, by implementation name (`responses_api_agents/<name>`,
 what `--agent` resolves to); unset admits any. `gym eval run` with another harness fails as soon as
@@ -820,6 +868,29 @@ allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
 [gym.defaults]
 num_repeats = 3
 ```
+
+### Typed task fields (`task_data.py`)
+
+A task folder may carry `task_data.json`, a JSON object of the task's own field values; the loader writes them into the
+row's `task_input.task_data` beside `_ng_digest` and `_ng_dataset_digest`, and the file enters the task digest. A dataset
+that ships `task_data.py` beside `dataset.toml`, a module exporting one Pydantic model `TaskData`, types those fields
+(`nemo_gym.tasks.harbor.task_data`). Prepare imports it once per dataset and checks every task folder's
+`task_data.json` against it before any image is recorded or built (and the loaded tasks again before a row is
+written), refusing the dataset, naming the task, when a task's fields do not satisfy the model or carry a key it does
+not declare (unknown keys fail whatever the model's `extra` setting: the model is validated with extras forbidden, so
+the input names pydantic itself reads, aliases, `AliasChoices` and `AliasPath` included, are the declared ones, and a
+key no field consumed, a field's name where only its alias is accepted or a second spelling of a field already given,
+is refused rather than ignored); values are validated strictly, as JSON (`"3"` does not pass as an `int` nor `"no"` as a
+`bool`: the row and the verifier's `task_data.json` carry the file's values as written, never the model's coerced ones);
+a validator that raises something pydantic does not wrap (a
+`KeyError` from a lookup) is the same refusal, with the exception named. This server imports each taskset's module at startup
+(`tasksets.<name>.folder/task_data.py`) and validates every row at seed: a row the model rejects, or whose fields differ
+from the pinned folder's `task_data.json`, is a terminal seed failure (422) before anything is provisioned (the pin holds
+for a task without `task_data.json` too: a row carrying keys beside the reserved `_ng_*` ones, which this server used to
+accept and ignore, is refused; re-materialize it), and a module
+that does not import refuses every episode of its taskset with the import error (logged once at startup). `gym dataset
+collate` validates the rows against this server's `task_data.py` (the reserved keys) and the dataset's model in one
+report. A dataset without the module is checked for the reserved keys only, as before.
 
 ## Example data
 
@@ -868,7 +939,10 @@ from these sources, the first that defines a name wins:
    name empty and warned about once; it never sees source 5;
 5. at seed, the environment server's `compose_variables` (a literal `value`, a process `env` variable or a
    `model_server`'s sandbox-reachable URL; see "Supported task behavior"): the deployment's values, below every
-   source above, so they fill only the names the task and Harbor leave unset. Prepare has none;
+   source above, so they fill only the names the task and Harbor leave unset. Prepare has none. In a job-level
+   overlay file they stand above sources 2 to 4 instead (the overlay files are the operator's, like the values; see
+   "Job-level Compose overlay"), for the pass-through forms of a service's `environment` (a bare `NAME` in the list
+   form, `NAME:` with no value in the mapping form) as for `${NAME}`;
 6. the default in the expression (`${VAR:-default}`, `${VAR-default}`);
 7. otherwise, at prepare, an empty string with one warning naming the task and the variable, as docker compose
    does; at seed, with the deployment's values in hand, a name the Compose document or an overlay file still
@@ -921,7 +995,8 @@ The file must sit under the task's `environment/` folder: an absolute path outsi
 out, or a symlink fails prepare with the path. Its `KEY=value` lines are inlined into the service's
 `environment` and taken literally, quotes and inline comments handled as Compose does, and a `$` in a value
 is never interpolated. The service's own `environment` wins over its files. Every service's `environment` becomes a mapping of
-strings. A bare `NAME` entry in a list-form `environment` takes the task variable of that name and is
+strings. A bare `NAME` entry in a list-form `environment` (or `NAME:` with no value in the mapping form) takes the
+task variable of that name, in the order of `${NAME}` for the file that wrote it, and is
 dropped when there is none. A missing
 file fails prepare with its name unless the entry says `required: false`. Error messages name the file and
 the line number and never repeat a line's content.
@@ -973,7 +1048,7 @@ in one of three ways, with the same planner at prepare and at seed:
 
 | Volume | How the sandbox group runs it |
 |---|---|
-| Bind mount of a task file or folder (`./seed.json:/app/seed.json`, `${CONTEXT_DIR}/data:/data`) | Uploaded into the service once it starts, before its command runs, so the process finds the file where the Compose file mounted it. The receiving folders are created when missing, and the target, every folder a file lands in (pre-existing or not: a `0700` folder the image ships at the target becomes readable, `0755`), the folders created for the upload and the uploaded files are made readable by every user (`chmod a+rX`, never recursive); what the image already holds under the target and the upload did not write keeps its mode; `ro` is not enforced: the copy is an ordinary tree in the service, owned and moded as the provider's upload leaves it, where Harbor's `:ro` bind is a mount the kernel keeps read-only for root too. An agent that can write the copy (root, or a user who owns the folder above it and can rename it aside) can therefore change any task data bound `:ro` into `main`, whatever folder it comes from (`environment/`, `tests/`, `solution/`, `steps/` or a top-level task file), and the verifier can read the changed copy in either mode: in shared mode `test.sh` runs in `main` itself after the agent's turn; in separate mode it runs in a fresh single sandbox that receives no Compose upload at all (the bind's copy is not there, only what the verifier image itself ships at that path, unless collected) and sees the agent's tree only through `/logs/artifacts` and the task's top-level `artifacts` entries (the `[verifier]` table carries no such key; a misplaced one is ignored), restored at their own paths with the modes the agent left, so a `:ro` target under a collected artifact path (`./reference:/app/reference:ro` with `artifacts = ["/app"]`) reaches the verifier as the agent left it, where Harbor restores artifacts the same way but its kernel-enforced `:ro` mount keeps the collected copy pristine. What `test.sh` must trust it reads from `/tests`, which is emptied and re-uploaded from the task's `tests/` after the agent's turn in shared mode and uploaded into the fresh sandbox in separate mode (when its image ships no `/tests`); a bind of a `tests/` path at another target (`../tests/golden:/golden:ro`) is an ordinary upload like the rest. A folder's tree is recreated, empty folders included, over whatever the image already has under the target (a merge; a bind mount would hide the image's folder, so a task that relies on hiding, say an `/etc/nginx/conf.d` with a default site, behaves differently), and the names the task digest skips (`__pycache__`, `*.pyc`, `.DS_Store`, editor swap and backup files) are not uploaded, so what reaches the service is what the digest covers. A task file or folder bound into several services is uploaded into each service separately: the copies are independent, so a write in one service is not seen by the others, where a Docker bind mount would share one host folder. A source the task folder does not contain, a link leaving it, a link with an absolute target (the server plans on a copy of the task, where it would leave the folder), a folder that contains a link, or a source outside what the task digest covers (`environment/`, `tests/`, `solution/`, `steps/` and the top-level task files, free of editor-leftover names such as `__pycache__`; a `../data/seed.json` could change without changing the task's identity) fails prepare with the path. The target must be an absolute path below `/` with no `..`. |
+| Bind mount of a task file or folder (`./seed.json:/app/seed.json`, `${CONTEXT_DIR}/data:/data`) | Uploaded into the service once it starts, before its command runs, so the process finds the file where the Compose file mounted it. The receiving folders are created when missing, and the target, every folder a file lands in (pre-existing or not: a `0700` folder the image ships at the target becomes readable, `0755`), the folders created for the upload and the uploaded files are made readable by every user (`chmod a+rX`, never recursive); what the image already holds under the target and the upload did not write keeps its mode; `ro` is not enforced: the copy is an ordinary tree in the service, owned and moded as the provider's upload leaves it, where Harbor's `:ro` bind is a mount the kernel keeps read-only for root too. Prepare warns once per such bind, naming the service, the source and the target (a real read-only mount is tracked in issue #5062). An agent that can write the copy (root, or a user who owns the folder above it and can rename it aside) can therefore change any task data bound `:ro` into `main`, whatever folder it comes from (`environment/`, `tests/`, `solution/`, `steps/` or a top-level task file), and the verifier can read the changed copy in either mode: in shared mode `test.sh` runs in `main` itself after the agent's turn; in separate mode it runs in a fresh single sandbox that receives no Compose upload at all (the bind's copy is not there, only what the verifier image itself ships at that path, unless collected) and sees the agent's tree only through `/logs/artifacts` and the task's top-level `artifacts` entries (the `[verifier]` table carries no such key; a misplaced one is ignored), restored at their own paths with the modes the agent left, so a `:ro` target under a collected artifact path (`./reference:/app/reference:ro` with `artifacts = ["/app"]`) reaches the verifier as the agent left it, where Harbor restores artifacts the same way but its kernel-enforced `:ro` mount keeps the collected copy pristine. What `test.sh` must trust it reads from `/tests`, which is emptied and re-uploaded from the task's `tests/` after the agent's turn in shared mode and uploaded into the fresh sandbox in separate mode (when its image ships no `/tests`); a bind of a `tests/` path at another target (`../tests/golden:/golden:ro`) is an ordinary upload like the rest. A folder's tree is recreated, empty folders included, over whatever the image already has under the target (a merge; a bind mount would hide the image's folder, so a task that relies on hiding, say an `/etc/nginx/conf.d` with a default site, behaves differently), and the names the task digest skips (`__pycache__`, `*.pyc`, `.DS_Store`, editor swap and backup files) are not uploaded, so what reaches the service is what the digest covers. A task file or folder bound into several services is uploaded into each service separately: the copies are independent, so a write in one service is not seen by the others, where a Docker bind mount would share one host folder. A source the task folder does not contain, a link leaving it, a link with an absolute target (the server plans on a copy of the task, where it would leave the folder), a folder that contains a link, or a source outside what the task digest covers (`environment/`, `tests/`, `solution/`, `steps/` and the top-level task files, free of editor-leftover names such as `__pycache__`; a `../data/seed.json` could change without changing the task's identity) fails prepare with the path. The target must be an absolute path below `/` with no `..`. |
 | Named volume declared under top-level `volumes:` (shared between services or not) | A folder on the provider's shared storage (`shared_storage` in the OpenSandbox block), mounted into every service that names it, copied up from the image's own content unless `nocopy`, removed when the group stops. When the `sandbox:` block's provider configures no shared storage (no `shared_storage.host_path`), a task that mounts one is left out at prepare naming the setting and the block (a GPU-reserving sidecar's volumes are answered by the `gpu_sandbox_provider` block), rather than failing at every seed; prepare reads the answer from the block's one provider key, so a block it cannot read leaves the decision to the seed. |
 | `external: true` volume, or a bind mount of a host path outside the task | Resolved through `volume_sources` in the `sandbox:` block: a mapping of the volume name or host path to a path under the shared storage root. A volume with no entry fails prepare with its name. Only the entries a task's Compose file resolves this way reach the sandbox adapter, so an ordinary named volume that happens to share a mapped name stays the group's own, isolated per episode. |
 
@@ -1023,6 +1098,146 @@ The `x-sandbox` key the planner writes for the sandbox adapter (`uploads`, and t
 prepare, and the server, naming `x-sandbox`. Upload sources are read in the server's process, so the adapter
 only accepts sources under the task copy it is handed.
 
+## Job-level Compose overlay
+
+Harbor's job config can attach services and tools to every task of a run without touching the tasks:
+`environment.extra_docker_compose` files are passed to every task's `docker compose -f ...` command after the
+task's own file, `agents[].mcp_servers` entries are merged by name with the task's `[[environment.mcp_servers]]`,
+and an agent's `prompt_template_path` is rendered around the instruction. The memory team's five backends (Redis,
+Moraine, MAMS, Hindsight, Graphiti) attach this way. This server reads the same three things from one block,
+`compose_overlay`, and prepare reads it too (from the configuration the command names, like `builds:` and the
+provider blocks), so the overlay's images are recorded with the tasks' and its merge is checked per task before a
+sandbox starts. No task file changes; swapping the block swaps the backend.
+
+```yaml
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      compose_overlay:
+        files:
+          - /path/redis-agent-memory-docker-compose.yaml         # the standalone stack
+          - /path/redis-agent-memory-docker-compose.harbor.yaml  # the glue: `ports: !reset []`, attaches `main`
+        mcp_servers:
+          - {name: redis-memory, transport: sse, url: "http://mcp:9000/sse"}
+        prompt_template: /path/memory_prompt.md.j2
+```
+
+**Files.** Each file is merged onto the task's Compose document, in order, the way Compose merges `-f` files
+(`nemo_gym/tasks/harbor/compose_overlay.py`): mappings key by key; sequences appended, the keyed ones (`ports` by
+host, published port, target and protocol; `volumes` by target; `expose`, `cap_add`, `env_file`, ... by value)
+unique on their key with the later entry winning; `environment`, `labels`, `extra_hosts` and `sysctls` as mappings
+whatever their written form; `depends_on` and a service's `networks` as mappings; `command`, `entrypoint` and
+`healthcheck.test` replaced whole; every other scalar by the last file; a key written with no value in a later file
+(a bare `memory_net:` under `networks` re-declaring one an earlier file configured) keeps the earlier value, as Compose
+keeps it. The `!reset` tag removes the attribute the earlier files set (`ports: !reset []` drops a standalone file's
+host ports, `networks.<name>.name: !reset null` drops its global network name so each episode's group gets the
+project-scoped default, `environment: {DISABLE_AUTH: !reset}` unsets one variable) and `!override` replaces a
+mapping or sequence instead of merging into it, as Compose defines both. The merge is by service name across every
+file, the task's own included: a task whose file declares a name an overlay file declares (`memory:` with an
+`entrypoint` of its own, under an overlay that gives `memory` the deployment's key in `environment`) keeps its
+definition under the overlay's fields, as Compose keeps the fields a later `-f` file does not set, and prepare and
+the server warn once per task and service, naming the overlay file. Tag an overlay service that carries the
+deployment's values `!override` (`memory: !override {image: ..., environment: ...}`), so the merged document starts
+the overlay's definition alone whatever a third-party task declared under that name; a later overlay file that merges
+into a service an earlier one replaced that way (the glue file onto the standalone file's `!override` service) merges
+into the overlay's definition and is not warned about; `main` is the exception, the
+task's own service that the glue files extend by design. The warning is not a refusal: an overlay written for one
+dataset may customize a service it knows by name, as Harbor's extra `-f` files do. Top-level `x-*` extension keys are
+dropped after their anchors expand, as Compose ignores them. Every file is interpolated with the task's variables
+([Compose template variables](#compose-template-variables-and-env_file), the deployment's `compose_variables`
+included, since Harbor's one `docker compose` command sees one environment), so `${REDIS_VERSION:-8.2-alpine}` and
+`${NGC_INFERENCE_API_KEY:?...}` resolve as they do under Harbor, with one difference in precedence: in an overlay file
+the deployment's `compose_variables` stand above the task's own sources (its `[environment].env`, `environment/.env`
+and the process environment), below Gym's infrastructure variables, where in the task's file they fill only the
+names the task leaves unset. The overlay files are the operator's, like the values, and a task is third-party here
+(the `env_file` containment, the private merged document): a task that sets `MEMORY_BASE_URL` in its
+`[environment].env` cannot redirect where an overlay sidecar sends the deployment's `OPENAI_API_KEY`. The pass-through
+spellings of an overlay service's `environment` (`- MEMORY_BASE_URL` in the list form, `MEMORY_BASE_URL:` with no
+value in the mapping form) follow the same order: they are resolved with the overlay's variables before the merge,
+where the task's own pass-through entries are read after it, in the task's order. Under Harbor
+the task's `[environment].env` wins over the operator's process environment in every `-f` file (`merge_compose_env`
+puts the task's env over `os.environ`); a run that needs that reading keeps the name out of `compose_variables`, since
+the process environment keeps Harbor's order. A name both the task and `compose_variables` set resolves to the
+task's value at prepare and the deployment's at seed, so it must stay out of the overlay's image references (below).
+Prepare, though,
+runs without the server's `compose_variables` (a name only they set is empty at prepare, or its `${X:-default}`
+default), and records the images the overlay then names: an image reference, or a variable in one, that only a
+seed-time `compose_variables` value sets is recorded at its default and refused at seed as unrecorded, which
+preparing again cannot change. Image references and the variables they use must resolve at prepare: set such a
+value in prepare's process environment too (source 3 above), or keep it out of image references. Its relative
+paths resolve against the Compose project directory, the task's `environment` folder, never against the overlay
+file's own folder: Compose resolves the relative paths of every `-f` file against the project directory ("Paths in
+override files are not resolved relative to the override file's own location"), and Harbor runs `docker compose
+--project-directory <task>/environment -f <task file> -f <extra> ...`, so an overlay's `./x.env` or `./conf:/etc/api`
+is the task's `environment/x.env` or `environment/conf` under Harbor and here alike (an existing `environment/conf`
+is uploaded as the task's own would be; a missing one is refused as a path the task folder does not contain). Write
+an absolute path, or a variable with one, for a file that lives beside the overlay: the memory team's
+`${GRAPHITI_CONFIG_PATH:-./config.yaml}` and `${MAMS_HARBOR_MCP_BUILD_CONTEXT:-./mcp-server}` defaults land in the
+task folder under both and need the variable set, as the Harbor job sets it. An overlay's `env_file` entries may
+name any readable file (an absolute path anywhere, a relative one wherever it lands): the overlay files are the
+operator's, so a task file's rule (under the task's `environment` folder, part of the digest) does not apply to
+them, as it does not under Harbor. A bind source outside the task (`../../../shared/conf` from the project directory,
+an absolute path, a `~` path) is mapped under the provider block's `volume_sources`; a bare name in short syntax is a
+named volume. The env files of the merged document are read once, after the merge, the merged
+`environment` winning over their values, as Compose reads env files after merging the `-f` files: a later file's
+`env_file` does not override a variable an earlier file or the task set in `environment`, `env_file: !reset []` in
+a later file drops the earlier files' lists (the task's included), `env_file: !override [...]` replaces them, and a
+plain entry appends to them, unique on the resolved path. A task that declares only an image gets Harbor's
+one-service group first (`main`, the task image with Harbor's keep-alive command) for the overlay to extend, as
+Harbor's own base files define `main` for every task. The merged document then goes through the same field check,
+volume planner and image resolution as a task's file: a service field the group cannot run, a `build:` on an
+overlay service, a bind source no `volume_sources` entry maps, a `secrets:` block (the adapter has no secrets; the
+memory team's Redis stack reads its key from one, so a third glue file resets it and sets the variable instead) or an
+overlay that removes the `services` mapping (`services: !reset`) fails prepare with a reason that names the task's
+Compose file and the overlay files merged onto it in order (`environment/docker-compose.yaml merged with Compose
+overlay files [...]`, or `Compose overlay files [...] (the task declares no Compose file of its own)` for an
+image-only task), since the service or the field may come from any of them; an overlay file that does not parse,
+interpolate or merge is named alone. The
+overlay's services start with the task's group and stop with it; a named volume they declare lives on the
+provider's shared storage like a task's; an extra network they declare maps onto the group's pod network as a name
+scope. The merged document carries the operator's values, so it is written to a private folder per episode
+(removed once the group starts), never under `artifacts_dir`, as a document with `compose_variables` is. The
+environment server logs the merged group's services and MCP names once per episode, at INFO level (the servers log at
+WARNING by default; `verbose: true` in the run config raises them to DEBUG), since the document is resolved per
+episode. A server started with a
+`compose_overlay` the dataset was not prepared with has no record of the overlay's images (`compose-images.json`
+next to the task folders, or no such file for an image-only dataset): the seed refuses every episode of the run
+terminally, before any sandbox, naming the services without a record and saying to prepare the dataset again
+with the block, rather than failing inside the group's start and being retried. The seed then runs every check
+prepare ran, on the merged document with this deployment's providers, `volume_sources` and image records: the field
+check, the volume planner, the services the task's `artifacts` and `[[verifier.collect]]` hooks name present in the
+merged document, and no `extra_hosts` on a sidecar whose recorded image runs as a non-root user. So an overlay file
+changed since prepare into something the group cannot run (a `privileged` service, a bind source no
+`volume_sources` entry maps, a removed `services` mapping, a `kafka: !reset` against a task whose collect hook runs
+in `kafka`, host entries on a non-root sidecar) is refused the same way, terminally and with the reason prepare
+gives, not retried for every episode.
+
+**MCP entries.** Merged by name with the task's `[[environment.mcp_servers]]` as Harbor's trial merges the job's
+`agents[].mcp_servers` with the task's (`{name: server}` over the task's entries then the job's): an overlay entry
+replaces a task entry of the same name in its position, a new name goes last. The merged list is what reaches the
+harness, in `/tmp/.nemo-gym/task.json` and, with `task_mcp_grants`, in the one grant list of its session seed
+(`streamable-http` URL entries; `sse` entries stay in the context file: a task's own `sse` entry is warned about at
+every seed, an overlay's once per run, since it is the operator's choice for the whole run). A harness that does not
+declare `supports_task_tool_context` is refused for an overlay entry exactly as for a task's own.
+
+**Prompt template.** A Jinja2 file that must use `{{ instruction }}` (refused when the block is read otherwise, as
+Harbor's `render_prompt_template` refuses it), read and compiled once when the block is read and rendered with
+`StrictUndefined` around the instruction of the
+episode's first turn: the first user message's text of a single-turn row, or of the first step of a `[[steps]]`
+task; later steps are sent as written (wrapping every turn is a parked follow-up). No episode reads or parses the
+file (an edit to it is seen when the server is started again). The server renders it before
+the sandbox is provisioned, so the harness and the first turn's ATIF transcript (the one its verifier reads) carry
+the rendered instruction, and so does a single-turn result's `responses_create_params`; a multi-step result
+records the last turn's params, as the multi-turn record does, so its rendered first turn shows in that turn's
+transcript only (recording each turn's params on the turn result is a follow-up). A template that does not render
+(an undefined variable) is a terminal seed failure with no sandbox. Paths in the block must exist when it is read; the memory team's `${job_config_dir}`
+paths are absolute, keep yours absolute too. The template is compiled with Jinja2 wherever the block is read: this
+server's requirements install it, but `gym dataset validate` and `gym eval run` read the block in the environment
+`gym` runs in, which has Jinja2 through the `ray` extra (`nemo-gym[ray]`, part of `all`) and not through the base
+install; without it, prepare
+stops with a message naming the install (`pip install 'jinja2>=3.1'`), so install it there before preparing a dataset
+with a `prompt_template`.
+
 ## Where settings live
 
 Four homes, one owner each. A setting sits on this server's config only if every dataset on the same
@@ -1031,9 +1246,9 @@ deployment wants the same value; a unit test pins that list.
 | Home | File | Owner | Holds |
 |---|---|---|---|
 | Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
-| Dataset | `dataset.toml`, `[gym]` table | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own |
+| Dataset | `dataset.toml`, `[gym]` table; `task_data.py` | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own. `task_data.py`: the `TaskData` model every task's `task_data.json` fields are validated against (materialize, seed, collate) |
 | Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels, shared storage and `volume_sources` for Compose volumes |
-| Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs |
+| Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs, `compose_overlay` (the job's extra Compose files, MCP entries and prompt template) |
 
 `gym dataset init <name>` writes a dataset in this shape, and `gym dataset validate <folder>` with no extra
 config is the test that a dataset is self-contained.
