@@ -547,7 +547,7 @@ class GdpPdfAgent(SimpleAgent):
         try:
             return await self._run_document(body, row, cookies)
         finally:
-            if any(getattr(tool, "name", None) == "python" for tool in body.responses_create_params.tools or []):
+            if any(tool.get("name") == "python" for tool in body.responses_create_params.tools):
                 try:
                     async with asyncio.timeout(30):
                         response = await self.server_client.request(
