@@ -95,6 +95,11 @@ class Migrator:
     def __init__(self, modules: Mapping[str, str], names: Mapping[str, Mapping[str, tuple[str, str]]]) -> None:
         self.modules = dict(modules)
         self.names = {module: dict(moved) for module, moved in names.items()}
+        # A module that names left can move later too; code then imports those names from its new path.
+        for module, moved in list(self.names.items()):
+            moved_to = self.module_path(module)
+            if moved_to != module:
+                self.names.setdefault(moved_to, {}).update(moved)
         dotted = {old: new for old, new in self.modules.items()}
         for module, moved in self.names.items():
             for name, (new_module, new_name) in moved.items():

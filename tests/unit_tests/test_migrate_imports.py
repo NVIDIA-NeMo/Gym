@@ -331,6 +331,17 @@ class TestRewritePython:
         )
         assert migrator.rewrite_python(source, path="x.py")[0] == source
 
+    def test_names_split_out_of_a_module_that_moved_later_are_found_at_its_new_path(self) -> None:
+        migrator = migrate_imports.Migrator(
+            {"nemo_gym.chat_streaming": "nemo_gym.models.chat_streaming"},
+            {"nemo_gym.chat_streaming": {"SSE_KEEPALIVE": ("nemo_gym.core.responses_api_types", "SSE_KEEPALIVE")}},
+        )
+        for module in ("nemo_gym.chat_streaming", "nemo_gym.models.chat_streaming"):
+            assert _python(migrator, f"from {module} import SSE_KEEPALIVE, stream\n") == (
+                "from nemo_gym.core.responses_api_types import SSE_KEEPALIVE\n"
+                "from nemo_gym.models.chat_streaming import stream\n"
+            )
+
 
 class TestRewriteText:
     def test_library_reference_urls_are_left_for_the_docs_redirects(self, migrator) -> None:
