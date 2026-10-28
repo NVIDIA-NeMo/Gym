@@ -28,8 +28,12 @@ The agent + its `example` dataset are defined in this server's own `configs/scic
 
 The agent sends a `solutions` dict — `{"<problem_id>.<step>": accumulated_code}` — to `/verify`. For
 each scored sub-step the server builds a program (`accumulated_code` + HDF5/compare helpers + the
-sub-step's sanitized test assertions) and runs it in a **Ray subprocess** (`scicode_integration/runner.py`);
-exit code 0 = pass. The HDF5 target-loading and comparison helpers (`process_hdf5_to_tuple`,
+sub-step's sanitized test assertions) and runs it in a **subprocess** (`scicode_integration/runner.py`).
+A pass requires exit code 0 and a random per-run completion sentinel written after the assertions.
+Exiting successfully before reaching that statement fails. The sentinel is removed from recorded
+stdout, including on timeout. This detects generic early exits; it is not a security boundary against
+code that deliberately inspects or modifies its grading program.
+The HDF5 target-loading and comparison helpers (`process_hdf5_to_tuple`,
 `cmp_tuple_or_list`, …) are ported from nemo-skills' `scicode_utils.eval_prefix`; the only change is
 that the `test_data.h5` path is injected from config rather than hardcoded.
 
@@ -43,10 +47,10 @@ Because the generated code runs in this server's own venv, `requirements.txt` pi
   `problem_accuracy`. The headline `subtask_accuracy` (total passed / total over all rollouts) is
   computed on the **agent** (`/aggregate_metrics` runs there), not this server.
 
-**Per-sub-step execution records (opt-in).** By default the server keeps only the pass/fail bit per
-sub-step: the subprocess's stdout is never read and its stderr is discarded after the exit code is
-known. Set `record_step_outputs: true` to add `step_outputs` to the verify response (and therefore to
-every rollout row): one record per scored sub-step, aligned with `step_results`, with `step_id`,
+**Per-sub-step execution records (opt-in).** The runner always checks stdout for the completion
+sentinel. By default, the verify response keeps pass/fail results and per-environment errors without
+the detailed execution records. Set `record_step_outputs: true` to add `step_outputs` to the verify
+response (and therefore to every rollout row): one record per scored sub-step, aligned with `step_results`, with `step_id`,
 `step_number`, `environment` (the grading interpreter whose run the record describes: under the OR rule
 the one that passed, else the last one tried; `null` for a sentinel step), `status` (`executed`, or
 `out_of_context` / `empty` for sentinels that never ran), `passed`, `returncode` (`null` on a timeout),

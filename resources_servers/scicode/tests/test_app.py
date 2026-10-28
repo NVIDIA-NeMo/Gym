@@ -193,6 +193,33 @@ def test_run_substep_timeout():
     assert result["duration_s"] >= 0.5
 
 
+def test_run_substep_timeout_after_tests_hides_completion_sentinel():
+    program = (
+        "import atexit, time\natexit.register(lambda: time.sleep(10))\nprint('finished', flush=True)\nassert True"
+    )
+    result = run_substep(program, timeout_secs=2.0)
+    assert result["passed"] is False
+    assert result["timed_out"] is True
+    assert result["error"] == "timeout"
+    assert result["stdout_tail"] == "finished\n"
+
+
+@pytest.mark.parametrize("tail_chars", [0, 5])
+def test_run_substep_completion_does_not_depend_on_retained_tail(tail_chars):
+    program = "import atexit\natexit.register(lambda: print('shutdown output'))\nassert True"
+    result = run_substep(program, timeout_secs=10.0, output_tail_chars=tail_chars)
+    assert result["passed"] is True
+    assert result["stdout_tail"] == ("tput\n" if tail_chars else "")
+
+
+def test_run_substep_completion_does_not_override_nonzero_exit():
+    program = "import atexit, os\natexit.register(lambda: os._exit(7))\nassert True"
+    result = run_substep(program, timeout_secs=10.0)
+    assert result["passed"] is False
+    assert result["returncode"] == 7
+    assert result["stdout_tail"] == ""
+
+
 def test_run_substep_accepts_explicit_python_interpreter():
     assert run_substep("assert 1 == 1", timeout_secs=10.0, python_executable=sys.executable)["passed"] is True
 

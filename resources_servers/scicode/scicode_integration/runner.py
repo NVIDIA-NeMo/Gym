@@ -18,7 +18,8 @@
 
 A sub-step's accumulated solution is concatenated with the HDF5 target-loading and comparison
 helpers (ported verbatim from nemo-skills' scicode_utils.eval_prefix), then the sub-step's test
-assertions, and run in a subprocess. Exit code 0 means every assertion passed.
+assertions, and run in a subprocess. Passing requires exit code 0 and a completion sentinel
+written after the assertions.
 
 The only change from nemo-skills' eval_prefix is the test-data path: nemo-skills hardcodes
 H5PY_FILE = "/data/test_data.h5"; here it is injected from config.
@@ -331,7 +332,8 @@ def run_substep(
     followed by a statement that writes a random per-run sentinel line, and a pass also
     requires that line on stdout.
 
-    Returns `passed`, the legacy `error` (the bounded stderr on failure, "timeout" on a timeout, the OS
+    Returns `passed`, the legacy `error` (the bounded stderr on failure, an early-exit message when
+    status 0 has no completion sentinel, "timeout" on a timeout, the OS
     error text when the interpreter could not be started, "" on a pass) and `infrastructure_error`, plus
     the execution details a caller may record: `returncode` (None when no process exit code exists),
     `timed_out`, `duration_s`, `exception_class` (see exception_class_from_stderr; read from the complete
@@ -376,7 +378,7 @@ def run_substep(
             "timed_out": True,
             "duration_s": time.monotonic() - started,
             "exception_class": None,
-            "stdout_tail": _tail(expired.stdout, output_tail_chars),
+            "stdout_tail": _tail_text(_decode(expired.stdout).replace(marker, "", 1), output_tail_chars),
             "stderr_tail": _tail(expired.stderr, output_tail_chars),
         }
     except OSError as error:
