@@ -60,7 +60,7 @@ def render_table(report: dict) -> str:
         matrices = render_matrices(rows).replace("# Harness checks by scenario\n", "", 1)
         for harness in rows:
             matrices = matrices.replace(f"## {harness}\n", f"### `{harness}`\n", 1)
-        lines += ["", matrices]
+        lines += ["", '<Accordion title="Detailed checks by harness">', "", matrices, "", "</Accordion>"]
     footer = f"[Gym `{commit[:12]}`](https://github.com/NVIDIA-NeMo/Gym/commit/{commit})"
     if report.get("generated_at"):
         stamp = datetime.fromisoformat(report["generated_at"]).astimezone(UTC)

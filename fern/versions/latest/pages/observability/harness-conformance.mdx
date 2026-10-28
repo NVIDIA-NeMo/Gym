@@ -1,10 +1,36 @@
 ---
 title: "Harness Conformance"
-description: "Check P0 trajectory evidence and compare harness artifact coverage."
+description: "Compare measured harness conformance and inspect retained trajectory evidence."
 position: 3
 ---
 
 # Harness Conformance
+
+## Results
+
+These results are updated automatically from scripted model, tool, and verifier
+scenarios at the linked Gym revision. Each P0, P1, or P2 cell shows
+**passing scenarios / measured scenarios**; a dash means no applicable measurements
+are available.
+
+{/* BEGIN GENERATED TE TABLE */}
+
+<Note>Harness measurements are available on the published documentation page.</Note>
+
+{/* END GENERATED TE TABLE */}
+
+A scenario counts in a tier when it has applicable checks at that priority, and
+passes when all of those checks pass. A scenario can contribute to more than one
+tier; failures in one tier do not change another tier's count. Completed check
+results remain visible when a probe reports execution errors. Expand the detailed
+checks or follow the linked CI results to inspect individual failures.
+
+These measurements cover local execution, independently of benchmark accuracy.
+Remote sandboxes, agent sessions, multimodal inputs, compaction, and parallel
+execution require separate qualification. See
+[Rollout Evidence](/main/observability/rollout-evidence) for collection setup.
+
+## Inspect rollout evidence
 
 Check the evidence retained by a harness/benchmark pair after collecting an evaluation:
 
@@ -128,10 +154,6 @@ a benchmark accuracy result.
 Checker unit tests use hand-authored synthetic evidence contracts, independent of
 harness implementations. Mutations verify missing, conflicting, and malformed
 evidence without prescribing which checks a real harness should pass.
-
-The [Trajectory Capability Matrix](/main/reference/trajectory-capabilities) is
-updated automatically from scripted harness checks. It shows measured results
-at the linked Gym revision, independently of benchmark accuracy.
 
 ## Onboard a producer
 
