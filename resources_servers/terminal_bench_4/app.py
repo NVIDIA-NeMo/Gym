@@ -703,16 +703,23 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     if task is not None:
                         await asyncio.shield(task)
                 if session.phase != "closed" or not lifecycle.released(session):
-                    with rollout_context(session.request.capture_rollout_id):
-                        if session.termination is None:
-                            session.termination = AgentTermination(
-                                reason="cancelled", detail="Resources session closed before verification"
-                            )
-                        await lifecycle.cleanup(session)
+                    # The session owns its teardown: a caller that stops waiting cannot abandon a sandbox,
+                    # the admission slot, or the retention record.
+                    session.finalization = asyncio.create_task(self._release_closed_session(key, session))
+                    await asyncio.shield(session.finalization)
                 if not lifecycle.released(session):
                     raise HTTPException(503, "Task sandboxes could not be stopped; the provider TTL applies")
             self._remember_close(key, session)
             return ResourcesCloseSessionResponse(resources_session_id=key)
+
+    async def _release_closed_session(self, key: str, session: Session) -> None:
+        with rollout_context(session.request.capture_rollout_id):
+            if session.termination is None:
+                session.termination = AgentTermination(
+                    reason="cancelled", detail="Resources session closed before verification"
+                )
+            await lifecycle.cleanup(session)
+        self._remember_close(key, session)
 
 
 def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:

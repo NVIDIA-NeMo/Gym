@@ -315,6 +315,51 @@ async def test_cancelled_close_fences_slow_provisioning_until_its_cleanup(harnes
     assert all(environment.closed for environment in harness.environments)
 
 
+async def test_cancelled_close_still_releases_every_sandbox_and_the_slot(tmp_path, monkeypatch) -> None:
+    harness = Harness(tmp_path, monkeypatch, sandbox_provider_ref="task_sandbox", max_concurrent_sessions=1)
+    monkeypatch.setattr(app_module, "monotonic", lambda: 0.0)
+    seed = harness.seed()
+    await harness.server.seed_session(SimpleNamespace(session={}), seed)
+    session = next(iter(harness.server._sessions.values()))
+    # The real provisioning holds an admission slot until cleanup.
+    await session.slots.acquire()
+    session.owns_slot = True
+    task_sandbox, deletion, deleting = harness.environments[0], asyncio.Event(), []
+    stop = task_sandbox.stop
+
+    async def delete():
+        await deletion.wait()
+        await stop()
+
+    async def gated_stop():
+        # Like Environment.stop: the provider deletion is shielded from its caller's cancellation.
+        if not deleting:
+            deleting.append(asyncio.create_task(delete()))
+        await asyncio.shield(deleting[0])
+
+    task_sandbox.stop = gated_stop
+    closing = asyncio.create_task(
+        harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
+    )
+    while not deleting:
+        await asyncio.sleep(0)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    deletion.set()
+
+    async def retention_recorded():
+        while seed.resources_session_id not in harness.server._close_expiry:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(retention_recorded(), 5)
+    assert all(environment.closed for environment in harness.environments)
+    assert not session.owns_slot and not harness.server._slots.locked()
+    assert harness.server._close_expiry[seed.resources_session_id] == 300
+    assert session.termination.reason == "cancelled"
+    assert harness.graded == []
+
+
 async def test_failed_close_keeps_its_fence_past_the_retry_window(harness, monkeypatch) -> None:
     now = 0.0
     monkeypatch.setattr(app_module, "monotonic", lambda: now)
