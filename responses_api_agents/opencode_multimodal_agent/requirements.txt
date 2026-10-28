@@ -1,0 +1,2 @@
+-r ../opencode_agent/requirements.txt
+Pillow

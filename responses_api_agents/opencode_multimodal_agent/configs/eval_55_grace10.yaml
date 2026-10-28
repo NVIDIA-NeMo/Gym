@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Enforce the shared turn budget at the model gateway.
+# OpenCode advisory steps are removed; prompt and sampling are configured separately.
+visual_opencode:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      entrypoint: eval.py
+      max_turns: 65
+      final_answer_reserve: null
+      strip_reasoning_for_grading: false
+      turn_budget:
+        regular_turns: 55
+        grace_turns: 10
+        grace_tool_turns: 2
+        grace_tool_calls: 2
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: visual_eval.py
+      num_workers: 1
+      turn_budget:
+        regular_turns: 55
+        grace_turns: 10
+        grace_tool_turns: 2
+        grace_tool_calls: 2

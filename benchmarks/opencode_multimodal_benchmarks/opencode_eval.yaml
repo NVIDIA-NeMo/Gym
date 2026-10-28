@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/opencode_multimodal_benchmarks/opencode_eval_agent.yaml
+opencode_multimodal_benchmarks:
+  resources_servers:
+    opencode_multimodal_benchmarks:
+      judge_server: visual_judge
+visual_judge:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:GYM_JUDGE_BASE_URL}
+      openai_api_key: ${oc.env:GYM_JUDGE_API_KEY}
+      openai_model: ${opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.judge_model}
+      openai_default_headers: {}

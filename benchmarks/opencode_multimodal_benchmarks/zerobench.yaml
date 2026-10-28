@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/opencode_multimodal_benchmarks/configs/opencode_multimodal_benchmarks.yaml
+opencode_multimodal_benchmarks:
+  resources_servers:
+    opencode_multimodal_benchmarks:
+      judge_model: null
+visual_opencode:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      entrypoint: app.py
+      resources_server: {type: resources_servers, name: opencode_multimodal_benchmarks}
+      datasets:
+        - name: zerobench
+          type: benchmark
+          jsonl_fpath: benchmarks/opencode_multimodal_benchmarks/data/zerobench.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/opencode_multimodal_benchmarks/zerobench_prepare.py
+          prepare_dependencies: [Pillow, pyarrow]
+          num_repeats: 1

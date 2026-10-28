@@ -54,9 +54,26 @@ def test_catalog_covers_p0_without_exposing_expectations():
     assert main(["--list-scenarios"]) == 0
 
 
-@pytest.mark.parametrize("use_agent_sessions", [False, True])
-@pytest.mark.parametrize("harness", HARNESSES)
-def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
+@pytest.mark.parametrize(
+    "harness,use_agent_sessions",
+    [(h, sessions) for h in HARNESSES for sessions in (False, True) if h != "opencode_multimodal" or not sessions],
+)
+def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path, monkeypatch):
+    if harness == "opencode_multimodal":
+        runtime = tmp_path / "runtime.json"
+        runtime.write_text(
+            json.dumps(
+                {
+                    "command": "opencode",
+                    "sandbox": {
+                        "bwrap_command": ["bwrap"],
+                        "python_env": "/tools/python",
+                        "plugin_dependencies": "/tools/plugins",
+                    },
+                }
+            )
+        )
+        monkeypatch.setenv("GYM_MULTIMODAL_SANDBOX_CONFIG", str(runtime))
     config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
     from omegaconf import OmegaConf
 
@@ -88,8 +105,29 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
     if os.environ.get("HARNESS") == harness:
         import importlib
 
-        module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-        getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
+        entrypoint = "eval" if harness == "opencode_multimodal" else "app"
+        module = importlib.import_module(f"responses_api_agents.{harness}_agent.{entrypoint}")
+        config_name = (
+            "OpenCodeMultimodalEvalConfig" if harness == "opencode_multimodal" else HARNESSES[harness] + "Config"
+        )
+        getattr(module, config_name).model_validate(agent)
+
+
+def test_sandbox_witness_requires_private_file_and_model_visible_result(tmp_path):
+    workspace = tmp_path / "workspace"
+    private = workspace / "opencode_fixture"
+    private.mkdir(parents=True)
+    probe = Probe(SCENARIO["tool_success"], tmp_path, sandbox_workspace_root=workspace)
+    _, arguments, _ = probe._tool({"tools": [TOOL]})
+    call = probe.tool_calls[0]
+    assert "/testbed/tool-0.txt" in arguments["command"]
+    assert str(tmp_path) not in arguments["command"]
+    body = {"messages": [{"role": "tool", "tool_call_id": call["id"], "content": call["token"]}]}
+    probe._observe_tool_results(body)
+    assert call["result_seen"] and not call["executed"]
+    (private / "tool-0.txt").write_text(call["token"])
+    probe._observe_tool_results(body)
+    assert call["executed"]
 
 
 def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
