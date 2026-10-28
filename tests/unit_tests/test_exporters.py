@@ -29,7 +29,7 @@ from mlflow.utils.validation import (
     MAX_PARAMS_TAGS_PER_BATCH,
     _validate_metric_name,
 )
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch
 
 import nemo_gym.exporters as exporters_module
@@ -795,6 +795,29 @@ class TestMLflowExporter:
         client.set_terminated.assert_called_once_with("run-1", status="FINISHED")
         assert exporter.run_id is None
 
+    def test_teardown_closes_a_run_whose_evaluation_failed_as_failed(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
+    ) -> None:
+        monkeypatch.setattr(exporters_module, "_RUN_FAILED", False)
+        exporter, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        exporters_module.mark_run_failed()
+        exporter.teardown()
+
+        client.set_terminated.assert_called_once_with("run-1", status="FAILED")
+
+    def test_opening_exporters_clears_an_earlier_failure(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
+    ) -> None:
+        monkeypatch.setattr(exporters_module, "_RUN_FAILED", False)
+        _register_recording(monkeypatch)
+        wandb_config["recording_enabled"] = False
+        exporters_module.mark_run_failed()
+
+        setup_exporters(wandb_config)
+
+        assert not exporters_module.run_failed()
+
     def test_teardown_without_setup_is_a_noop(self, mlflow_config: DictConfig) -> None:
         MLflowExporter(mlflow_config).teardown()
 
@@ -1067,3 +1090,66 @@ class TestMLflowReopenAgainstARealStore:
 
         assert replacement != deleted
         assert Path(mlflow_store["output_jsonl_fpath"]).with_name("rollouts_mlflow_run_id").read_text() == replacement
+
+
+@pytest.mark.parametrize("serve", [True, False], ids=["serve", "no-serve"])
+@pytest.mark.parametrize("outcome", ["success", "failure", "interrupt", "sigterm"])
+def test_cli_collection_failure_status(tmp_path: Path, monkeypatch: MonkeyPatch, serve: bool, outcome: str) -> None:
+    import nemo_gym.cli.eval as cli
+    import nemo_gym.resolved_config as resolved_config
+    import nemo_gym.telemetry.setup as telemetry
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    output = tmp_path / "output.jsonl"
+    prepared = tmp_path / "output" / "preprocessed_datasets" / "train.jsonl"
+    prepared.parent.mkdir(parents=True)
+    prepared.write_text("{}\n")
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("{}\n")
+    config = OmegaConf.create(
+        {
+            "output_jsonl_fpath": str(output),
+            "split": "train",
+            "reuse_existing_data_preparation": True,
+            "require_complete": True,
+            "disable_aggregation": True,
+            "disable_health_check": True,
+        }
+    )
+    if not serve:
+        config["input_jsonl_fpath"] = str(input_path)
+
+    # Exercise the CLI failure-to-exporter wiring without starting servers or telemetry.
+    monkeypatch.setattr(cli, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(cli, "RunHelper", MagicMock())
+    monkeypatch.setattr(cli.GlobalConfigDictParser, "filter_for_server_instance_configs", lambda *args, **kwargs: {})
+    monkeypatch.setattr(cli, "_validate_split_datasets_declared", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_interrupt_on_sigterm", lambda: None)
+    monkeypatch.setattr(cli, "_terminated", outcome == "sigterm")
+    monkeypatch.setattr(resolved_config, "write_resolved_config", lambda *args, **kwargs: None)
+    for name in ("configure_telemetry_env", "init_telemetry", "shutdown_telemetry"):
+        monkeypatch.setattr(telemetry, name, lambda *args, **kwargs: None)
+    monkeypatch.setattr(exporters_module, "_RUN_FAILED", False)
+
+    async def collect(_self, _config):
+        if outcome == "failure":
+            raise RuntimeError("EVAL FAILED: 0/1 rollouts completed")
+        if outcome in ("interrupt", "sigterm"):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collect)
+    command = cli.e2e_rollout_collection if serve else cli.collect_rollouts
+    if outcome == "success":
+        command()
+    elif serve or outcome == "failure":
+        with pytest.raises(RuntimeError):
+            command()
+    elif outcome == "sigterm":
+        with pytest.raises(SystemExit) as stopped:
+            command()
+        assert stopped.value.code == 143
+    else:
+        with pytest.raises(KeyboardInterrupt):
+            command()
+
+    assert exporters_module.run_failed() is (outcome != "success")

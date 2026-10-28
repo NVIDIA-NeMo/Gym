@@ -43,6 +43,18 @@ EXPORTER_REGISTRY: dict[str, tuple[type[ExporterConfig], str, str]] = {
 }
 
 _EXPORTERS: list[BaseExporter] = []
+_RUN_FAILED = False
+
+
+def mark_run_failed() -> None:
+    """Record that this process's evaluation ended without its results, so exporters close the run as failed."""
+    global _RUN_FAILED
+    _RUN_FAILED = True
+
+
+def run_failed() -> bool:
+    """Whether `mark_run_failed` was called since the exporters were last opened."""
+    return _RUN_FAILED
 
 
 def load_run_exporter_class(name: str) -> type[Exporter]:
@@ -93,6 +105,8 @@ def setup_exporters(global_config_dict: DictConfig) -> list[BaseExporter]:
     warning: telemetry must not take the run down with it.
     """
     teardown_exporters()
+    global _RUN_FAILED
+    _RUN_FAILED = False
 
     for name, (config_model, class_path, extra) in EXPORTER_REGISTRY.items():
         if not config_model.model_validate(global_config_dict).is_available:
