@@ -47,7 +47,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.judge import JudgeError
+from nemo_gym.verification.judge import JudgeError
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
     GdpPdfResourcesServer,

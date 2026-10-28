@@ -13,9 +13,9 @@ from pydantic import ValidationError
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.failure_kinds import is_namespaced
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import SimpleServer
 from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from nemo_gym.verification.judge import JudgeError
 from resources_servers.partner_if import grading_contract as kinds
 from resources_servers.partner_if.app import PartnerIFResourcesServer, PartnerIFResourcesServerConfig, VerifyRequest
 from resources_servers.partner_if.grading_contract import GradingContract
@@ -359,7 +359,7 @@ def test_checkpoints_replay_the_stateless_verification():
 
 
 async def test_verifier_fixture_pins_both_reward_endpoints_without_a_judge():
-    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
     from resources_servers.partner_if.app import VERIFIER_FIXTURE
 
     with patch("resources_servers.partner_if.grading_service.call_judge", new_callable=AsyncMock) as call:

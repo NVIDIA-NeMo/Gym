@@ -19,8 +19,8 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification.judge import JudgeError, call_judge
+from nemo_gym.verification.verifier_fixture import VerifierFixture
 from resources_servers.sciknoweval.grading import grade_task, parse_judgement
 from resources_servers.sciknoweval.task_data import TaskData
 from resources_servers.sciknoweval.verifier_fixture import create_server

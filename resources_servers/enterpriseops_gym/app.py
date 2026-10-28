@@ -53,7 +53,7 @@ from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification.verifier_fixture import VerifierFixture
 from resources_servers.enterpriseops_gym.gym_client import GymRequestError, GymServerClient, GymUnavailableError
 from resources_servers.enterpriseops_gym.task_data import (
     DATABASE_ID_HEADER,

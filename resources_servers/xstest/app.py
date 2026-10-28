@@ -41,7 +41,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import call_judge
+from nemo_gym.verification.judge import call_judge
 
 
 class XSTestResourcesServerConfig(BaseResourcesServerConfig):

@@ -169,6 +169,15 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/trajectory/atif_json"
   - source: "/nemo/gym/nemo-gym/nemo_gym/atif_v1_7"
     destination: "/nemo/gym/nemo-gym/nemo_gym/trajectory/atif_v1_7"
+  # Library reference pages of modules moved into nemo_gym/verification (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/judge"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/verification/judge"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/verifier_fixture"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/verification/verifier_fixture"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/verifier_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/verification"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/verifier_utils/sandbox_verification"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/verification/sandbox_verification"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

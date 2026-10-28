@@ -35,8 +35,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.judge import JudgeError
 from nemo_gym.telemetry.resources_operations import ResourcesOperation
+from nemo_gym.verification.judge import JudgeError
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,

@@ -45,8 +45,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import RETRY_ERROR_CODES
+from nemo_gym.verification.judge import JudgeError, call_judge
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 

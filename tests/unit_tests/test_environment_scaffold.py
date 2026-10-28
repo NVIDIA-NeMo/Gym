@@ -27,7 +27,7 @@ from nemo_gym.environment.scaffold import (
 )
 from nemo_gym.environment.validation import validate_environment
 from nemo_gym.rollout_collection import _environment_servers_by_agent
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
 
 
 @pytest.mark.parametrize("kind", list(EnvironmentKind))
@@ -296,7 +296,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification.verifier_fixture import VerifierFixture
 
 
 class Request(BaseModel):

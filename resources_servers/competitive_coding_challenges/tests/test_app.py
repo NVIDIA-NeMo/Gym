@@ -45,7 +45,7 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
+from nemo_gym.verification.sandbox_verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.app import (
     CompetitiveCodingChallengesResourcesServer,
     CompetitiveCodingChallengesResourcesServerConfig,

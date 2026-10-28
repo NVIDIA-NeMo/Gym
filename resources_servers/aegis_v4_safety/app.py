@@ -31,9 +31,9 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import call_judge
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification.judge import call_judge
+from nemo_gym.verification.verifier_fixture import VerifierFixture
 from resources_servers.aegis_v4_safety.verifier_fixture import (
     create_aegis_v4_safety_server,
     invoke_aegis_v4_safety,

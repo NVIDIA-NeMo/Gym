@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from nemo_gym.config.config_types import AggregateMetricsRequest
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.judge import judge_failsafe
+from nemo_gym.verification.judge import judge_failsafe
 from resources_servers.voicebench.app import (
     VoiceBenchConfig,
     VoiceBenchServer,

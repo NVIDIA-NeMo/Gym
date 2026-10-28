@@ -46,8 +46,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import call_judge
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification.judge import call_judge
+from nemo_gym.verification.verifier_fixture import VerifierFixture
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 
 

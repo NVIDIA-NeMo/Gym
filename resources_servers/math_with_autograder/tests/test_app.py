@@ -34,7 +34,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import JudgeError
+from nemo_gym.verification.judge import JudgeError
 from resources_servers.math_with_autograder.app import (
     MathWithAutograderResourcesServer,
     MathWithAutograderResourcesServerConfig,

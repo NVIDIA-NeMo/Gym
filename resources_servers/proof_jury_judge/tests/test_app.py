@@ -30,9 +30,9 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import SimpleServer
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification.judge import JudgeError
+from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
 from resources_servers.proof_jury_judge.app import (
     VERIFIER_FIXTURE,
     ProofJuryJudgeConfig,

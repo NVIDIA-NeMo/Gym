@@ -52,7 +52,6 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import judge_failsafe
 from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
@@ -61,6 +60,7 @@ from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, Simpl
 from nemo_gym.session_routing import SessionKind
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
+from nemo_gym.verification.judge import judge_failsafe
 
 
 logger = logging.getLogger(__name__)

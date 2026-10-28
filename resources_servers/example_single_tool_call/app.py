@@ -34,7 +34,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification.verifier_fixture import VerifierFixture
 
 
 class SimpleWeatherResourcesServerConfig(BaseResourcesServerConfig):
