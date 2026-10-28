@@ -77,6 +77,10 @@ class InferenceProvider(SimpleResponsesAPIModel):
         self._semaphore = Semaphore(self.config.num_concurrent_requests)
         return super().model_post_init(context)
 
+    def _mints_response_ids(self) -> bool:
+        # responses() builds each response from a chat completion.
+        return True
+
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:

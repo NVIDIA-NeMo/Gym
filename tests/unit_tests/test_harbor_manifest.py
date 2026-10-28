@@ -34,7 +34,9 @@ from nemo_gym.tasks.harbor.manifest import (
     check_manifest,
     check_task_manifest,
     dataset_digest,
+    dataset_files_digest,
     dataset_toml_digest,
+    refresh_gym_layer,
     task_differences,
 )
 from nemo_gym.tasks.harbor.materialize import run_config, write_rows
@@ -227,6 +229,59 @@ class TestManifestFormat:
         with_edit = Manifest.build(folder, source="local")
         assert with_edit.digest not in (base.digest, with_toml.digest)
         assert with_edit.tasks["a"]["digest"] != base.tasks["a"]["digest"]
+
+    def test_dataset_level_verifier_and_task_data_modules_enter_the_dataset_digest(self, tmp_path, capsys):
+        # A dataset-level verifier.py grades every task without tests/ and task_data.py types every row: two runs
+        # that differ only in one of them are not one dataset. Without them nothing changes: same digest, same text.
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        base = Manifest.build(folder, source="local")
+        assert base.dataset_files_digest == dataset_files_digest(folder) == dataset_toml_digest(folder)
+        assert "dataset_files_digest" not in base.text()
+        assert base.digest == dataset_digest({"a": content_hash(folder / "a")}, base.dataset_toml_digest)
+
+        (folder / "verifier.py").write_text("def verify(workspace):\n    return 1.0\n")
+        with_grader = Manifest.build(folder, source="local")
+        assert with_grader.digest != base.digest and with_grader.tasks == base.tasks
+        assert with_grader.digest == dataset_digest(
+            {"a": content_hash(folder / "a")},
+            base.dataset_toml_digest,
+            with_grader.dataset_files_digest,
+        )
+        assert f"dataset_files_digest = {json.dumps(with_grader.dataset_files_digest)}" in with_grader.text()
+        with_grader.write(folder)
+        assert Manifest.read(folder) == with_grader
+        assert set(tomllib.loads(with_grader.text())["dataset"]) == {
+            "source",
+            "digest",
+            "dataset_toml_digest",
+            "dataset_files_digest",
+        }
+
+        (folder / "verifier.py").write_text("def verify(workspace):\n    return 0.0\n")
+        edited = Manifest.build(folder, source="local")
+        assert edited.digest != with_grader.digest and edited.dataset_files_digest != with_grader.dataset_files_digest
+        (folder / "task_data.py").write_text("from pydantic import BaseModel\nclass TaskData(BaseModel):\n    pass\n")
+        with_model = Manifest.build(folder, source="local")
+        assert with_model.digest not in (base.digest, with_grader.digest, edited.digest)
+
+        # A fetched dataset: the Gym layer moved, the task folders did not, so the manifest is rewritten (not
+        # refused, as for dataset.toml), the pins kept, and the rewrite says which file moved.
+        before = fetched_manifest(folder, ["a"])
+        (folder / "verifier.py").write_text("def verify(workspace):\n    return 0.5\n")
+        after = check_manifest(folder)
+        assert after.source == "harbor-registry" and after.pins == before.pins and after.digest != before.digest
+        assert after.tasks["a"]["digest"] == before.tasks["a"]["digest"]
+        assert "a dataset-level task_data.py or verifier.py changed" in capsys.readouterr().out
+        assert Manifest.read(folder) == after
+
+        # A single task folder prepared on its own: its identity covers the files beside it the same way.
+        prepared = prepare_target(str(folder / "a"), output_root=tmp_path / "out")
+        assert prepared.dataset_digest == dataset_digest(
+            {"a": prepared.tasks[0].folder_digest},
+            dataset_toml_digest(folder),
+            dataset_files_digest(folder),
+        )
 
     def test_names_round_trip_through_toml_and_pins_survive_absent_folders(self, tmp_path):
         folder = tmp_path / "ds"
@@ -452,6 +507,37 @@ class TestCheckManifest:
         assert after.tasks["a"]["digest"] == before.tasks["a"]["digest"]
         assert "dataset.toml changed" in capsys.readouterr().out
 
+    def test_refresh_gym_layer_follows_dataset_toml_and_keeps_the_task_record(self, tmp_path, capsys):
+        """A pull that fetched nothing brings the manifest's Gym-layer digests up to date without hashing a task: an
+        edited task folder keeps its recorded digest (check_manifest, which rehashes, still refuses it), a pin without
+        a digest stays one, and a manifest with pins only or none at all is left to check_manifest."""
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        pins = {
+            name: {"git_url": "https://example.test/tasks.git", "git_commit_id": "a" * 40, "path": f"tasks/{name}"}
+            for name in ("a", "b")
+        }
+        before = Manifest.build(folder, source="harbor-registry", pins=pins, names=["a"])
+        before.write(folder)
+        assert before.tasks["b"] == pins["b"]  # pinned, not landed: no digest
+        assert refresh_gym_layer(tmp_path / "none") is None
+        assert refresh_gym_layer(folder) == before and (folder / MANIFEST_FILE).read_text() == before.text()
+        (folder / "dataset.toml").write_text('[gym.tasks."a".environment]\nenv = { X = "1" }\n')
+        (folder / "a" / "instruction.md").write_text("edited by hand\n")
+        after = refresh_gym_layer(folder)
+        assert after.dataset_toml_digest == dataset_toml_digest(folder) != before.dataset_toml_digest
+        assert after.tasks == before.tasks and after.digest != before.digest and after.source == before.source
+        # The rewrite is announced as check_manifest announces it (round 3): the identity changed.
+        assert Manifest.read(folder) == after and capsys.readouterr().out == (
+            f"Rewrote {folder / MANIFEST_FILE}: dataset.toml changed; dataset digest "
+            f"{before.digest[:12]} -> {after.digest[:12]}\n"
+        )
+        with pytest.raises(ManifestError, match="interrupted"):
+            check_manifest(folder)  # the pin without a digest is still the fetch's unfinished business
+        (folder / MANIFEST_FILE).write_text('[dataset]\nsource = "harbor-registry"\n[tasks."a"]\npath = "tasks/a"\n')
+        text = (folder / MANIFEST_FILE).read_text()
+        assert not refresh_gym_layer(folder).records_content and (folder / MANIFEST_FILE).read_text() == text
+
     def test_a_task_that_cannot_be_hashed_is_recorded_by_name_without_a_digest(self, tmp_path, capsys, caplog):
         folder = tmp_path / "ds"
         write_task(folder / "good")
@@ -520,6 +606,11 @@ class TestCheckManifest:
         with pytest.raises(ManifestError, match=r"does not match its manifest.toml \(changed: b\)"):
             check_manifest(folder)
         assert (folder / MANIFEST_FILE).read_text() == legacy
+        # A pull that fetched nothing brings the record up to date without hashing: the edit stays caught above.
+        refreshed = refresh_gym_layer(folder)
+        assert refreshed.task_digests == previous.task_digests and refreshed.pins == previous.pins
+        assert "it recorded no dataset digest; dataset digest - ->" in capsys.readouterr().out
+        (folder / MANIFEST_FILE).write_text(legacy)
 
         # Unchanged: upgraded in place, the recorded digests and pins kept, and the next check finds it as it is.
         (folder / "b" / "instruction.md").write_text("Create a file called hello.txt.\n")
@@ -548,6 +639,37 @@ class TestCheckManifest:
 
 
 @pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
+class TestFetchReferenceRecord:
+    def test_the_fetch_reference_is_recorded_read_back_and_kept_by_every_rewrite(self, tmp_path, capsys):
+        """A fetch records the reference it was made from beside its source (round 32: what a committed entry's
+        declared source is checked against without the hub); it stays out of the dataset digest, a local manifest
+        has none, and check_manifest and refresh_gym_layer carry it through their rewrites as they carry the pins."""
+        folder = tmp_path / "ds"
+        write_task(folder / "a")
+        pins = {"a": {"package": "org/a", "content_hash": "sha256:" + "a" * 64}}
+        ref = "harbor:org/ds@1.0.0"
+        fetched = Manifest.build(folder, source="harbor-package-store", pins=pins, ref=ref)
+        fetched.write(folder)
+        lines = (folder / MANIFEST_FILE).read_text().splitlines()
+        assert lines[2:5] == ["[dataset]", 'source = "harbor-package-store"', f'ref = "{ref}"']
+        assert Manifest.read(folder) == fetched and fetched.ref == ref
+        assert fetched.digest == Manifest.build(folder, source="harbor-package-store", pins=pins).digest
+        assert check_manifest(folder) == fetched and capsys.readouterr().out == ""
+        (folder / "dataset.toml").write_text('[gym.tasks."a".environment]\nenv = { X = "1" }\n')
+        assert refresh_gym_layer(folder).ref == ref and Manifest.read(folder).ref == ref
+        (folder / "dataset.toml").write_text('[gym.tasks."a".environment]\nenv = { X = "2" }\n')
+        assert check_manifest(folder).ref == ref and Manifest.read(folder).ref == ref
+        assert capsys.readouterr().out.count("Rewrote") == 2
+        assert Manifest.read(folder).tasks == fetched.tasks
+        # A local folder records none, and a value that is not a string reads as none.
+        local = tmp_path / "local"
+        write_task(local / "a")
+        assert check_manifest(local).ref is None and "ref = " not in (local / MANIFEST_FILE).read_text()
+        path = folder / MANIFEST_FILE
+        path.write_text(path.read_text().replace(f'ref = "{ref}"', "ref = 7"))
+        assert Manifest.read(folder).ref is None
+
+
 class TestPrepareRecordsIdentity:
     def test_rows_and_run_config_carry_the_dataset_digest(self, tmp_path):
         folder = tmp_path / "ds"

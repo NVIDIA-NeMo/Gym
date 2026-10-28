@@ -629,8 +629,8 @@ def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tm
     from nemo_gym.rollout_observability import (
         AgentObservationBundle,
         TrajectoryRecord,
+        join_agent_model_calls,
         join_assistant_message_calls,
-        join_model_call_observations,
     )
 
     agent, sandbox = setup
@@ -670,7 +670,7 @@ def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tm
                 },
             )
         )
-    bundle = join_model_call_observations(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
+    bundle = join_agent_model_calls(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
     bundle, trajectory = join_assistant_message_calls(
         bundle, TrajectoryRecord.model_validate(receipt["trajectory"]), calls
     )

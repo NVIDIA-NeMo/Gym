@@ -342,6 +342,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
             "reward": 1,
             "judge_score": 1,
             "task_id": "task",
+            "evaluation_completed": True,
         }
 
     async def post(name, path, *, json, cookies, headers=None, _control=False):
@@ -462,6 +463,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
             "reward": 0,
             "judge_score": 0,
             "task_id": "task",
+            "evaluation_completed": True,
         }
 
     async def post(name, path, *, json, cookies, **kwargs):

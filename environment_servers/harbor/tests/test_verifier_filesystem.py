@@ -105,6 +105,62 @@ async def test_linked_verifier_roots_cannot_preserve_planted_success(tmp_path, m
     await server.shutdown()
 
 
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+@pytest.mark.parametrize("left_behind", ["declared_input", "undeclared_input", "planted_reward", "planted_report"])
+async def test_the_shared_verifier_keeps_declared_sidecar_inputs_alone_and_removes_everything_else(
+    tmp_path, monkeypatch, verifier_tree, left_behind
+):
+    """Review (M22, then round 38 P1): kumo's ``verifier`` sidecar appends ``/logs/verifier/actions.jsonl`` during
+    the agent's run, shared with ``main`` by the planner, and ``main``'s ``tests/score.py`` reads it; emptying the
+    whole folder before ``test.sh`` deleted that input, so a test that needs it measured 0 for 1. Keeping everything
+    but the grader's own four names kept an agent-planted test report too: an all-pass ``results.xml`` left behind by
+    a solution that exits during pytest's import, which a ``test.sh`` that reads the report scores as a pass. The
+    folder is emptied again now, except the inputs the task declares (``[verifier].inputs`` from dataset.toml): a
+    declared ``actions.jsonl`` is read by ``test.sh``, an undeclared one is gone like a planted ``reward.json`` or
+    ``results.xml``, in a single-step shared task as in a step's shared verification."""
+    root, logs, tests = verifier_tree
+    verifier_dir = logs / "verifier"
+    verifier_dir.mkdir(parents=True)
+    reward = shlex.quote(str(verifier_dir / "reward.txt"))
+    if left_behind == "declared_input":
+        (tmp_path / "datasets" / "ds").mkdir(parents=True)
+        (tmp_path / "datasets" / "ds" / "dataset.toml").write_text(
+            '[gym.tasks."hello".verifier]\ninputs = ["actions.jsonl"]\n'
+        )
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    assert task.config.verifier.inputs == (["actions.jsonl"] if left_behind == "declared_input" else [])
+    if left_behind in ("declared_input", "undeclared_input"):
+        (verifier_dir / "actions.jsonl").write_text('{"action": "click"}\n')
+        actions = shlex.quote(str(verifier_dir / "actions.jsonl"))
+        (task.path / "tests" / "test.sh").write_text(
+            f"#!/bin/bash\nif test -s {actions}; then echo 1; else echo 0; fi > {reward}\n"
+        )
+    elif left_behind == "planted_reward":
+        (verifier_dir / "reward.json").write_text('{"reward": 1}')
+        (task.path / "tests" / "test.sh").write_text(f"#!/bin/bash\necho 0 > {reward}\n")
+    else:
+        # The report pytest would have written had it run; the solution exited during import, so it writes none.
+        (verifier_dir / "results.xml").write_text('<testsuite tests="3" failures="0" errors="0"/>\n')
+        report = shlex.quote(str(verifier_dir / "results.xml"))
+        (task.path / "tests" / "test.sh").write_text(
+            f"#!/bin/bash\nif test -f {report} && ! grep -q 'failures=\"[1-9]' {report}; then echo 1; else echo 0; fi "
+            f"> {reward}\n"
+        )
+
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
+    )
+
+    assert not outcome.get("mask_sample", False), outcome
+    if left_behind == "declared_input":
+        assert outcome["reward"] == 1, outcome
+        assert (verifier_dir / "actions.jsonl").read_text() == '{"action": "click"}\n'
+    else:
+        assert outcome["reward"] == 0, outcome
+        assert not any((verifier_dir / name).exists() for name in ("actions.jsonl", "reward.json", "results.xml"))
+    await server.shutdown()
+
+
 async def separate_verification(tmp_path, monkeypatch, verifier_tree, artifacts: list[str]) -> dict:
     """One separate-mode verification on the pytest-owned tree, with real shell and tar on both sides.
 

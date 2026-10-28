@@ -28,7 +28,7 @@ from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, join_model_call_observations
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, join_agent_model_calls
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.kilocode_agent.app import KiloCodeAgent, KiloCodeAgentRunRequest, _runtime_failure
@@ -115,7 +115,7 @@ def test_kilo_session_capture_join_enables_health_checks(tmp_path: Path, complet
         request={"messages": [{"role": "user", "content": "hi"}]},
         response={"choices": [{"message": {"role": "assistant", "content": "answer"}}]},
     )
-    joined = join_model_call_observations(observations, [call])
+    joined = join_agent_model_calls(observations, [call])
     assert joined.records[0].invocation_id == "ses-kilo"
     assert joined.records[0].status == "completed"
     assert joined.records[0].model_calls[0].model_call_id == "call-1"

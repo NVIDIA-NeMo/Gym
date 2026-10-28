@@ -729,7 +729,12 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 await state.snapshots.capture(state.sandbox, len(activations))
                 patch = state.snapshots.final_patch
                 if self.config.scoring_profile == "reference" and len(patch.strip()) < 100:
-                    result.update(judge_score=0.0, verdict={"judge_score": 0.0, "reason": "short_patch"})
+                    # A patch too short to judge is a measured zero, not a missing measurement.
+                    result.update(
+                        judge_score=0.0,
+                        verdict={"judge_score": 0.0, "reason": "short_patch"},
+                        evaluation_completed=True,
+                    )
                 else:
                     sandbox = await self._new_sandbox(state, judge=True)
                     result["submission"] = await replicate_submission(
@@ -761,11 +766,13 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         verdict=verdict,
                         judge_score=verdict["judge_score"],
                         reward=float(verdict["judge_score"] >= PASS_THRESHOLD),
+                        evaluation_completed=True,
                     )
         except Exception as error:
             LOGGER.exception("SWE-Together judge measurement failed")
             result.update(
                 mask_sample=True,
+                evaluation_completed=False,
                 failure_kind=JUDGE_FAILED,
                 failure_reason=f"{type(error).__name__}: {error}",
                 _ng_failure_class=JUDGE_FAILED,
