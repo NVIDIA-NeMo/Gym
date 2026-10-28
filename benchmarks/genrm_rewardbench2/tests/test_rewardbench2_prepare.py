@@ -9,6 +9,10 @@ from unittest.mock import patch
 import pytest
 
 from benchmarks.genrm_rewardbench2.prepare import COLUMNS, PARQUET_FPATH, REVISION, convert_rows, prepare
+from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+
+
+GENRM_EVAL_DIR = Path(__file__).resolve().parents[3] / "resources_servers" / "genrm_eval"
 
 
 def record(**overrides: object) -> dict:
@@ -148,3 +152,29 @@ def test_preparation_preserves_existing_files(tmp_path: Path, same_path: bool) -
     assert sorted(path.name for path in tmp_path.iterdir()) == (
         ["source.jsonl"] if same_path else ["prepared.jsonl", "source.jsonl"]
     )
+
+
+def genrm_eval_validator() -> TaskDataValidator:
+    adapter = load_task_data_schema(GENRM_EVAL_DIR)
+    assert adapter is not None
+    return TaskDataValidator(server_name="genrm_eval", adapter=adapter, dataset_fpath="rewardbench2_validation.jsonl")
+
+
+def test_prepared_rows_validate_against_the_owning_schema() -> None:
+    """Generated metadata must be declared, so collation never reports these rows as dirty."""
+    ties = record(id="tied:0", subset="Ties", chosen=["1", "2"], rejected=["0", "11", "42"])
+    rows = list(convert_rows([record(), ties]))
+    check = genrm_eval_validator()
+    for index, row in enumerate(rows):
+        check.validate_row(index, row)
+    assert check.report.clean, check.report.summary()
+    assert not check.report.unknown_keys
+
+
+def test_a_misspelled_generated_field_is_still_unknown() -> None:
+    """Declaring the real fields must not blunt typo detection."""
+    row = next(iter(convert_rows([record()])))
+    row["verifier_metadata"]["comparisnos"] = row["verifier_metadata"].pop("comparisons")
+    check = genrm_eval_validator()
+    check.validate_row(0, row)
+    assert "comparisnos" in check.report.unknown_keys

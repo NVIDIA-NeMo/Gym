@@ -84,8 +84,8 @@ def ties_score(records: list[dict[str, Any]]) -> dict[str, float]:
     Upstream weights tied and reference accuracy at 0.30 each, `correctness_preferred` and its
     harder variant at 0.20 each, and a tanh margin tie-break at 0.01.
     """
-    reference: dict[str, dict[str, Any]] = {}
-    tied: dict[str, dict[str, Any]] = {}
+    reference: dict[tuple[str, int], dict[str, Any]] = {}
+    tied: dict[tuple[str, int], dict[str, Any]] = {}
     for record in records:
         stats = {
             "correct_incorrect": correct_incorrect_margin(record),
@@ -93,7 +93,9 @@ def ties_score(records: list[dict[str, Any]]) -> dict[str, float]:
         }
         stats["accurate"] = stats["correct_incorrect"] is not None and stats["correct_incorrect"] > 0
         # A reference record holds a single correct answer, so it has no correct-answer spread.
-        index = record["example_id"].rsplit(":", 1)[-1]
+        # Repeats are independent evaluations, so a `tied:N` record pairs only with the `ref:N`
+        # from its own repeat; keying on the example number alone would collapse them.
+        index = (record["example_id"].rsplit(":", 1)[-1], record["repeat"])
         (reference if record["correct_pairs"] == 0 else tied)[index] = stats
 
     shared = sorted(set(reference) & set(tied))
@@ -164,6 +166,7 @@ def comparison_outcomes(results: list[dict[str, Any]]) -> tuple[dict[tuple[str, 
             (example_id, repeat),
             {
                 "example_id": example_id,
+                "repeat": repeat,
                 "subset": samples[0].get("subset", "unknown"),
                 "comparisons": samples[0].get("comparisons"),
                 "correct_pairs": samples[0].get("correct_pairs"),

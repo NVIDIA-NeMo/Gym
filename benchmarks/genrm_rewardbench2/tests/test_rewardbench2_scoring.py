@@ -238,6 +238,51 @@ def test_repeats_are_scored_independently() -> None:
     assert metrics["counts"]["math"] == {"total": 2, "correct": 1, "partial": 0}
 
 
+def test_ties_repeats_are_paired_within_their_own_repeat() -> None:
+    """A `tied:N` record pairs with the `ref:N` of its own repeat, never across repeats.
+
+    Both repeats hold the same zero spread, and one wins its chosen-versus-rejected comparison
+    while the other loses it, so every component averages the two instead of taking either alone.
+    """
+    tasks = []
+    for example, correct_pairs in (("Ties:ref:0", 0), ("Ties:tied:0", 1)):
+        shared = {"example_id": example, "subset": "Ties", "comparisons": 1, "correct_pairs": correct_pairs}
+        comparisons = [(f"{example}:0:0", "A>B", (WIN, LOSS))]
+        if correct_pairs:
+            comparisons.append((f"{example}:c0:c1", "A=B", (TIE, TIE)))
+        for pair_id, label, repeats in comparisons:
+            flipped_label = "B>A" if label == "A>B" else label
+            tasks.append(
+                [
+                    rollout(orders[0], repeat=repeat, pair_id=pair_id, label=label, flipped=False, **shared)
+                    for repeat, orders in enumerate(repeats)
+                ]
+            )
+            tasks.append(
+                [
+                    rollout(
+                        orders[1],
+                        repeat=repeat,
+                        pair_id=f"{pair_id}-flipped",
+                        label=flipped_label,
+                        flipped=True,
+                        **shared,
+                    )
+                    for repeat, orders in enumerate(repeats)
+                ]
+            )
+
+    result = compute_metrics(tasks)
+    assert result["metrics"]["ties_reference_accuracy"] == 0.5
+    assert result["metrics"]["ties_tied_accuracy"] == 0.5
+    assert result["metrics"]["ties_correctness_preferred"] == 0.5
+    assert result["metrics"]["ties_correctness_preferred_hard"] == 0.5
+    # The two repeats saturate tanh in opposite directions, so the tie-break cancels.
+    assert result["metrics"]["ties_margin_score"] == 0.0
+    assert result["metrics"]["ties"] == pytest.approx(0.5)
+    assert result["counts"]["ties"] == {"total": 4, "correct": 2, "partial": 0}
+
+
 def test_duplicate_orientations_are_rejected() -> None:
     row = rollout(1, pair_id="Math:1:0:0", label="A>B", flipped=False, example_id="Math:1", subset="Math")
     with pytest.raises(ValueError, match="Duplicate"):
