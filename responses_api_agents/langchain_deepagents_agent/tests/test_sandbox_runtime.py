@@ -6,6 +6,7 @@ import json
 import os
 import signal
 import time
+from uuid import uuid4
 
 import pytest
 
@@ -386,3 +387,80 @@ async def test_native_state_updating_tool_retains_its_actual_message(tmp_path, m
     sent = [item for item in transport.requests[1]["json"]["input"] if item["type"] == "function_call_output"]
     assert retained == sent and len(retained) == 1
     assert retained[0]["call_id"] == "todo-1" and "Inspect evidence" in retained[0]["output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child", [False, True])
+async def test_native_validation_error_retains_actual_repair_message(tmp_path, monkeypatch, child):
+    def call(name, call_id, arguments):
+        return {"type": "function_call", "name": name, "call_id": call_id, "arguments": json.dumps(arguments)}
+
+    def text(value):
+        return {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": value}]}
+
+    outputs = [
+        [call("write_todos", "bad-todo", {"todos": [{"parameter": "Inspect evidence", "status": "completed"}]})],
+        [call("write_todos", "fixed-todo", {"todos": [{"content": "Inspect evidence", "status": "completed"}]})],
+        [text("recovered")],
+    ]
+    if child:
+        outputs.insert(
+            0, [call("task", "delegate", {"description": "Inspect evidence", "subagent_type": "general-purpose"})]
+        )
+        outputs.append([text("all done")])
+    transport = Transport([Reply(200, response(items, index)) for index, items in enumerate(outputs)])
+    monkeypatch.setattr(sandbox_runner, "model_http_session", lambda: transport)
+    observer = DeepAgentsObserver(
+        output=tmp_path / "output.json",
+        task_id="task",
+        rollout_id="rollout",
+        model_ref={"type": "responses_api_models", "name": "policy_model"},
+        sandbox_id="sandbox",
+    )
+    await sandbox_runner.run(payload(tmp_path), observer)
+    assert observer.status == "completed", observer.error
+    owner = "root/delegate" if child else "root"
+    tool = next(t for t in observer.tools.values() if t["tool_call_id"] == "bad-todo")
+    assert tool["status"] == "failed" and tool["error_type"] == "ValidationError"
+    assert tool["invocation_id"] == owner and tool["completed_at"] >= tool["started_at"]
+    sent = [
+        item
+        for item in transport.requests[2 if child else 1]["json"]["input"]
+        if item["type"] == "function_call_output" and item["call_id"] == "bad-todo"
+    ]
+    assert len(sent) == 1 and "Field required" in sent[0]["output"]
+    retained = [
+        item
+        for item in observer.invocations[owner]["conversation"]
+        if item["type"] == "function_call_output" and item["call_id"] == "bad-todo"
+    ]
+    assert retained == sent
+    assert not observer.gaps
+    saved = json.loads((tmp_path / "output.json").read_text())
+    saved_owner = next(i for i in saved["invocations"] if i["invocation_id"] == owner)
+    assert saved_owner["conversation"] == observer.invocations[owner]["conversation"]
+    if child:
+        assert not any(item.get("call_id") == "bad-todo" for item in saved["output_items"])
+    else:
+        assert sent[0] in saved["output_items"]
+    # The SDK sees the original invalid arguments, then its own error, and recovers.
+    assert len(transport.requests) == len(outputs)
+    assert all(r["url"] == payload(tmp_path)["model_url"] for r in transport.requests)
+
+
+@pytest.mark.asyncio
+async def test_tool_error_without_native_result_preserves_evidence_gap(tmp_path):
+    observer = DeepAgentsObserver(
+        output=tmp_path / "output.json",
+        task_id="task",
+        rollout_id="rollout",
+        model_ref={"type": "responses_api_models", "name": "policy_model"},
+        sandbox_id="sandbox",
+    )
+    run_id = uuid4()
+    await observer.on_tool_start({"name": "write_todos"}, "{}", run_id=run_id, tool_call_id="unobserved")
+    await observer.on_tool_error(ValueError("not a native tool result"), run_id=run_id)
+    saved = json.loads((tmp_path / "output.json").read_text())
+    assert saved["tools"][0]["status"] == "failed"
+    assert saved["output_items"] == []
+    assert saved["gaps"] == [{"code": "tool_output_unavailable", "invocation_id": "root", "detail": "unobserved"}]

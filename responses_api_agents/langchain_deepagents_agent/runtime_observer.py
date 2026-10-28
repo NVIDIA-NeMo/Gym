@@ -72,6 +72,7 @@ class DeepAgentsObserver(AsyncCallbackHandler):
         self.children: dict[str, str] = {}
         self.invocations: dict[str, dict[str, Any]] = {"root": self._invocation("root")}
         self.tools: dict[str, dict[str, Any]] = {}
+        self.pending_tool_errors: set[tuple[str, str]] = set()
         self.turns: list[dict[str, Any]] = []
         self.usages: list[dict[str, Any] | None] = []
         self.compactions: list[dict[str, Any]] = []
@@ -192,11 +193,42 @@ class DeepAgentsObserver(AsyncCallbackHandler):
         )
         if key in self.children:
             self.invocations[self.children[key]]["status"] = "failed"
+        self.pending_tool_errors.add((record["invocation_id"], record["tool_call_id"]))
+        self.gaps.append(
+            {
+                "code": "tool_output_unavailable",
+                "invocation_id": record["invocation_id"],
+                "detail": record["tool_call_id"],
+            }
+        )
         self.save()
+
+    def _retain_tool_errors(self, *, owner: str, items: list[dict[str, Any]]) -> None:
+        # The SDK constructs recoverable validation-error ToolMessages after
+        # on_tool_error. Observe its actual next input; never synthesize the text
+        # from the exception or borrow a result from another invocation.
+        if not self.pending_tool_errors:
+            return
+        for item in items:
+            key = (owner, item.get("call_id"))
+            if item.get("type") != "function_call_output" or key not in self.pending_tool_errors:
+                continue
+            self.invocations[owner]["conversation"].append(dict(item))
+            self.pending_tool_errors.remove(key)
+            self.gaps = [
+                gap
+                for gap in self.gaps
+                if not (
+                    gap["code"] == "tool_output_unavailable"
+                    and gap.get("invocation_id") == owner
+                    and gap.get("detail") == item["call_id"]
+                )
+            ]
 
     def begin_model(self, *, run_id: UUID, request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         owner = self.owner(run_id)
         invocation = self.invocations[owner]
+        self._retain_tool_errors(owner=owner, items=request["input"])
         summary_scope = _summary_scope.get()
         if summary_scope is not None:
             if summary_scope:
