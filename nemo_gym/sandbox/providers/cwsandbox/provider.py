@@ -242,7 +242,7 @@ class CWSandboxProvider:
             async with asyncio.timeout(ready_timeout):
                 # Retain start on cancellation so its allocated ID can be reclaimed.
                 await asyncio.shield(start_task)
-                await asyncio.to_thread(sandbox.wait, timeout=ready_timeout)
+                await sandbox
                 if str(sandbox.status) != "running":
                     raise SandboxCreateError(f"cwsandbox reached {sandbox.status}, expected running")
                 result = await sandbox.exec(["bash", "-c", "printf nemo-gym-ready"], timeout_seconds=30)
@@ -356,7 +356,7 @@ class CWSandboxProvider:
             timeout_seconds=self.connection.request_timeout_s,
         )
         if str(sandbox.status) != "running":
-            await asyncio.to_thread(sandbox._cleanup_channels)
+            await self._detach_client(sandbox)
             raise RuntimeError(f"Cannot connect to cwsandbox {sandbox_id!r}: status is {sandbox.status}")
         self._attached.append(sandbox)
         return SandboxHandle(sandbox_id, self.name, sandbox)
@@ -404,10 +404,20 @@ class CWSandboxProvider:
             missing_ok=True,
         )
 
+    @staticmethod
+    async def _detach_client(sandbox: "Sandbox") -> None:
+        # The SDK has no public detach API. Guard its client-only hook so an
+        # incompatible SDK cannot silently report a successful disconnect.
+        cleanup = getattr(sandbox, "_cleanup_channels", None)
+        if not callable(cleanup):
+            raise RuntimeError(
+                "The installed cwsandbox SDK lacks client-only cleanup (_cleanup_channels). "
+                "Install cwsandbox==1.21.0 to disconnect without stopping the owner's sandbox."
+            )
+        await asyncio.to_thread(cleanup)
+
     async def aclose(self) -> None:
         """Release attached clients without stopping the owner's sandboxes."""
         for sandbox in self._attached:
-            # The SDK has no public detach operation. Its synchronous cleanup
-            # helper schedules channel closure on the SDK's own event loop.
-            await asyncio.to_thread(sandbox._cleanup_channels)
+            await self._detach_client(sandbox)
         self._attached.clear()
