@@ -8,7 +8,10 @@ SHA256 over sorted ``relative_path NUL file_sha256 LF`` records covering
 ``task.toml``, ``instruction.md``, ``README.md``, ``trajectory.json`` and everything
 under ``environment/``, ``tests/``, ``solution/`` and ``steps/``. The digest travels in
 ``task_data`` under :data:`DIGEST_KEY` so the resources server can refuse a row whose
-folder changed after materialization. Beside it, :data:`DATASET_DIGEST_KEY` carries the digest of
+folder changed after materialization. :func:`content_hash` refuses directory symlinks because
+this file-content format does not represent their targets.
+
+Beside it, :data:`DATASET_DIGEST_KEY` carries the digest of
 the whole dataset (``manifest.toml``'s ``[dataset].digest``, see :mod:`nemo_gym.tasks.harbor.manifest`). Rollout
 collection copies both ``_ng_*`` keys from the row onto the results row it writes, so every
 ``rollouts.jsonl`` row says which task folder and which dataset it ran. :func:`context_digest` is the second
@@ -32,7 +35,7 @@ from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
 DIGEST_KEY = "_ng_digest"
 DATASET_DIGEST_KEY = "_ng_dataset_digest"
 
-_SINGLE_FILES = ("task.toml", "instruction.md", "README.md", "trajectory.json")
+_SINGLE_FILES = ("task.toml", "instruction.md", "README.md", "trajectory.json", "task_data.json")
 _DIRECTORIES = ("environment", "tests", "solution", "steps")
 _IGNORED = ("__pycache__", "*.pyc", ".DS_Store", "*.swp", "*.swo", "*~")
 
@@ -93,6 +96,19 @@ def archive_hash(path: Path) -> str:
 def content_hash(path: Path) -> str:
     """Digest the task folder at ``path``."""
     path = Path(path).resolve()
+    # rglob does not descend into directory links, so check links before filtering to files
+    # or ignoring cache paths. Reject unsupported links without changing the digest format.
+    for link in path.rglob("*"):
+        if not link.is_symlink():
+            continue
+        relative = link.relative_to(path).as_posix()
+        target = link.resolve(strict=True)
+        if not target.is_relative_to(path):
+            raise ValueError(f"Task symlink escapes the task folder: {relative}")
+        if target.is_dir():
+            raise ValueError(
+                f"Task directory symlinks are not supported: {relative}; replace it with a directory inside the task"
+            )
     digest = hashlib.sha256()
     for file in _covered_files(path):
         relative = file.relative_to(path).as_posix()

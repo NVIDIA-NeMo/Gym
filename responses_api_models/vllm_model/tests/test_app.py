@@ -1364,11 +1364,18 @@ class TestApp:
             else:
                 assert response.json()["choices"][0]["finish_reason"] == finish_reason
 
-    async def test_provider_abort_skips_scoring_and_can_be_retried(self, monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize(
+        "max_model_retries,abort_count",
+        [(None, 1), (None, 3), (0, 1)],
+        ids=["agent-recovers", "agent-exhausts-retries", "agent-retries-disabled"],
+    )
+    async def test_provider_abort_skips_scoring_and_can_be_retried(
+        self, monkeypatch: MonkeyPatch, max_model_retries: int | None, abort_count: int
+    ) -> None:
         model = self._setup_server(monkeypatch)
         provider = MagicMock(spec=NeMoGymAsyncOpenAI)
         provider.create_chat_completion = AsyncMock(
-            side_effect=[self._provider_reply("abort"), self._provider_reply("stop")]
+            side_effect=[self._provider_reply("abort") for _ in range(abort_count)] + [self._provider_reply("stop")]
         )
         model._clients = [provider]
         model_app = model.setup_webserver()
@@ -1386,6 +1393,8 @@ class TestApp:
             ),
             server_client=transport,
         )
+        if max_model_retries is not None:
+            agent.config.max_model_retries = max_model_retries
         request = MagicMock(cookies={}, path_params={}, headers={})
         verify = AsyncMock()
 
@@ -1401,6 +1410,7 @@ class TestApp:
 
         async def post(*, server_name, url_path, json, cookies, headers=None):
             if server_name == "model":
+                verify.assert_not_awaited()
                 result = model_client.post(url_path, json=json.model_dump(exclude_none=True))
                 return reply(result.json(), result.status_code)
             if url_path == "/seed_session":
@@ -1418,23 +1428,25 @@ class TestApp:
                 input=[{"role": "user", "content": "hi"}], max_output_tokens=4096
             )
         )
-        with raises(ClientResponseError) as error:
-            await agent.run(request, body)
-        verify.assert_not_awaited()
-        failure = _agent_request_failure_row(error.value, error.value.status)
-        assert "provider_cancelled" in failure["_ng_failure_response_body"]
-        assert "abort" in failure["_ng_failure_response_body"]
-        assert "reward" not in failure and "response" not in failure
-        assert not is_terminal_failure(failure)
+        if abort_count > agent.config.max_model_retries:
+            with raises(ClientResponseError) as error:
+                await agent.run(request, body)
+            verify.assert_not_awaited()
+            assert provider.create_chat_completion.await_count == agent.config.max_model_retries + 1
+            failure = _agent_request_failure_row(error.value, error.value.status)
+            assert "provider_cancelled" in failure["_ng_failure_response_body"]
+            assert "abort" in failure["_ng_failure_response_body"]
+            assert "reward" not in failure and "response" not in failure
+            assert not is_terminal_failure(failure)
 
-        # Resuming the same task makes a fresh generation; only that successful
-        # response is sent to the verifier and can become a scored result.
+        # Recovery happens within the agent retry budget, or in a fresh rollout
+        # after that budget is exhausted. Only the successful response is scored.
         result = await agent.run(request, body)
         verify.assert_awaited_once()
         assert result.response.status == "completed"
         assert result.response.incomplete_details is None
         assert result.reward == 1.0
-        assert provider.create_chat_completion.await_count == 2
+        assert provider.create_chat_completion.await_count == abort_count + 1
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
