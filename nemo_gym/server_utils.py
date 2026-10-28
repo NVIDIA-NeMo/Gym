@@ -48,6 +48,7 @@ from aiohttp import (
     ClientResponseError,
     ClientSession,
     ClientTimeout,
+    ConnectionTimeoutError,
     DummyCookieJar,
     ServerDisconnectedError,
 )
@@ -596,6 +597,8 @@ async def request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    *,
+    _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -615,6 +618,10 @@ async def request(
 
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
     server may already have received it. A connection that was never made is still retried.
+
+    ``_connection_retry_window`` caps the wall-clock time spent retrying connection errors, counted from the
+    first one; past it the last connection error is raised. Share one window across the calls of one logical
+    request so they draw on a single budget. None retries connection errors without a time limit.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
@@ -641,6 +648,7 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
     # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
@@ -655,6 +663,7 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
     finally:
@@ -670,6 +679,8 @@ async def _traced_request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    *,
+    _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -713,6 +724,7 @@ async def _traced_request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
 
@@ -770,6 +782,52 @@ def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> 
     )
 
 
+class ConnectionRetryWindow:
+    """Wall-clock budget for connection-error retries of one logical request.
+
+    The window opens at the first connection error. After that, each attempt may wait for a
+    connection only as long as the budget has left, but a connected attempt is never cut short.
+    """
+
+    __slots__ = ("timeout_s", "first_error_at", "last_error")
+
+    def __init__(self, timeout_s: float) -> None:
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        self.timeout_s = timeout_s
+        self.first_error_at: Optional[float] = None
+        self.last_error: Optional[BaseException] = None
+
+    def record(self, error: BaseException) -> None:
+        if self.first_error_at is None:
+            self.first_error_at = time.monotonic()
+        self.last_error = error
+
+    def remaining(self) -> Optional[float]:
+        """Seconds left in the budget, or None while no connection error has happened."""
+        if self.first_error_at is None:
+            return None
+        return self.timeout_s - (time.monotonic() - self.first_error_at)
+
+    def expired(self) -> bool:
+        remaining = self.remaining()
+        return remaining is not None and remaining <= 0
+
+    def bound_connect(self, timeout: ClientTimeout) -> ClientTimeout:
+        """Cap connection setup, including the wait for a pool slot, at the time left."""
+        remaining = self.remaining()
+        if remaining is None:
+            return timeout
+        connect = remaining if timeout.connect is None else min(timeout.connect, remaining)
+        return ClientTimeout(
+            total=timeout.total,
+            connect=connect,
+            sock_read=timeout.sock_read,
+            sock_connect=timeout.sock_connect,
+            ceil_threshold=timeout.ceil_threshold,
+        )
+
+
 async def _request_with_retries(
     method: str,
     url: str,
@@ -779,6 +837,8 @@ async def _request_with_retries(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    *,
+    _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
@@ -789,12 +849,18 @@ async def _request_with_retries(
         explicit_tries = 0
         retries = 0
         retry_start = time.monotonic()
+        window = _connection_retry_window
         while True:
+            if window is not None and window.expired():
+                raise window.last_error
             if _max_num_tries is not None:
                 explicit_tries += 1
+            attempt_kwargs = kwargs
+            if window is not None and window.first_error_at is not None:
+                attempt_kwargs = kwargs | {"timeout": window.bound_connect(kwargs.get("timeout") or client.timeout)}
             try:
-                return await client.request(method=method, url=url, **kwargs)
-            except ServerDisconnectedError:
+                return await client.request(method=method, url=url, **attempt_kwargs)
+            except ServerDisconnectedError as error:
                 if not _resend_after_disconnect:
                     raise
                 global _NUM_SERVER_DISCONNECTED_ERROR
@@ -812,8 +878,12 @@ async def _request_with_retries(
                 # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
                 if _max_connection_retries is not None and retries >= _max_connection_retries:
                     raise
+                if window is not None:
+                    window.record(error)
+                    if window.expired():
+                        raise
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(_connection_backoff_s(window))
             except ClientOSError as error:
                 if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
                     raise
@@ -831,11 +901,18 @@ async def _request_with_retries(
 
                 if _max_connection_retries is not None and retries >= _max_connection_retries:
                     raise
+                if window is not None:
+                    window.record(error)
+                    if window.expired():
+                        raise
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(_connection_backoff_s(window))
             except Exception as e:
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
+                # The connect cap set from the window ran out: report the connection error it stood for.
+                if isinstance(e, ConnectionTimeoutError) and window is not None and window.expired():
+                    raise window.last_error from e
                 if not _resend_after_disconnect:
                     # A connection that was never made is a ClientOSError, handled above;
                     # anything else may have sent it.
@@ -868,6 +945,11 @@ Sleeping 0.5s and retrying...
     finally:
         if token is not None:
             reset_server_name(token)
+
+
+def _connection_backoff_s(window: Optional[ConnectionRetryWindow]) -> float:
+    remaining = None if window is None else window.remaining()
+    return 0.5 if remaining is None else max(0.0, min(0.5, remaining))
 
 
 async def raise_for_status(response: ClientResponse, content: Optional[bytes] = None) -> None:  # pragma: no cover

@@ -123,6 +123,7 @@ from nemo_gym.responses_converter import (
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.server_utils import ConnectionRetryWindow
 
 
 def _response_with_output(output: list) -> dict:
@@ -743,6 +744,32 @@ class TestProviderBackoff:
 
         assert await client._request_with_retry(url="https://example.com/v1/responses") is success
         sleep.assert_awaited_once_with(3.0)
+
+    async def test_status_retries_of_one_call_share_one_connection_retry_window(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(retry_after="1"), success, success])
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1", connection_retry_timeout_s=30.0)
+
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+
+        windows = [c.kwargs["_connection_retry_window"] for c in request.await_args_list]
+        assert isinstance(windows[0], ConnectionRetryWindow) and windows[0].timeout_s == 30.0
+        # The 503 retry keeps the call's window; the next call gets its own.
+        assert windows[0] is windows[1]
+        assert windows[2] is not windows[0]
+
+    async def test_no_connection_retry_window_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        request = AsyncMock(return_value=SimpleNamespace(status=200))
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+
+        await client._request(method="POST", url="https://example.com/v1/responses")
+        assert "_connection_retry_window" not in request.await_args.kwargs
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:
