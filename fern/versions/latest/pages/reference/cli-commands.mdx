@@ -1067,6 +1067,80 @@ Writes into the output directory:
 
 If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or point at the file directly with `--baseline-agg-metrics` / `--candidates-agg-metrics`.
 
+#### Benchmark-suite comparisons
+
+Use `--level suite` to compare baseline and candidate runs across several benchmarks for each model, and across a declared set of model–benchmark pairs. Omitting this option preserves single-run comparison behavior.
+
+```bash
+gym eval compare --level suite \
+    --suite suite.yaml \
+    --confidence-level 0.90 \
+    --output-dir results/suite
+```
+
+| Option | Description |
+| --- | --- |
+| `--level suite` | Select suite comparison explicitly. The default comparison level is `run`. |
+| `--suite PATH` | YAML defining metrics and one baseline/candidate run pair per model and benchmark. Required in suite mode. |
+| `--confidence-level FRACTION` | Two-sided confidence level, strictly between zero and one. Defaults to `0.90` in suite mode. |
+| `--output-dir DIR` | Report directory; defaults to the suite YAML's directory. |
+| `--report-format` | `md`, `json`, or `both` (default). |
+
+Run paths and agent selectors come from the suite YAML; do not combine suite mode with `--baseline`, `--candidates`, or the single-run agent and aggregate-metrics flags.
+
+```yaml
+schema_version: 1
+benchmarks:
+  birdbench:
+    metrics:
+      - name: mean/reward
+  mmlu-redux:
+    metrics:
+      - name: mean/strict_boxed_reward
+        low: 0
+        high: 1
+        higher_is_better: true
+      - name: mean/normalized_reward
+        low: 0
+        high: 1
+        higher_is_better: true
+models:
+  model-a:
+    birdbench:
+      baseline:
+        rollouts: baseline/birdbench/rollouts.jsonl
+      candidate:
+        rollouts: candidate/birdbench/rollouts.jsonl
+    mmlu-redux:
+      baseline:
+        rollouts: baseline/mmlu-redux/rollouts.jsonl
+      candidate:
+        rollouts: candidate/mmlu-redux/rollouts.jsonl
+```
+
+Paths are relative to the suite YAML. Each source may specify `aggregate_metrics` to override the derived metrics filename and `materialized_inputs` to identify planned collection inputs. `agent` is optional when the aggregate file contains one agent; files containing several agents require it. There is one run per side, without pooling.
+
+For `mean/reward`, Gym resolves theoretical bounds and direction from the named benchmark's manifest. Other metrics require explicit `low`, `high`, and `higher_is_better`. A complete explicit definition overrides manifest metadata. Bounds must be finite, with `high > low`; observed extrema never supply them. The MMLU example requires runs collected with MCQA's `boxed_and_normalized` grading mode, which emits both selected reward fields.
+
+Every repeat's metric is normalized using `100 * (raw - low) / (high - low)`. Lower-is-better metrics use `100` minus that result. Scores outside the declared theoretical bounds are errors. Gym averages normalized metrics **within each repeat**, then estimates each benchmark's repeat mean and sample variance. This preserves covariance between metrics measured in the same repeat. Selecting more metrics does not give a benchmark additional weight.
+
+Per-model results weight eligible benchmarks equally. The overall result weights eligible model–benchmark pairs equally, including explicitly declared sparse matrices. Each side's repeat count may differ. The interval for the candidate-minus-baseline aggregate uses squared-weight variance contributions and Welch–Satterthwaite effective degrees of freedom. Its confidence level defaults to 90%; intervals are not clipped to score bounds.
+
+<Note>
+Inference describes independent repeats for the fixed benchmark suite and task sets. It assumes independent baseline/candidate samples and independent model–benchmark estimates. It does not estimate variability across possible benchmarks or models. Correlation between metrics within a benchmark is preserved by averaging them before variance estimation.
+</Note>
+
+Suite comparison requires stored `repeat_level_metrics`. Files missing that field must be regenerated with `gym eval aggregate`; suite mode does not reconstruct it. If either side has only one repeat, the whole model–benchmark pair is excluded with a warning. The report lists requested and effective membership, exclusions, and recomputed equal weights. An empty effective suite is an error.
+
+Recorded task sets must agree across repeats and sides. Gym checks materialized inputs when available; without them, full planned coverage remains unverified. Known incomplete coverage suppresses affected confidence intervals while retaining descriptive results. Constant-score benchmarks retain their weights; zero total empirical variance produces zero SE and an unavailable interval and degrees of freedom.
+
+| File | Contents |
+| --- | --- |
+| `suite_compare_report.md` | Aggregates, benchmark membership, metric scales, source runs, coverage, and assumptions. |
+| `suite_compare_report.json` | Suite schema version `"2"`, including per-repeat raw and scaled values, variance contributions, and normalization provenance. |
+
+The numerical implementation, including normalization and metric averaging, is isolated in `nemo_gym/comparison/statistics/unpaired_welch_fixed_suite.py`. Artifact loading, coverage checks, report construction, and presentation are separate from those calculations.
+
 ### `gym eval reverify`
 
 Recompute rewards by replaying a stored response through a resources server's `/verify` endpoint — without re-running model inference. The command accepts native Gym rollouts or the initial completed, text-only Relay ATIF v1.7 profile. It starts the resources server automatically from the provided config.

@@ -1543,6 +1543,18 @@ COMMANDS = {
         summary="Compare a baseline eval run against candidate runs.",
         flags=(
             _value_flag(
+                "level",
+                "comparison_level",
+                "Comparison level: run (default) or an explicitly configured benchmark suite.",
+                choices=("run", "suite"),
+            ),
+            _value_flag("suite", "suite_fpath", "Suite YAML, required with --level suite.", quote=True),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Suite confidence level as a fraction between 0 and 1 (default: 0.90).",
+            ),
+            _value_flag(
                 "baseline",
                 "baseline_rollouts_jsonl_fpath",
                 "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read today).",
