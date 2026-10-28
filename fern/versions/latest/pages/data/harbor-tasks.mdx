@@ -280,6 +280,12 @@ planner, the services the task's artifacts and collect hooks name, the non-root 
 reason names the task's Compose file and the overlay files merged onto it. The template is read and compiled once,
 when the block is read.
 
+For an image-only task with recorded image settings, attaching services preserves the image's startup user and
+working directory. Dockerfile `RUN` commands finish first, including creation of a user or its `WORKDIR`; the
+entrypoint and image health check then use the Dockerfile's final settings. `[agent].user` and
+`[environment].workdir` apply to subsequent agent commands. An explicit `services.main.user` or
+`services.main.working_dir` in a job overlay overrides the startup default.
+
 ```yaml
 harbor_environment_server:
   environment_servers:

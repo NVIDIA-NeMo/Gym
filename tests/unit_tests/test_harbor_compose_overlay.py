@@ -222,7 +222,7 @@ class TestMerge:
             "services": {"main": {"entrypoint": ["/entry.sh", "--serve"]}}
         }
         overlaid = replace(started, overlay=(OverlayRun("touch marker", workdir="/app", user="app"),))
-        assert synthesized_group(overlaid) == {"services": {"main": {"entrypoint": ["/entry.sh", "--serve"]}}}
+        assert synthesized_group(overlaid) == synthesized_group(started)
         merged = merge_files(synthesized_group(known), STANDALONE, HARBOR_GLUE)
         assert merged["services"]["main"]["entrypoint"] == []
         merged = merge_files(synthesized_group(started), STANDALONE, HARBOR_GLUE)
@@ -232,7 +232,8 @@ class TestMerge:
             "working_dir"
         ] == ("/app")
         assert (
-            "working_dir" not in merge_files(synthesized_group(overlaid), STANDALONE, HARBOR_GLUE)["services"]["main"]
+            merge_files(synthesized_group(overlaid), STANDALONE, HARBOR_GLUE)["services"]["main"]["working_dir"]
+            == "/app"
         )
 
     def test_mappings_merge_key_by_key_and_scalars_take_the_last_file(self):

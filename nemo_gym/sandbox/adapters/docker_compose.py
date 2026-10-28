@@ -116,7 +116,8 @@ class AsyncSandboxCompose:
     function the group awaits with that service's sandbox once it is created and its runtime is configured,
     before its uploads, its command, its hooks and its healthcheck: the caller's own image setup (the Harbor
     server runs an overlay Dockerfile's ``RUN`` lines there, so they precede the mounts and the command, as
-    a build precedes ``compose up``). An exception from it fails the start and stops the group.
+    a build precedes ``compose up``). For a service with setup, its working directory is applied afterwards:
+    setup may create that directory under a different user. An exception fails the start and stops the group.
     """
 
     def __init__(
@@ -938,9 +939,14 @@ class AsyncSandboxCompose:
                     await self._prepare_volumes()
                 for name in order:
                     provider = self._provider_for(name)
-                    self.services[name] = AsyncSandbox(provider, self._plans[name]["spec"], owns_provider=False)
+                    spec = self._plans[name]["spec"]
+                    # Image setup owns directory creation, including its permissions. Do not let the provider
+                    # or our bootstrap create the final WORKDIR as root before a Dockerfile's RUN lines.
+                    creation_spec = replace(spec, workdir=None) if name in self.service_setup else spec
+                    self.services[name] = AsyncSandbox(provider, creation_spec, owns_provider=False)
                     await self.services[name].start()
-                    await self._create_workdir(name)
+                    if name not in self.service_setup:
+                        await self._create_workdir(name)
                     service = self.document["services"][name]
                     if service.get("cap_add") or service.get("shm_size") is not None:
                         await provider.configure_runtime(
@@ -953,6 +959,8 @@ class AsyncSandboxCompose:
                     # into the mounted container), then, below, the command, hooks and healthcheck.
                     if name in self.service_setup:
                         await self.service_setup[name](self.services[name])
+                        await self._create_workdir(name)
+                        self.services[name].set_default_workdir(spec.workdir)
                     if (service.get("x-sandbox") or {}).get("logs"):
                         await self._prepare_logs(name)
                     if (service.get("x-sandbox") or {}).get("uploads"):

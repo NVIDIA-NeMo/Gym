@@ -96,6 +96,29 @@ class FakeConnectableProvider:
         return SandboxHandle(sandbox_id=sid, provider_name=self.name, raw=sid)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_workdir", [None, "/image"])
+async def test_workdir_changed_after_setup_is_used_by_exec_and_reconnected_clients(provider_workdir):
+    class ProviderWithWorkdir(FakeConnectableProvider):
+        async def serialize_handle(self, handle, *, scope=None):
+            return {**await super().serialize_handle(handle, scope=scope), "workdir": provider_workdir}
+
+    owner = AsyncSandbox(ProviderWithWorkdir(), SandboxSpec(image="image", workdir="/image"))
+    await owner.start()
+    try:
+        owner.set_default_workdir("/prepared")
+        assert (await owner.exec("pwd")).stdout == "/prepared"
+        assert (await owner.exec("pwd", cwd="/explicit")).stdout == "/explicit"
+        descriptor = await owner.serialize()
+        borrower = await AsyncSandbox.connect(descriptor, provider=ProviderWithWorkdir())
+        try:
+            assert (await borrower.exec("pwd")).stdout == "/prepared"
+        finally:
+            await borrower.stop()
+    finally:
+        await owner.stop()
+
+
 class _OpsOnlyProvider:
     """A provider without the connect capability (negative case)."""
 

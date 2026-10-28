@@ -2586,7 +2586,8 @@ async def test_service_setup_runs_after_the_sandbox_starts_and_before_uploads_an
         "services": {
             "main": {
                 "image": "image",
-                "command": ["sh", "-c", f"cat {sandbox_root}/data/seed.csv > {result}"],
+                "working_dir": str(sandbox_root / "data"),
+                "command": ["sh", "-c", f"cat seed.csv > {result}"],
                 "x-sandbox": {
                     "uploads": [{"source": str(task / "seed.csv"), "target": f"{sandbox_root}/data/seed.csv"}]
                 },
@@ -2608,6 +2609,7 @@ async def test_service_setup_runs_after_the_sandbox_starts_and_before_uploads_an
         await group._wait("main", "service_completed_successfully")
     # The upload won over the RUN line's default, and the command read the uploaded bytes.
     assert result.read_text() == "uploaded"
+    assert provider.created[0].workdir is None  # setup created the directory before it became the exec default
     assert order[:2] == ["setup", "upload"] and order.count("setup") == 1  # side had no setup
     setup_index = next(
         i for i, command in enumerate(provider.commands) if command.startswith("mkdir ") and "/data &&" in command
