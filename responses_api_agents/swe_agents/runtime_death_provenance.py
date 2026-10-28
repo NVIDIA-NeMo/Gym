@@ -12,7 +12,8 @@ import uuid
 from pathlib import Path
 
 
-SUPPORTED_OPENHANDS_COMMIT = "54d2a95edc666551b854a7e5d4205ec69e60ff23"
+# Public source revision, not a credential.
+SUPPORTED_OPENHANDS_COMMIT = "54d2a95edc666551b854a7e5d4205ec69e60ff23"  # pragma: allowlist secret
 PROVENANCE_MOUNT = "/nemo_gym_runtime_provenance"
 SOCKET_MOUNT = "/nemo_gym_runtime_provenance.sock"
 
