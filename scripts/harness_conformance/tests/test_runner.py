@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import psutil
 import pytest
@@ -854,3 +855,28 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+def test_deepagents_execute_schema_runs_the_unchanged_probe_command(tmp_path):
+    probe = Probe(SCENARIO["tool_failure"], tmp_path)
+    name, arguments, namespaces = probe._tool(
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "execute",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                }
+            ]
+        }
+    )
+    assert name == "execute" and set(arguments) == {"command"}
+    result = subprocess.run(["sh", "-c", arguments["command"]], capture_output=True, text=True, timeout=5)
+    (call,) = probe.tool_calls
+    assert result.returncode == 7
+    assert result.stdout == call["token"]
+    assert Path(call["marker"]).read_text() == call["token"]

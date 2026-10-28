@@ -1,0 +1,16 @@
+langchain_deepagents_agent:
+  responses_api_agents:
+    langchain_deepagents_agent:
+      entrypoint: sandbox_agent.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      deepagents_version: "0.6.12"
+      model: ${policy_model_name}
+      max_input_tokens: 262144
+      max_output_tokens: 32768
+      temperature: 1.0
+      top_p: 0.95
+      sandbox_provider: null

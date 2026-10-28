@@ -202,3 +202,12 @@ class DeepAgentsAgent(SimpleAgent):
         response_body = to_responses(new_messages, self.config.model_server.name)
         response_body["usage"] = model_usage["usage"]
         return NeMoGymResponse.model_validate(response_body)
+
+
+# The sandbox execution mode shares this adapter directory and registry key.
+from responses_api_agents.langchain_deepagents_agent.sandbox_agent import (
+    SandboxedDeepAgent as SandboxedDeepAgent,
+)
+from responses_api_agents.langchain_deepagents_agent.sandbox_agent import (
+    SandboxedDeepAgentConfig as SandboxedDeepAgentConfig,
+)

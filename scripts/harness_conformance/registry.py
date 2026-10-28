@@ -4,6 +4,7 @@
 """Local probe adapters, importable by CI before Gym dependencies are installed."""
 
 HARNESSES = {
+    "langchain_deepagents": "SandboxedDeepAgent",
     "opencode": "OpenCodeAgent",
     "pi": "PiAgent",
     "codex": "CodexAgent",

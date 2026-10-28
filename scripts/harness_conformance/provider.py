@@ -25,7 +25,7 @@ from nemo_gym.responses_streaming import (
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec")
+SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "execute")
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"

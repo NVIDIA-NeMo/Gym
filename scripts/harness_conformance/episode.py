@@ -84,6 +84,8 @@ def _config(
     defaults_path = (
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/configs/{harness}_agent.yaml"
     )
+    if harness == "langchain_deepagents":
+        defaults_path = defaults_path.with_name("sandbox.yaml")
     defaults = yaml.safe_load(defaults_path.read_text())[f"{harness}_agent"]["responses_api_agents"][
         f"{harness}_agent"
     ]
@@ -109,6 +111,8 @@ def _config(
             sandbox_mode="danger-full-access",
             extra_config={"features": {"shell_snapshot": False}, "web_search": "disabled"},
         )
+    if harness == "langchain_deepagents":
+        agent.update(sandbox_runner_timeout_seconds=timeout, shell_timeout_seconds=10)
     if harness == "hermes":
         agent.update(
             max_turns=6,

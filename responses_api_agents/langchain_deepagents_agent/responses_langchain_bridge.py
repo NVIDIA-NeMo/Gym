@@ -39,8 +39,6 @@ which nested/parallel branches may share by reference.
 """
 
 import json
-import time
-import uuid
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -53,14 +51,15 @@ from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
 from nemo_gym.server_utils import get_response_json, raise_for_status
-
-
-def _text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(part.get("text", "") for part in content if isinstance(part, dict))
-    return str(content)
+from responses_api_agents.langchain_deepagents_agent.runtime_messages import (
+    _text as _text,
+)
+from responses_api_agents.langchain_deepagents_agent.runtime_messages import (
+    to_gym_input as to_gym_input,
+)
+from responses_api_agents.langchain_deepagents_agent.runtime_messages import (
+    to_responses as to_responses,
+)
 
 
 def _output_text(content_items: list) -> str:
@@ -100,73 +99,6 @@ def to_langchain(input_items: list) -> list:
         elif item_type == "function_call_output":
             messages.append(ToolMessage(content=_text(item.output), tool_call_id=item.call_id))
     return messages
-
-
-def to_responses(new_messages: list, model_name: str) -> dict:
-    """LangChain messages -> a Gym Responses API response dict, preserving the full tool-call/tool-result
-    trace (not just the final assistant text). Reuses to_gym_input()'s message-type mapping: its
-    function_call/function_call_output dicts already satisfy NeMoGymResponseOutputItem's required fields
-    (NeMoGymResponseFunctionToolCall and NeMoGymFunctionCallOutput are the same classes on the input and
-    output sides), but its message dicts need an `id` and output_text-shaped `content` added, since
-    NeMoGymResponseOutputMessage (output-only) requires both and to_gym_input()'s input-side message dicts
-    don't carry them."""
-    output_items = []
-    for item in to_gym_input(new_messages):
-        if item["type"] == "message":
-            item = {
-                **item,
-                "id": f"msg_{uuid.uuid4().hex}",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": item["content"], "annotations": []}],
-            }
-        output_items.append(item)
-    return {
-        "id": f"resp_{uuid.uuid4().hex}",
-        "created_at": time.time(),
-        "model": model_name,
-        "object": "response",
-        "output": output_items,
-        "parallel_tool_calls": False,
-        "tools": [],
-        "tool_choice": "auto",
-    }
-
-
-def to_gym_input(messages: list) -> list[dict]:
-    """LangChain messages -> Gym Responses API input items, for one internal deepagents model call."""
-    items: list[dict] = []
-    for message in messages:
-        if isinstance(message, ToolMessage):
-            items.append(
-                {
-                    "type": "function_call_output",
-                    "call_id": message.tool_call_id,
-                    "output": _text(message.content),
-                }
-            )
-        elif isinstance(message, AIMessage):
-            # Round-trips reasoning items stashed by to_langchain_ai_message() so they aren't silently
-            # dropped on the next internal turn. This resends reasoning content on every subsequent
-            # internal model call (the full growing input list is resent each turn), which grows token
-            # usage — comment out this line to stop round-tripping and only pay for reasoning once, on
-            # the turn it was produced.
-            items.extend(message.additional_kwargs.get("reasoning_items", []))
-            if message.content:
-                items.append({"type": "message", "role": "assistant", "content": _text(message.content)})
-            for call in message.tool_calls:
-                items.append(
-                    {
-                        "type": "function_call",
-                        "call_id": call["id"],
-                        "name": call["name"],
-                        "arguments": json.dumps(call["args"]),
-                    }
-                )
-        elif isinstance(message, SystemMessage):
-            items.append({"type": "message", "role": "system", "content": _text(message.content)})
-        else:
-            items.append({"type": "message", "role": "user", "content": _text(message.content)})
-    return items
 
 
 def to_langchain_ai_message(gym_response: NeMoGymResponse) -> AIMessage:
