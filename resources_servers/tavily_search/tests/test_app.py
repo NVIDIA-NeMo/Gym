@@ -25,7 +25,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,

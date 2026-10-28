@@ -16,7 +16,7 @@ from nemo_gym.agent_utils.sandbox_session import (
     shell_assignments,
 )
 from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox.utils import read_text, upload_text
 

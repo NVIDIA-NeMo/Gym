@@ -21,8 +21,7 @@ import orjson
 import pytest
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -30,6 +29,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import ServerClient, SimpleServer
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.proof_jury_judge.app import (

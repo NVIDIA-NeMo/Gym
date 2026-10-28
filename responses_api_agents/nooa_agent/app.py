@@ -27,7 +27,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionState,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.sandbox import AsyncSandbox

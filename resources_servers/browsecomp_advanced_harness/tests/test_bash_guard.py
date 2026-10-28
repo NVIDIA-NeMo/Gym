@@ -28,7 +28,7 @@ import os
 from unittest.mock import MagicMock
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     TavilySearchResourcesServer,

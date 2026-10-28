@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
+from nemo_gym.core.episode import current_rollout_id
+from nemo_gym.rollout_correlation import rollout_context
 from resources_servers.partner_if.app import VerifyRequest
 from resources_servers.partner_if.grading_contract import GradingContract
 from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS

@@ -19,7 +19,7 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

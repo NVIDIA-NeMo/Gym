@@ -33,7 +33,7 @@ from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 
 
 if TYPE_CHECKING:
-    from nemo_gym.openai_utils import NeMoGymChatCompletionMessageParam
+    from nemo_gym.core.responses_api_types import NeMoGymChatCompletionMessageParam
 
 
 LOGGER = logging.getLogger(__name__)

@@ -7,7 +7,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,

@@ -75,12 +75,11 @@ from openai.types.responses.response_output_item import (
 from pydantic import ValidationError
 
 from nemo_gym import openai_utils as openai_utils_module
-from nemo_gym.openai_utils import (
+from nemo_gym.core import responses_api_types as responses_api_types_module
+from nemo_gym.core.responses_api_types import (
     CHAT_REQUEST_IGNORED_CLIENT_FIELDS,
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
-    MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
-    NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessageCustomToolCall,
@@ -111,12 +110,16 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
-    PermanentEndpointError,
     TokenIDLogProbMixin,
-    _error_body_is_permanent_auth,
-    _error_body_is_permanent_quota,
     accumulate_response_usage,
     training_variant_of,
+)
+from nemo_gym.openai_utils import (
+    MAX_NUM_TRIES,
+    NeMoGymAsyncOpenAI,
+    PermanentEndpointError,
+    _error_body_is_permanent_auth,
+    _error_body_is_permanent_quota,
 )
 from nemo_gym.responses_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
@@ -2750,9 +2753,9 @@ def test_public_wire_models_have_no_lazy_iterable_fields(model: type) -> None:
 @pytest.mark.parametrize(
     "gym_union, sdk_union",
     [
-        (openai_utils_module.NeMoGymToolParam, ToolParam),
-        (openai_utils_module.NeMoGymToolChoice, ToolChoice),
-        (openai_utils_module.NeMoGymChatCompletionToolChoiceOptionParam, ChatCompletionToolChoiceOptionParam),
+        (responses_api_types_module.NeMoGymToolParam, ToolParam),
+        (responses_api_types_module.NeMoGymToolChoice, ToolChoice),
+        (responses_api_types_module.NeMoGymChatCompletionToolChoiceOptionParam, ChatCompletionToolChoiceOptionParam),
     ],
     ids=["ToolParam", "ToolChoice", "ChatCompletionToolChoiceOptionParam"],
 )
@@ -2877,7 +2880,7 @@ def test_response_accepts_provider_specific_service_tier() -> None:
 
 
 def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> None:
-    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+    from nemo_gym.core.responses_api_types import NeMoGymChatCompletionCreateParamsNonStreaming
 
     params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
         {

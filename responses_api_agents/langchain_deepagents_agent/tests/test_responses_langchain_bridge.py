@@ -24,7 +24,7 @@ from langchain_core.messages.tool import tool_call
 from langchain_core.runnables import RunnableConfig, ensure_config
 from langchain_core.runnables.config import var_child_runnable_config
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,

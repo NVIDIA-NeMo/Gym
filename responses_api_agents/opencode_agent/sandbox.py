@@ -20,7 +20,7 @@ from nemo_gym.agent_utils.sandbox_session import (
 )
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.sandbox.utils import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations

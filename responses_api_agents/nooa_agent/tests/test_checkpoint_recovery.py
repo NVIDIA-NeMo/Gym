@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest

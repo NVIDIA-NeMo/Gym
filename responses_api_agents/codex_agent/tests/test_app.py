@@ -26,7 +26,7 @@ from fastapi import Request
 from pydantic import ValidationError
 
 from nemo_gym.config.global_config import SKILLS_REF_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,

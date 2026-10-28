@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,

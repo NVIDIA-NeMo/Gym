@@ -54,11 +54,11 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,

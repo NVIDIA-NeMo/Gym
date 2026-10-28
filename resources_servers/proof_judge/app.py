@@ -31,12 +31,12 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.judge import reraise_judge_errors
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.judge import reraise_judge_errors
 from nemo_gym.server_utils import get_response_json
 
 

@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 from pytest import approx, fixture
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,

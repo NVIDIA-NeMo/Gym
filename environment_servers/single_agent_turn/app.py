@@ -44,7 +44,7 @@ from nemo_gym.config.global_config import (
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,

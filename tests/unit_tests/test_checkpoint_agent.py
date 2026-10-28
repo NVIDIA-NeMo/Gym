@@ -1264,7 +1264,7 @@ class _EpisodeClient(ServerClient):
     tool_calls: int = 0
 
     async def post(self, server_name: str, url_path: str, **kwargs: Any) -> Any:
-        from nemo_gym.rollout_correlation import current_rollout_id
+        from nemo_gym.core.episode import current_rollout_id
 
         body = kwargs.get("json") or {}
         rollout = current_rollout_id()

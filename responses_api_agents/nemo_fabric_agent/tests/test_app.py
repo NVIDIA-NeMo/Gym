@@ -18,7 +18,7 @@ from nemo_gym.config.global_config import (
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nemo_fabric_agent.app import (
     NeMoFabricAgent,

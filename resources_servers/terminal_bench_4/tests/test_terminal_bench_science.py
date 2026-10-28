@@ -17,7 +17,7 @@ from benchmarks.terminal_bench_science import prepare as preparation
 from nemo_gym.config import global_config
 from nemo_gym.config.config_types import AggregateMetricsRequest
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.sandbox import SandboxExecResult, create_provider, resolve_provider_config
 from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider

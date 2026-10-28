@@ -21,7 +21,7 @@ import pytest
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall
 from pydantic import BaseModel
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseOutputMessageForTraining,

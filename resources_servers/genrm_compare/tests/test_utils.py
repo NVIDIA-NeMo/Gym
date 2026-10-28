@@ -17,7 +17,7 @@ import json
 import pytest
 from pytest import approx
 
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage
+from nemo_gym.core.responses_api_types import NeMoGymEasyInputMessage
 from resources_servers.genrm_compare.utils import (
     EMPTY_OUTPUT_PLACEHOLDER,
     GenRMOutputParseError,

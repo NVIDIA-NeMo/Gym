@@ -21,7 +21,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.failure_kinds import VERIFIER_ERROR
+from nemo_gym.core.failure_kinds import VERIFIER_ERROR
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY

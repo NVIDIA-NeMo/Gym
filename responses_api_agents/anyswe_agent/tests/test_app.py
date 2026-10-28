@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,

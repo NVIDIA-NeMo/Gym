@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_model import _orjson_dispatch_response
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

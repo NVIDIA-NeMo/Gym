@@ -10,8 +10,8 @@ import pytest
 
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.core.responses_api_types import NeMoGymFunctionCallOutput
 from nemo_gym.observability.model_calls import ModelCallRecord, merge_model_call_capture_into_record
-from nemo_gym.openai_utils import NeMoGymFunctionCallOutput
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,

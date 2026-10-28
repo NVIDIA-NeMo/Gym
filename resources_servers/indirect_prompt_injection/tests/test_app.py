@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 from fastapi import Request
 from pytest import fixture
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )

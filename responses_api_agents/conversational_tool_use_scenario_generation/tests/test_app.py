@@ -31,7 +31,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.conversational_tool_use_scenario_generation import app
 from responses_api_agents.conversational_tool_use_scenario_generation.app import (
     ConversationalToolUseScenarioGenerationAgent,

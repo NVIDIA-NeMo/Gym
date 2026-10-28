@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 from omegaconf import OmegaConf
 
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

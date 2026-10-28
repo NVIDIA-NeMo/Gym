@@ -13,9 +13,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.core.failure_kinds import SESSION_LOST
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import SESSION_LOST
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.session_routing import install_session_routing

@@ -25,8 +25,7 @@ from sympy import sympify
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
@@ -35,6 +34,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.telemetry.resources_operations import ResourcesOperation
 from resources_servers.math_with_judge.app import (
@@ -1320,7 +1320,7 @@ async def test_failure_zero_uses_verifier_fields_and_counts_every_repeat():
     from unittest.mock import AsyncMock
 
     from nemo_gym.config.config_types import ResourcesServerRef
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core.responses_api_types import NeMoGymResponse
     from nemo_gym.reward_profile import compute_pass_majority_metrics
     from nemo_gym.sandbox import agent_tools
     from resources_servers.math_with_judge.app import LibraryJudgeMathResourcesServer, LibraryJudgeMathVerifyRequest

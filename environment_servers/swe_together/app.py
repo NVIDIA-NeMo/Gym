@@ -63,9 +63,9 @@ from nemo_gym.config.config_types import (
     ModelServerRef,
 )
 from nemo_gym.config.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
+from nemo_gym.core.failure_kinds import JUDGE_FAILED
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.episode_types import EpisodeFailure
-from nemo_gym.failure_kinds import JUDGE_FAILED
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess

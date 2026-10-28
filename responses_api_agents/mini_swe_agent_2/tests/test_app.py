@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.config.config_types import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponseCreateParamsNonStreaming,
 )

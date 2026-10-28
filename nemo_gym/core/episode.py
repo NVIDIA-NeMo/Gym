@@ -12,22 +12,66 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Episode identity, and the episode that the current request or task belongs to."""
+
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Optional
 
-from pydantic import BaseModel
-
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.config.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_ID_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
 )
-from nemo_gym.episode_types import EpisodeId
+from typing_extensions import Self
+
+
+_CAPTURE_KEY_ATTEMPT = re.compile(r"-a([1-9][0-9]*)$")
+
+
+class EpisodeId(BaseModel):
+    """Identify one physical attempt of a logical rollout."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rollout_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    attempt: int = Field(default=0, ge=0)
+
+    @field_validator("rollout_id")
+    @classmethod
+    def reserve_attempt_suffix(cls, rollout_id: str) -> str:
+        """Keep the derived capture key injective without changing existing keys."""
+        if _CAPTURE_KEY_ATTEMPT.search(rollout_id):
+            raise ValueError("rollout_id must not end with the reserved attempt suffix '-a<N>'")
+        return rollout_id
+
+    @property
+    def capture_key(self) -> str:
+        """Return the attempt-qualified key used by capture routes."""
+        return self.rollout_id if self.attempt == 0 else f"{self.rollout_id}-a{self.attempt}"
+
+    @classmethod
+    def from_capture_key(cls, capture_key: str) -> Self:
+        """Invert ``capture_key``; the reserved attempt suffix makes the mapping one-to-one."""
+        match = _CAPTURE_KEY_ATTEMPT.search(capture_key)
+        if match is None:
+            return cls(rollout_id=capture_key)
+        return cls(rollout_id=capture_key[: match.start()], attempt=int(match.group(1)))
+
+
+class TaskId(BaseModel):
+    """Identify one task within a run-qualified taskset."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    taskset: str = Field(
+        min_length=1,
+        description="Run-unique taskset name; use the '<environment>:<taskset>' convention for blended runs.",
+    )
+    task_id: str = Field(min_length=1)
 
 
 VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
@@ -41,13 +85,6 @@ _VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifi
 # Exclude leading dots because stores also use the id as a filename component.
 # Middleware uses the same pattern.
 ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-ROUTED_PATH_STATE_KEY = "nemo_gym.routed_path"
-
-
-def scope_with_routed_path(scope: dict[str, Any], path: str) -> dict[str, Any]:
-    """Copy the scope for routing and share the rewritten path with outer middleware."""
-    scope.setdefault("state", {})[ROUTED_PATH_STATE_KEY] = path
-    return {**scope, "path": path, "raw_path": path.encode("utf-8")}
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
@@ -63,6 +100,14 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     Reused task and rollout indices produce a repeated capture key.
     Use an explicit id when numbering restarts across dispatches.
     """
+    # Imported here because global_config imports feature modules that import the episode identity above.
+    from nemo_gym.config.global_config import (
+        ATTEMPT_INDEX_KEY_NAME,
+        ROLLOUT_ID_KEY_NAME,
+        ROLLOUT_INDEX_KEY_NAME,
+        TASK_INDEX_KEY_NAME,
+    )
+
     if not isinstance(body, (BaseModel, Mapping)):
         return None
 
@@ -137,30 +182,3 @@ def verifier_invocation_context(invocation_id: str) -> Iterator[None]:
         yield
     finally:
         _VERIFIER_INVOCATION_ID.reset(token)
-
-
-class RolloutContextMiddleware:
-    """Strip a rollout prefix and expose it to downstream Gym calls for this request."""
-
-    # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
-    skipped_on_direct_mcp_dispatch = True
-
-    # Match the same id characters as ``ROLLOUT_ID_PATTERN``.
-    # Anchor the id between the prefix and the remaining path.
-    _PREFIX = re.compile(
-        rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>{ROLLOUT_ID_PATTERN.pattern.strip('^$')})(?P<rest>/.*)$"
-    )
-
-    def __init__(self, app: Any) -> None:
-        self._app = app
-
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        match = self._PREFIX.match(scope.get("path", "")) if scope.get("type") == "http" else None
-        if match is None:
-            await self._app(scope, receive, send)
-            return
-
-        path = match.group("rest")
-        scope = scope_with_routed_path(scope, path)
-        with rollout_context(match.group("rollout_id")):
-            await self._app(scope, receive, send)

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseInputItem
+from nemo_gym.core.responses_api_types import NeMoGymResponseInputItem
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,
