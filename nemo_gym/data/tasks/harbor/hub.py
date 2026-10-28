@@ -565,7 +565,7 @@ def fetch_dataset(dataset: RegistryDataset, root: Path, *, folder: Path | None =
     _refuse_repinned_folders(folder, repinned, dataset)
     # A manifest that records another reference for these pins (one written before the reference was recorded, or a
     # version the registry lists with the same tasks) is rewritten with this fetch's, so a run by the entry's name
-    # finds the fetch it declares on record (nemo_gym.data.tasks.harbor.cli._check_fetch_record).
+    # finds the fetch it declares on record (nemo_gym.data.tasks.harbor.prepare._check_fetch_record).
     rerecord = manifest is not None and manifest.ref != dataset.reference
     if by_repo or not dataset.tasks or rerecord:
         # The manifest is about to be rewritten: a folder it would not pin must not be there (one a previous fetch

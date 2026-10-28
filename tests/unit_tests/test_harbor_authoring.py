@@ -19,7 +19,6 @@ import pytest
 
 import nemo_gym.verifiers as verifiers_package
 from nemo_gym.data.tasks.harbor import DIGEST_KEY, content_hash, load_task, parameterized
-from nemo_gym.data.tasks.harbor.cli import prepare_target
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 from nemo_gym.data.tasks.harbor.parameterized import (
     ParameterizedError,
@@ -30,6 +29,7 @@ from nemo_gym.data.tasks.harbor.parameterized import (
     rendered_name,
     rendered_task_toml,
 )
+from nemo_gym.data.tasks.harbor.prepare import prepare_target
 from nemo_gym.data.tasks.harbor.publish import PublishError, answer_write_command, publish_harbor, strip_gym_table
 from nemo_gym.data.tasks.harbor.python_verifier import (
     PYTHON_FLOOR,

@@ -14,6 +14,7 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 
+import nemo_gym.cli.eval as cli_eval
 import nemo_gym.data.tasks.harbor.build_options as build_options
 import nemo_gym.data.tasks.harbor.hub as hub_module
 import nemo_gym.data.tasks.harbor.manifest as manifest_module
@@ -21,15 +22,6 @@ import nemo_gym.data.tasks.harbor.materialize as materialize_module
 import nemo_gym.data.tasks.harbor.prepare_builds as prepare_builds
 from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
 from nemo_gym.data.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
-from nemo_gym.data.tasks.harbor.cli import (
-    AgentSelection,
-    PreparedTaskset,
-    build_run,
-    prepare_target,
-    resolve_agent,
-    run_images,
-    runs_in_sandbox,
-)
 from nemo_gym.data.tasks.harbor.digest import context_digest
 from nemo_gym.data.tasks.harbor.dockerfile import (
     DEFAULT_PATH,
@@ -66,6 +58,15 @@ from nemo_gym.data.tasks.harbor.materialize import (
 )
 from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.data.tasks.harbor.package_store import PackageStoreError
+from nemo_gym.data.tasks.harbor.prepare import (
+    AgentSelection,
+    PreparedTaskset,
+    build_run,
+    prepare_target,
+    resolve_agent,
+    run_images,
+    runs_in_sandbox,
+)
 from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 from nemo_gym.data.tasks.harbor.task import task_digest
 
@@ -2188,7 +2189,7 @@ class TestCli:
         folder = tmp_path / "ds"
         write_task(folder / "a")
         write_task(folder / "bad", toml="[[steps]]\nname = 'x'")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.cli"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.prepare"):
             prepared = prepare_target(str(folder), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["a"]
         assert list(prepared.skipped) == ["bad"]
@@ -2245,7 +2246,7 @@ class TestCli:
         for name, line in services.items():
             write_task(folder / name)
             (folder / name / "environment" / "docker-compose.yaml").write_text(f"services:\n  main:\n    {line}\n")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.cli"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.prepare"):
             prepared = prepare_target(str(folder), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["good"]
         assert sorted(prepared.skipped) == ["bad-env-file", "bad-required"]
@@ -2476,7 +2477,7 @@ class TestCli:
         assert runs_in_sandbox(impl_name, {"entrypoint": "app.py"}) is False
 
     def test_runs_in_sandbox_from_declaration_or_config_key(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("nemo_gym.data.tasks.harbor.cli.component_search_roots", lambda: [tmp_path])
+        monkeypatch.setattr("nemo_gym.data.tasks.harbor.prepare.component_search_roots", lambda: [tmp_path])
 
         def write_agent(name, source, entrypoint="app.py"):
             folder = tmp_path / "responses_api_agents" / name
@@ -2966,7 +2967,7 @@ def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
 
 @pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
 def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monkeypatch):
-    import nemo_gym.data.tasks.harbor.cli as harbor_cli
+    import nemo_gym.data.tasks.harbor.prepare as harbor_cli
 
     for version in ("1.0", "2.0"):
         write_task(tmp_path / f"ds-{version}" / "a")
@@ -3581,13 +3582,14 @@ def test_a_compose_volume_problem_in_a_task_folder_exits_cleanly(tmp_path, monke
 def test_harbor_selectors_fail_before_any_preparation(monkeypatch, capsys, flags):
     import sys
 
-    import nemo_gym.data.tasks.harbor.cli as harbor_cli
+    import nemo_gym.data.tasks.harbor.prepare as harbor_cli
     from nemo_gym.cli.main import main
 
     def unexpected_preparation(*args, **kwargs):
         pytest.fail("Invalid selectors must be rejected before preparing or fetching tasks")
 
     monkeypatch.setattr(harbor_cli, "prepare_target", unexpected_preparation)
+    monkeypatch.setattr(cli_eval, "prepare_target", unexpected_preparation)
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:hello-world", *flags])
     with pytest.raises(SystemExit) as exc:
         main()
@@ -3598,13 +3600,14 @@ def test_harbor_selectors_fail_before_any_preparation(monkeypatch, capsys, flags
 def test_unexpected_harbor_programming_errors_remain_visible(monkeypatch):
     import sys
 
-    import nemo_gym.data.tasks.harbor.cli as harbor_cli
+    import nemo_gym.data.tasks.harbor.prepare as harbor_cli
     from nemo_gym.cli.main import main
 
     def bug(*args, **kwargs):
         raise TypeError("unexpected implementation bug")
 
     monkeypatch.setattr(harbor_cli, "prepare_target", bug)
+    monkeypatch.setattr(cli_eval, "prepare_target", bug)
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "run", "harbor:hello-world", "--agent", "hermes_agent"])
     with pytest.raises(TypeError, match="unexpected implementation bug"):
         main()
@@ -3966,7 +3969,7 @@ class TestComposeVolumeSourcesAtPrepare:
 
     @pytest.fixture
     def sources(self, tmp_path, monkeypatch):
-        import nemo_gym.data.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.prepare as harbor_cli
 
         dotenv = tmp_path / "env.yaml"
         dotenv.write_text("some_key: 1\n")
@@ -3979,11 +3982,12 @@ class TestComposeVolumeSourcesAtPrepare:
             "  volume_sources:\n    pgdata: datasets/pgdata\n"
         )
         monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider)
+        monkeypatch.setattr(cli_eval, "resolve_sandbox_config", lambda name: provider)
         monkeypatch.delenv("M22_UNSET_KEY", raising=False)
         return dotenv, provider
 
     def test_volume_sources_come_from_the_sandbox_file_and_overrides(self, tmp_path, sources):
-        from nemo_gym.data.tasks.harbor.cli import volume_sources_from_overrides
+        from nemo_gym.cli.eval import volume_sources_from_overrides
 
         assert volume_sources_from_overrides([], None) is None
         assert volume_sources_from_overrides([], "opensandbox") == {"pgdata": "datasets/pgdata"}
@@ -4007,7 +4011,7 @@ class TestComposeVolumeSourcesAtPrepare:
         """M35 D6: prepare answers whether the block's provider has shared storage from the one setting the server's
         provider requires (``shared_storage.host_path``), without resolving the block's credentials; unknown (no
         block, or none naming one provider) stays ``None`` and the seed decides."""
-        from nemo_gym.data.tasks.harbor.cli import (
+        from nemo_gym.cli.eval import (
             GPU_SANDBOX_PROVIDER_KEY,
             gpu_shared_storage_from_overrides,
             shared_storage_from_overrides,
@@ -4044,7 +4048,7 @@ class TestComposeVolumeSourcesAtPrepare:
     def test_gpu_volume_sources_come_from_the_gpu_sandbox_provider_block(self, tmp_path, sources):
         # Review: GPU-declaring tasks are seeded from the server's `gpu_sandbox_provider` block, so prepare reads
         # that block's volume_sources too: None without a GPU block, {} for a GPU block without the key.
-        from nemo_gym.data.tasks.harbor.cli import GPU_SANDBOX_PROVIDER_KEY, gpu_volume_sources_from_overrides
+        from nemo_gym.cli.eval import GPU_SANDBOX_PROVIDER_KEY, gpu_volume_sources_from_overrides
 
         gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
         assert GPU_SANDBOX_PROVIDER_KEY == "harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider"
@@ -4067,7 +4071,7 @@ class TestComposeVolumeSourcesAtPrepare:
     def test_run_and_validate_hand_volume_sources_to_prepare(self, tmp_path, monkeypatch, sources):
         import argparse
 
-        import nemo_gym.data.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.prepare as harbor_cli
 
         seen = []
 
@@ -4079,21 +4083,25 @@ class TestComposeVolumeSourcesAtPrepare:
             raise SystemExit(message)
 
         monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        monkeypatch.setattr(cli_eval, "prepare_target", fake_prepare)
         # The rows file is scoped to the agent, so the stub has to name one.
         monkeypatch.setattr(
             harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
+        )
+        monkeypatch.setattr(
+            cli_eval, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
         )
         args = argparse.Namespace(
             target=str(tmp_path), agent="a", sandbox="opensandbox", _parser=argparse.Namespace(error=fail)
         )
         with pytest.raises(SystemExit, match="stop here"):
-            harbor_cli.run_target(args, [])
+            cli_eval.run_target(args, [])
         with pytest.raises(SystemExit, match="stop here"):
-            harbor_cli.validate_target(
+            cli_eval.validate_target(
                 args,
                 [
                     "++sandbox.volume_sources.pgdata=pg",
-                    f"++{harbor_cli.GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu",
+                    f"++{cli_eval.GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu",
                     "++sandbox_gpu.volume_sources.pgdata=gpu/pg",
                 ],
             )
@@ -4104,7 +4112,7 @@ class TestComposeVolumeSourcesAtPrepare:
         it with HTTP 403 though the sandbox block's `images.auth` would pull it. Prepare reads the same block's
         `images.auth`, resolved (so `${gitlab_registry_password}` comes from env.yaml), and records images with it."""
         import nemo_gym.data.tasks.harbor.build_options as build_options
-        import nemo_gym.data.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.prepare as harbor_cli
 
         dotenv = tmp_path / "env.yaml"
         dotenv.write_text("gitlab_registry_username: bot\ngitlab_registry_password: secret\n")
@@ -4117,8 +4125,9 @@ class TestComposeVolumeSourcesAtPrepare:
             "          password: ${gitlab_registry_password}\n"
         )
         monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider)
+        monkeypatch.setattr(cli_eval, "resolve_sandbox_config", lambda name: provider)
 
-        from nemo_gym.data.tasks.harbor.cli import registry_credentials_from_overrides
+        from nemo_gym.cli.eval import registry_credentials_from_overrides
 
         # No block names a provider: anonymous, as before.
         assert registry_credentials_from_overrides([], None) == {}
@@ -4129,7 +4138,7 @@ class TestComposeVolumeSourcesAtPrepare:
     def test_run_and_validate_hand_registry_credentials_to_prepare(self, tmp_path, monkeypatch, sources):
         import argparse
 
-        import nemo_gym.data.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.prepare as harbor_cli
 
         # The `sources` fixture's provider.yaml has no images.auth, so credentials are empty; a block with one is
         # covered above. This asserts both entry points read them and pass them on.
@@ -4143,16 +4152,20 @@ class TestComposeVolumeSourcesAtPrepare:
             raise SystemExit(message)
 
         monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        monkeypatch.setattr(cli_eval, "prepare_target", fake_prepare)
         monkeypatch.setattr(
             harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
+        )
+        monkeypatch.setattr(
+            cli_eval, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
         )
         args = argparse.Namespace(
             target=str(tmp_path), agent="a", sandbox="opensandbox", _parser=argparse.Namespace(error=fail)
         )
         with pytest.raises(SystemExit, match="stop here"):
-            harbor_cli.run_target(args, [])
+            cli_eval.run_target(args, [])
         with pytest.raises(SystemExit, match="stop here"):
-            harbor_cli.validate_target(args, [])
+            cli_eval.validate_target(args, [])
         assert seen == [{}, {}]
 
     def test_prepare_fails_naming_an_unmapped_external_volume(self, tmp_path, fake_registry):
@@ -4702,7 +4715,7 @@ class TestTrainingMetadata:
 
         import nemo_gym.cli.main as main_module
         import nemo_gym.config.global_config as global_config
-        from nemo_gym.data.tasks.harbor.cli import pairing_override_from_overrides
+        from nemo_gym.cli.eval import pairing_override_from_overrides
 
         folder = tmp_path / "ds"
         write_task(folder / "good")
@@ -4766,8 +4779,8 @@ class TestTrainingMetadata:
         """`gym dataset validate` is always admitted: the oracle's run config carries the entry without
         `allowed_agents` (the list speaks of model harnesses), so the collector's guard lets the oracle through,
         while an admitted harness's run config keeps the list and passes the same guard."""
-        from nemo_gym.data.tasks.harbor.cli import ORACLE_AGENT
         from nemo_gym.data.tasks.harbor.materialize import environment_server_instance
+        from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT
         from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 
         folder = tmp_path / "ds"

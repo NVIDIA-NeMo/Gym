@@ -559,8 +559,8 @@ class TestPackageStore:
         Fetch after fetch keeps refusing the edit, prepare refuses the folder, and the one download is alpha's."""
         import tomllib
 
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
         from nemo_gym.data.tasks.harbor.manifest import ManifestError
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)
@@ -846,8 +846,8 @@ class TestPackageStore:
         orgs (a curated suite of upstream tasks). Its pins name those packages, not <dataset org>/<task>: the folder
         is this dataset's on every later fetch, with one download per task, prepare takes it, and a same-named
         dataset whose tasks are someone else's packages is still refused before anything is touched."""
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
         from nemo_gym.data.tasks.harbor.hub import fetch_ref
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders, task_org="upstream")
@@ -1114,8 +1114,8 @@ class TestPackageStore:
         with nothing downloaded and its manifest is upgraded with the recorded digests kept, an edited folder is
         refused by fetch and prepare alike with the manifest untouched, and a task the earlier fetch never landed
         is unfinished business until it is fetched."""
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
         from nemo_gym.data.tasks.harbor.manifest import ManifestError, check_manifest
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folders = {name: write_task(tmp_path / "src" / name) for name in ("alpha", "beta")}
         module, digests, calls = self.fake_store(tmp_path, monkeypatch, folders)

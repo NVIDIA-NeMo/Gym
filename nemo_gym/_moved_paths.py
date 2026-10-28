@@ -67,6 +67,7 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.tasks.harbor.cli": MovedPath(new="nemo_gym.data.tasks.harbor.prepare", since="0.8.0"),
     "nemo_gym.prompt": MovedPath(new="nemo_gym.data.prompt", since="0.8.0"),
     "nemo_gym.vision_input": MovedPath(new="nemo_gym.data.vision_input", since="0.8.0"),
     "nemo_gym.task_data": MovedPath(new="nemo_gym.data.task_data", since="0.8.0"),
@@ -528,6 +529,61 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.chat_streaming": {
         # Split out of chat_streaming.
         **_names("nemo_gym.core.responses_api_types", "0.8.0", "SSE_KEEPALIVE"),
+    },
+    "nemo_gym.tasks.harbor.cli": {
+        # Split out of cli.
+        **_names(
+            "nemo_gym.cli.eval",
+            "0.8.0",
+            """
+            COMPOSE_OVERLAY_KEY GPU_SANDBOX_PROVIDER_KEY HARBOR_SERVER_KEY SANDBOX_BLOCK_KEY
+            SANDBOX_IMAGES_AUTH_KEY SANDBOX_PROVIDER_OPTIONS_KEY _block_provider_name _block_shared_storage
+            _block_volume_sources _clear_collector_metrics _collector_split _patterns _requested_output
+            _resolved_collection _resumable_cache _resume_conflict _rows_name _write_summary
+            compose_overlay_from_overrides compose_platform_from_overrides gpu_sandbox_provider_from_overrides
+            gpu_shared_storage_from_overrides gpu_volume_sources_from_overrides pairing_override_from_overrides
+            registry_credentials_from_overrides run_target sandbox_provider_from_overrides
+            shared_storage_from_overrides validate_target volume_sources_from_overrides
+            """,
+        ),
+        # cli imported these for code that moved out of it.
+        **_names("nemo_gym.cli.eval", "0.8.0", "ValidationError"),
+        **_names("nemo_gym.cli.utils", "0.8.0", "exit_cleanly_on_config_error"),
+        **_names("nemo_gym.config.config_types", "0.8.0", "ConfigError"),
+        **_names(
+            "nemo_gym.data.tasks.harbor.build_options",
+            "0.8.0",
+            """
+            _block_from_overrides _merged_cli_config build_options_from_overrides
+            """,
+        ),
+        **_names("nemo_gym.data.tasks.harbor.build_plan", "0.8.0", "BuildError"),
+        **_names("nemo_gym.data.tasks.harbor.hub", "0.8.0", "datasets_dir"),
+        **_names(
+            "nemo_gym.data.tasks.harbor.materialize",
+            "0.8.0",
+            """
+            ENVIRONMENT_SERVER_IMPL ENVIRONMENT_SERVER_INSTANCE
+            """,
+        ),
+        **_names("nemo_gym.data.tasks.harbor.registry", "0.8.0", "ImageConfigError credentials_for_image_prefixes"),
+        **_names(
+            "nemo_gym.data.tasks.harbor.run_summary",
+            "0.8.0",
+            """
+            NO_REFERENCE_SOLUTION output_signatures write_run_summary
+            """,
+        ),
+        **_names(
+            "nemo_gym.data.tasks.harbor.validation_report",
+            "0.8.0",
+            """
+            _task_digests _validation_key _validation_rows summarize_validation
+            """,
+        ),
+        **_names("nemo_gym.sandbox.compose_config", "0.8.0", "deployment_platform"),
+        **_names("nemo_gym.sandbox.config", "0.8.0", "SANDBOX_BLOCK_VOLUME_SOURCES_KEY validate_volume_sources"),
+        **_names("nemo_gym.utils.path_utils", "0.8.0", "materialized_path_for"),
     },
 }
 

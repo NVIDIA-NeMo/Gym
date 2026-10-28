@@ -107,7 +107,6 @@ from nemo_gym.core import failure_kinds
 from nemo_gym.core.episode import TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.data.tasks.harbor import DIGEST_KEY, HarborTask, load_task
-from nemo_gym.data.tasks.harbor.cli import ORACLE_AGENT
 from nemo_gym.data.tasks.harbor.compose_overlay import (
     ComposeOverlayError,
     HarborComposeOverlay,
@@ -117,6 +116,7 @@ from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
 from nemo_gym.data.tasks.harbor.materialize import STEP_METADATA_KEY, HarborTaskInput
 from nemo_gym.data.tasks.harbor.models import HarborMCPServer
+from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT
 from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE
 from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE
 from nemo_gym.data.tasks.harbor.task import HarborTurn

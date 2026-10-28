@@ -911,9 +911,6 @@ ignore_imports = [
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",
     "nemo_gym.sandbox.compose_config -> nemo_gym.data.tasks.harbor.digest",
-    "nemo_gym.data.tasks.harbor.cli -> nemo_gym.cli.main",
-    "nemo_gym.data.tasks.harbor.cli -> nemo_gym.cli.utils",
-    "nemo_gym.data.tasks.harbor.cli -> nemo_gym.rollout_collection",
     "nemo_gym.telemetry.setup -> nemo_gym.sandbox.observability",
     "nemo_gym.trajectory.trajectory_record -> nemo_gym.observability.model_calls",
 ]
