@@ -32,6 +32,7 @@ from nemo_gym.base_responses_api_model import (
     ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
     _orjson_dispatch_response,
+    _request_messages,
     install_model_call_capture,
     make_capture_store,
 )
@@ -42,7 +43,21 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER
 from nemo_gym.server_utils import ServerClient, apply_rollout_prefix, rollout_path_prefix
+from nemo_gym.token_id_capture.replay import replay_context
+
+
+@pytest.mark.parametrize("text", ["What is 2 + 2?", ""])
+@pytest.mark.parametrize("typed", [False, True])
+def test_responses_string_input_matches_explicit_user_history(text: str, typed: bool) -> None:
+    body = {"input": text, "instructions": "Be concise."}
+    explicit = {**body, "input": [{"role": "user", "content": text}]}
+    if typed:
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
+        explicit = NeMoGymResponseCreateParamsNonStreaming.model_validate(explicit)
+    assert replay_context(_request_messages(body)) == replay_context(_request_messages(explicit))
+    assert _request_messages(body)[-1] == {"role": "user", "content": text}
 
 
 class TestBaseResponsesAPIModel:
@@ -68,6 +83,30 @@ class TestBaseResponsesAPIModel:
         server_client.global_config_dict = {}
         model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
         model.setup_webserver()
+
+    def test_embeddings_default_not_implemented(self) -> None:
+        # A policy-only server exposes /v1/embeddings but the base default rejects it with 501,
+        # since it has no embeddings backend to pass the request through to.
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
+
+        class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
+            async def chat_completions(
+                self, request: NeMoGymResponseCreateParamsNonStreaming
+            ) -> NeMoGymChatCompletion:
+                raise NotImplementedError
+
+            async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+                raise NotImplementedError
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
+        client = TestClient(model.setup_webserver())
+
+        response = client.post("/v1/embeddings", json={"input": "hello", "model": "text-embedding-3-small"})
+
+        assert response.status_code == 501
+        assert "does not support the embeddings endpoint" in response.json()["detail"]
 
 
 @pytest.mark.parametrize(
@@ -304,6 +343,8 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
 
     assert forwarded_headers == request_headers
     [exchange] = store.read("header-round-trip")
+    assert "verifier_invocation_id" not in exchange
+    assert "verifier_invocation" not in exchange
     assert exchange.get("client_assistant_message_id") == expected
     if expected is None:
         assert "client_assistant_message_id" not in exchange
@@ -1642,3 +1683,77 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
         assert len(store.read("r-inflight")) == 1
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observations(tmp_path):
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    statuses = iter([400, 200])
+
+    async def app(scope, receive, send):
+        await receive()
+        status = next(statuses)
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        body = b'{"error":"rejected"}' if status == 400 else b'{"id":"judge-response","output":[]}'
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"input":"grade this"}', "more_body": False}
+
+    async def send(_message):
+        pass
+
+    middleware = _CaptureMiddleware(app, store=store, model_server_name="judge_model")
+    for _ in range(2):
+        await middleware(
+            {
+                "type": "http",
+                "path": "/ng-rollout/judge-retry/v1/responses",
+                "headers": [(VERIFIER_INVOCATION_HEADER.encode("ascii"), b"verification-1")],
+            },
+            receive,
+            send,
+        )
+    exchanges = store.read("judge-retry")
+    assert len(exchanges) == 2
+    assert all(exchange["verifier_invocation_id"] == "verification-1" for exchange in exchanges)
+    assert all("verifier_invocation" not in exchange for exchange in exchanges)
+    assert exchanges[0]["model_call_id"] != exchanges[1]["model_call_id"]
+    record = {"_ng_rollout_id": "judge-retry", "ng_agent_observations": {"source": "agent", "records": []}}
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+    capture = record["ng_model_call_capture"]
+    calls = capture["calls"]
+    assert [call["status_code"] for call in calls] == [400, 200]
+    assert calls[0]["response_id"] is None
+    assert len(capture["verifier_invocations"]) == 1
+    verifier = capture["verifier_invocations"][0]
+    assert verifier["invocation_id"] == "verification-1"
+    assert {ref["model_call_id"] for ref in verifier["model_calls"]} == {call["model_call_id"] for call in calls}
+    assert verifier["status"] == "unknown"  # Capture does not establish the final grade.
+    assert record["ng_agent_observations"]["records"] == []
+    assert record["ng_agent_observations"]["gaps"] == []
+    assert all("client_invocation_role" not in call for call in calls)
+
+
+@pytest.mark.parametrize("invocation_id", ["", "  ", 42, {}])
+def test_invalid_verifier_id_does_not_hide_the_captured_call(tmp_path, invocation_id):
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.record(
+        "judge-invalid",
+        {
+            "model_call_id": "actual-call",
+            "status_code": 400,
+            "verifier_invocation_id": invocation_id,
+        },
+    )
+    record = {"_ng_rollout_id": "judge-invalid"}
+    merge_model_call_capture_into_record(record, [tmp_path])
+    capture = record["ng_model_call_capture"]
+    assert [call["model_call_id"] for call in capture["calls"]] == ["actual-call"]
+    assert not capture.get("verifier_invocations")
+    assert "model_call_capture_records_unreadable" in {gap["code"] for gap in capture["gaps"]}

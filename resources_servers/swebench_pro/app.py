@@ -40,9 +40,13 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
+    ResourcesSessionFence,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
@@ -213,8 +217,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         # Typed sessions, which an Environment Server seeds and closes by resources_session_id.
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
-        self._session_locks: dict[str, asyncio.Lock] = {}
-        self._closed_sessions: dict[str, EpisodeId] = {}
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -249,20 +252,20 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         except ValidationError as error:
             raise RequestValidationError(error.errors()) from error
         session_id = typed.resources_session_id
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            closed_episode_id = self._closed_sessions.get(session_id)
+        # The body names the session, so a close without a cookie (after a lost seed reply) still releases it.
+        async with self._fence.locked(session_id):
+            closed_episode_id = self._fence.closed_episode(session_id)
             if closed_episode_id is not None:
                 if typed.episode_id != closed_episode_id:
-                    raise ValueError("episode_id does not match the closed resources session")
+                    raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
                 request.session.pop(SESSION_ID_KEY, None)
                 return ResourcesCloseSessionResponse(resources_session_id=session_id)
             identity = self._session_id_to_identity.get(session_id)
             if identity is not None and typed.episode_id != identity[0]:
-                raise ValueError("episode_id does not match the seeded resources session")
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             await self._stop_session_sandbox(session_id)
             self._session_id_to_identity.pop(session_id, None)
-            self._closed_sessions[session_id] = typed.episode_id
+            self._fence.mark_closed(session_id, typed.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -276,8 +279,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     async def shutdown(self) -> None:
         self._session_id_to_identity.clear()
-        self._session_locks.clear()
-        self._closed_sessions.clear()
+        self._fence.clear()
         for session_id in list(self._session_id_to_sandbox):
             try:
                 await self._stop_session_sandbox(session_id)
@@ -359,19 +361,25 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return await self._seed_session(request.session[SESSION_ID_KEY], body)
 
         session_id = body.resources_session_id
-        request.session[SESSION_ID_KEY] = session_id
-        lock = self._session_locks.setdefault(session_id, asyncio.Lock())
-        async with lock:
-            if session_id in self._closed_sessions:
-                raise ValueError(f"Resources session is already closed: {session_id}")
+        # The cookie is bound only once the seed succeeds: a refused seed's reply would otherwise point this client at
+        # the session it was refused, which may belong to another episode.
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
             identity = self._session_id_to_identity.get(session_id)
             if identity is not None:
                 if identity != (body.episode_id, body.task_id):
-                    raise ValueError("resources_session_id is already bound to another episode or task")
-                return await self._typed_seed_response(session_id)
-            task = SWEBenchProInstanceRequest.model_validate(body.task_data)
+                    raise ResourcesSessionConflictError(
+                        "resources_session_id is already bound to another episode or task"
+                    )
+                response = await self._typed_seed_response(session_id)
+                request.session[SESSION_ID_KEY] = session_id
+                return response
+            try:
+                task = SWEBenchProInstanceRequest.model_validate(body.task_data)
+            except ValidationError as error:
+                raise ResourcesSeedRejectedError(f"task_data is not a SWE-bench Pro instance: {error}") from error
             if body.task_id.task_id != task.instance_id:
-                raise ValueError("TaskId does not match the SWE-bench Pro instance_id")
+                raise ResourcesSeedRejectedError("TaskId does not match the SWE-bench Pro instance_id")
             await self._seed_session(session_id, task)
             try:
                 response = await self._typed_seed_response(session_id)
@@ -380,6 +388,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 await self._stop_session_sandbox(session_id)
                 raise
             self._session_id_to_identity[session_id] = (body.episode_id, body.task_id)
+            request.session[SESSION_ID_KEY] = session_id
             return response
 
     async def _typed_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
@@ -496,14 +505,30 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         body: SWEBenchProVerifyRequest,
     ) -> SWEBenchProVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        # A typed session's sandbox is consumed by its first verify. Grading again would score an empty
-        # patch with a normal-looking reward, so a repeated verify fails instead.
-        if (
-            not self.config.is_verifying_golden_patch
-            and session_id in self._session_id_to_identity
-            and session_id not in self._session_id_to_sandbox
-        ):
-            raise ValueError("SWE-bench Pro task sandbox is no longer available")
+        # A session with no task sandbox (an earlier verify consumed it, a close released it, or the server never held
+        # it) has nothing left to grade: grading would score an empty patch as a policy that changed nothing, so the
+        # sample is masked. A failed patch extraction from a live sandbox stays an unmasked failure, since the agent
+        # can cause it.
+        if not self.config.is_verifying_golden_patch and session_id not in self._session_id_to_sandbox:
+            return SWEBenchProVerifyResponse.model_validate(
+                body.model_dump()
+                | lost_session_verification("SWE-bench Pro task sandbox is no longer available")
+                | {
+                    "evaluation_completed": False,
+                    "eval_timed_out": False,
+                    "image_provenance": {},
+                    "resolved": False,
+                    "patch_applied": False,
+                    "eval_sandbox_start_time_taken": 0.0,
+                    "patch_verification_time_taken": 0.0,
+                    "instance_id": body.instance_id,
+                    "model_patch": None,
+                    "test_results": None,
+                    "test_output": "",
+                    "error": "SWE-bench Pro task sandbox is no longer available",
+                    "log_dir": "",
+                }
+            )
         extraction_error = None
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
@@ -580,9 +605,13 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 file=sys.stderr,
             )
 
+        # The request allows extra fields, so response-owned fields a caller sent are overwritten, not passed through.
         response_data = body.model_dump() | {
             "image_provenance": await asyncio.to_thread(self._image_info, body),
             "reward": float(result.resolved),
+            "mask_sample": False,
+            "failure_kind": None,
+            "failure_reason": None,
             "evaluation_completed": result.completed and reason is None,
             "eval_timed_out": result.timed_out,
             "resolved": result.resolved,

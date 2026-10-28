@@ -9,6 +9,10 @@ Preparation writes, under ``results/harbor/<taskset>/``:
 - ``skipped.json``: omitted task IDs and reasons (empty when all tasks load);
 - ``run_config_<agent>.yaml``: the agent and environment server blocks.
 
+Beside the task folders it reconciles ``manifest.toml`` (:mod:`nemo_gym.tasks.harbor.manifest`) before
+anything is built or pushed: a fetched dataset whose folders no longer match the manifest is refused, a
+local folder gets one. The dataset digest goes into the rows and the run config.
+
 Then the ordinary end-to-end rollout collection runs with that config plus the
 selected agent, environment server and model configs.
 """
@@ -18,22 +22,33 @@ import fnmatch
 import json
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+from pydantic import ValidationError
 
 from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import materialized_path_for
-from nemo_gym.tasks.harbor.build_options import BuildOptions, build_options_from_overrides
+from nemo_gym.sandbox.compose_config import deployment_platform
+from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
+from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
+from nemo_gym.tasks.harbor.build_options import (
+    BuildOptions,
+    _block_from_overrides,
+    _merged_cli_config,
+    build_options_from_overrides,
+)
 from nemo_gym.tasks.harbor.build_plan import (
+    DEFAULT_PLATFORM,
     BuildError,
 )
-from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, read_dataset_config
+from nemo_gym.tasks.harbor.compose_overlay import HarborComposeOverlay
+from nemo_gym.tasks.harbor.dataset_config import DATASET_FILE, GymDatasetConfig, read_dataset_config
 from nemo_gym.tasks.harbor.errors import HarborTaskError
 from nemo_gym.tasks.harbor.hub import HubError, datasets_dir, fetch_ref, is_hub_ref
 from nemo_gym.tasks.harbor.image_configs import (
@@ -41,11 +56,33 @@ from nemo_gym.tasks.harbor.image_configs import (
     record_base_images,
     record_compose_images,
 )
-from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles, unsupported_compose_fields_error
+from nemo_gym.tasks.harbor.manifest import (
+    LOCAL_SOURCE,
+    MANIFEST_FILE,
+    Manifest,
+    ManifestError,
+    check_manifest,
+    check_task_manifest,
+    dataset_digest,
+    dataset_toml_digest,
+)
+from nemo_gym.tasks.harbor.materialize import (
+    ENVIRONMENT_SERVER_IMPL,
+    ENVIRONMENT_SERVER_INSTANCE,
+    run_config,
+    write_rows,
+)
+from nemo_gym.tasks.harbor.prepare_builds import _build_dockerfiles
 from nemo_gym.tasks.harbor.records import read_image_configs
-from nemo_gym.tasks.harbor.registry import ImageConfigError
-from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder
+from nemo_gym.tasks.harbor.registry import (
+    ImageConfigError,
+    RegistryClient,
+    credentials_for_image_prefixes,
+    platform_pair,
+)
+from nemo_gym.tasks.harbor.run_summary import NO_REFERENCE_SOLUTION, output_signatures, write_run_summary
+from nemo_gym.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder, iter_task_folders
+from nemo_gym.tasks.harbor.task_data import check_task_folders, check_tasks, load_task_data_schema
 from nemo_gym.tasks.harbor.validation_report import (
     _task_digests,
     _validation_key,
@@ -76,6 +113,17 @@ USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY = "absolute_ip_server_types"
 SANDBOX_REACHABLE_SERVER_TYPES = ("responses_api_models",)
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
+# The top-level block the Harbor environment server reads its provider from by default (`sandbox_provider`).
+SANDBOX_BLOCK_KEY = "sandbox"
+# Where the server's settings sit in the configuration a command names: the shipped environment server instance
+# every run config inherits from. `gpu_sandbox_provider` names the block GPU-declaring tasks and GPU sidecars run
+# on; `sandbox_provider_options.platform` ({os, arch}) is the platform a service's `platform` must match.
+HARBOR_SERVER_KEY = f"{ENVIRONMENT_SERVER_INSTANCE}.environment_servers.{ENVIRONMENT_SERVER_IMPL}"
+GPU_SANDBOX_PROVIDER_KEY = f"{HARBOR_SERVER_KEY}.gpu_sandbox_provider"
+SANDBOX_PROVIDER_OPTIONS_KEY = f"{HARBOR_SERVER_KEY}.sandbox_provider_options"
+# The job-level Compose overlay (extra Compose files, MCP entries, prompt template), read at prepare so the
+# overlay's images are recorded and its merge checked with the tasks', exactly as the server reads it at seed.
+COMPOSE_OVERLAY_KEY = f"{HARBOR_SERVER_KEY}.compose_overlay"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     # Hermes borrows the task sandbox and drives it through its terminal toolset. vLLM-only
@@ -94,6 +142,180 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+def _block_provider_name(overrides: list[str], sandbox: str | None, block_key: str) -> str | None:
+    """The provider name a top-level sandbox block carries, read from its keys alone (never its values)."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.sandbox.config import SANDBOX_BLOCK_RESERVED_KEYS
+
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    block = OmegaConf.select(_merged_cli_config(overrides, files), block_key, throw_on_resolution_failure=False)
+    if block is None or not hasattr(block, "keys"):
+        return None
+    providers = [str(key) for key in block.keys() if key not in SANDBOX_BLOCK_RESERVED_KEYS]
+    return providers[0] if len(providers) == 1 else None
+
+
+def sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
+    """The provider name (``opensandbox``, ``docker``, ...) of the ``sandbox:`` block the command names.
+
+    The block comes from the ``--sandbox`` provider file (when given) and the configuration the command line
+    names, merged as :func:`_merged_cli_config` does; only its keys are read, never its values, so provider
+    credentials are not needed for this (the registry credentials prepare does read are the block's
+    ``images.auth``, :func:`registry_credentials_from_overrides`). Prepare checks each Compose task's ``tmpfs``, ``ulimits``,
+    ``sysctls`` and ``security_opt`` against this provider's capabilities. ``None`` when no block names a
+    provider: the check then runs at seed, against the live provider.
+    """
+    return _block_provider_name(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+# The sandbox provider block's image credentials (OpenSandbox's `images.auth`: image prefix to username and
+# password), the one place a deployment names registry credentials; prepare reads private images with the same.
+SANDBOX_IMAGES_AUTH_KEY = "images.auth"
+
+
+def registry_credentials_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, tuple[str, str]]:
+    """The registry credentials prepare records private images with: the ``sandbox:`` block's ``images.auth``
+    (what the provider pulls those images with at seed), turned into the registry client's prefix-keyed form
+    (:func:`~nemo_gym.tasks.harbor.registry.credentials_for_image_prefixes`), so each image is read with the
+    credentials of its longest matching prefix, as the provider pulls it.
+
+    Read from the ``--sandbox`` provider file and the configuration the command names, resolved against them
+    (so ``${gitlab_registry_password}`` comes from ``env.yaml`` as it does at seed), like
+    :func:`volume_sources_from_overrides`. Empty when no block names a provider or the block has no
+    ``images.auth``: prepare then reads registries anonymously, as before. A malformed block is a
+    :class:`ValueError` naming the key.
+    """
+    provider = sandbox_provider_from_overrides(overrides, sandbox)
+    if provider is None:
+        return {}
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    key = f"{SANDBOX_BLOCK_KEY}.{provider}.{SANDBOX_IMAGES_AUTH_KEY}"
+    return credentials_for_image_prefixes(_block_from_overrides(overrides, key, config_files=files), key)
+
+
+def gpu_sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
+    """The provider name of the block GPU-declaring tasks and GPU sidecars run on: the environment server's
+    ``gpu_sandbox_provider`` in the configuration the command names (``GPU_SANDBOX_PROVIDER_KEY``), read like
+    :func:`sandbox_provider_from_overrides` reads the ``sandbox:`` block. ``None`` when no GPU block is set
+    (every service is then checked against the ``sandbox:`` block) or the block does not name one provider."""
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_provider_name(overrides, sandbox, block)
+
+
+def pairing_override_from_overrides(overrides: list[str]) -> bool:
+    """Whether the run waives the agent admission checks: ``--allow-unsupported-pairing`` (which the CLI translates
+    to ``+allow_unsupported_pairing=true``), a configuration file the command names that sets the key, or
+    ``NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING``. The same reading as the collector's pairing guard at dispatch
+    (:func:`~nemo_gym.global_config.pairing_override_enabled`), so the early admission check of ``prepare_target``
+    and the guard agree on one explicit override."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import ALLOW_UNSUPPORTED_PAIRING_KEY_NAME, pairing_override_enabled
+
+    block = _block_from_overrides(overrides, ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)
+    return pairing_override_enabled(OmegaConf.create({ALLOW_UNSUPPORTED_PAIRING_KEY_NAME: block}))
+
+
+def compose_platform_from_overrides(overrides: list[str]) -> str:
+    """The platform a Compose service's ``platform`` must match at prepare: the environment server's
+    ``sandbox_provider_options.platform`` (``{os, arch}``) in the configuration the command names, else
+    linux/amd64, exactly as the server reads it at seed (``deployment_platform``).
+
+    Only the ``platform`` subkey is selected and resolved. The sibling options (volumes, credentials, a
+    ``${results_dir}`` the server's configuration parser defaults later) are not needed at prepare and are
+    not evaluated; a block that is not a mapping selects no platform and the default stands, the server's own
+    configuration validation names the malformed block at dispatch."""
+    platform = _block_from_overrides(overrides, f"{SANDBOX_PROVIDER_OPTIONS_KEY}.platform")
+    return deployment_platform({"platform": platform} if platform is not None else None)
+
+
+def compose_overlay_from_overrides(overrides: list[str]) -> HarborComposeOverlay | None:
+    """The environment server's ``compose_overlay`` block in the configuration the command names
+    (``COMPOSE_OVERLAY_KEY``), validated as the server validates it, or ``None`` when the block is absent or null.
+    Prepare merges its files onto every task's Compose document and records their images, so the document the
+    server starts is the one prepare checked; a block that does not validate is a configuration error here."""
+    block = _block_from_overrides(overrides, COMPOSE_OVERLAY_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, Mapping):
+        raise ValueError(
+            f"`{COMPOSE_OVERLAY_KEY}` must be a mapping (files, mcp_servers, prompt_template); got {block!r}"
+        )
+    try:
+        overlay = HarborComposeOverlay.model_validate(block)
+    except ValidationError as exc:
+        raise ValueError(f"`{COMPOSE_OVERLAY_KEY}`: {exc}") from exc
+    return overlay if overlay.configured else None
+
+
+def volume_sources_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, str] | None:
+    """The ``volume_sources`` of the ``sandbox:`` block the command names, for checking Compose volumes at prepare.
+
+    The block comes from the ``--sandbox`` provider file (when given) and the configuration the command
+    line names, merged as :func:`_block_from_overrides` does. ``None`` when no ``volume_sources`` is
+    configured: prepare then reports every external volume and foreign bind mount as unmapped.
+    """
+    return _block_volume_sources(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+def gpu_volume_sources_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, str] | None:
+    """The ``volume_sources`` of the block GPU-declaring tasks run on, for checking their Compose volumes at prepare.
+
+    The block is the environment server's ``gpu_sandbox_provider`` in the configuration the command names
+    (``GPU_SANDBOX_PROVIDER_KEY``). ``None`` when no GPU block is set: every task is then checked against
+    the ``sandbox:`` block. An empty mapping when the block is set but carries no ``volume_sources``, which
+    is what the server resolves such a task against.
+    """
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_volume_sources(overrides, sandbox, block) or {}
+
+
+def _block_volume_sources(overrides: list[str], sandbox: str | None, block: str) -> dict[str, str] | None:
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    sources = _block_from_overrides(overrides, f"{block}.{SANDBOX_BLOCK_VOLUME_SOURCES_KEY}", config_files=files)
+    if sources is None:
+        return None
+    return validate_volume_sources(sources, f"the `{block}:` block")
+
+
+def shared_storage_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
+    """Whether the ``sandbox:`` block's provider configures shared storage, for checking Compose named volumes and
+    shared logs binds at prepare: OpenSandbox's ``shared_storage.host_path`` under the block's one provider key,
+    read from the ``--sandbox`` provider file and the configuration the command names. ``None`` when the block
+    names no single provider (the adapter then decides at seed); otherwise whether the path is set, which is
+    the one setting the server's provider requires for every such volume."""
+    return _block_shared_storage(overrides, sandbox, SANDBOX_BLOCK_KEY)
+
+
+def gpu_shared_storage_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
+    """:func:`shared_storage_from_overrides` for the block GPU-declaring tasks and GPU sidecars run on
+    (``GPU_SANDBOX_PROVIDER_KEY``); ``None`` when no GPU block is set."""
+    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
+    if block is None:
+        return None
+    if not isinstance(block, str) or not block:
+        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
+    return _block_shared_storage(overrides, sandbox, block)
+
+
+def _block_shared_storage(overrides: list[str], sandbox: str | None, block: str) -> bool | None:
+    provider = _block_provider_name(overrides, sandbox, block)
+    if provider is None:
+        return None
+    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
+    host_path = _block_from_overrides(overrides, f"{block}.{provider}.shared_storage.host_path", config_files=files)
+    return bool(host_path)
+
+
 @dataclass(frozen=True)
 class PreparedTaskset:
     taskset: str
@@ -102,8 +324,24 @@ class PreparedTaskset:
     rows_path: Path
     output_dir: Path
     skipped: dict[str, str] = field(default_factory=dict)
-    # Every distinct image the prepared tasks start from, for pre-pulling.
+    # Every distinct image a run of the prepared tasks starts, for pre-pulling (``run_images``): the task images,
+    # the separate verifiers' (declared or built from tests/Dockerfile) and the Compose services' as recorded.
     images: tuple[str, ...] = ()
+    # The dataset's identity (``manifest.toml``'s ``[dataset].digest``) and the digest of its
+    # ``dataset.toml``, recorded in every row and in the run config.
+    dataset_digest: str | None = None
+    dataset_toml_digest: str | None = None
+    # The ``[gym]`` table of the dataset's ``dataset.toml`` (empty without one): what the generated
+    # ``datasets:`` entry and the run's defaults are built from.
+    dataset: GymDatasetConfig = field(default_factory=GymDatasetConfig)
+    # The dataset label every row carries as ``task_source``: the dataset folder's name, which is the taskset
+    # unless the target is a single task folder inside a dataset (a parent with a ``dataset.toml`` or a
+    # ``manifest.toml``, whose table and images it uses); a task folder whose parent is no dataset is labelled
+    # by its own name (see ``_dataset_label``). ``None`` (a hand-built taskset) labels the rows with the taskset.
+    task_source: str | None = None
+    # Where the dataset came from (``manifest.toml``'s ``[dataset].source``: ``harbor-registry``,
+    # ``harbor-package-store``, ``git`` or ``local``), for the run summary.
+    dataset_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -129,22 +367,69 @@ def prepare_target(
     exclude: list[str] | None = None,
     only: list[str] | None = None,
     build: BuildOptions | None = None,
+    sandbox_provider: str | None = None,
+    gpu_sandbox_provider: str | None = None,
+    compose_platform: str = DEFAULT_PLATFORM,
+    volume_sources: dict[str, str] | None = None,
+    gpu_volume_sources: dict[str, str] | None = None,
+    shared_storage: bool | None = None,
+    gpu_shared_storage: bool | None = None,
+    compose_overlay: HarborComposeOverlay | None = None,
     rows_name: str = "tasks.jsonl",
+    registry_credentials: Mapping[str, tuple[str, str]] | None = None,
+    agent: str | None = None,
+    allow_unsupported_pairing: bool = False,
 ) -> PreparedTaskset:
     """Fetch (for hub references) and load the tasks, then write the rows file.
 
     A task folder that does not load is skipped with a warning (and listed in
     ``PreparedTaskset.skipped``) so the rest of the dataset still prepares; so is a task whose
     image fails to build or whose Compose file does not resolve, with the build's or the
-    resolver's reason.
+    resolver's reason. A dataset that ships ``task_data.py`` is refused as a whole, with the task
+    named, when a task's ``task_data.json`` does not satisfy its ``TaskData`` or when the module does
+    not import (:mod:`nemo_gym.tasks.harbor.task_data`); both are checked before any image is
+    recorded or built, and the loaded tasks are checked again before a row is written.
 
     Tasks matching an ``exclude`` glob, or not matching an ``only`` glob, are left out of the
     rows and listed on stdout. Dockerfiles outside pull and overlay mode are built once and
     recorded before the tasks load, as ``build`` (the ``builds:`` configuration block) says; the
     default builds locally with docker, and pushes with the first tool on PATH when a repository
-    is named. ``rows_name`` names the rows file inside the taskset's output folder: a run scopes
-    it to its agent, so two agents prepared with different selections on one taskset keep their
-    own rows.
+    is named. Compose service fields are checked against ``sandbox_provider`` and ``gpu_sandbox_provider``,
+    the provider names of the ``sandbox:`` and GPU blocks, which decide the ``tmpfs``, ``ulimits``, ``sysctls``
+    and ``security_opt`` each service's provider can apply, and against ``compose_platform``, the deployment's (see
+    ``nemo_gym.tasks.harbor.image_configs.check_task_compose_fields``). Compose ``volumes`` are checked against ``volume_sources``, the deployment's mapping of
+    external volumes and foreign bind sources to shared storage (see ``nemo_gym.sandbox.config``); a task that
+    declares GPUs is checked against ``gpu_volume_sources`` when given, the mapping of the block the server runs
+    such tasks on; ``shared_storage`` and ``gpu_shared_storage`` say whether each block's provider has the shared
+    storage named volumes and shared logs binds need, so a task that needs it is left out at prepare, naming the
+    setting, when the block has none (``None``: unknown, decided at seed). ``compose_overlay`` is the job-level Compose overlay (the server's ``compose_overlay`` block):
+    its files are merged onto every task's Compose document, a plain image task included, and its images recorded
+    with the tasks'. ``rows_name`` names the rows file inside the taskset's output folder: a run scopes it to its
+    agent, so two agents prepared with different selections on one taskset keep their own rows. ``registry_credentials``
+    (registry host or image prefix to username and password, :func:`registry_credentials_from_overrides`) are what the base images
+    and the Compose images are read from their registries with; without them a private image stops the
+    preparation with the registry's refusal.
+
+    Before any image is recorded, built or pushed, ``manifest.toml`` beside the task folders is
+    reconciled with their digests (:func:`~nemo_gym.tasks.harbor.manifest.check_manifest`): a fetched
+    dataset whose folders changed is refused, a local folder gets a manifest. The digests hashed for
+    that check are reused for the tasks that do not load; the loader's own folder digests are checked
+    against them. Selection does not enter the dataset digest; it covers every task folder, so two runs of
+    different subsets still name one dataset. A task folder that cannot be hashed (a file under it escapes
+    it through a link, or cannot be read) is recorded in the manifest by name without a digest and does
+    not enter the dataset digest; the loader refuses it, so it is skipped like any task that does not load,
+    and selection applies to it as to any other task.
+
+    ``agent`` is the harness the run selected (its implementation name, what ``--agent`` resolves to). It is
+    checked against the dataset's ``[gym] allowed_agents`` as soon as ``dataset.toml`` is at hand, after a
+    hub fetch and before any manifest check, image record, build or server start; a harness the dataset does
+    not admit is refused with both named. ``None`` skips the check (the oracle's validation run, which plays
+    the reference solution and not a model), and so does ``allow_unsupported_pairing``, the run's pairing override
+    (``--allow-unsupported-pairing`` or ``NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING``, :func:`pairing_override_from_overrides`):
+    the collector's guard waives the same list at dispatch under it, so an explicit experimental run proceeds
+    without editing the dataset's declaration. An ``example`` dataset (``[gym] type``) is refused at the same
+    point whatever the harness, before anything is written: that type marks committed smoke-test samples,
+    which neither ``gym eval run`` nor ``gym dataset validate`` runs.
     """
     build = build or BuildOptions()
     if is_hub_ref(target):
@@ -153,18 +438,63 @@ def prepare_target(
     else:
         folder = Path(target).expanduser().resolve()
     taskset = folder.name
+    # Dataset-level files (dataset.toml, the recorded image configurations, the built images) live at the
+    # dataset root, which is where the loader and the environment server read them from for nested tasks.
+    dataset_root = folder.parent if is_task_folder(folder) else folder
+    # A dataset.toml that does not parse is reported per task by the loader below, with every task skipped;
+    # the admission check needs a readable table, and the prepared taskset keeps the one it read.
+    dataset = _readable_dataset_config(dataset_root)
+    # Both refusals come here, where the table is first in hand: before the manifest check, the image records,
+    # the builds and the rows file, so a run that cannot happen leaves nothing behind.
+    if dataset is not None:
+        refuse_example_dataset(dataset)
+        if agent is not None and not allow_unsupported_pairing:
+            refuse_disallowed_agent(dataset, agent)
     exclude = exclude or []
+    # The refusal of a hand-edited fetched dataset comes first, so no image of unverified content is
+    # built, pushed or recorded. A single task folder has no manifest of its own (see _dataset_identity).
+    digests: dict[str, str] = {}
+    identity = check_manifest(folder, digests=digests) if folder.is_dir() and not is_task_folder(folder) else None
+    # The dataset's TaskData (task_data.py beside dataset.toml) is imported once here, before any image is
+    # recorded or built: a module that does not import refuses the dataset now, and so does a task folder whose
+    # task_data.json the model refuses (the fields need no loaded task, and a dataset refused as a whole should not
+    # first resolve, build and push every image). Every loaded task's fields are checked again below, before a row
+    # is written. Duplicate task IDs are rejected by the folder walk itself, as they are for the image records.
+    task_data_schema = load_task_data_schema(dataset_root) if dataset_root.is_dir() else None
+    if task_data_schema is not None and folder.is_dir():
+        check_task_folders(task_data_schema, [folder] if is_task_folder(folder) else iter_task_folders(folder))
 
     def selected(task_id: str) -> bool:
         return selection_reason(task_id, exclude, only) is None
+
+    # A single task folder inside a fetched dataset is held here to the manifest its dataset folder's check holds it
+    # to (the nearest fetched one within that check's discovery range: at most MAX_DISCOVERY_DEPTH levels up, through
+    # visible folders that are not links), before any image is recorded or built (check_task_manifest): preparing
+    # one task of a fetched dataset is no way around the check its dataset folder gets. Its identity then carries
+    # the fetch's source (see _dataset_identity); a task no such manifest holds is held to nothing.
+    parent = check_task_manifest(folder, digests=digests) if is_task_folder(folder) else None
 
     # Dockerfile ENV, WORKDIR and USER resolve from the base image's configuration, so it is recorded
     # before the tasks load; a base image the registry cannot resolve stops the preparation here. Only
     # the selected tasks' images are recorded, so an image a left-out task uses cannot stop it. A target
     # that is itself a task folder always loads (discover_tasks raises for it); selection applies after.
-    # A missing or unreadable target is reported by discover_tasks below, in its own words.
+    # A missing or unreadable target is reported by discover_tasks below, in its own words. Duplicate
+    # task IDs are rejected by the folder walk itself, before any registry or docker work. Images are
+    # recorded for the platform the sandboxes run, ``builds.platform`` (linux/amd64 unless set), as the
+    # built ones are.
+    # One registry client for the base images and the Compose images, for the platform the images are recorded for
+    # and with the deployment's credentials; None keeps the recorder's own anonymous client.
+    client = (
+        RegistryClient(dict(registry_credentials), platform=platform_pair(build.platform))
+        if registry_credentials
+        else None
+    )
     images = (
-        record_base_images(folder, select=None if is_task_folder(folder) else selected) if folder.is_dir() else None
+        record_base_images(
+            folder, select=None if is_task_folder(folder) else selected, platform=build.platform, client=client
+        )
+        if folder.is_dir()
+        else None
     )
     if images is not None:
         print(f"Base image configurations recorded in {images}")
@@ -190,6 +520,7 @@ def prepare_target(
     loaded = [task for task in loaded if task.task_id not in unbuilt]
     _write_skipped(output_dir, errors)
     _check_dataset_task_keys(folder, loaded, errors)
+    identity = _dataset_identity(folder, loaded, identity, digests, parent=parent)
     tasks, skipped = select_tasks(loaded, exclude, only)
     # A left-out task that did not load (its base image was not recorded) is left out, not reported as broken.
     for task_id in [task_id for task_id in errors if not selected(task_id)]:
@@ -202,9 +533,28 @@ def prepare_target(
         print(f"Skipping {task_id}: {reason}")
     if not tasks:
         raise _no_runnable_task(folder, errors)
-    # A Compose file that does not resolve leaves its task out the same way; the others' images are still recorded.
+    # A task whose fields do not satisfy the dataset's TaskData refuses the whole dataset, named: the rows would
+    # carry data the dataset's own verifier cannot read. Selection does not narrow the check; the dataset is one unit.
+    check_tasks(task_data_schema, loaded)
+    # A Compose file that does not resolve, a field the sandbox Compose adapter would refuse at seed, or volumes the
+    # group cannot run, leaves its task out the same way, with the field named, as an unloadable task is, not as a
+    # seed failure of every episode; the others' images are still recorded.
     unresolved: dict[str, str] = {}
-    images = record_compose_images(tasks, tasks[0].path.parent, skipped=unresolved)
+    images = record_compose_images(
+        tasks,
+        dataset_root,
+        client=client,
+        skipped=unresolved,
+        platform=build.platform,
+        sandbox_provider=sandbox_provider,
+        gpu_sandbox_provider=gpu_sandbox_provider,
+        compose_platform=compose_platform,
+        volume_sources=volume_sources,
+        gpu_volume_sources=gpu_volume_sources,
+        shared_storage=shared_storage,
+        gpu_shared_storage=gpu_shared_storage,
+        overlay=compose_overlay,
+    )
     if unresolved:
         for task_id, reason in unresolved.items():
             errors[task_id] = HarborTaskError(reason)
@@ -215,24 +565,15 @@ def prepare_target(
             raise _no_runnable_task(folder, errors)
     if images is not None:
         print(f"Compose image configurations recorded in {images}")
-    # The Compose adapter's field check, per task and before any sandbox exists: a field it does not start is
-    # a skipped task with the field named, as an unloadable task is, not a seed failure of every episode.
-    refused = {task.task_id: error for task in tasks if (error := unsupported_compose_fields_error(task))}
-    if refused:
-        errors.update(refused)
-        _write_skipped(output_dir, errors)
-        for task_id, error in refused.items():
-            logger.warning("Skipping task %s: %s", task_id, error)
-        tasks = [task for task in tasks if task.task_id not in refused]
-        if not tasks:
-            raise _no_runnable_task(folder, errors)
     rows_path = output_dir / rows_name
-    write_rows(tasks, taskset, rows_path)
+    task_source = _dataset_label(folder, dataset_root)
+    write_rows(tasks, taskset, rows_path, dataset_digest=identity.digest, task_source=task_source)
     skipped_note = f", skipped {len(errors)}" if errors else ""
     print(f"Materialized {len(tasks)} task(s) from {folder} into {rows_path}{skipped_note}")
+    print(f"Dataset digest {identity.digest} ({identity.source})")
     # Every distinct image a run starts, for pre-pulling onto the sandbox hosts before it: the task images, the
     # Compose sidecars' (as recorded, the pinned reference the sandbox gets) and the separate verifiers'.
-    distinct = run_images(tasks, read_image_configs(tasks[0].path.parent))
+    distinct = run_images(tasks, read_image_configs(tasks[0].path.parent), overlay=compose_overlay)
     (output_dir / IMAGES_FILE).write_text(json.dumps(list(distinct), indent=2) + "\n")
     if distinct:
         print(f"Images: {len(distinct)} distinct, listed in {output_dir / IMAGES_FILE}")
@@ -246,18 +587,84 @@ def prepare_target(
         output_dir=output_dir,
         skipped={task_id: str(error) for task_id, error in errors.items()},
         images=distinct,
+        dataset_digest=identity.digest,
+        dataset_toml_digest=identity.dataset_toml_digest,
+        dataset=dataset or GymDatasetConfig(),
+        task_source=task_source,
+        dataset_source=identity.source,
     )
 
 
-def run_images(tasks: list[HarborTask], image_configs: Mapping[str, Any]) -> tuple[str, ...]:
+def _dataset_label(folder: Path, dataset_root: Path) -> str:
+    """The dataset label the rows of ``folder`` carry as ``task_source``.
+
+    A dataset folder target is labelled by its own name, the taskset. A single task folder target is labelled by
+    its parent's name when the parent is a dataset: it holds a ``dataset.toml`` or a ``manifest.toml``, so the
+    table, image records and digests the preparation uses are the parent's, and two single-task runs of one
+    dataset carry one label. A task folder whose parent holds neither is a standalone task (the parent is only
+    the directory that happens to hold it: a scratch folder, a user's home) and is labelled by its own name, as a
+    hand-built taskset is, so two unrelated task folders prepared from one parent do not share a label.
+    """
+    if folder == dataset_root:
+        return dataset_root.name
+    if (dataset_root / DATASET_FILE).is_file() or (dataset_root / MANIFEST_FILE).is_file():
+        return dataset_root.name
+    return folder.name
+
+
+def _readable_dataset_config(dataset_root: Path) -> GymDatasetConfig | None:
+    """The dataset's ``[gym]`` table, or ``None`` when ``dataset.toml`` does not parse (the loader reports that)."""
+    try:
+        return read_dataset_config(dataset_root)
+    except ValueError:
+        return None
+
+
+def refuse_example_dataset(dataset: GymDatasetConfig) -> None:
+    """Refuse a dataset whose ``[gym] type`` is ``example``: that type marks committed smoke-test samples, which
+    no split runs.
+
+    ``prepare_target`` raises it as soon as ``dataset.toml`` is read, before any manifest check, image record,
+    build or rows file; ``build_run`` raises it again as a backstop for a hand-built :class:`PreparedTaskset`.
+    """
+    if dataset.effective_type != "example":
+        return
+    raise HarborTaskError(
+        f'{dataset.path or DATASET_FILE} [gym] type = "example" marks smoke-test samples, which '
+        "`gym eval run` and `gym dataset validate` do not run; set type to benchmark, validation or train"
+    )
+
+
+def refuse_disallowed_agent(dataset: GymDatasetConfig, agent: str) -> None:
+    """Refuse a harness the dataset's ``[gym] allowed_agents`` does not admit, naming the harness and the list.
+
+    Raised before any fetch result is built on, any image recorded or built, or any server or sandbox started.
+    """
+    if dataset.admits(agent):
+        return
+    admitted = ", ".join(dataset.allowed_agents or ())
+    raise ValueError(
+        f"{dataset.path or DATASET_FILE} [gym] allowed_agents admits {admitted}, not `--agent {agent}`. "
+        f"Run it with one of those harnesses, or add {agent!r} to allowed_agents in the dataset."
+    )
+
+
+def run_images(
+    tasks: list[HarborTask], image_configs: Mapping[str, Any], *, overlay: HarborComposeOverlay | None = None
+) -> tuple[str, ...]:
     """Every distinct image a run of ``tasks`` starts, sorted: each task's image, the image of a separate
-    verifier (``[verifier.environment].docker_image``) and every Compose service image, the last as the
-    recorded configuration pins it (``compose-images.json``, what ``resolve_compose`` hands the sandbox),
-    else as written when it has no record."""
+    verifier (``[verifier.environment].docker_image``) and every Compose service image (the job-level
+    ``overlay``'s services included), the last as the recorded configuration pins it (``compose-images.json``,
+    what ``resolve_compose`` hands the sandbox), else as written when it has no record."""
     images: set[str] = set()
     for task in tasks:
         if task.image:
             images.add(task.image)
+        if task.verifier_image:
+            # The separate verifier's sandbox starts this image: the one prepare built from tests/Dockerfile
+            # (recorded under the tests/ digest, never a Compose service, so nothing below would name it) or the
+            # declared one, which the check below names too (HarborTask.verifier_image covers both).
+            images.add(task.verifier_image)
         verifier_environment = task.config.verifier.environment
         if (
             not task.config.is_shared_verifier
@@ -265,7 +672,7 @@ def run_images(tasks: list[HarborTask], image_configs: Mapping[str, Any]) -> tup
             and verifier_environment.docker_image
         ):
             images.add(verifier_environment.docker_image)
-        document = load_compose_document(task) if task.needs_compose else None
+        document = load_compose_document(task, overlay=overlay)
         for service in ((document or {}).get("services") or {}).values():
             reference = (service or {}).get("image")
             if reference:
@@ -282,6 +689,52 @@ def _listed(reasons: Mapping[str, object]) -> str:
 def _no_runnable_task(folder: Path, errors: Mapping[str, object]) -> ValueError:
     """The error of a preparation that keeps no task, listing every task left out and why."""
     return ValueError(f"No runnable task left in {folder}" + (f"; left out:{_listed(errors)}" if errors else ""))
+
+
+def _dataset_identity(
+    folder: Path,
+    loaded: list[HarborTask],
+    checked: Manifest | None,
+    digests: dict[str, str],
+    *,
+    parent: Manifest | None = None,
+) -> Manifest:
+    """The dataset's manifest, reconciled with the loaded tasks' folder digests.
+
+    A folder of task folders carries ``manifest.toml``, reconciled by ``check_manifest`` before the
+    builds (``checked``, with the folder ``digests`` it hashed). The loader hashed the folders that loaded
+    again, with the same function (``HarborTask.folder_digest``); a digest that differs means a folder
+    changed under the preparation, so the manifest is reconciled once more with the loader's digests (and
+    a fetched dataset refused). The manifest records folder digests only: ``HarborTask.digest``, the one
+    rows carry, also folds in the ``dataset.toml`` settings, which the manifest covers once through
+    ``dataset_toml_digest``, so a settings edit changes the dataset digest but is not a task file edit.
+    A single task folder names no dataset folder of its own (its parent is whatever holds it), so its
+    identity is computed in memory over that one task, with the ``dataset.toml`` beside it, and nothing
+    is written (``checked`` is ``None`` exactly then). When a fetched dataset's check reaches the task (its
+    manifest is the nearest fetched one within discovery range, wherever under that folder the task sits),
+    ``parent`` is that manifest, which ``check_task_manifest`` held the folder to before the builds: the identity
+    is that same in-memory one with the fetch's source instead of ``local`` (still over the ``dataset.toml`` beside
+    the task: the manifest holds the task's content, not the settings a nested task is prepared with), and a
+    folder that changed under the preparation is held to the manifest once more with the loader's digest, as a
+    dataset folder is.
+    """
+    if parent is not None:
+        hashed = {task.task_id: task.folder_digest for task in loaded}
+        if any(digests.get(name) != digest for name, digest in hashed.items()):
+            check_task_manifest(folder, digests=hashed)
+        return replace(_dataset_identity(folder, loaded, None, digests), source=parent.source)
+    if checked is None:
+        hashed = {task.task_id: task.folder_digest for task in loaded}
+        toml_digest = dataset_toml_digest(folder.parent)
+        return Manifest(
+            source=LOCAL_SOURCE,
+            digest=dataset_digest(hashed, toml_digest),
+            dataset_toml_digest=toml_digest,
+            tasks={name: {"digest": digest} for name, digest in hashed.items()},
+        )
+    if all(digests.get(task.task_id) == task.folder_digest for task in loaded):
+        return checked
+    return check_manifest(folder, digests={task.task_id: task.folder_digest for task in loaded})
 
 
 def _check_dataset_task_keys(folder: Path, loaded: list[HarborTask], errors: dict[str, HarborTaskError]) -> None:
@@ -424,7 +877,29 @@ def build_run(
     sandbox: str | None,
     overrides: list[str],
 ) -> tuple[Path, list[str]]:
-    """Write ``run_config.yaml`` and return it with the Hydra overrides for collection."""
+    """Write ``run_config.yaml`` and return it with the Hydra overrides for collection.
+
+    The dataset's ``[gym]`` table sets the run's defaults: the split the collector runs is the entry's
+    ``type`` (``+split=`` on the command line still wins), and the run config's top-level ``num_repeats``
+    is ``[gym.defaults].num_repeats``, below every config file and command-line override, so
+    ``+num_repeats=`` replaces it. The count lives at the run level and not in the entry: collate would
+    duplicate rows by an entry count and the collector would multiply on top, and the metrics sidecar
+    beside the rows records the entry, so a moving entry count would conflict run to run. The oracle's
+    validation run is not an evaluation: ``validate_target`` adds ``+num_repeats=1`` unless the command
+    line sets a count, so each reference solution plays once. An ``example`` dataset is refused here again
+    (:func:`refuse_example_dataset`; ``prepare_target`` refused it before anything was written), so a hand-built
+    taskset of smoke-test samples does not run either.
+
+    The entry carries the dataset's ``allowed_agents``, and the collector's pairing guard checks the agent
+    block's harness against it at dispatch. The oracle plays the reference solution, not a model, and is
+    always admitted (``prepare_target`` checks no agent for it), so its run config carries the entry without
+    the list: the list speaks of model harnesses, and the guard would otherwise refuse the validation run.
+    """
+    refuse_example_dataset(prepared.dataset)
+    split = prepared.dataset.effective_type
+    dataset = prepared.dataset
+    if agent.impl_name == ORACLE_AGENT and dataset.allowed_agents is not None:
+        dataset = dataset.model_copy(update={"allowed_agents": None})
     config = run_config(
         taskset=prepared.taskset,
         folder=prepared.folder,
@@ -433,9 +908,13 @@ def build_run(
         agent_instance_name=agent.instance_name,
         agent_impl=agent.impl_name,
         agent_overrides=AGENT_OVERRIDES.get(agent.impl_name),
+        dataset_digest=prepared.dataset_digest,
+        dataset_toml_digest=prepared.dataset_toml_digest,
+        dataset=dataset,
     )
     # Defaults belong below explicit config files and command-line overrides.
     config["output_jsonl_fpath"] = str(prepared.output_dir / "rollouts.jsonl")
+    config["num_repeats"] = prepared.dataset.defaults.num_repeats
     if agent.runs_in_sandbox:
         config[USE_ABSOLUTE_IP_KEY] = True
         config[ABSOLUTE_IP_SERVER_TYPES_KEY] = list(SANDBOX_REACHABLE_SERVER_TYPES)
@@ -450,7 +929,7 @@ def build_run(
     tokens = [f"+config_paths=[{','.join(json.dumps(str(path), ensure_ascii=False) for path in config_paths)}]"]
     tokens += [token for token in overrides if not token.startswith("+agent_name=")]
     if not _has_override(tokens, "split"):
-        tokens.append("+split=validation")
+        tokens.append(f"+split={split}")
     return config_path, tokens
 
 
@@ -479,16 +958,37 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         validate_target(args, overrides, agent=agent)
         return
     try:
-        # The `builds:` block comes from the configuration the command names; the run config does not exist yet.
+        # The `builds:` and `sandbox:` blocks come from the configuration the command names; the run config
+        # does not exist yet.
         build = build_options_from_overrides(overrides)
         prepared = prepare_target(
             args.target,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build,
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
+            volume_sources=volume_sources_from_overrides(overrides, sandbox),
+            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
+            shared_storage=shared_storage_from_overrides(overrides, sandbox),
+            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
+            compose_overlay=compose_overlay_from_overrides(overrides),
             rows_name=_rows_name(agent),
+            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
+            agent=agent.impl_name,
+            allow_unsupported_pairing=pairing_override_from_overrides(overrides),
         )
-    except (HarborTaskError, HubError, BuildError, ImageConfigError, ConfigError, ValueError, OSError) as exc:
+    except (
+        HarborTaskError,
+        HubError,
+        BuildError,
+        ImageConfigError,
+        ManifestError,
+        ConfigError,
+        ValueError,
+        OSError,
+    ) as exc:
         args._parser.error(str(exc))
     if prepared.skipped and not getattr(args, "skip_unloadable", False):
         args._parser.error(
@@ -501,15 +1001,103 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error(str(exc))
     tokens = _merge_config_paths(tokens)
     collection = _resolved_collection(tokens, prepared)
+    helper = RolloutCollectionHelper()
+    expected: list[dict[str, Any]] | None = None
+    before_dispatch = None
     cache = _resumable_cache(collection)
     if cache is not None:
         # The collector resumes its saved inputs, not the rows just prepared: a selection or digest that
         # changed since would run (or 404 on) tasks the server no longer maps. Refuse before startup.
-        conflict = _resume_conflict(cache, RolloutCollectionHelper()._preprocess_rows_from_config(collection))
+        expected = helper._preprocess_rows_from_config(collection)
+        conflict = _resume_conflict(cache, expected)
         if conflict:
             args._parser.error(conflict)
+        # The collector resumes the schedule it saved (the materialized inputs: every task and repeat as that run
+        # expanded them, with the input each carried), not the rows the current config expands: a resume with
+        # another `num_repeats` passes the check above and dispatches no further attempts, so the summary's
+        # expected attempts and input echo are the saved ones, not a missing attempt the run never owed.
+        expected = _validation_rows(cache)
+    else:
+        # A fresh start clears its output files only once the servers are up: what sits under those names now
+        # is an earlier run's, and the summary must not report it as this run's if the collector never gets there.
+        before_dispatch = output_signatures(Path(collection.output_jsonl_fpath))
+        # The collated split metrics an earlier run left are that run's selection; the data processor would
+        # refuse this one against them. Cleared here, they are rewritten before any server starts.
+        _clear_collector_metrics(Path(collection.output_jsonl_fpath), split=_collector_split())
     print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
-    dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+    try:
+        dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+    finally:
+        _write_summary(
+            Path(collection.output_jsonl_fpath),
+            command="gym eval run",
+            target=args.target,
+            prepared=prepared,
+            agent=agent,
+            run_config=config_path,
+            # A fresh run reads its selected rows only for the summary, after the collector has had them.
+            expected=expected if expected is not None else lambda: helper._preprocess_rows_from_config(collection),
+            split=_collector_split(),
+            before_dispatch=before_dispatch,
+        )
+
+
+def _collector_split() -> str | None:
+    """The split the resolved run config dispatches (``validation`` unless overridden), for the run summary."""
+    from nemo_gym.global_config import get_global_config_dict
+
+    split = get_global_config_dict().get("split")
+    return str(split) if split else None
+
+
+def _clear_collector_metrics(rollouts: Path, *, split: str | None) -> None:
+    """Remove the collated split metrics an earlier run left under ``<rollouts stem>/preprocessed_datasets/``
+    (``<split>_metrics.json`` and the ``<split>_metrics_conflict.json`` of a refused run), right before a fresh
+    start dispatches the collector.
+
+    ``e2e_rollout_collection`` collates the rows it dispatches there and checks the metrics it computes against
+    that file, refusing a mismatch ("Found conflicting aggregate metrics") unless ``overwrite_metrics_conflicts``
+    is set. That protects a committed source dataset; on this path the rows are regenerated from the task folder
+    on every command and the output folder is reused per taskset, so the file is the previous selection's, and
+    a user must neither see that error nor pass the flag. A resumed run keeps the file: its rows are unchanged
+    (:func:`_resume_conflict`). So does a run that reuses the prepared input (``reuse_existing_data_preparation``
+    with the collated ``<split>.jsonl`` present): the processor does not run, and the metrics stay with the input
+    they describe. ``split`` is the resolved run config's (:func:`_collector_split`); without one nothing is known
+    to clear.
+    """
+    from nemo_gym.global_config import get_global_config_dict
+    from nemo_gym.tasks.harbor.run_summary import PREPROCESSED_SUBDIR
+
+    if not split:
+        return
+    preprocessed = Path(rollouts).with_suffix("") / PREPROCESSED_SUBDIR
+    reuses_input = bool(get_global_config_dict().get("reuse_existing_data_preparation"))
+    if reuses_input and (preprocessed / f"{split}.jsonl").is_file():
+        return
+    metrics = preprocessed / f"{split}_metrics.json"
+    for path in (metrics, metrics.with_name(f"{metrics.stem}_conflict.json")):
+        path.unlink(missing_ok=True)
+
+
+def _write_summary(
+    rollouts: Path, *, expected: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]] | None, **kwargs: Any
+) -> None:
+    """Write the run summary beside ``rollouts`` (:mod:`nemo_gym.tasks.harbor.run_summary`) and say where.
+
+    Runs after collection whatever it did, so a run that stopped early still leaves a summary of what it
+    wrote; a summary that cannot be written is logged and never displaces the run's own outcome. ``expected``
+    may be a callable that reads the collector's selected rows, so a run that did not need them before
+    dispatch reads them here, inside the same guard. ``before_dispatch`` (in ``kwargs``) is what a fresh start
+    found under its output names before dispatch, so files it never got to clear are not reported as its own.
+    """
+    try:
+        if callable(expected):
+            expected = expected()
+        path = write_run_summary(rollouts, expected=expected, **kwargs)
+    except Exception:
+        logger.warning("Could not write the run summary beside %s", rollouts, exc_info=True)
+        return
+    print(f"Run summary written to {path}")
 
 
 def _rows_name(agent: AgentSelection) -> str:
@@ -537,6 +1125,21 @@ def _resolved_collection(tokens: list[str], prepared: PreparedTaskset) -> "Rollo
     except InterpolationResolutionError as exc:
         raise translate_interpolation_error(exc) from exc
     return RolloutCollectionConfig.model_validate({**resolved, "input_jsonl_fpath": str(prepared.rows_path)})
+
+
+def _requested_output(tokens: list[str], default: Path) -> Path:
+    """The rollouts path ``tokens`` ask for (``--output``, ``+output_jsonl_fpath=`` or a ``--config`` overlay), or
+    ``default`` when they name none.
+
+    Resolved through the same parser dispatch uses, so a quoted ``--output`` and a file overlay both count, for
+    the path that dispatches nothing and so has no run config to resolve a collection from.
+    """
+    from nemo_gym.global_config import get_global_config_dict, reset_global_config_dict
+
+    sys.argv = [sys.argv[0], *tokens]
+    reset_global_config_dict()
+    requested = get_global_config_dict().get("output_jsonl_fpath")
+    return Path(str(requested)) if requested else default
 
 
 def _resumable_cache(collection: "RolloutCollectionConfig") -> Path | None:
@@ -605,7 +1208,16 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build_options_from_overrides(overrides),
+            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
+            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
+            compose_platform=compose_platform_from_overrides(overrides),
+            volume_sources=volume_sources_from_overrides(overrides, sandbox),
+            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
+            shared_storage=shared_storage_from_overrides(overrides, sandbox),
+            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
+            compose_overlay=compose_overlay_from_overrides(overrides),
             rows_name=_rows_name(agent),
+            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
         )
     except (
         HarborTaskError,
@@ -619,18 +1231,32 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
     ) as exc:
         args._parser.error(str(exc))
     unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
+    # Left out of the run, not failed: the summary names them with the reason so the result folder explains itself.
+    left_out = dict.fromkeys(unvalidated, NO_REFERENCE_SOLUTION)
     prepared = replace(prepared, tasks=[task for task in prepared.tasks if task.has_solution])
-    write_rows(prepared.tasks, prepared.taskset, prepared.rows_path)
+    write_rows(
+        prepared.tasks,
+        prepared.taskset,
+        prepared.rows_path,
+        dataset_digest=prepared.dataset_digest,
+        task_source=prepared.task_source,
+    )
     rollouts = prepared.output_dir / "rollouts.jsonl"
     expected = []
     if prepared.tasks:
         # Oracle runs reference scripts directly; it needs no placeholder model server.
-        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=list(overrides))
+        overrides = list(overrides)
+        # Validation is not an evaluation: a reference solution scores the same every time, so the dataset's
+        # `[gym.defaults].num_repeats` does not apply to it. An explicit `+num_repeats=` still wins.
+        if not _has_override(overrides, "num_repeats"):
+            overrides.append("+num_repeats=1")
+        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
         tokens = _merge_config_paths(tokens)
         # Resolve through the same parser and cache used by dispatch, including file overlays.
         collection = _resolved_collection(tokens, prepared)
         expected = RolloutCollectionHelper()._preprocess_rows_from_config(collection)
         rollouts = Path(collection.output_jsonl_fpath)
+        before_dispatch = None
         cache = _resumable_cache(collection)
         if cache is not None:
             # The collector resumes its saved inputs, not the just-prepared task rows. Reject a stale
@@ -656,8 +1282,47 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
                     f"{', ...' if len(foreign) > 5 else ''}. Use +resume_from_cache=false to validate the current "
                     "tasks, or choose a new +output_jsonl_fpath to keep the old results."
                 )
+            # What the collector resumes is its saved schedule (see run_target): the report and the summary
+            # expect the saved attempts, with the input each carried.
+            expected = _validation_rows(cache)
+        else:
+            # See run_target: a fresh start's files under the output names are an earlier run's until the
+            # collector clears them, which happens only once the servers are up; the collated metrics of an
+            # earlier selection would make the data processor refuse this one, so they go now.
+            before_dispatch = output_signatures(rollouts)
+            _clear_collector_metrics(rollouts, split=_collector_split())
         print(f"Run config written to {config_path}; validating {len(expected)} oracle rollout(s)")
-        dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+        try:
+            dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
+        finally:
+            _write_summary(
+                rollouts,
+                command="gym dataset validate",
+                target=args.target,
+                prepared=prepared,
+                agent=agent,
+                run_config=config_path,
+                expected=expected,
+                split=_collector_split(),
+                before_dispatch=before_dispatch,
+                unvalidated=left_out,
+            )
+    else:
+        # Nothing to dispatch (no selected task has a solution/): the summary still says what was selected,
+        # beside the rollouts file the command line asked for (there is no run config to resolve it from).
+        rollouts = _requested_output(_merge_config_paths(list(overrides)), rollouts)
+        _write_summary(
+            rollouts,
+            command="gym dataset validate",
+            target=args.target,
+            prepared=prepared,
+            agent=agent,
+            run_config=None,
+            expected=expected,
+            # Nothing ran, so whatever sits under the output names is an earlier run's.
+            before_dispatch=output_signatures(rollouts),
+            unvalidated=left_out,
+        )
     report = summarize_validation(rollouts, unvalidated, expected=expected, skipped=prepared.skipped)
     print(report.text)
     if not report.ok:

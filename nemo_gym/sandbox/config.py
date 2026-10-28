@@ -37,6 +37,14 @@ the provider rather than the agent config::
     sandbox:
       opensandbox: { connection: { ... } }
       default_metadata: { sandbox-api: opensandbox-sdk }
+
+A block may also carry a reserved ``volume_sources`` key: a mapping from a Compose
+volume name (an ``external: true`` volume) or a bind-mount host path to the path, under
+the provider's shared storage root, that stands in for it when a Compose group starts::
+
+    sandbox:
+      opensandbox: { shared_storage: { host_path: /mnt/shared } }
+      volume_sources: { pgdata: datasets/pgdata, /var/lib/models: models }
 """
 
 from collections.abc import Mapping
@@ -49,7 +57,8 @@ from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
 
 # Reserved keys inside a sandbox block that are not the provider config.
 SANDBOX_BLOCK_DEFAULT_METADATA_KEY = "default_metadata"
-SANDBOX_BLOCK_RESERVED_KEYS = frozenset({SANDBOX_BLOCK_DEFAULT_METADATA_KEY})
+SANDBOX_BLOCK_VOLUME_SOURCES_KEY = "volume_sources"
+SANDBOX_BLOCK_RESERVED_KEYS = frozenset({SANDBOX_BLOCK_DEFAULT_METADATA_KEY, SANDBOX_BLOCK_VOLUME_SOURCES_KEY})
 
 
 def _to_plain_dict(value: Any) -> Any:
@@ -170,6 +179,40 @@ def resolve_provider_metadata(
             f"Sandbox '{SANDBOX_BLOCK_DEFAULT_METADATA_KEY}' from {source} must be a mapping, got: {metadata!r}"
         )
     return dict(metadata)
+
+
+def resolve_provider_volume_sources(
+    sandbox_provider: str | Mapping[str, Any],
+    named_configs: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Return a sandbox block's ``volume_sources``: Compose volume names and bind-mount host paths mapped
+    to paths under the provider's shared storage root.
+
+    Returns an empty dict when the block has no ``volume_sources`` key. Keys and values must be
+    non-empty strings. See :func:`resolve_provider_config` for argument semantics.
+    """
+    block, source = _resolve_block(sandbox_provider, named_configs)
+    if not isinstance(block, Mapping):
+        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
+
+    return validate_volume_sources(block.get(SANDBOX_BLOCK_VOLUME_SOURCES_KEY), source)
+
+
+def validate_volume_sources(sources: Any, source: str = "the sandbox block") -> dict[str, str]:
+    """``volume_sources`` as a plain dict of non-empty strings; ``None`` is empty. ``source`` names the config
+    in error messages."""
+    sources = _to_plain_dict(sources) if sources is not None else {}
+    if not isinstance(sources, Mapping):
+        raise ValueError(
+            f"Sandbox '{SANDBOX_BLOCK_VOLUME_SOURCES_KEY}' from {source} must be a mapping, got: {sources!r}"
+        )
+    for key, value in sources.items():
+        if not isinstance(key, str) or not key or not isinstance(value, str) or not value:
+            raise ValueError(
+                f"Sandbox '{SANDBOX_BLOCK_VOLUME_SOURCES_KEY}' from {source} maps volume names or host paths to "
+                f"non-empty shared-storage paths, got {key!r}: {value!r}"
+            )
+    return dict(sources)
 
 
 class SandboxConfig(BaseModel):

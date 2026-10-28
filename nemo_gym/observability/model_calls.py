@@ -14,14 +14,17 @@ from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.observability.verifiers import merge_verifier_call_observation
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
     ObservationGap,
     TrajectoryRecord,
+    VerifierInvocation,
+    exclude_verifier_model_calls,
+    join_agent_model_calls,
     join_assistant_message_calls,
-    join_model_call_observations,
 )
 
 
@@ -53,11 +56,8 @@ def _usage_detail_token(
 def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     """Normalize token totals across Responses, Chat Completions, and Anthropic Messages usage.
 
-    For native Anthropic ``/v1/messages`` with prompt caching, ``input_tokens`` is only the uncached
-    remainder, so cache-read + cache-creation tokens are folded into ``tokens_in`` to reflect the true
-    prompt size (and cache-creation is surfaced separately as ``cache_creation_tokens``). OpenAI /
-    Responses usage already includes cached tokens in ``input_tokens`` / ``prompt_tokens`` (where
-    ``cached_tokens`` is a subset), so it is left untouched -- no double counting.
+    ``tokens_in`` is the whole prompt size (see ``_prompt_size``); cache creation is also reported
+    separately as ``cache_creation_tokens``. A count the provider did not report stays ``None``, never 0.
 
     ``tokens_in`` is a prompt-*size* metric, not a cost proxy: providers price cache-read (~0.1x) and
     cache-creation (~1.25x) differently from base input, so cost-accurate consumers should weight
@@ -71,20 +71,11 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
             "tokens_total": None,
             "cache_creation_tokens": None,
         }
-    tokens_in = _token_count(usage.get("input_tokens"))
-    if tokens_in is None:
-        tokens_in = _token_count(usage.get("prompt_tokens"))
+    tokens_in = _prompt_size(usage)
     tokens_out = _token_count(usage.get("output_tokens"))
     if tokens_out is None:
         tokens_out = _token_count(usage.get("completion_tokens"))
-    # Anthropic-native shape: top-level cache_* keys mean input_tokens excludes cached tokens.
-    cache_read = _token_count(usage.get("cache_read_input_tokens"))
     cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
-    if cache_read is not None or cache_creation is not None:
-        cache_total = (cache_read or 0) + (cache_creation or 0)
-        # Zero cache fields alone do not establish a missing prompt count.
-        if tokens_in is not None or cache_total > 0:
-            tokens_in = (tokens_in or 0) + cache_total
     tokens_total = _token_count(usage.get("total_tokens"))
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
@@ -334,14 +325,24 @@ def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelC
 
 def read_available_model_call_records(store: CaptureStore, rollout_id: str) -> tuple[list[ModelCallRecord], int]:
     """Read valid call records and count damaged records."""
+    calls, _, invalid_count = _read_capture_records(store, rollout_id)
+    return calls, invalid_count
+
+
+def _read_capture_records(
+    store: CaptureStore, rollout_id: str
+) -> tuple[list[ModelCallRecord], dict[str, "VerifierInvocation"], int]:
     exchanges, invalid_count = store.read_available(rollout_id)
     calls = []
+    verifier_invocations: dict[str, "VerifierInvocation"] = {}
     for index, exchange in exchanges:
         try:
-            calls.append(build_model_call_record(exchange, call_index=index))
+            call = build_model_call_record(exchange, call_index=index)
+            calls.append(call)
+            merge_verifier_call_observation(verifier_invocations, exchange, model_call_id=call.model_call_id)
         except Exception:
             invalid_count += 1
-    return calls, invalid_count
+    return calls, verifier_invocations, invalid_count
 
 
 def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]:
@@ -470,13 +471,14 @@ def merge_model_call_capture_into_record(
     if rollout_id is None:
         return record
     gaps: list[ObservationGap] = []
+    verifier_invocations: dict[str, "VerifierInvocation"] = {}
     store = _store_for_rollout(rollout_id, capture_dirs)
     if store is None:
         calls = []
         gaps.append(ObservationGap(code="model_call_capture_no_records"))
     else:
         try:
-            calls, invalid_count = read_available_model_call_records(store, rollout_id)
+            calls, verifier_invocations, invalid_count = _read_capture_records(store, rollout_id)
             if invalid_count:
                 gaps.append(
                     ObservationGap(
@@ -512,7 +514,8 @@ def merge_model_call_capture_into_record(
                         exc_info=True,
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
-            bundle = join_model_call_observations(bundle, calls)
+            agent_calls = exclude_verifier_model_calls(calls, verifier_invocations.values())
+            bundle = join_agent_model_calls(bundle, agent_calls)
             if any(call.client_assistant_message_id for call in calls):
                 try:
                     raw_trajectory = record.get("ng_trajectory")
@@ -522,7 +525,7 @@ def merge_model_call_capture_into_record(
                     if trajectory is not None and trajectory.rollout_id != rollout_id:
                         bundle.gaps.append(ObservationGap(code="assistant_message_call_rollout_mismatch"))
                     else:
-                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, agent_calls)
                         if trajectory is not None:
                             record["ng_trajectory"] = trajectory.model_dump(mode="json")
                 except Exception:
@@ -540,7 +543,35 @@ def merge_model_call_capture_into_record(
         "metrics": aggregate_model_call_records(calls),
         "calls": [call.model_dump(exclude=exclude) for call in calls],
     }
+    if verifier_invocations:
+        capture["verifier_invocations"] = [inv.model_dump(mode="json") for inv in verifier_invocations.values()]
     if gaps:
         capture["gaps"] = [gap.model_dump(mode="json", exclude_none=True) for gap in gaps]
     record["ng_model_call_capture"] = capture
     return record
+
+
+def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:
+    """Return the whole prompt size, with cached tokens counted exactly once.
+
+    Usage formats disagree on whether the prompt count includes the cache:
+
+    - ``prompt_tokens`` (Chat Completions) includes it. It wins whenever present, also when a gateway
+      adds Anthropic-style ``cache_*`` fields beside it.
+    - ``input_tokens`` with top-level ``cache_read_input_tokens`` or ``cache_creation_input_tokens``
+      (Anthropic Messages) excludes it, so the cache counts are added.
+    - ``input_tokens`` alone (Responses) includes it.
+    """
+    prompt_tokens = _token_count(usage.get("prompt_tokens"))
+    if prompt_tokens is not None:
+        return prompt_tokens
+    input_tokens = _token_count(usage.get("input_tokens"))
+    cache_read = _token_count(usage.get("cache_read_input_tokens"))
+    cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
+    if cache_read is None and cache_creation is None:
+        return input_tokens
+    cache_total = (cache_read or 0) + (cache_creation or 0)
+    # A fully cached Anthropic response may omit input_tokens; zero cache counts alone prove no prompt size.
+    if input_tokens is None and cache_total == 0:
+        return None
+    return (input_tokens or 0) + cache_total

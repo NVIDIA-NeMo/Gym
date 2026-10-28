@@ -23,6 +23,7 @@ import shlex
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -55,16 +56,21 @@ class SandboxProbeError(RuntimeError):
     """
 
 
-def _pack(source: Path, archive: Path) -> None:
+def _pack(source: Path, archive: Path, *, ignore: Callable[[str], bool] | None = None) -> None:
     if Path(source).is_symlink():
         # The root is never followed: a link the agent left where a folder was expected would otherwise
         # archive whatever it points at on this host.
         raise SandboxTransferError(f"Refusing to archive {source}: it is a symbolic link")
+
+    def member(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        # ``info.name`` is the entry's path relative to ``source``; a folder left out takes its subtree with it.
+        return None if ignore is not None and ignore(info.name) else info
+
     with tarfile.open(archive, "w:gz") as tar:
         # Add the children, not the folder itself: an archive entry for "." makes tar restore the
         # source folder's mode onto the target, which fails on a root-owned world-writable target.
         for child in sorted(Path(source).iterdir()):
-            tar.add(child, arcname=child.name)
+            tar.add(child, arcname=child.name, filter=member)
 
 
 def _unpack(
@@ -148,17 +154,28 @@ def tar_extract_command(remote: str, target: str) -> str:
 
 
 async def upload_dir(
-    sandbox: AsyncSandbox, source: Path, target: str, *, timeout_s: float = 600, make_readable: bool = False
+    sandbox: AsyncSandbox,
+    source: Path,
+    target: str,
+    *,
+    timeout_s: float = 600,
+    make_readable: bool = False,
+    ignore: Callable[[str], bool] | None = None,
 ) -> None:
     """Copy the contents of ``source`` into ``target`` inside the sandbox.
 
     File modes travel with the archive. ``make_readable`` additionally opens the tree to every user, for a
     solution the task user must read; a verifier tree keeps its modes because tests may check them.
+    ``ignore`` is called with each entry's path relative to ``source`` (posix form); an entry it names is left
+    out, its subtree with it. The environment server passes the task digest's rule
+    (:func:`nemo_gym.tasks.harbor.digest.is_ignored`) for a task's own folders, so a ``tests/helper.pyc`` or an
+    ``environment/__pycache__`` that the digest skips never reaches the sandbox; artifacts restored by
+    :func:`upload_path` travel whole.
     """
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "upload.tar.gz"
         # Archiving is blocking file work; keep it off the event loop.
-        await asyncio.to_thread(_pack, source, archive)
+        await asyncio.to_thread(_pack, source, archive, ignore=ignore)
         # The readability fix-up is best effort, as the extraction's handling of the target folder is.
         fixup = f"chmod -R a+rX {shlex.quote(target)} 2>/dev/null || true; " if make_readable else ""
         await _upload_and_extract(sandbox, archive, target, timeout_s=timeout_s, fixup=fixup, what=source)
