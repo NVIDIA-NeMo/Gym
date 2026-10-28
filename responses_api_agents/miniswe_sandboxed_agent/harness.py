@@ -18,6 +18,7 @@ from minisweagent.models.utils.actions_toolcall_response import BASH_TOOL_RESPON
 from pydantic import BaseModel, Field, TypeAdapter
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.execution_timing import ExecutionTiming
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -100,6 +101,7 @@ def project_native_trajectory(trajectory: dict) -> tuple[list[dict], list[dict]]
                 tool.update(
                     message={"role": "tool", "tool_call_id": message["call_id"], "content": message["output"]},
                     completed_at=extra.get("timestamp"),
+                    execution_timing=extra.get("execution_timing"),
                     status="timeout"
                     if error == "TimeoutExpired"
                     else "failed"
@@ -330,7 +332,9 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 "cost_limit": 0,
             },
             "environment": {
-                "environment_class": "local",
+                "environment_class": "timed_environment.TimedLocalEnvironment"
+                if self.observability_enabled
+                else "local",
                 "cwd": self.context.workdir or "",
                 "timeout": max(1, int(min(budget, self.config.step_timeout_sec))),
             },
@@ -341,6 +345,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 "model_kwargs": model_kwargs,
             },
         }
+        if self.observability_enabled:
+            await self.sandbox.upload(
+                Path(__file__).with_name("runtime") / "timed_environment.py", f"{remote}/timed_environment.py"
+            )
         local_config = self.directory / "config.yaml"
         local_config.write_text(json.dumps(payload))
         command = (
@@ -349,6 +357,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             "export MSWEA_CONFIGURED=true MSWEA_SILENT_STARTUP=true LITELLM_LOCAL_MODEL_COST_MAP=true "
             "MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT=1; "
             f"export MSWEA_GLOBAL_CONFIG_DIR={quote(remote + '/config')}; "
+            f"export PYTHONPATH={quote(remote)}${{PYTHONPATH:+:$PYTHONPATH}}; "
             f"exec {quote(remote + '/venv/bin/python')} -m minisweagent.run.mini "
             f"-c mini.yaml -c {quote(remote + '/config.yaml')} -o {quote(remote + '/trajectory.json')} "
             f"> {quote(remote + '/agent.log')} 2>&1"
@@ -519,7 +528,19 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 status = tool.get("status", "incomplete")
                 if status == "incomplete":
                     status = termination.reason if termination.reason in {"cancelled", "timeout"} else "incomplete"
-                if tool.get("duration_ms") is None:
+                execution_timing = None
+                if tool.get("execution_timing") is not None:
+                    try:
+                        execution_timing = ExecutionTiming.model_validate(tool["execution_timing"])
+                    except ValueError:
+                        trajectory.gaps.append(
+                            ObservationGap(
+                                code="tool_timing_invalid",
+                                invocation_id=invocation.invocation_id,
+                                detail=tool["tool_call_id"],
+                            )
+                        )
+                if execution_timing is None or execution_timing.duration_ms is None:
                     trajectory.gaps.append(
                         ObservationGap(
                             code="tool_timing_unavailable",
@@ -532,6 +553,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                         invocation_id=invocation.invocation_id,
                         tool_call_id=tool["tool_call_id"],
                         tool_name="bash",
+                        execution_timing=execution_timing,
                         started_at=tool.get("started_at"),
                         completed_at=tool.get("completed_at"),
                         duration_ms=tool.get("duration_ms"),

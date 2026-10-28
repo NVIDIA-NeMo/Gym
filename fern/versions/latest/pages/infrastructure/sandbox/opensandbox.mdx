@@ -362,3 +362,42 @@ execd, the exec daemon inside each sandbox, holds every command response open fo
 `connection.tls_verify` (default `false`) controls certificate verification on every connection the provider opens, both the SDK transport and PTY WebSockets. The default skips verification so that `https://` endpoints with a certificate the client cannot verify, such as a validation cluster behind a self-signed load balancer, work without extra setup; set `tls_verify: true` for endpoints with a verifiable certificate. For `https` endpoints, either set `connection.protocol: https` or include the scheme in the domain (`connection.domain: https://sandbox.example`, or `OPENSANDBOX_DOMAIN=https://sandbox.example`): a scheme in the domain sets the protocol and takes precedence over `connection.protocol`. The `cleanup_sandboxes.py` helper mirrors the setting with `--tls-verify` and reads `tls_verify` from `--connection-config`.
 
 Setting `connection.keepalive_expiry_s: null` preserves the configured `tls_verify` behavior. It uses the SDK's default transport only when `tls_verify: true` and `disable_connection_pooling: false`; otherwise, the provider supplies a transport to apply those settings.
+
+## Execution timing
+
+`SandboxExecResult.execution_timing` carries execd's command-status start/end
+(epoch seconds) and execution ID. Foreground execution also uses execd's measured
+completion duration; background execution derives duration from its runtime wall
+clock endpoints. `result.duration_ms` exposes the scalar duration. The explicit
+`duration_source` distinguishes these measurements.
+
+Foreground execution performs one bounded, best-effort status read after completion;
+background execution reuses its final status poll. Timing collection never resubmits
+the command. Missing timestamps stay unknown, including on older runtimes; a measured
+duration does not reconstruct an endpoint. Dispatch, polling, and log retrieval time
+are excluded. Compare endpoints only within the same
+`opensandbox:<sandbox_id>:unix` clock domain, with no assumed synchronization to the
+client or other sandboxes.
+
+### Native mini-SWE tool clocks
+
+With `observability_enabled: true`, `miniswe_sandboxed_agent` selects a native
+`TimedLocalEnvironment` inside the sandbox. Each command result carries
+`execution_timing` into persisted normalized tool records, correlated by
+`tool_call_id`. The native transcript retains the tool name, arguments, result,
+and error status. The interval covers subprocess spawn through output collection
+and reap, including timeout cleanup; duration uses `perf_counter`. Model latency,
+host dispatch, and artifact download are excluded. Artifact completion timestamps
+remain separate. The native agent executes multiple calls sequentially.
+
+The timing object includes `started_at`, `completed_at`, `duration_ms`,
+`clock_domain`, `timing_source`, `duration_source`, and `execution_id`. Only
+intervals sharing a clock domain are directly comparable. The native interpreter's
+clock is not assumed synchronized with the Gym host or OpenSandbox execd. Missing
+or invalid execution timing produces a gap. Native submission exits before saving
+its final tool result, so that call's timing remains unknown, as does an active
+step lost to a forced shutdown.
+
+Timing the provider command that launches a whole agent measures that session;
+per-tool clocks come from its native executor. Tool intervals alone do not
+establish GPU inactivity.

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.execution_timing import ExecutionTiming
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseInputItem
 
 
@@ -177,6 +178,7 @@ class ToolCallObservation(ObservationModel):
         description="Enclosing sandbox instance, shared by concurrent calls; not per-call resource attribution.",
     )
     tool_name: Optional[str] = None
+    execution_timing: Optional[ExecutionTiming] = None
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     duration_ms: Optional[float] = Field(default=None, ge=0)
