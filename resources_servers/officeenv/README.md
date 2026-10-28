@@ -77,6 +77,38 @@ smokes, not a benchmark.
 
 Training and validation sets are not committed.
 
+## Artifacts and corpora
+
+A row may name its TaskSpec's large strings (a seeded workbook's base64, a long CSV) by SHA-256
+instead of carrying them, in OfficeEnv's artifact format (`officeenv.artifacts`):
+
+```json
+{"$artifact": "sha256:<64 hex digits>", "encoding": "base64", "bytes": 10240}
+```
+
+A corpus is one directory, its rows files beside the store of the artifacts they name:
+
+```
+<corpus>/<rows>.jsonl
+<corpus>/artifacts/<64 hex digits>
+```
+
+so it moves as one directory and is read with only its rows path changed.
+`python -m officeenv.artifacts externalize rows.jsonl -o <corpus>/rows.jsonl` writes one, and
+`check`, `pack` and `unpack` verify a corpus, write it as one archive and install it.
+
+The server reads the references back at seed, for an Agent's seed and an Environment Server's
+alike, from the stores in `artifacts_dirs`: absolute paths (the server runs in its own
+directory), searched in order, with `artifacts_dir` searched last. Each artifact is checked
+against its hash and size before OfficeEnv reads the TaskSpec. A row whose artifacts cannot be
+read is refused with 400 (`missing_artifact`, `artifact_mismatch` or `invalid_artifact`) and
+nothing is seeded; a row without references seeds as before. To serve a corpus:
+
+```bash
+gym env start --resources-server officeenv --model-type openai_model \
+  "++officeenv_resources_server.resources_servers.officeenv.artifacts_dirs=[/data/corpus/artifacts]"
+```
+
 ## Run
 
 ```bash

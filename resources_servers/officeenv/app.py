@@ -24,21 +24,29 @@ MCP clients read the tool definitions from that endpoint rather than from the ro
 tools differ from those definitions (a row in the ``api_search``, ``cli`` or ``mcp`` exposure, or
 with another tool-name separator) is refused.
 
+A row may name its TaskSpec's large strings by SHA-256 instead of carrying them (OfficeEnv's
+artifact references, ``officeenv.artifacts``). The stores in ``artifacts_dirs`` (a corpus's
+``artifacts/`` folder beside its rows file; ``artifacts_dir`` is searched last) go to the episode
+service, which reads the references back at seed, each checked against its hash, and refuses a
+row whose artifacts cannot be read (400).
+
 For training, ``length_penalty`` (off by default) deducts AutomationBench's training length
 penalty from the reward and reports the two terms as ``reward_components``, so a trainer can
 schedule the penalty on its own (NeMo RL ``grpo.phasic_reward_components``).
 """
 
 import contextvars
+import os
 from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from officeenv.apps import available, get_app_class
+from officeenv.artifacts import ArtifactStore
 from officeenv.exposure import Catalog, ToolsExposure
 from officeenv.service import EpisodeService, Reply
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
@@ -88,6 +96,25 @@ class OfficeEnvResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
     length_penalty: LengthPenaltyConfig = Field(default_factory=LengthPenaltyConfig)
+    artifacts_dirs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Stores of the artifacts a row's TaskSpec names by SHA-256 instead of carrying them "
+            "(officeenv.artifacts), searched in order: absolute paths, such as a corpus's artifacts/ folder "
+            "beside its rows file. A row that names artifacts no store holds is refused (400)."
+        ),
+    )
+    artifacts_dir: str | None = Field(default=None, description="One more store, searched after artifacts_dirs")
+
+    @field_validator("artifacts_dirs", "artifacts_dir")
+    @classmethod
+    def _stores_are_absolute(cls, value: list[str] | str | None) -> list[str] | str | None:
+        # the server runs in its own directory, not where its config was written
+        stores = [value] if isinstance(value, str) else value or []
+        relative = [store for store in stores if not os.path.isabs(store)]
+        if relative:
+            raise ValueError(f"artifact stores must be absolute paths: {relative}")
+        return value
 
 
 class OfficeEnvSeedSessionRequest(BaseSeedSessionRequest):
@@ -201,6 +228,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        stores = [*self.config.artifacts_dirs, *filter(None, [self.config.artifacts_dir])]
+        if stores:  # the service reads a row's artifact references back from them at seed
+            self.service = EpisodeService(artifacts=ArtifactStore(stores))
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
