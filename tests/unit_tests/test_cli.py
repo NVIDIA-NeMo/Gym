@@ -1189,6 +1189,33 @@ class TestValidate:
         )
         assert "valid" in capsys.readouterr().out.lower()
 
+    @pytest.mark.parametrize("command", [validate, dump_config])
+    @pytest.mark.parametrize(
+        "override,options",
+        [("+sampling_options={}", {}), ("+sampling_options.generation={}", {"generation": {}})],
+    )
+    def test_offline_commands_ignore_non_server_mappings(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, command, override: str, options: dict[str, object]
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "my_server:\n  resources_servers:\n    my_server:\n      entrypoint: app.py\n      domain: other\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["gym", f"+config_paths=[{config_file}]", override])
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        command()
+
+        captured = capsys.readouterr()
+        assert "Could not check" not in captured.err
+        if command is validate:
+            assert "Config is valid" in captured.out
+        else:
+            resolved = OmegaConf.create(captured.out)
+            assert OmegaConf.to_container(resolved.sampling_options) == options
+            assert resolved.my_server.resources_servers.my_server.entrypoint == "app.py"
+
     def test_unknown_cross_reference_exits_nonzero(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # An agent referencing a resources server that isn't defined -> ServerRefNotFoundError ->
         # clean exit(1) (real cross-reference validation, not a mock).

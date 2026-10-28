@@ -385,9 +385,12 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
         if not isinstance(server_config_dict, DictConfig):
             continue
 
-        first_key = list(server_config_dict)[0]
+        # Top-level mappings may be interpolation inputs rather than server instances.
+        first_key = next((key for key in server_config_dict if key in SERVER_TYPE_KEYS), None)
+        if first_key is None:
+            continue
         server_config_dict = server_config_dict[first_key]
-        if not isinstance(server_config_dict, DictConfig):
+        if not isinstance(server_config_dict, DictConfig) or not server_config_dict:
             continue
         second_key = list(server_config_dict)[0]
         server_config_dict = server_config_dict[second_key]
