@@ -207,6 +207,36 @@ def test_missing_invocations_still_block_p0_step_and_tool_relationships():
         assert by_id[check_id]["status"] == "fail"
 
 
+@pytest.mark.parametrize("collection", ["invocations", "verifier_invocations"])
+@pytest.mark.parametrize(
+    "field,check_id,suffix",
+    [("invocation_id", "invocations.identity", ""), ("model_calls", "invocations.references", ".model_calls")],
+)
+def test_invocation_schema_failure_reports_exact_path(collection, field, check_id, suffix):
+    record = evidence_record()
+    trajectory = record["ng_trajectory"]
+    trajectory["verifier_invocations"] = [{"invocation_id": "verifier", "model_calls": []}]
+    invocation = trajectory[collection][0]
+    if field == "invocation_id":
+        invocation.pop(field)
+    else:
+        invocation[field] = None
+
+    result = checks(record)[check_id]
+
+    assert result["status"] == "fail"
+    assert result["locations"] == ["$.ng_trajectory", f"$.ng_trajectory.{collection}[0]{suffix}"]
+
+
+@pytest.mark.parametrize("verifiers", [None, [], [{"invocation_id": "verifier", "model_calls": []}]])
+def test_optional_verifier_invocations_preserve_valid_records(verifiers):
+    record = evidence_record()
+    if verifiers is not None:
+        record["ng_trajectory"]["verifier_invocations"] = verifiers
+
+    assert inspect_record(record)["verdict"] == "fulfilled"
+
+
 @pytest.mark.parametrize("collection", ["verifier_invocations", "invocations"])
 def test_only_explicit_verifier_calls_are_excluded_from_policy_steps(collection):
     record = evidence_record()

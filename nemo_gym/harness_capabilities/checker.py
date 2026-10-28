@@ -531,7 +531,7 @@ class Inspector:
                 id="invocations.identity",
                 tier="P0",
                 evidence=("TE-8",),
-                location="$.ng_trajectory['invocations','verifier_invocations']",
+                location="$.ng_trajectory",
                 reason="required evidence does not match its schema",
                 value=self.trajectory,
                 schema={
@@ -554,7 +554,7 @@ class Inspector:
                 id="invocations.references",
                 tier="P0",
                 evidence=("TE-8",),
-                location="$.ng_trajectory['invocations','verifier_invocations']",
+                location="$.ng_trajectory",
                 reason="required evidence does not match its schema",
                 value=self.trajectory,
                 schema={
