@@ -12315,16 +12315,11 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     assert "failure_kind" not in plain and not any(key.endswith("_step") for key in plain)
 
 
-@pytest.mark.parametrize("verifier_reference", ["model_call_id", "response_id"])
 @pytest.mark.parametrize("with_policy", [False, True])
-def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(verifier_reference, with_policy):
+def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(with_policy):
     call_ids = ["policy", "judge"] if with_policy else ["judge"]
     agent_refs = [{"model_call_id": call_id} for call_id in call_ids]
-    judge_ref = (
-        {"model_call_id": "judge"}
-        if verifier_reference == "model_call_id"
-        else {"model_ref": {"type": "responses_api_models", "name": "judge"}, "response_id": "shared-id"}
-    )
+    judge_ref = {"model_call_id": "judge"}
     result = {
         "ng_agent_observations": {
             "source": "harness",

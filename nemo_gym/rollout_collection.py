@@ -700,12 +700,8 @@ def _turns_from_model_calls(
     or auxiliary calls that do not belong to the agent. Explicit verifier ownership also excludes
     a call from turns when an agent incorrectly references it; retain both ownership claims for validation.
     """
-    verifier_refs = [ref for invocation in verifier_invocations for ref in invocation.model_calls]
-    verifier_call_ids = {ref.model_call_id for ref in verifier_refs if ref.model_call_id}
-    verifier_responses = {
-        (ref.model_ref.type, ref.model_ref.name, ref.response_id)
-        for ref in verifier_refs
-        if not ref.model_call_id and ref.model_ref is not None and ref.response_id
+    verifier_call_ids = {
+        ref.model_call_id for invocation in verifier_invocations for ref in invocation.model_calls if ref.model_call_id
     }
     invocation_by_call_id: dict[str, str] = {}
     invocation_by_response_id: dict[str, str] = {}
@@ -721,10 +717,7 @@ def _turns_from_model_calls(
     tool_counts: Counter = Counter()
     for call in model_calls:
         metadata = call.response_metadata
-        model_ref = metadata.model_ref
-        if call.model_call_id in verifier_call_ids or (
-            model_ref is not None and (model_ref.type, model_ref.name, metadata.response_id) in verifier_responses
-        ):
+        if call.model_call_id in verifier_call_ids:
             continue
         if call.response is None or (metadata.status_code is not None and metadata.status_code >= 400):
             # HTTP error payloads are retained attempts, not model decisions.
