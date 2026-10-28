@@ -41,7 +41,7 @@ _MODEL_SERVER_BASE_URL_ENV = "NEMO_GYM_MODEL_SERVER_BASE_URL"
 
 def _install_capture_route_patch() -> None:
     try:
-        from nemo_gym import server_utils
+        from nemo_gym.server_runtime import server_utils
     except ModuleNotFoundError as error:
         # The base Miniforge interpreter also loads this module without ``nemo-gym`` installed.
         # Model requests run in the OpenHands virtual environment.

@@ -82,14 +82,9 @@ from nemo_gym.registry import (
     read_environment_details,
     resolve_catalog_entry,
 )
+from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
+from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
 from nemo_gym.server_runtime.server_status import StatusCommand
-from nemo_gym.server_utils import (
-    HeadServer,
-    ServerInstanceDisplayConfig,
-    entrypoint_ray_enabled,
-    initialize_ray,
-    ray_is_installed,
-)
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
 from nemo_gym.telemetry.metrics import record_active_servers

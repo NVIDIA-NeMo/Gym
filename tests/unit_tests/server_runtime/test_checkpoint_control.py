@@ -611,7 +611,7 @@ async def test_an_episode_woken_by_resume_stays_parked_if_a_new_checkpoint_close
 async def test_control_calls_use_a_reserved_pool_when_data_calls_fill_theirs() -> None:
     from aiohttp import web
 
-    import nemo_gym.server_utils as server_utils
+    import nemo_gym.server_runtime.server_utils as server_utils
 
     release = asyncio.Event()
 

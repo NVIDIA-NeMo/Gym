@@ -42,7 +42,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.server_utils import (
+from nemo_gym.server_runtime.server_utils import (
     get_first_server_config_dict,
 )
 from responses_api_agents.mini_swe_agent.utils import MiniSWEAgentUtils

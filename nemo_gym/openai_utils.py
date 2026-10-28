@@ -49,7 +49,7 @@ from nemo_gym.client.http_client import (
     request,
 )
 from nemo_gym.core.episode import current_rollout_id
-from nemo_gym.server_utils import ClientResponseError
+from nemo_gym.server_runtime.server_utils import ClientResponseError
 
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors

@@ -60,7 +60,7 @@ from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     install_auto_exposure,
     maybe_auto_expose,
 )
-from nemo_gym.server_utils import SimpleServer  # noqa: E402
+from nemo_gym.server_runtime.server_utils import SimpleServer  # noqa: E402
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -251,7 +251,7 @@ def test_server_utils_imports_mcp_auto_exposure_lazily():
     # Agents and models import server_utils; the MCP SDK must not come along for the ride.
     code = (
         "import sys\n"
-        "import nemo_gym.server_utils\n"
+        "import nemo_gym.server_runtime.server_utils\n"
         "assert 'nemo_gym.server_runtime.mcp_auto_exposure' not in sys.modules, 'mcp_auto_exposure imported eagerly'\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True)

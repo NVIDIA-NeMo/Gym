@@ -89,7 +89,7 @@ from nemo_gym.responses_streaming import (
 from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (

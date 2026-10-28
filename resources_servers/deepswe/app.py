@@ -36,7 +36,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.server_runtime.server_utils import get_first_server_config_dict
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,

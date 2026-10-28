@@ -66,7 +66,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.server_runtime.server_utils import get_global_config_dict
 from nemo_gym.trajectory.trajectory_record import (
     AgentEpisode,
     AgentObservationBundle,

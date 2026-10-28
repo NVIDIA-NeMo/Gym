@@ -70,7 +70,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.server_runtime.server_utils import get_first_server_config_dict
 from nemo_gym.telemetry.profiling import Profiler
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,

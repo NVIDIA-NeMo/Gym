@@ -10,16 +10,13 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.ray_support
+import nemo_gym.server_runtime.server_utils
 from nemo_gym import PARENT_DIR
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
-from nemo_gym.server_utils import (
-    SimpleServer,
-    _connect_server_to_ray,
-    _declared_ray_enabled,
-    entrypoint_class_flag,
-    entrypoint_ray_enabled,
-)
+from nemo_gym.server_runtime.entrypoint_flags import entrypoint_class_flag
+from nemo_gym.server_runtime.ray_support import _connect_server_to_ray, _declared_ray_enabled, entrypoint_ray_enabled
+from nemo_gym.server_runtime.server_utils import SimpleServer
 
 
 WITH_CLUSTER = OmegaConf.create({"ray_head_node_address": "10.0.0.1:6379"})
@@ -119,7 +116,7 @@ class TestConnectServerToRay:
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch, *, launched_by_gym: bool) -> MagicMock:
         initialize_ray = MagicMock()
-        monkeypatch.setattr(nemo_gym.server_utils, "initialize_ray", initialize_ray)
+        monkeypatch.setattr(nemo_gym.server_runtime.ray_support, "initialize_ray", initialize_ray)
         if launched_by_gym:
             monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
         else:
