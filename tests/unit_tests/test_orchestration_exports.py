@@ -193,6 +193,25 @@ class TestValidation:
         with pytest.raises(ValidationError, match=r"export 'mlflow': the settings are incomplete"):
             _submit(job_exports={"mlflow": {"mlflow_tracking_uri": "https://mlflow.example"}})
 
+    def test_wandb_export_without_a_key_setting_uses_the_environment(self) -> None:
+        config = _submit(job_exports={"wandb": {"wandb_project": "p"}})
+
+        assert effective_exports(config, "gpqa")["wandb"] == {"wandb_project": "p"}
+
+    @pytest.mark.parametrize("key", ["", "****"])
+    def test_wandb_export_rejects_an_empty_or_masked_key(self, key: str) -> None:
+        with pytest.raises(ValidationError, match=r"export 'wandb': the settings are incomplete"):
+            _submit(job_exports={"wandb": {"wandb_project": "p", "wandb_api_key": key}})
+
+    def test_wandb_export_still_needs_a_project(self) -> None:
+        with pytest.raises(ValidationError, match=r"export 'wandb': the settings are incomplete"):
+            _submit(job_exports={"wandb": {}})
+
+    def test_wandb_export_without_a_key_is_still_refused_next_to_the_same_live_exporter(self) -> None:
+        run = {"wandb_project": "p", "wandb_name": "n", "wandb_api_key": "k"}  # pragma: allowlist secret
+        with pytest.raises(ValidationError, match="already enable the live wandb exporter"):
+            _submit(benchmarks={"gpqa": {"run": run}}, job_exports={"wandb": {"wandb_project": "p"}})
+
     def test_exports_on_a_command_benchmark_are_rejected(self) -> None:
         with pytest.raises(ValidationError, match="sets both `command` and `export`"):
             _submit(benchmarks={"custom": {"command": "echo hi", "export": {"evalrdl": {}}}})
