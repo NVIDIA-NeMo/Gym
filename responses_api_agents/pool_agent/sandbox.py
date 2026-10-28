@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from shlex import quote
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.utils import read_text, upload_text
@@ -84,8 +84,9 @@ class PoolSession(AgentSessionState):
         prepared = await sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
         if prepared.return_code != 0 or prepared.error_type:
             raise RuntimeError("Cannot create Pool session directory")
-        for filename in ("install_pool.sh", "install_pool.py", "sandbox_runner.py"):
+        for filename in ("install_pool.sh", "install_pool.py"):
             await sandbox.upload(Path(__file__).with_name(filename), f"{directory}/{filename}")
+        await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
         result = await sandbox.exec(
             f"sh {quote(directory + '/install_pool.sh')} {quote(directory)} {quote(version)} "
             f"{str(accept_eula).lower()}",
@@ -121,8 +122,8 @@ class PoolSession(AgentSessionState):
             self.session.sandbox, path=f"{directory}/task_env.json", text=json.dumps(access.env if access else {})
         )
         return SandboxCommand(
-            python="python3",
-            argv=["python3", "-I", f"{directory}/sandbox_runner.py", directory, self.session.workdir],
+            argv=["python3", "-I", f"{directory}/{RUNNER_FILE}", directory, self.session.workdir],
+            stdlib_runner=True,
         )
 
     async def collect(self) -> PoolArtifacts:
@@ -158,7 +159,7 @@ class PoolSession(AgentSessionState):
         trajectory, trajectory_error = "", None
         try:
             result = await self.session.sandbox.exec(
-                f"python3 -I {quote(directory + '/sandbox_runner.py')} --snapshot {quote(directory)}",
+                f"python3 -I {quote(f'{directory}/{RUNNER_FILE}')} --snapshot {quote(directory)}",
                 cwd="/",
                 timeout_s=30,
             )

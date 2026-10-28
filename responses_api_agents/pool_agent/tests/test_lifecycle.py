@@ -168,7 +168,8 @@ async def test_real_stage_run_collect_close(tmp_path, ending):
         if ending == "stubborn":
             # The supervisor's grace is shorter than the runner's fallback wait.
             assert artifacts.exit_code is None
-            assert state.session.cleanup["return_code"] == -9
+            # The bash supervisor reports a signal death as 128 + SIGKILL.
+            assert state.session.cleanup["return_code"] == 137
         assert state.session.cleanup["timed_out"] is (ending in ("timeout", "stubborn"))
     finally:
         await asyncio.wait_for(state.close(timeout=10), timeout=30)

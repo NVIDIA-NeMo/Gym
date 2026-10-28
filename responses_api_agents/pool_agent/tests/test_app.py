@@ -671,21 +671,17 @@ async def test_shutdown_continues_after_failed_close_and_retains_retry_state():
     assert server._session_records[failed.request.agent_session_id].state is None
 
 
-def test_harbor_materialized_request_passes_validation():
-    from types import SimpleNamespace
-
+def test_harbor_materialized_request_passes_validation(tmp_path):
     from nemo_gym.tasks.harbor.materialize import materialize_task
+    from nemo_gym.tasks.harbor.task import load_task
 
-    task = SimpleNamespace(
-        task_id="task",
-        instruction="Inspect the repository.",
-        digest="a" * 64,
-        config=SimpleNamespace(agent=SimpleNamespace(timeout_sec=12)),
-    )
-    row = materialize_task(task, "test")
+    (tmp_path / "task.toml").write_text("[agent]\ntimeout_sec = 12.0\n")
+    (tmp_path / "instruction.md").write_text("Inspect the repository.")
+    (tmp_path / "tests").mkdir()
+    row = materialize_task(load_task(tmp_path), "test")
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate(row.task_input.responses_create_params)
-    assert prompt_from_request(body) == task.instruction
-    assert body.metadata == {"agent_timeout_sec": "12"}
+    assert prompt_from_request(body) == "Inspect the repository."
+    assert body.metadata == {"agent_timeout_sec": "12.0"}
 
 
 @pytest.mark.asyncio
