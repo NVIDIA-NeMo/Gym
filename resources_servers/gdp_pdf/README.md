@@ -217,12 +217,17 @@ five-attempts-per-task protocol.
 With `sandbox_provider` set, the server serves `POST /python`: a persistent IPython kernel in a
 per-rollout sandbox whose working directory holds the task's source PDF as `document.pdf`. Rows
 offer it as a `python` function tool in `responses_create_params.tools`, which `gdp_pdf_agent`
-dispatches like any row tool; the document is still delivered in the prompt. Tool output is text (streams, the
-last expression's value, tracebacks). The sandbox starts at `/seed_session` and stops at `/verify`;
-grading never reads it.
+dispatches like any row tool. Tool output contains text (streams, expression values, tracebacks) and displayed
+PNG/JPEG images. There is no per-call image-count cap; images remain in the saved trajectory. The sandbox
+starts at `/seed_session` and stops at `/verify` or `DELETE /python`. The agent releases it in a `finally`
+block, including when verification is deferred or generation fails; grading never reads it.
 
 `--benchmark gdp_pdf/python` (`benchmarks/gdp_pdf/python.yaml`) runs the benchmark this way: its
-prepare script adds the tool to the rows, and the agent may take up to 50 steps. Add a sandbox
+prepare script adds the tool to the rows. The initial prompt contains the question only; the model chooses
+what to read or render from `document.pdf`. The agent may take up to 50 model turns, including the final
+answer, within 65,536 generated tokens. It reserves 8,192 tokens for a tool-free final answer when the
+turn or token limit is reached. These budgets are configuration fields, independent of the single-turn
+benchmark. Add a sandbox
 provider config and an image with `python3`, `ipykernel` and `jupyter_client`, such as
 `resources_servers/gdp_pdf/containers/Dockerfile`:
 

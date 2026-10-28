@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# GDP.pdf with a `python` tool: the same tasks, documents and grading as config.yaml, and each row also offers the
-# resources server's `python` tool, a persistent IPython kernel in a per-rollout sandbox holding the source PDF.
+# GDP.pdf through a persistent Python tool. The initial prompt contains only the question;
+# the model reads the source PDF and displays any pages it needs from its sandbox.
 # Add a sandbox provider config, e.g. --config nemo_gym/sandbox/providers/docker/configs/docker.yaml, and set
 # GDP_PDF_SANDBOX_IMAGE to an image built from resources_servers/gdp_pdf/containers/Dockerfile.
 config_paths:
@@ -18,6 +18,11 @@ gdp_pdf_benchmark_simple_agent:
   responses_api_agents:
     gdp_pdf_agent:
       max_steps: 50
+      include_text: false
+      include_images: false
+      strip_images_from_output: false
+      max_total_output_tokens: 65536
+      final_answer_tokens: 8192
       datasets:
       - name: gdp_pdf
         type: benchmark

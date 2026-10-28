@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -289,6 +289,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             return app
 
         app.post("/python")(self.python)
+        app.delete("/python")(self.release_python_session)
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -319,8 +320,12 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             )
         return BaseSeedSessionResponse()
 
-    async def python(self, request: Request, body: PythonToolRequest) -> PlainTextResponse:
-        """Run Python in a persistent IPython kernel; the task's source PDF is document.pdf in its working directory."""
+    async def python(self, request: Request, body: PythonToolRequest) -> JSONResponse:
+        """Run Python in a persistent IPython kernel. The task's source PDF is document.pdf in the working directory.
+
+        Use fitz (PyMuPDF) or pdfplumber to read it, and IPython.display.display to inspect images.
+        Printed text and displayed PNG/JPEG images are returned. Variables persist between calls.
+        """
         sandbox = self._python_sandboxes.get(request.session.get(SESSION_ID_KEY))
         if sandbox is None:
             raise ResourcesSessionLostError("This rollout has no Python sandbox")
@@ -331,7 +336,12 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             timeout_s=self.config.python_timeout_s,
             max_chars=self.config.python_max_output_chars,
         )
-        return PlainTextResponse(output or "[No output]")
+        return JSONResponse(json.loads(output))
+
+    async def release_python_session(self, request: Request) -> dict[str, bool]:
+        """Release the rollout sandbox, including when grading is deferred or generation fails."""
+        await self._stop_python_sandbox(request.session.get(SESSION_ID_KEY))
+        return {"released": request.session.get(SESSION_ID_KEY) not in self._python_sandboxes}
 
     async def _stop_python_sandbox(self, session_id: Optional[str]) -> None:
         sandbox = self._python_sandboxes.get(session_id)

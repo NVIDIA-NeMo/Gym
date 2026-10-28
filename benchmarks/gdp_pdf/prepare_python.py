@@ -15,7 +15,9 @@ PYTHON_TOOL = {
     "type": "function",
     "name": "python",
     "description": (
-        "Run Python in a persistent IPython kernel; the task's source PDF is document.pdf in its working directory."
+        "Run Python in a persistent IPython kernel. The task's source PDF is document.pdf in the working directory.\n\n"
+        "Use fitz (PyMuPDF) or pdfplumber to read it, and IPython.display.display to inspect images.\n"
+        "Printed text and displayed PNG/JPEG images are returned. Variables persist between calls."
     ),
     "parameters": {
         "properties": {"code": {"description": "The Python code to run.", "title": "Code", "type": "string"}},

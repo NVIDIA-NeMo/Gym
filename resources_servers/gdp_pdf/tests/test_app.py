@@ -593,7 +593,7 @@ def python_client(python_server: GdpPdfResourcesServer) -> Iterator[TestClient]:
 def _python(client: TestClient, code: str) -> str:
     response = client.post("/python", json={"code": code})
     assert response.status_code == 200, response.text
-    return response.text
+    return "".join(part["text"] for part in response.json()["content"] if part["type"] == "input_text")
 
 
 def _process_ended(pid: int) -> bool:
@@ -654,7 +654,29 @@ class TestPythonTool:
 
         output = _python(python_client, "print('a' * 1000)")
 
-        assert output == "a" * 100 + "\n[Output truncated to 100 characters.]\n"
+        assert output == "a" * 100 + "\n[Text output truncated to 100 characters.]\n"
+
+    def test_displayed_images_are_returned_without_a_four_image_cap(self, python_client: TestClient) -> None:
+        response = python_client.post(
+            "/python",
+            json={
+                "code": "from PIL import Image\nfrom IPython.display import display\n"
+                "for i in range(6):\n    display(Image.new('RGB', (8, 8), (i, 0, 0)))\nprint('done')"
+            },
+        )
+        assert response.status_code == 200
+        parts = response.json()["content"]
+        images = [part for part in parts if part["type"] == "input_image"]
+        assert len(images) == 6
+        assert all(part["image_url"].startswith("data:image/png;base64,") for part in images)
+        assert any(part.get("text") == "done\n" for part in parts)
+
+    def test_generation_only_session_can_be_released(self, python_client: TestClient, tmp_path: Path) -> None:
+        pid = int((tmp_path / "sandbox" / ".ipython_kernel" / "kernel.pid").read_text())
+        assert python_client.delete("/python").json() == {"released": True}
+        assert _process_ended(pid)
+        assert python_client.post("/python", json={"code": "1"}).status_code == 404
+        assert python_client.delete("/python").json() == {"released": True}
 
     def test_verify_stops_the_sandbox_and_its_kernel(
         self, python_server: GdpPdfResourcesServer, python_client: TestClient, tmp_path: Path

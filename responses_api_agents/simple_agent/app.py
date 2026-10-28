@@ -295,6 +295,29 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=state.resources_cookies,
         )
 
+    def _prepare_model_request(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        step: int,
+        output_tokens: int,
+        previous_response: NeMoGymResponse | None,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Allow an environment to constrain the next turn using the accumulated episode usage."""
+        return body
+
+    def _continue_after_incomplete(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, response: NeMoGymResponse, *, output_tokens: int
+    ) -> bool:
+        """Whether to request a final answer after an incomplete model turn."""
+        return False
+
+    def _tool_result_messages(
+        self, call: NeMoGymResponseFunctionToolCall, output: str
+    ) -> list[NeMoGymFunctionCallOutput | NeMoGymEasyInputMessage]:
+        """Convert an environment's tool output to model-visible conversation items."""
+        return [NeMoGymFunctionCallOutput(call_id=call.call_id, output=output)]
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -390,6 +413,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             if not pending_tools:
                 step += 1
                 new_body = body.model_copy(update={"input": body.input + new_outputs})
+                new_body = self._prepare_model_request(
+                    new_body,
+                    step=step,
+                    output_tokens=usage.output_tokens if usage else 0,
+                    previous_response=model_response,
+                )
                 question_length = len(new_outputs)
                 if collect_trajectory:
                     turn_timestamp = time()
@@ -453,6 +482,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 model_response.usage = None
 
                 if model_response.incomplete_details:
+                    if self._continue_after_incomplete(
+                        new_body, model_response, output_tokens=usage.output_tokens if usage else 0
+                    ):
+                        # An unfinished tool call has no result and must not enter the next model request.
+                        # The raw model response remains available in the captured turn.
+                        del new_outputs[len(new_outputs) - len(output) :]
+                        new_outputs.extend(item for item in output if item.type != "function_call")
+                        await commit_boundary()
+                        continue
                     invocation_status = "incomplete"
                     break
 
@@ -560,13 +598,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         )
                     )
 
-                new_outputs.append(
-                    NeMoGymFunctionCallOutput(
-                        type="function_call_output",
-                        call_id=output_function_call.call_id,
-                        output=tool_output,
-                    )
-                )
+                new_outputs.extend(self._tool_result_messages(output_function_call, tool_output))
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)

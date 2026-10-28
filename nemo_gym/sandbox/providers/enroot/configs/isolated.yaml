@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Use with ENROOT_SYSCONF_PATH pointing to this provider's sandbox_mounts directory,
+# and an empty ENROOT_CONFIG_PATH. Host/site mount and environment hooks must not run.
+config_paths:
+  - nemo_gym/sandbox/providers/enroot/configs/enroot.yaml
+sandbox:
+  enroot:
+    create:
+      bypass_entrypoint: false
+      remap_root: true
+      extra_start_args: [--net, --ipc, --uts]
+      network_namespace_before_start: ${oc.decode:${oc.env:NEMO_GYM_ENROOT_NETWORK_FIRST,false}}
+      init_command: sleep 21600; exit 0

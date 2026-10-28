@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Minimal device mounts for PDF/IPython. No host home, shared storage, SSH,
+# service-account files, GPUs, or shared /dev/shm are exposed.
+proc        /proc        proc    x-create=dir,rw,nosuid,nodev,noexec,private          0 -1
+/sys        /sys         none    x-create=dir,rbind,ro,nosuid,nodev,noexec,rslave     0 -1
+tmpfs       /dev         tmpfs   x-create=dir,rw,nosuid,noexec,mode=755,private      0 -1
+/dev/null   /dev/null    none    x-create=file,bind,rw,nosuid,noexec,private         0 -1
+/dev/zero   /dev/zero    none    x-create=file,bind,rw,nosuid,noexec,private         0 -1
+/dev/full   /dev/full    none    x-create=file,bind,rw,nosuid,noexec,private         0 -1
+/dev/random /dev/random  none    x-create=file,bind,rw,nosuid,noexec,private         0 -1
+/dev/urandom /dev/urandom none   x-create=file,bind,rw,nosuid,noexec,private         0 -1
+tmpfs       /dev/shm     tmpfs   x-create=dir,rw,nosuid,nodev,noexec,mode=1777,private 0 -1
+devpts      /dev/pts     devpts  x-create=dir,rw,nosuid,noexec,newinstance,ptmxmode=0666,mode=620,private 0 -1
+tmpfs       /var/run     tmpfs   x-create=dir,rw,nosuid,nodev,mode=755,private      0 -1
+tmpfs       /var/lock    tmpfs   x-create=dir,rw,nosuid,nodev,mode=755,private      0 -1

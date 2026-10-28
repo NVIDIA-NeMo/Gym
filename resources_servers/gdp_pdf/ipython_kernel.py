@@ -6,14 +6,15 @@ The resources server places this file in ``<workdir>/.ipython_kernel/`` and runs
 ``python3``, which needs ``ipykernel`` and ``jupyter_client`` (nothing from Gym):
 
 - ``start`` launches a detached kernel whose working directory is ``<workdir>``, and waits until it answers.
-- ``run`` executes ``cell.py`` and prints the cell's text output (streams, the last expression's value, tracebacks),
-  keeping at most ``--max-chars`` of it. A cell still running after ``--timeout`` seconds is interrupted. A kernel that
+- ``run`` executes ``cell.py`` and prints JSON content containing text and displayed PNG/JPEG images, keeping at most
+  ``--max-chars`` of text without dropping images. A cell still running after ``--timeout`` seconds is interrupted. A kernel that
   has exited, or that ignores the interrupt, is restarted, and the output says so.
 - ``stop`` kills the kernel and anything it started.
 """
 
 import argparse
 import contextlib
+import json
 import os
 import re
 import signal
@@ -127,12 +128,24 @@ def run(timeout: float, max_chars: int) -> None:
             text = ""
             if kind == "stream":
                 text = content["text"]
-            elif kind in ("execute_result", "display_data") and "text/plain" in content["data"]:
-                text = content["data"]["text/plain"] + "\n"
+            elif kind in ("execute_result", "display_data"):
+                data = content["data"]
+                image_type = next((mime for mime in ("image/png", "image/jpeg") if mime in data), None)
+                if image_type:
+                    output.append(
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:{image_type};base64,{data[image_type]}",
+                            "detail": "auto",
+                        }
+                    )
+                elif "text/plain" in data:
+                    text = data["text/plain"] + "\n"
             elif kind == "error":
                 text = ANSI_ESCAPE.sub("", "\n".join(content["traceback"])) + "\n"
             kept = text[: max(0, max_chars - size)]
-            output.append(kept)
+            if kept:
+                output.append({"type": "input_text", "text": kept})
             size += len(kept)
             dropped += len(text) - len(kept)
         if interrupted:
@@ -140,8 +153,10 @@ def run(timeout: float, max_chars: int) -> None:
     finally:
         client.stop_channels()
     if dropped:
-        output.append(f"\n[Output truncated to {max_chars} characters.]\n")
-    print("".join(output + notes), end="")
+        notes.append(f"\n[Text output truncated to {max_chars} characters.]\n")
+    if notes:
+        output.append({"type": "input_text", "text": "".join(notes)})
+    print(json.dumps({"content": output}), end="")
 
 
 if __name__ == "__main__":
