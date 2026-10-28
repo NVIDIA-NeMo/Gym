@@ -217,6 +217,30 @@ class TestMovedNames:
         with pytest.warns(DeprecationWarning, match=r"removed in nemo_gym 0.10.0"):
             assert getter("PackageInfoVersion") == __version__
 
+    def test_each_moved_name_warns_once_and_is_looked_up_on_every_access(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(
+            moved_paths.MOVED_NAMES,
+            "nemo_gym.fake_old",
+            {
+                "VERSION": MovedPath(new="nemo_gym.package_info", since="0.8.0"),
+                "PackageInfoVersion": MovedPath(new="nemo_gym.package_info:__version__", since="0.8.0"),
+            },
+        )
+        getter = moved_names_getattr("nemo_gym.fake_old")
+        package_info = importlib.import_module("nemo_gym.package_info")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert getter("VERSION") is package_info.VERSION
+            monkeypatch.setattr(package_info, "VERSION", "patched")
+            assert getter("VERSION") == "patched"
+            getter("PackageInfoVersion")
+        assert [str(w.message).split("`")[1] for w in caught] == [
+            "nemo_gym.fake_old.VERSION",
+            "nemo_gym.fake_old.PackageInfoVersion",
+        ]
+
     def test_unknown_name_raises_attribute_error(self) -> None:
         with pytest.raises(AttributeError, match="has no attribute 'nothing'"):
             moved_names_getattr("nemo_gym.fake_old")("nothing")
@@ -369,6 +393,21 @@ class TestImportSurface:
             f"These modules no longer import at their old paths: {missing}. A moved module needs a MOVED_MODULES "
             f"entry in nemo_gym/_moved_paths.py. If one was deleted on purpose, remove it from {IMPORT_SURFACE_PATH.name}."
         )
+
+    def test_surface_records_the_modules_added_before_the_reorganization(self) -> None:
+        # Recorded from the whole tree the moves start from, so later moves cannot drop one unnoticed.
+        surface = self.surface
+        for module in (
+            "nemo_gym.verifiers",
+            "nemo_gym.verifiers.files",
+            "nemo_gym.verifiers.runner",
+            "nemo_gym.tasks.harbor.entries",
+            "nemo_gym.tasks.harbor.parameterized",
+            "nemo_gym.tasks.harbor.publish",
+            "nemo_gym.tasks.harbor.python_verifier",
+        ):
+            assert module in surface
+        assert "text_file_equals" in surface["nemo_gym.verifiers.files"]
 
     def test_moved_modules_keep_every_recorded_name(self) -> None:
         missing = []

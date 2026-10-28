@@ -167,6 +167,8 @@ def moved_names_getattr(module_name: str) -> Callable[[str], Any]:
     keeps serving them once the module runs under its new name.
     """
 
+    warned: set[str] = set()
+
     def __getattr__(name: str) -> Any:
         for listed_as in _names_were_listed_under(module_name):
             moved = MOVED_NAMES.get(listed_as, {}).get(name)
@@ -176,11 +178,15 @@ def moved_names_getattr(module_name: str) -> Callable[[str], Any]:
             raise AttributeError(f"module {module_name!r} has no attribute {name!r}")
         new_module, _, new_name = moved.new.partition(":")
         new_name = new_name or name
-        warnings.warn(
-            deprecation_message(f"{listed_as}.{name}", moved, f"{new_module}.{new_name}"),
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return getattr(importlib.import_module(new_module), new_name)
+        # Look the name up on every access, so a patch of the new module shows through; warn once per old path.
+        value = getattr(importlib.import_module(new_module), new_name)
+        if name not in warned:
+            warnings.warn(
+                deprecation_message(f"{listed_as}.{name}", moved, f"{new_module}.{new_name}"),
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            warned.add(name)
+        return value
 
     return __getattr__
