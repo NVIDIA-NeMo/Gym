@@ -203,6 +203,29 @@ To swap a component, change the imported configuration and its matching implemen
 
 For where the harness runs and who cleans up, including borrowed and agent-owned sandboxes and host execution, see [Select an execution mode](/main/agent-server/add-or-update-a-harness#select-an-execution-mode).
 
+### Run Codex on Terminal-Bench-Science
+
+[Terminal-Bench-Science v0.1](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md) ships a ready-made Codex profile, `terminal_bench_science/codex`, so you do not write the four files above. Unlike the Terminal Bench 2.1 adapters, its Resources Server is `terminal_bench_4`: it provisions each pinned task, lends the task sandbox to `codex_agent`, and grades in a separate offline verifier sandbox. The profile composes `single_agent_turn_legacy`, so it reads flat rows rather than a taskset. Like the other session paths, it is for evaluation only.
+
+Before you run it:
+
+- **Build the task images.** Upstream publishes none. Build each task's agent and verifier image, push them to a registry that your sandbox deployment can pull from, and pass them as a `tbsci_task_images` map or as `tbsci_agent_image` and `tbsci_verifier_image` templates. See [Images](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#images).
+- **Prepare the rows in the Resources Server's environment.** Each row carries the task's official instruction, read from the pinned package after its hashes are checked. The check needs `pathspec`, which Gym's own environment leaves out, so run the preparation module with `resources_servers/terminal_bench_4/.venv/bin/python` rather than `gym eval prepare`, as [the README shows](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#codex-in-the-task-sandbox).
+- **Bind Gym to a reachable address.** Codex calls Gym's model server from inside the task sandbox, so pass `++default_host` with an address that the sandboxes can reach, as with `GYM_HOST` above.
+
+`codex_deepseek_flash.yaml` is the run configuration for the leaderboard's DeepSeek V4.1 Flash row, served by your own chat-completions server. Pass your images in a second `--config` file, here `tbsci-images.yaml`, that sets `tbsci_task_images`:
+
+```bash
+export POLICY_API_KEY=...  # any string if the server has no auth
+gym eval run --config benchmarks/terminal_bench_science/codex_deepseek_flash.yaml \
+  --config tbsci-images.yaml \
+  --split benchmark --model-url http://SERVER_HOST:PORT/v1 \
+  --output results/tbsci-deepseek/rollouts.jsonl --concurrency 8 \
+  ++default_host=$GYM_HOST
+```
+
+The profile runs one trial per task. The leaderboard's protocol is three trials per task, 210 in all: add `++num_repeats=3`. For the Codex defaults and the model server settings, see [Codex with DeepSeek V4.1 Flash](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#codex-with-deepseek-v41-flash).
+
 ## Resuming harness sessions
 
 OpenCode can resume its saved session across multiple activations in either
