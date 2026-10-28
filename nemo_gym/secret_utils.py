@@ -36,7 +36,8 @@ _SECRET_KEY_SUBSTRINGS = (
 )
 
 
-# `scheme://user:PASSWORD@host`. `${...}` stays whole inside the user name, so an interpolation is never cut in two.
+# The password in a URL's user info (`user:PASSWORD@host` after the scheme). `${...}` stays whole inside the user name,
+# so an interpolation is never cut in two.
 # The password runs to the last `@` of the authority, because passwords are often pasted without percent-encoding.
 _URL_PASSWORD = re.compile(
     r"(?P<head>[A-Za-z][A-Za-z0-9+.\-]*://(?:\$\{[^}]*\}|[^\s/?#:@$])*):(?P<password>[^\s/?#]*)@(?P<host>[^\s/?#@]*)"
@@ -44,7 +45,7 @@ _URL_PASSWORD = re.compile(
 
 
 def mask_url_passwords(text: str) -> str:
-    """Mask the password in every `scheme://user:password@host` inside `text`, keeping the user name.
+    """Mask the password in the user info of every URL inside `text`, keeping the user name and the rest of the URL.
 
     Only a precaution for a credential pasted into a URL: it is the user's job to keep secrets out of the config
     in the first place (behind `${oc.env:NAME}` or `env.yaml`). A password that is an interpolation is a reference
