@@ -267,7 +267,6 @@ def run_suite(
         "harnesses": rows,
         "limits": [
             "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
-            "P0 checks gate conformance; the P1 judge-reference check is reported without blocking the P0 gate",
             "multimodal, compaction, parallelism and deployment health are outside this suite",
         ],
     }
