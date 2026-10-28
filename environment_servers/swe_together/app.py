@@ -14,7 +14,6 @@ from time import monotonic, time
 from typing import Literal
 from uuid import uuid4
 
-from aiohttp import ClientResponseError
 from fastapi import FastAPI
 from pydantic import Field, PrivateAttr
 
@@ -24,7 +23,7 @@ from environment_servers.swe_together.egress import DependencyAccess, install_tr
 from environment_servers.swe_together.evaluation import PASS_THRESHOLD, interaction_metrics, run_judge
 from environment_servers.swe_together.guidance import session_analysis
 from environment_servers.swe_together.metrics import aggregate
-from environment_servers.swe_together.model_client import AuxiliaryModel
+from environment_servers.swe_together.model_client import AuxiliaryModel, error_evidence
 from environment_servers.swe_together.repo_config import discover_repo_config_files
 from environment_servers.swe_together.runtime import PYTHON, RuntimeProvisioner
 from environment_servers.swe_together.schemas import (
@@ -365,13 +364,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             return response
         except Exception as error:
             LOGGER.exception("SWE-Together episode failed at %s", stage)
-            dependency = {"type": type(error).__name__, "message": str(error)[:2000]}
-            if isinstance(error, ClientResponseError):
-                dependency["status_code"] = error.status
-                content = getattr(error, "response_content", b"")
-                dependency["body"] = (
-                    content.decode(errors="replace") if isinstance(content, bytes) else str(content)
-                )[:8000]
+            dependency = error_evidence(error)
             failure = SWETFailure(
                 stage=stage,
                 terminal=activation_attempted or isinstance(error, (ValueError, FileNotFoundError)),
@@ -630,6 +623,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             evidence = {
                 "turn": turn + 1,
                 "error": str(error) or type(error).__name__,
+                "error_detail": error_evidence(error),
                 "simulator_messages": simulator.last_messages_sent,
                 "source_observation": activation.response.model_dump(mode="json"),
             }
