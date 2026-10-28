@@ -4,7 +4,7 @@ facts_search:
       entrypoint: app.py
       domain: knowledge
       verified: false
-      description: Complete public FACTS Search V2 Search-On protocol with Brave Search and Gemini 3.5 Flash grading
+      description: Complete public FACTS Search V2 Search-On protocol with Brave Search and Gemini 3.8 Flash grading
       value: Measure factual search-agent quality, commitment, and search efficiency
       brave_api_key: ${oc.env:FACTS_SEARCH_BRAVE_API_KEY,''}
       brave_num_results: 5
@@ -22,5 +22,5 @@ facts_search_judge:
       entrypoint: app.py
       base_url: ${oc.env:FACTS_SEARCH_JUDGE_BASE_URL,''}
       api_key: ${oc.env:FACTS_SEARCH_JUDGE_API_KEY,''}
-      model: ${oc.env:FACTS_SEARCH_JUDGE_MODEL,google/gemini-3.5-flash}
+      model: ${oc.env:FACTS_SEARCH_JUDGE_MODEL,google/gemini-3.8-flash}
       num_concurrent_requests: ${oc.decode:${oc.env:FACTS_SEARCH_JUDGE_CONCURRENCY,8}}

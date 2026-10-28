@@ -4,7 +4,7 @@
 
 The sole tool is the canonical Brave Web Search request/format from Google's
 public implementation.  Final answers are graded once with the public A/B/C
-prompt and the current benchmark-page judge, Gemini 3.5 Flash.
+prompt and Gemini 3.8 Flash as the judge (see benchmarks/facts_search/METHODS.md).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from nemo_gym.server_utils import raise_for_status, request
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search"
 GRADER_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "grader_template.txt"
 GRADER_TEMPLATE_SHA256 = "4bfbea8aeb6726cf8c23a663a8c3f43fd11f2a072c24229507f3a6d7c4890317"  # pragma: allowlist secret
-GRADER_VARIANT = "kaggle-aminmohamedmohami-facts-search-on-implementation-v3-current-gemini-3.5-flash"
+GRADER_VARIANT = "kaggle-aminmohamedmohami-facts-search-on-implementation-v3-gemini-3.8-flash"
 _FINAL_ANSWER_RE = re.compile(r"Final Answer:\s*(.*)", re.IGNORECASE | re.DOTALL)
 _STRICT_GRADE_RE = re.compile(r"^\s*([ABC])(?:\s*[:.)-].*)?\s*$", re.IGNORECASE | re.DOTALL)
 

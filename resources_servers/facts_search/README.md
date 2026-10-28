@@ -1,6 +1,6 @@
 # FACTS Search resources server
 
-The server exposes exactly one model-visible tool, `brave_search`, backed by Brave Web Search. It requests five results and returns each result’s title, URL, description, and complete `extra_snippets`, matching Google’s public implementation. It also owns the current Gemini 3.5 Flash A/B/C verifier and public aggregate metrics.
+The server exposes exactly one model-visible tool, `brave_search`, backed by Brave Web Search. It requests five results and returns each result’s title, URL, description, and complete `extra_snippets`, matching Google’s public implementation. It also owns the Gemini 3.8 Flash A/B/C verifier and public aggregate metrics.
 
 No alternate search provider is configured. Missing Brave or judge credentials fail startup/evaluation instead of changing the benchmark.
 

@@ -83,7 +83,7 @@ def _server(judge_text="A"):
                 "id": "judge-id",
                 "object": "chat.completion",
                 "created": 0,
-                "model": "google/gemini-3.5-flash",
+                "model": "google/gemini-3.8-flash",
                 "choices": [
                     {"index": 0, "message": {"role": "assistant", "content": judge_text}, "finish_reason": "stop"}
                 ],
@@ -125,7 +125,7 @@ def test_openrouter_provisioned_service_tier_is_a_valid_judge_response():
             "id": "judge",
             "object": "chat.completion",
             "created": 0,
-            "model": "google/gemini-3.5-flash",
+            "model": "google/gemini-3.8-flash",
             "service_tier": "provisioned",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "A"}, "finish_reason": "stop"}],
         }
@@ -249,7 +249,7 @@ async def test_verify_records_current_judge_receipt_and_search_accounting():
     assert result.final_answer == "Paris"
     assert result.search_hops == 3 and result.search_queries == 5 and result.forced_final is True
     assert result.judge_valid is True
-    assert result.judge_receipt["judge_model"] == "google/gemini-3.5-flash"
+    assert result.judge_receipt["judge_model"] == "google/gemini-3.8-flash"
     assert client.post.await_count == 1
 
 

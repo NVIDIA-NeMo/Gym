@@ -1,6 +1,6 @@
 # FACTS Search V2
 
-This package ports the public Search-On component of Google DeepMind's [FACTS Leaderboard](https://arxiv.org/abs/2512.10791) into NeMo Gym. It evaluates a policy model in a seven-hop agent loop with Brave Web Search, then grades the final answer against the public gold answer with the current Gemini 3.5 Flash A/B/C grader.
+This package ports the public Search-On component of Google DeepMind's [FACTS Leaderboard](https://arxiv.org/abs/2512.10791) into NeMo Gym. It evaluates a policy model in a seven-hop agent loop with Brave Web Search, then grades the final answer against the public gold answer with a Gemini 3.8 Flash A/B/C grader.
 
 ```bash
 gym eval prepare --benchmark facts_search
@@ -14,7 +14,7 @@ gym eval run --no-serve --benchmark facts_search --model-type vllm_model \
 Required runtime variables:
 
 - `FACTS_SEARCH_BRAVE_API_KEY`: Brave Search API subscription token.
-- `FACTS_SEARCH_JUDGE_BASE_URL`, `FACTS_SEARCH_JUDGE_API_KEY`, and optionally `FACTS_SEARCH_JUDGE_MODEL` (default `google/gemini-3.5-flash`): an OpenAI-compatible endpoint exposing the current canonical judge.
+- `FACTS_SEARCH_JUDGE_BASE_URL`, `FACTS_SEARCH_JUDGE_API_KEY`, and optionally `FACTS_SEARCH_JUDGE_MODEL` (default `google/gemini-3.8-flash`; through Portkey, `@gemini/gemini-3.8-flash`): an OpenAI-compatible endpoint exposing the judge. Record the model id the endpoint reports, which the verifier stores in each `judge_receipt`.
 
 The public artifact mismatch and all inaccessible rows are recorded in [METHODS.md](METHODS.md). No substitute search engine or judge is accepted by the default configuration.
 
