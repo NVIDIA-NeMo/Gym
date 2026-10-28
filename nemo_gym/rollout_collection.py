@@ -84,6 +84,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
     label_runs,
+    maybe_get_global_config_dict,
     pairing_override_enabled,
     resolve_dataset_agent,
 )
@@ -1842,6 +1843,34 @@ def observed_elapsed(record: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def _judge_recovery_route_check(
+    global_config_dict: Optional[Mapping[str, Any]],
+) -> Callable[[Mapping[str, Any]], bool]:
+    """Whether `gym eval reverify --judge-failed-only` can send a failures-sidecar row to a resources server.
+
+    It routes rows the way recovery does with the run's config. Without a config nothing is known to be
+    recoverable, so resume keeps retrying every row as before.
+    """
+    if global_config_dict is None:
+        return lambda _row: False
+    # Imported here: rollout_reverification imports this module.
+    from nemo_gym.rollout_reverification import _build_agent_to_resources_server_mapping, _rs_for_row
+
+    try:
+        agent_to_rs = _build_agent_to_resources_server_mapping(global_config_dict)
+    except ConfigError:
+        return lambda _row: False
+
+    def has_route(row: Mapping[str, Any]) -> bool:
+        try:
+            _rs_for_row(row, agent_to_rs, global_config_dict)
+        except ConfigError:
+            return False
+        return True
+
+    return has_route
+
+
 def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: bool = False) -> bool:
     """Whether a persisted failure must be gated on resume.
 
@@ -3302,7 +3331,9 @@ class RolloutCollectionHelper(BaseModel):
         *,
         retain_results_in_memory: bool = True,
         success_keys: Optional[set] = None,
+        global_config_dict: Optional[Mapping[str, Any]] = None,
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[bytes]]]:
+        has_judge_recovery_route = _judge_recovery_route_check(global_config_dict)
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         _reject_attempt_qualified_rollout_ids(original_input_rows, config.materialized_jsonl_fpath)
@@ -3335,6 +3366,11 @@ class RolloutCollectionHelper(BaseModel):
         resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
         budget_used: Counter = Counter()
         terminal_keys: set = set()
+        # A judge failure keeps the policy answer. Running the rollout again would generate a new one,
+        # so it is gated and recovered by `gym eval reverify --judge-failed-only`, which judges the saved answer.
+        # A row without an answer, a multi-stage row that recovery refuses, or one recovery cannot route to a
+        # resources server (an Environment Server that judges in its own sandbox) is retried.
+        judge_failed_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
@@ -3354,6 +3390,13 @@ class RolloutCollectionHelper(BaseModel):
                         budget_used[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
+                    if (
+                        fr.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED
+                        and "response" in fr
+                        and "stage_index" not in fr
+                        and has_judge_recovery_route(fr)
+                    ):
+                        judge_failed_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -3363,7 +3406,7 @@ class RolloutCollectionHelper(BaseModel):
 
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
-        gated = successes_seen | terminal_keys | maxed_out
+        gated = successes_seen | terminal_keys | maxed_out | judge_failed_keys
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
@@ -3405,8 +3448,14 @@ class RolloutCollectionHelper(BaseModel):
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
 - {len(terminal_keys)} sidecar-terminal → not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
+- {len(judge_failed_keys)} judge failures with a saved answer → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
+        if judge_failed_keys:
+            print(
+                f"{len(judge_failed_keys)} rollout(s) keep their saved answers after a judge failure. Judge them again "
+                "with `gym eval reverify --judge-failed-only` once the judge is available."
+            )
 
         return input_rows, rows, results, result_strs
 
@@ -3469,6 +3518,12 @@ class RolloutCollectionHelper(BaseModel):
                 config,
                 retain_results_in_memory=config.retain_results_in_memory,
                 success_keys=persisted_success_keys,
+                # Only a config this process already has: parsing the command line here could end the run.
+                global_config_dict=(
+                    environment_server_client.global_config_dict
+                    if environment_server_client is not None
+                    else maybe_get_global_config_dict()
+                ),
             )
             persisted_rows = list(rows)
             persisted_results = list(results)
