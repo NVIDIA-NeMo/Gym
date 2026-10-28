@@ -1408,6 +1408,61 @@ class TestResponsesStreamKeepalive:
         assert resp.status_code == 429
         assert resp.content == error.response_content
 
+    @pytest.mark.parametrize(
+        ("path", "backend", "body"),
+        [
+            ("/v1/responses", "_invoke_responses", STREAM_BODY),
+            ("/v1/chat/completions", "_invoke_chat_completions", {"stream": True, "messages": []}),
+        ],
+    )
+    async def test_disconnect_before_the_first_chunk_cancels_the_backend(
+        self, monkeypatch, path, backend, body
+    ) -> None:
+        # Through the real cancellation middleware: the client leaves after the handler returned the
+        # keepalive stream but before its body started, so the body's own cleanup never runs.
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", _KEEPALIVE_S)
+        client, server = _keepalive_client(_EchoModel)
+        server.setup_cancellation_middleware(client.app)
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(_EchoModel, backend, blocked)
+        incoming: asyncio.Queue[dict] = asyncio.Queue()
+        await incoming.put({"type": "http.request", "body": json.dumps(body).encode(), "more_body": False})
+        response_started = asyncio.Event()
+
+        async def send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                response_started.set()
+                await asyncio.Event().wait()  # The client is gone before any body chunk arrives.
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 50000),
+            "server": ("testserver", 80),
+        }
+        call = asyncio.create_task(client.app(scope, incoming.get, send))
+        await asyncio.wait_for(response_started.wait(), 5)
+        assert started.is_set() and not cancelled.is_set()
+        await incoming.put({"type": "http.disconnect"})
+        await asyncio.wait_for(call, 5)
+        await asyncio.wait_for(cancelled.wait(), 5)
+
 
 class TestUnionItemTypesThroughDispatch:
     """Verify item handling on streaming and non-streaming dispatch paths.
