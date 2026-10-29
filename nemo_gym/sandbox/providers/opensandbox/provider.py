@@ -19,15 +19,17 @@ import hashlib
 import ipaddress
 import logging
 import math
+import random
 import re
 import shlex
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Literal, NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
@@ -55,6 +57,20 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 LOGGER = logging.getLogger(__name__)
 logging.getLogger("opensandbox").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+# Management API listing page size; one listing per release, so a few large pages beat many small ones.
+SNAPSHOT_LIST_PAGE_SIZE = 100
+
+
+@dataclass(eq=False)
+class _BackgroundCommandPoll:
+    """One background command's poll loop, woken when a checkpoint polling scope of its sandbox opens or closes."""
+
+    wakeup: asyncio.Event = field(default_factory=asyncio.Event)
+    # Set when a parked scope opens for the sandbox, cleared before each status request: a request that fails
+    # with this set overlapped a checkpoint, while the sandbox may not answer.
+    parked: bool = False
 
 
 class _MissingSandboxTerminateFilter(logging.Filter):
@@ -399,6 +415,13 @@ def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
     return "sandbox_not_found" in message or ("sandbox" in message and "not found" in message)
 
 
+def _snapshot_state(payload: Mapping[str, Any]) -> str:
+    """A management API snapshot record's lifecycle state, lowercased; ``""`` when it reports none."""
+    status = payload.get("status")
+    state = status.get("state") if isinstance(status, dict) else None
+    return str(state or payload.get("state") or "").lower()
+
+
 def _execution_outcome(execution: Any) -> tuple[int, str | None, str | None]:
     """Map a streamed SDK execution to ``(return_code, error_type, stderr_note)``.
 
@@ -661,6 +684,14 @@ class OpenSandboxCreateConfig:
     # Refresh a created sandbox's TTL while this provider owns its handle.
     # This does not change task/command timeouts or renew borrowed handles.
     renew_interval_s: float | None = None
+    # A lease: each sandbox is created with this TTL, capped by the spec's ``ttl_s``, and every renewal sets it to
+    # now plus this TTL again, never past the spec's lifetime. The sandbox lives while the creating process renews
+    # it, so the service deletes a crashed process's sandboxes within one TTL instead of at the end of the spec's
+    # lifetime. A renewal that fails is logged and tried again at the next interval. Requires ``renew_interval_s``.
+    renew_ttl_s: float | None = None
+    # Per-call budget of one renewal: a hung renew must not use up the TTL it extends.
+    # Unset, the connection's request timeout applies (60 s without one).
+    renew_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
         if self.image_pull_policy is not None:
@@ -671,6 +702,13 @@ class OpenSandboxCreateConfig:
             not math.isfinite(self.renew_interval_s) or self.renew_interval_s <= 0
         ):
             raise ValueError("create.renew_interval_s must be finite and > 0")
+        if self.renew_ttl_s is not None:
+            if not math.isfinite(self.renew_ttl_s) or self.renew_ttl_s <= 0:
+                raise ValueError("create.renew_ttl_s must be finite and > 0")
+            if self.renew_interval_s is None or self.renew_interval_s >= self.renew_ttl_s:
+                raise ValueError("create.renew_ttl_s requires a shorter create.renew_interval_s")
+        if self.renew_timeout_s is not None and (not math.isfinite(self.renew_timeout_s) or self.renew_timeout_s <= 0):
+            raise ValueError("create.renew_timeout_s must be finite and > 0")
         if self.retries < 0:
             raise ValueError("create.retries must be >= 0")
         if self.retry_delay_s < 0:
@@ -723,6 +761,15 @@ class OpenSandboxOperationConfig:
     # Backs off from initial to interval.
     background_poll_initial_s: float = 0.25
     background_poll_interval_s: float = 2.0
+    # Inside a checkpoint polling scope only: command polls of that sandbox wake at once and then poll at least
+    # this often, so a harness stopped for a checkpoint is seen to end promptly. Other commands keep their backoff.
+    checkpoint_background_poll_interval_s: float = 1.0
+    # Create-to-ready budget of one snapshot, which pushes the sandbox's layers to the registry. Kept below a
+    # controller's usual commit deadline, so a slow push fails the export with a typed error first.
+    snapshot_timeout_s: float = 240.0
+    # The management API can answer 404 for a snapshot it has only just created. Until a lookup first finds it, a
+    # 404 is waited out for this long, within snapshot_timeout_s; 0 fails on the first 404.
+    snapshot_lookup_grace_s: float = 60.0
     # Per-request budget for background-command status polls, which are small
     # idempotent GETs: without their own short budget, each poll against an
     # unreachable sandbox hangs for the shared request timeout (tuned for long
@@ -746,6 +793,15 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.background_poll_interval_s must be > 0")
         if self.background_poll_initial_s <= 0:
             raise ValueError("operations.background_poll_initial_s must be > 0")
+        if (
+            not math.isfinite(self.checkpoint_background_poll_interval_s)
+            or self.checkpoint_background_poll_interval_s <= 0
+        ):
+            raise ValueError("operations.checkpoint_background_poll_interval_s must be finite and > 0")
+        if not math.isfinite(self.snapshot_timeout_s) or self.snapshot_timeout_s <= 0:
+            raise ValueError("operations.snapshot_timeout_s must be finite and > 0")
+        if not math.isfinite(self.snapshot_lookup_grace_s) or self.snapshot_lookup_grace_s < 0:
+            raise ValueError("operations.snapshot_lookup_grace_s must be finite and >= 0")
         if self.status_poll_timeout_s is not None and self.status_poll_timeout_s <= 0:
             raise ValueError("operations.status_poll_timeout_s must be > 0")
 
@@ -923,6 +979,10 @@ class OpenSandboxProvider:
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
         self._renewals: dict[str, asyncio.Task[None]] = {}
+        # Background command polls by sandbox, and the checkpoint polling scopes open on each sandbox.
+        self._command_polls: dict[str, set[_BackgroundCommandPoll]] = {}
+        self._checkpoint_poll_scopes: dict[str, int] = {}
+        self._parked_poll_scopes: dict[str, int] = {}
 
     def pull_policy_options(self, policy: str) -> dict[str, Any]:
         """Compose's ``pull_policy`` as the per-sandbox image pull policy extension (``_resolve_extensions`` lets a
@@ -1217,6 +1277,283 @@ class OpenSandboxProvider:
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.aclose()
+
+    # -- checkpoint polling scopes ------------------------------------------------------------------------------
+
+    @contextmanager
+    def checkpoint_exec_polling(self, handle: SandboxHandle) -> Iterator[None]:
+        """Wake the background command polls of this sandbox and poll at least every
+        ``operations.checkpoint_background_poll_interval_s`` until the scope exits.
+
+        For a harness being stopped or paused for a checkpoint, so its command is seen to end promptly.
+        """
+        sandbox_id = handle.sandbox_id
+        self._checkpoint_poll_scopes[sandbox_id] = self._checkpoint_poll_scopes.get(sandbox_id, 0) + 1
+        self._wake_command_polls(sandbox_id)
+        try:
+            yield
+        finally:
+            self._leave_scope(self._checkpoint_poll_scopes, sandbox_id)
+            self._wake_command_polls(sandbox_id)
+
+    @contextmanager
+    def parked_exec_polling(self, handle: SandboxHandle) -> Iterator[None]:
+        """Hold the background command polls of this sandbox, without asking it, until the scope exits.
+
+        For a harness launch paused for a checkpoint: the sandbox is being snapshotted and may not answer for a
+        while. A status request that fails after the scope opened is asked again once it exits, with a fresh retry
+        allowance. Do not wait inside the scope for a command of this sandbox: its polls are held too.
+        """
+        sandbox_id = handle.sandbox_id
+        self._parked_poll_scopes[sandbox_id] = self._parked_poll_scopes.get(sandbox_id, 0) + 1
+        for poll in self._command_polls.get(sandbox_id, ()):
+            poll.parked = True
+        try:
+            yield
+        finally:
+            self._leave_scope(self._parked_poll_scopes, sandbox_id)
+            self._wake_command_polls(sandbox_id)
+
+    @staticmethod
+    def _leave_scope(scopes: dict[str, int], sandbox_id: str) -> None:
+        remaining = scopes[sandbox_id] - 1
+        if remaining:
+            scopes[sandbox_id] = remaining
+        else:
+            del scopes[sandbox_id]
+
+    def _wake_command_polls(self, sandbox_id: str) -> None:
+        for poll in self._command_polls.get(sandbox_id, ()):
+            poll.wakeup.set()
+
+    async def _wait_command_poll(self, poll: _BackgroundCommandPoll, *, interval_s: float) -> None:
+        """Wait for the next poll or a scope change, including a wakeup delivered before this call."""
+        if poll.wakeup.is_set():
+            poll.wakeup.clear()
+            return
+        sleep_task = asyncio.create_task(asyncio.sleep(interval_s))
+        wake_task = asyncio.create_task(poll.wakeup.wait())
+        try:
+            done, _ = await asyncio.wait({sleep_task, wake_task}, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        finally:
+            sleep_task.cancel()
+            wake_task.cancel()
+            await asyncio.gather(sleep_task, wake_task, return_exceptions=True)
+            poll.wakeup.clear()
+
+    async def _wait_while_parked(self, sandbox_id: str, poll: _BackgroundCommandPoll) -> None:
+        while sandbox_id in self._parked_poll_scopes:
+            await self._wait_command_poll(poll, interval_s=self._operations.background_poll_interval_s)
+
+    # -- snapshots ----------------------------------------------------------------------------------------------
+
+    async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
+        """Start a snapshot of a running sandbox and return its id at once.
+
+        Creation is asynchronous on the server: the snapshot can create sandboxes only once
+        :meth:`wait_snapshot_ready` returns. The sandbox keeps running either way. Not retried: a repeated request
+        could leave a second snapshot nobody knows the id of.
+        """
+        info = await self._await_sdk_call(
+            handle.raw.create_snapshot(name),
+            operation="create_snapshot",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=self._connection.request_timeout_s,
+        )
+        snapshot_id = getattr(info, "id", None)
+        if not snapshot_id:
+            raise RuntimeError(
+                f"OpenSandbox create_snapshot returned no snapshot id for sandbox {handle.sandbox_id!r}"
+            )
+        return str(snapshot_id)
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        """Poll the management API until the snapshot is ``Ready``, within ``operations.snapshot_timeout_s``.
+
+        A snapshot that fails, or is not ready in time, raises. Transient answers are waited out within the
+        timeout: 429, 5xx and connection errors at any time, and a 404 before the first successful lookup for
+        ``operations.snapshot_lookup_grace_s`` (the API can answer 404 for a snapshot it has only just created).
+        Any other answer, or a 404 once the snapshot was found, raises at once.
+        """
+        timeout_s = self._operations.snapshot_timeout_s
+        grace_s = self._operations.snapshot_lookup_grace_s
+        poll_s = self._create.connect_poll_s
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        found = False
+        not_found = 0
+        deadline = asyncio.timeout(timeout_s)
+        path = f"/v1/snapshots/{quote(snapshot_id, safe='')}"
+        try:
+            async with deadline:
+                while True:
+                    try:
+                        status, payload = await self._management_request("GET", path)
+                    except (OSError, asyncio.TimeoutError, ConnectionError) as error:
+                        LOGGER.warning("OpenSandbox snapshot %r lookup failed; retrying: %r", snapshot_id, error)
+                        await asyncio.sleep(poll_s)
+                        continue
+                    if status == 404 and not found and loop.time() - started < grace_s:
+                        not_found += 1
+                        await asyncio.sleep(poll_s)
+                        continue
+                    if status == 429 or status >= 500:
+                        LOGGER.warning("OpenSandbox snapshot %r lookup -> HTTP %d; retrying", snapshot_id, status)
+                        await asyncio.sleep(poll_s)
+                        continue
+                    if status >= 400:
+                        detail = ""
+                        if status == 404 and not_found and not found:
+                            detail = f" ({not_found + 1} lookups over {loop.time() - started:.1f}s)"
+                        raise RuntimeError(
+                            f"OpenSandbox snapshot {snapshot_id!r} lookup failed -> HTTP {status}{detail}"
+                        )
+                    if not found and not_found:
+                        LOGGER.warning(
+                            "OpenSandbox snapshot %r appeared %.1fs into its wait; %d earlier lookups got 404",
+                            snapshot_id,
+                            loop.time() - started,
+                            not_found,
+                        )
+                    found = True
+                    state = _snapshot_state(payload)
+                    if state == "ready":
+                        return
+                    if state in {"failed", "error"}:
+                        reason = (payload.get("status") or {}).get("message") or state
+                        raise RuntimeError(f"OpenSandbox snapshot {snapshot_id!r} failed: {reason}")
+                    if not state:
+                        # Waiting on a record that reports no state would only end in the timeout.
+                        raise RuntimeError(
+                            f"OpenSandbox snapshot {snapshot_id!r} lookup returned no state: {payload!r}"
+                        )
+                    await asyncio.sleep(poll_s)
+        except TimeoutError as error:
+            if not deadline.expired():
+                raise
+            raise TimeoutError(
+                f"Timed out waiting for OpenSandbox snapshot {snapshot_id!r} to be ready after {timeout_s:g}s"
+            ) from error
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete a snapshot over the management API; one that is already gone (404) is not an error.
+
+        429, 5xx and connection errors are retried ``operations.retries`` times with the operation backoff.
+        """
+        path = f"/v1/snapshots/{quote(snapshot_id, safe='')}"
+        attempts = self._operations.retries + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                status, _ = await self._management_request("DELETE", path)
+            except (OSError, asyncio.TimeoutError, ConnectionError) as error:
+                if attempt == attempts:
+                    raise RuntimeError(f"OpenSandbox snapshot {snapshot_id!r} delete failed: {error!r}") from error
+            else:
+                if status < 400 or status == 404:
+                    return
+                if not (status == 429 or status >= 500) or attempt == attempts:
+                    raise RuntimeError(f"OpenSandbox snapshot {snapshot_id!r} delete failed -> HTTP {status}")
+            await asyncio.sleep(
+                min(self._operations.retry_delay_s * 2 ** (attempt - 1), self._operations.retry_max_delay_s)
+            )
+
+    async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
+        """Every snapshot whose name starts with ``prefix``, as ``{"id", "name", "state", "sandbox_id"}``.
+
+        The management API's ``name`` query parameter matches a whole name, not a prefix, so this reads every page
+        of the listing and filters here. Pages are collected before anything is deleted, so deletes do not shift
+        them. A failed page request (after the operation retries for 429 and 5xx) raises.
+        """
+        found: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            payload = await self._management_get_page(page)
+            items = payload.get("items")
+            pagination = payload.get("pagination")
+            if not isinstance(items, list) or not isinstance(pagination, dict):
+                raise RuntimeError("OpenSandbox snapshot listing is missing items or pagination")
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                    raise RuntimeError("OpenSandbox snapshot listing contains an item without an id")
+                name = item.get("name")
+                if isinstance(name, str) and name.startswith(prefix):
+                    found.append(
+                        {
+                            "id": item["id"],
+                            "name": name,
+                            "state": _snapshot_state(item),
+                            "sandbox_id": item.get("sandboxId"),
+                        }
+                    )
+            if pagination.get("hasNextPage") is not True:
+                return found
+            page += 1
+
+    async def _management_get_page(self, page: int) -> dict[str, Any]:
+        attempts = self._operations.retries + 1
+        params = {"page": str(page), "pageSize": str(SNAPSHOT_LIST_PAGE_SIZE)}
+        for attempt in range(1, attempts + 1):
+            try:
+                status, payload = await self._management_request("GET", "/v1/snapshots", params=params)
+            except (OSError, asyncio.TimeoutError, ConnectionError) as error:
+                if attempt == attempts:
+                    raise RuntimeError(f"OpenSandbox snapshot listing failed: {error!r}") from error
+            else:
+                if status < 400:
+                    return payload
+                if not (status == 429 or status >= 500) or attempt == attempts:
+                    raise RuntimeError(f"OpenSandbox snapshot listing failed -> HTTP {status}")
+            await asyncio.sleep(
+                min(self._operations.retry_delay_s * 2 ** (attempt - 1), self._operations.retry_max_delay_s)
+            )
+        raise RuntimeError("OpenSandbox snapshot listing retry loop did not run")
+
+    async def _management_request(
+        self, method: str, path: str, *, params: Mapping[str, str] | None = None
+    ) -> tuple[int, dict[str, Any]]:
+        """One call to the server's management API over Gym's shared aiohttp client, which the SDK handle does not
+        expose; returns the HTTP status and the JSON object body (``{}`` for an error status or an empty body)."""
+        import aiohttp
+
+        from nemo_gym.server_utils import request
+
+        if self._connection.domain is None:
+            raise RuntimeError("OpenSandbox snapshot operations require connection.domain")
+        # The connection config keeps the scheme in ``protocol`` (the SDK's default is http) and the host, with any
+        # path prefix, in ``domain``.
+        base_url = f"{self._connection.protocol or 'http'}://{self._connection.domain.rstrip('/')}"
+        headers = {"OPEN-SANDBOX-API-KEY": self._connection.api_key} if self._connection.api_key else {}
+        timeout_s = float(self._connection.request_timeout_s) if self._connection.request_timeout_s else 30.0
+        # Same certificate policy as the SDK transport and the PTY sockets (connection.tls_verify).
+        tls: dict[str, Any] = {} if self._connection.tls_verify else {"ssl": False}
+        extra: dict[str, Any] = {"params": dict(params)} if params else {}
+        response = await request(
+            method,
+            f"{base_url}{path}",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=timeout_s),
+            _control=True,
+            **tls,
+            **extra,
+        )
+        async with response:
+            if response.status >= 400:
+                return response.status, {}
+            try:
+                payload = await response.json(content_type=None)
+            except (aiohttp.ContentTypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"OpenSandbox management API answered {method} {path} with HTTP {response.status} and a body "
+                    "that is not JSON"
+                ) from error
+            if payload is not None and not isinstance(payload, dict):
+                raise RuntimeError(
+                    f"OpenSandbox management API answered {method} {path} with HTTP {response.status} and a body "
+                    f"that is not a JSON object: {payload!r}"
+                )
+            return response.status, payload or {}
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for reattaching to this sandbox by id.
@@ -1683,16 +2020,48 @@ class OpenSandboxProvider:
         headers.update(getattr(resolved, "headers", None) or {})
         return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
-    def _start_renewal(self, handle: SandboxHandle, ttl_s: int | float) -> None:
+    def _start_renewal(self, handle: SandboxHandle, ttl_s: int | float, *, lifetime_s: int | float | None) -> None:
+        """Renew the sandbox's TTL every ``renew_interval_s`` (jittered by 10%) until cancelled or the sandbox is gone.
+
+        Without a lease every renewal sets the TTL to ``ttl_s`` again, and one that fails after its retries ends the
+        loop and fails the sandbox's later operations. With a lease (``renew_ttl_s``) every renewal sets it to the
+        lease, never past ``lifetime_s`` (the spec's ``ttl_s``) from creation; a renewal that fails is logged and the
+        next one tries again, since the sandbox has the lease minus one interval of slack. Either way, a renewal
+        that finds the sandbox gone (stopped or deleted elsewhere) ends the loop quietly.
+        """
+        interval_s = self._create.renew_interval_s
+        lease = self._create.renew_ttl_s is not None
+        loop = asyncio.get_running_loop()
+        lifetime_end = None if lifetime_s is None else loop.time() + lifetime_s
+        timeout_s = self._create.renew_timeout_s or self._connection.request_timeout_s or 60
+
         async def renew() -> None:
             while True:
-                await asyncio.sleep(self._create.renew_interval_s)
-                await self._await_sdk_operation(
-                    lambda: handle.raw.renew(timedelta(seconds=ttl_s)),
-                    operation="renew",
-                    sandbox_id=handle.sandbox_id,
-                    timeout_s=self._connection.request_timeout_s or 60,
-                )
+                await asyncio.sleep(interval_s * random.uniform(0.9, 1.1))
+                duration = ttl_s
+                if lifetime_end is not None:
+                    duration = min(duration, lifetime_end - loop.time())
+                    if duration <= 0:
+                        return  # the spec's lifetime is over; the service ends the sandbox at its current TTL
+                try:
+                    await self._await_sdk_operation(
+                        lambda: handle.raw.renew(timedelta(seconds=duration)),
+                        operation="renew",
+                        sandbox_id=handle.sandbox_id,
+                        timeout_s=timeout_s,
+                    )
+                except Exception as error:
+                    if _is_missing_sandbox_delete_error(error):
+                        LOGGER.info("OpenSandbox sandbox %r is gone; stopping its renewal", handle.sandbox_id)
+                        return
+                    if not lease:
+                        raise
+                    LOGGER.warning(
+                        "OpenSandbox lifetime renewal failed for sandbox %r; retrying in about %gs: %r",
+                        handle.sandbox_id,
+                        interval_s,
+                        error,
+                    )
 
         def report_failure(task: asyncio.Task[None]) -> None:
             if not task.cancelled() and (error := task.exception()) is not None:
@@ -1712,7 +2081,11 @@ class OpenSandboxProvider:
 
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
-        if self._create.renew_interval_s is not None and (
+        # A lease caps the spec's TTL; the renewals then keep the sandbox alive up to the spec's lifetime.
+        ttl_s = spec.ttl_s
+        if self._create.renew_ttl_s is not None:
+            ttl_s = self._create.renew_ttl_s if spec.ttl_s is None else min(spec.ttl_s, self._create.renew_ttl_s)
+        elif self._create.renew_interval_s is not None and (
             spec.ttl_s is None or self._create.renew_interval_s >= spec.ttl_s
         ):
             raise ValueError("create.renew_interval_s requires a longer, explicit sandbox ttl_s")
@@ -1756,8 +2129,8 @@ class OpenSandboxProvider:
             kwargs["image"] = _to_image_spec(image, options.image_auth or auth)
         if options.snapshot_id is not None:
             kwargs["snapshot_id"] = options.snapshot_id
-        if spec.ttl_s is not None:
-            kwargs["timeout"] = timedelta(seconds=spec.ttl_s)
+        if ttl_s is not None:
+            kwargs["timeout"] = timedelta(seconds=ttl_s)
         if spec.ready_timeout_s is not None:
             kwargs["ready_timeout"] = timedelta(seconds=spec.ready_timeout_s)
         if spec.entrypoint is not None:
@@ -1821,8 +2194,12 @@ class OpenSandboxProvider:
             # The shield lets the cleanup finish even if this task is cancelled again meanwhile.
             await asyncio.shield(self._cleanup_failed_create_handle(created_handle))
             raise
-        if self._create.renew_interval_s is not None:
-            self._start_renewal(handle, spec.ttl_s)
+        if self._create.renew_ttl_s is not None:
+            # A spec lifetime within the lease needs no renewal: the sandbox ends at its own TTL.
+            if spec.ttl_s is None or spec.ttl_s > self._create.renew_ttl_s:
+                self._start_renewal(handle, self._create.renew_ttl_s, lifetime_s=spec.ttl_s)
+        elif self._create.renew_interval_s is not None:
+            self._start_renewal(handle, spec.ttl_s, lifetime_s=None)
         return handle
 
     def _create_budget(self, spec: SandboxSpec) -> tuple[float | None, int | float | None]:
@@ -2168,6 +2545,36 @@ class OpenSandboxProvider:
         total_timeout_s: int | float | None,
         retries: int,
     ) -> SandboxExecResult:
+        """Register this command's poll for checkpoint polling scopes, and release it on every exit."""
+        poll = _BackgroundCommandPoll(parked=handle.sandbox_id in self._parked_poll_scopes)
+        self._command_polls.setdefault(handle.sandbox_id, set()).add(poll)
+        try:
+            return await self._exec_background_polled(
+                handle,
+                command,
+                opts_kwargs,
+                sdk_timeout_s=sdk_timeout_s,
+                total_timeout_s=total_timeout_s,
+                retries=retries,
+                poll=poll,
+            )
+        finally:
+            polls = self._command_polls[handle.sandbox_id]
+            polls.discard(poll)
+            if not polls:
+                del self._command_polls[handle.sandbox_id]
+
+    async def _exec_background_polled(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        opts_kwargs: dict[str, Any],
+        *,
+        sdk_timeout_s: float | None,
+        total_timeout_s: int | float | None,
+        retries: int,
+        poll: _BackgroundCommandPoll,
+    ) -> SandboxExecResult:
         """Run a command as a background execution polled via short requests.
 
         The logs endpoint returns one combined stream, so unlike the foreground
@@ -2214,14 +2621,33 @@ class OpenSandboxProvider:
         # detected promptly, then back off so long ones do not spam requests.
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
-            status = await self._await_sdk_operation(
-                lambda: handle.raw.commands.get_command_status(execution_id),
-                operation="command status",
-                sandbox_id=handle.sandbox_id,
-                timeout_s=status_timeout_s,
-                retries=self._operations.retries,
-                is_retryable=_command_read_is_retryable,
-            )
+            # A parked sandbox is being snapshotted and may not answer: ask once the park ends.
+            await self._wait_while_parked(handle.sandbox_id, poll)
+            poll.parked = False
+            started = loop.time()
+            try:
+                status = await self._await_sdk_operation(
+                    lambda: handle.raw.commands.get_command_status(execution_id),
+                    operation="command status",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=status_timeout_s,
+                    retries=self._operations.retries,
+                    is_retryable=_command_read_is_retryable,
+                )
+            except Exception as error:
+                if not poll.parked:
+                    raise
+                # A park began while this request was retrying, so the sandbox may have been unresponsive for the
+                # checkpoint rather than lost: ask again once the park ends, with a fresh retry allowance.
+                LOGGER.warning(
+                    "Forgave a failed OpenSandbox command status during a checkpoint park after %.1fs; "
+                    "sandbox_id=%r, execution_id=%r: %s",
+                    loop.time() - started,
+                    handle.sandbox_id,
+                    execution_id,
+                    error,
+                )
+                continue
             # A renamed SDK field must not degrade silently: a missing `running`
             # would end the poll at once, a missing `exit_code` would score a
             # failed command as a success.
@@ -2235,7 +2661,10 @@ class OpenSandboxProvider:
                     f"Timed out polling OpenSandbox background command; sandbox_id={handle.sandbox_id!r}, "
                     f"execution_id={execution_id!r}"
                 )
-            await asyncio.sleep(poll_interval)
+            interval_s = poll_interval
+            if handle.sandbox_id in self._checkpoint_poll_scopes:
+                interval_s = min(interval_s, self._operations.checkpoint_background_poll_interval_s)
+            await self._wait_command_poll(poll, interval_s=interval_s)
             poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
 
         # The execution has finished, so one call returns its whole buffer; the

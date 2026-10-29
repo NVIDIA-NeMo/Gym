@@ -128,6 +128,17 @@ A `resource_requests` entry above the sandbox's limit is clamped to the limit wi
 declares no `resources` is held to the SDK's default limits (1 CPU, 2048 MiB), since those are what the
 server applies.
 
+Set `create.renew_ttl_s` and `create.renew_interval_s` to keep every sandbox on a lease, as partial-rollout
+checkpoints recommend (`renew_ttl_s: 1200`, `renew_interval_s: 300`, `renew_timeout_s: 30`). Each sandbox is
+then created with `renew_ttl_s`, or the spec's `ttl_s` when that is shorter, and the process that created it
+renews it every `renew_interval_s` (jittered by 10%), with `renew_timeout_s` per call, but never past the
+spec's `ttl_s` from creation. Stopping a sandbox stops its renewal, and so does a crash of the process that
+created it: the service then deletes the sandbox within one `renew_ttl_s` instead of at the end of the spec's
+lifetime. A failed renewal is logged and tried again at the next interval; if the OpenSandbox API is
+unreachable for longer than `renew_ttl_s - renew_interval_s`, live sandboxes expire. Without `renew_ttl_s`,
+`renew_interval_s` alone refreshes the spec's whole `ttl_s` at every interval, and a renewal that fails fails
+the sandbox's later operations.
+
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
 ```bash
@@ -142,9 +153,9 @@ The provider constructor accepts four optional config sections:
 | Section | Purpose |
 | --- | --- |
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
-| `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
+| `create` | Sandbox create timeout, retry, image pull policy, health-check behavior, and the lease (`renew_ttl_s`, `renew_interval_s`, `renew_timeout_s`). |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
+| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, the dedicated `status_poll_timeout_s` budget for background status polls, and the snapshot budgets (`snapshot_timeout_s`, `snapshot_lookup_grace_s`) used by partial-rollout checkpoints. |
 
 ## Image policy and setup commands
 
