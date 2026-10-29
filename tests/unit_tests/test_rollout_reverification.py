@@ -1560,15 +1560,16 @@ class TestRunVerificationPayloads:
             failure_kind="judge_failed",
             failure_reason="Judge call failed",
             operation="judge.request",
+            cause_id=attempts[-1].event_id,
         )
-        # judge_failsafe's 200 result names its own failure; the header forwards the attempts and that failure again.
+        # judge_failsafe's body owns the judge failure and its cause; the header contains only model attempts.
         body = {
             "reward": 0.0,
             "_ng_failure_class": "judge_failed",
             "_ng_failure_id": judge.event_id,
-            "_ng_failure_events": {judge.event_id: judge.model_dump(mode="json")},
+            "_ng_failure_events": {e.event_id: e.model_dump(mode="json") for e in (judge, attempts[-1])},
         }
-        reply = FailureReport(events={e.event_id: e for e in (*attempts, judge)})
+        reply = FailureReport(events={e.event_id: e for e in attempts})
         mock_client = MagicMock(global_config_dict={})
         mock_client.post = AsyncMock(return_value=MagicMock(headers=FailureHeader.encode(reply)))
         self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json=body)
@@ -1578,6 +1579,7 @@ class TestRunVerificationPayloads:
         assert result["_ng_failure_class"] == "judge_failed" and result["_ng_failure_id"] == judge.event_id
         assert sorted(result["_ng_failure_events"]) == sorted(e.event_id for e in (*attempts, judge))
         assert result["_ng_failure_events"][judge.event_id] == judge.model_dump(mode="json")
+        assert result["_ng_failure_events"][judge.event_id]["cause_id"] == attempts[-1].event_id
 
     async def test_an_omitted_reply_report_is_kept_as_omitted(self, monkeypatch) -> None:
         mock_client = MagicMock(global_config_dict={})
