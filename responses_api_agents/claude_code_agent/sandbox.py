@@ -98,6 +98,8 @@ class ClaudeCodeSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     stderr: str = ""
+    # Where to copy the stream-json output in the sandbox; the session directory is removed at close.
+    transcript_path: str | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage runner input using the shared file-transfer utility."""
@@ -177,6 +179,15 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
+    async def copy_transcript(self, path: str) -> None:
+        """Copy events.jsonl to ``path`` for a task verifier that reads the harness transcript."""
+        source = f"{self.session.session_dir}/events.jsonl"
+        result = await self.session.sandbox.exec(
+            f"mkdir -p {quote(str(Path(path).parent))} && cp {quote(source)} {quote(path)}", timeout_s=60
+        )
+        if result.return_code or result.error_type:
+            LOG.warning("Could not copy the Claude transcript to %s: %s", path, (result.stderr or "")[-2000:])
+
     async def collect_artifacts(self) -> ClaudeCodeArtifacts:
         """Copy dedicated stdout and transcripts after confirmed harness termination."""
         try:
@@ -188,6 +199,8 @@ class ClaudeCodeSandboxSession(AgentSessionState):
         except Exception as error:
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Claude runner returned no events: {(self.stderr or logs)[-16000:]}") from error
+        if self.transcript_path:
+            await self.copy_transcript(self.transcript_path)
         try:
             runtime = json.loads(await self.read_text("runtime.json"))
         except Exception:

@@ -1,0 +1,29 @@
+# Harbor environment server for PostTrainBench; benchmarks/posttrainbench/config.yaml names the agent.
+# Every setting not listed here keeps the harbor server's default (environment_servers/harbor/configs/harbor.yaml).
+posttrainbench_environment_server:
+  environment_servers:
+    posttrainbench:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ???
+      # Written by benchmarks/posttrainbench/prepare.py: task folder, digests, baselines and weights.
+      taskset_file: benchmarks/posttrainbench/data/taskset.json
+      sandbox_provider: sandbox
+      # Every task declares one H100 for the agent and one for the separate verifier.
+      gpu_sandbox_provider: sandbox_gpu
+      # The H100 pool can be busy for a long time: a pending sandbox is not a failed one.
+      sandbox_ready_timeout_s: 3600
+      # All 24 tasks at once by default; lower it to fit the pool's free H100s.
+      max_concurrent_episodes: null
+      queue_timeout_seconds: null
+      # Setup, the 10 h agent budget, the collect hook (up to 1 h), the weight transfer and the verifier
+      # (judges plus final eval, up to 9 h).
+      default_episode_timeout_seconds: 79200
+      cleanup_timeout_seconds: 600
+      sandbox_ttl_slack_s: 1800
+      sandbox_provider_options: {}
+      sandbox_metadata:
+        benchmark: posttrainbench
+      # Relative to the run's results_dir.
+      artifacts_dir: posttrainbench/verifier

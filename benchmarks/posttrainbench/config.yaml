@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# PostTrainBench v1.2: Claude Code post-trains four base models for six benchmarks, 10 h on one H100 each.
+config_paths:
+  - environment_servers/posttrainbench/configs/posttrainbench.yaml
+  - responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+environment_server_routes:
+  posttrainbench: posttrainbench_environment_server
+
+# Every task runs its agent and its separate verifier on an H100 OpenSandbox deployment.
+sandbox_gpu:
+  _copy: sandbox
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN_GPU}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY_GPU}
+      protocol: https
+
+posttrainbench_environment_server:
+  environment_servers:
+    posttrainbench:
+      sandbox_provider: sandbox_gpu
+      agent_server:
+        name: posttrainbench_claude_code_agent
+      max_concurrent_episodes: ${oc.select:ptb_max_concurrent_episodes,null}
+      # A capped run queues tasks for earlier waves of up to about 22 h each; required whenever a cap is set.
+      queue_timeout_seconds: ${oc.select:ptb_queue_timeout_seconds,259200}
+
+posttrainbench_claude_code_agent:
+  _inherit_from: claude_code_agent
+  responses_api_agents:
+    claude_code_agent:
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${oc.select:policy_model_name,policy}
+      anthropic_api_key: ""
+      # The image's Claude Code pin (template/environment/Dockerfile), installed in the sandbox by the agent.
+      claude_code_version: "2.1.219"
+      # Upstream's judges read the agent's stream-json transcript from here (Harbor's claude-code.txt).
+      sandbox_transcript_path: /logs/agent/claude-code.txt
+      # The task's agent budget (10 h) bounds the run; the turn limit does not.
+      max_turns: null
+      timeout: 36000
+      concurrency: 24
+      datasets:
+        - name: posttrainbench
+          type: benchmark
+          taskset: posttrainbench
+          jsonl_fpath: benchmarks/posttrainbench/data/rows/posttrainbench/tasks.jsonl
+          prepare_script: benchmarks/posttrainbench/prepare.py
+          prepare_dependencies:
+            - datasets
+            - huggingface_hub
+            - pyarrow
+          prompt_config: null
+          num_repeats: 1
+          license: MIT

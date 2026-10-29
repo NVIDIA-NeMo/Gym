@@ -211,6 +211,25 @@ async def test_artifact_capture_reads_separate_stdout_and_process_info(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_artifact_capture_copies_the_transcript_before_the_session_directory_goes(monkeypatch):
+    exec_ = AsyncMock(return_value=result(code=0))
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed(),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", sandbox=SimpleNamespace(exec=exec_)),
+        transcript_path="/logs/agent/claude-code.txt",
+    )
+    read = AsyncMock(side_effect=lambda name: {"events.jsonl": "{}\n", "stderr.log": "", "runtime.json": "{}"}[name])
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "read_text", read)
+
+    await state.collect_artifacts()
+
+    assert exec_.await_args_list[0].args[0] == (
+        "mkdir -p /logs/agent && cp /tmp/session/events.jsonl /logs/agent/claude-code.txt"
+    )
+
+
+@pytest.mark.asyncio
 async def test_close_returns_gap_without_activation_and_honors_cleanup_error():
     instance = agent()
     session = SimpleNamespace(
