@@ -31,6 +31,7 @@ from nemo_gym.token_id_capture.staging import (
     compute_chain_hash,
     hash_token_ids,
 )
+from nemo_gym.token_id_capture.staging import records as staging_records
 from nemo_gym.token_id_capture.staging.capture import (
     CaptureError,
     CaptureHost,
@@ -147,11 +148,13 @@ def _capture(
     return capture, actual_sink
 
 
-def test_root_stages_exact_full_delta_before_returning_coords() -> None:
+def test_root_stages_exact_full_delta_before_returning_coords(monkeypatch: pytest.MonkeyPatch) -> None:
     capture, sink = _capture()
     call = capture.begin_call(_root())
     # Frameworks written before the rename read the capture key as ``rollout_id``.
-    assert call.rollout_id == call.capture_key
+    monkeypatch.setattr(staging_records, "_WARNED_RENAMES", set())
+    with pytest.warns(FutureWarning, match="`rollout_id` is deprecated"):
+        assert call.rollout_id == call.capture_key
 
     coords = capture.complete_call(
         call,

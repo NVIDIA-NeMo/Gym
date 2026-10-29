@@ -17,11 +17,13 @@
 import math
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.token_id_capture.staging import records as staging_records
 from nemo_gym.token_id_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
 from nemo_gym.token_id_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
@@ -366,6 +368,7 @@ def test_stage_result_and_receipt_validate_identity() -> None:
     assert poisoned_after_attribution.terminal_model_call_id == "call-1"
 
 
+@pytest.mark.filterwarnings("ignore::FutureWarning")
 def test_capture_owner_wire_names_accept_pre_rename_names_without_changing_storage_keys() -> None:
     record = StagedCallRecord.model_validate(_record_payload())
     row = _manifest_row().model_copy(update={"source_capture_key": "rollout-1"})
@@ -415,6 +418,32 @@ def test_capture_owner_wire_names_accept_pre_rename_names_without_changing_stora
     assert CallRecord.model_validate(old_payload) == row
     with pytest.raises(ValidationError, match="capture_key"):
         CallRecord.model_validate({**payload, "capture_key": "other"})
+
+
+def test_pre_rename_names_warn_once_and_new_names_never_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(staging_records, "_WARNED_RENAMES", set())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        admission = CaptureAdmission(capture_key="rollout-1", model_call_id="call-1", mode="text")
+        assert admission.capture_key == "rollout-1"
+        assert _manifest_row().source_capture_key is None
+
+    with pytest.warns(FutureWarning, match="`rollout_id` is deprecated .* use `capture_key` instead"):
+        old_admission = CaptureAdmission(rollout_id="rollout-1", model_call_id="call-1", mode="text")
+    with pytest.warns(
+        FutureWarning, match="`CallRecord.capture_key` is deprecated .* use `CallRecord.source_capture_key` instead"
+    ):
+        assert _manifest_row().capture_key is None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert old_admission.rollout_id == "rollout-1"
+        CaptureAdmission(rollout_id="rollout-1", model_call_id="call-2", mode="text")
+        CallRecord.model_validate({**_manifest_row().model_dump(exclude={"source_capture_key"}), "capture_key": None})
+
+    # Reading the old name warns too when it is the first use.
+    monkeypatch.setattr(staging_records, "_WARNED_RENAMES", set())
+    with pytest.warns(FutureWarning, match="`rollout_id` is deprecated"):
+        assert admission.rollout_id == "rollout-1"
 
 
 @pytest.mark.parametrize(

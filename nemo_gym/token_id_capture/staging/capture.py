@@ -28,6 +28,7 @@ from nemo_gym.token_id_capture.staging.records import (
     StagedCallBaseSnapshot,
     StagedCallRecord,
     StageResult,
+    warn_renamed,
 )
 
 
@@ -63,7 +64,7 @@ class ActiveCall:
 
     @property
     def rollout_id(self) -> str:
-        """Read access under the name ``capture_key`` replaced."""
+        warn_renamed("rollout_id", "capture_key", stacklevel=2)
         return self.capture_key
 
     @property
