@@ -27,6 +27,13 @@ It still parks at its next boundary until resume.
 A boundary is a snapshot function, not a snapshot.
 It runs only when a checkpoint exports the session,
 so a rollout that is never checkpointed pays nothing for its boundaries.
+
+A harness that runs outside the agent's event loop, such as a CLI in a sandbox, has no boundary of its own
+before each model call.
+Its activation waits for ``Activation.wait_park_requested()`` beside the harness instead,
+pauses the harness when a checkpoint asks, and then parks with ``Activation.boundary()``.
+An activation waiting for the agent's own concurrency limit wraps that wait in ``Activation.queued()``,
+so a checkpoint counts it as parked instead of waiting for a slot that parked activations hold.
 """
 
 import asyncio
@@ -117,15 +124,23 @@ class AgentSessionHooks(Protocol):
     A restore runs in a fresh process after a crash and rebuilds every session or raises;
     the crashed process's sandboxes are still running and can be stopped there.
     Retire stops a discarded attempt's sandbox.
+    Export receives the ID of the checkpoint being written; ``release_external_state``, which is optional,
+    receives every checkpoint the controller may still restore and deletes what the export of any other
+    checkpoint kept outside Gym, such as snapshots.
     """
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         """Return the state of every session in ``session_keys``."""
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
         """Validate every session, then install all of them; never install a partial set."""
 
     async def retire_agent_session(self, session_key: str) -> None: ...
+
+    async def release_external_state(self, kept: frozenset[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept`` kept outside Gym. Optional."""
 
 
 @dataclass
@@ -134,6 +149,9 @@ class _Session:
     episode_id: EpisodeId
     state: Literal["idle", "running", "at_boundary"] = "idle"
     park_requested: bool = False
+    # Set while a checkpoint asks this session's activation to park, and when the session is retired or closed,
+    # so an activation that waits for it beside a harness wakes either way.
+    park_event: asyncio.Event = field(default_factory=asyncio.Event)
     boundary: Optional[BoundarySnapshot] = None
     continuation: Optional[dict[str, JsonValue]] = None
     task: Optional[asyncio.Task] = None
@@ -166,6 +184,40 @@ class Activation:
         """
         await self._participant.at_boundary(self._session, snapshot)
 
+    @property
+    def park_requested(self) -> bool:
+        """Whether a checkpoint asks this activation to park; never for an episode that restarts."""
+        return self._session.park_requested and not self._participant.restarts_session(self._session)
+
+    async def wait_park_requested(self) -> None:
+        """Return once a checkpoint asks this activation to park at its next boundary.
+
+        For a harness that runs beside the activation, such as a CLI in a sandbox: race this against the harness,
+        pause the harness when it returns, then call ``boundary``.
+        An episode that restarts after a crash is never asked to park, so this keeps waiting through checkpoints
+        that leave it out.
+        Raises ``StaleAttemptError`` once the session is retired or closed.
+        """
+        session = self._session
+        while True:
+            await session.park_event.wait()
+            self._participant.require_open(session)
+            if not self._participant.restarts_session(session):
+                return
+            # A restart keeps running through the checkpoint: wait for this one to end, then for the next.
+            # The resume clears the event; one still set after it belongs to a retire or close, refused above.
+            await self._participant.wait_open()
+
+    @asynccontextmanager
+    async def queued(self) -> AsyncIterator[None]:
+        """Wrap a wait for the agent's own concurrency limit: the session counts as at its latest boundary.
+
+        A checkpoint does not wait for a slot that parked activations hold.
+        A slot granted while a checkpoint is open is held here, parked, until resume.
+        """
+        async with self._participant.queued(self._session):
+            yield
+
     @asynccontextmanager
     async def awaiting_model(self) -> AsyncIterator[None]:
         """Wrap a policy call made right after a boundary; the session counts as at that boundary.
@@ -196,6 +248,9 @@ class AgentSessionParticipant(CheckpointParticipant):
         self._rollout_seeds: dict[str, Counter[EpisodeId]] = {}
         self._rollout_sessions: dict[str, set[str]] = {}
         self._restart_calls = _RestartCalls(self.notify)
+        # Agent sessions whose episode restarts after a crash, such as one in a sandbox the agent owns:
+        # never exported and never waited for, like an agent's own /run that restarts.
+        self._restart_sessions: set[str] = set()
         self._open = asyncio.Event()
         self._open.set()
 
@@ -271,10 +326,13 @@ class AgentSessionParticipant(CheckpointParticipant):
             return True
         return False
 
-    def open_session(self, session_key: str, episode_id: EpisodeId, *, seed: bool = False) -> None:
+    def open_session(
+        self, session_key: str, episode_id: EpisodeId, *, seed: bool = False, restart: bool = False
+    ) -> None:
         """Register a new session, or re-bind a restored one that its replacement attempt re-seeds.
 
         A ``seed`` inside ``seeding`` is registered even if admission closed after it began.
+        A ``restart`` session is never exported and never waited for: its episode starts over after a crash.
         """
         self.retired.check(episode_id)
         existing = self._sessions.get(session_key)
@@ -285,9 +343,33 @@ class AgentSessionParticipant(CheckpointParticipant):
         if not self.accepting and not (seed and session_key in self._seeding):
             raise AdmissionClosedError("agent admission is closed for a checkpoint")
         self._add(_Session(key=session_key, episode_id=episode_id))
+        if restart:
+            self._restart_sessions.add(session_key)
+
+    def restarts_session(self, session: _Session) -> bool:
+        """Whether ``session``'s episode starts over after a crash, so no checkpoint waits for or exports it."""
+        return (
+            session.key in self._restart_sessions
+            or session.episode_id.capture_key in self.carried_restarts
+            or session.key in self.legacy_episodes.restarts()
+        )
+
+    def require_open(self, session: _Session) -> None:
+        """Refuse to continue an activation of a session that was retired or closed."""
+        self._require_live(session)
+        if session.retired or session.closing:
+            raise StaleAttemptError(f"agent session {session.key!r} is closing")
 
     def has_session(self, session_key: str) -> bool:
         return session_key in self._sessions
+
+    def restored_episode(self, session_key: str) -> Optional[EpisodeId]:
+        """The attempt a restored session continues, while no activation or request has used it; else ``None``.
+
+        The replacement attempt's seed of such a session re-binds it to that attempt's sandbox and grants.
+        """
+        session = self._sessions.get(session_key)
+        return session.episode_id if session is not None and session.unclaimed and not session.retired else None
 
     def _add(self, session: _Session) -> None:
         self._sessions[session.key] = session
@@ -298,6 +380,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         if self._sessions.get(session.key) is not session:
             return
         del self._sessions[session.key]
+        self._restart_sessions.discard(session.key)
         keys = self._rollout_sessions[session.episode_id.rollout_id]
         keys.discard(session.key)
         if not keys:
@@ -317,6 +400,8 @@ class AgentSessionParticipant(CheckpointParticipant):
         if session is None:
             return True
         session.closing = True
+        # An activation waiting beside its harness for a park request wakes and stops.
+        session.park_event.set()
         task = session.task
         if task is not None and task is not asyncio.current_task():
             # Cancel once: a retire, possibly cut short by its deadline, may have cancelled it already,
@@ -437,6 +522,10 @@ class AgentSessionParticipant(CheckpointParticipant):
         # so it parks at its first boundary.
         session.state = "running"
         session.park_requested = not self.accepting
+        if session.park_requested:
+            session.park_event.set()
+        else:
+            session.park_event.clear()
         session.task = asyncio.current_task()
         session.activation_index = index
         done = session.activation_done = asyncio.Event()
@@ -511,6 +600,24 @@ class AgentSessionParticipant(CheckpointParticipant):
         elif self._live(session):
             session.state = "running"
 
+    @asynccontextmanager
+    async def queued(self, session: _Session) -> AsyncIterator[None]:
+        previous = session.state
+        session.state = "at_boundary"
+        if not self.accepting:
+            await self.notify()
+        try:
+            yield
+        except BaseException:
+            if self._live(session):
+                session.state = previous
+            raise
+        if session.park_requested:
+            # A slot granted while a checkpoint is open: the checkpoint may have counted this session as parked.
+            await self.park(session)
+        if self._live(session):
+            session.state = previous
+
     def _live(self, session: _Session) -> bool:
         return self._sessions.get(session.key) is session
 
@@ -526,6 +633,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         self.legacy_episodes.close()
         for session in self._sessions.values():
             session.park_requested = True
+            session.park_event.set()
 
     async def open_admission(self) -> None:
         self.accepting = True
@@ -533,14 +641,21 @@ class AgentSessionParticipant(CheckpointParticipant):
         self.legacy_episodes.open()
         for session in self._sessions.values():
             session.park_requested = False
+            if not (session.retired or session.closing):
+                session.park_event.clear()
             session.resume.set()
+
+    async def release(self, kept: frozenset[str]) -> None:
+        release = getattr(self.hooks, "release_external_state", None)
+        if release is not None:  # optional: an agent whose checkpoints keep nothing outside Gym
+            await release(kept)
 
     def readiness(self) -> PrepareReport:
         legacy_blockers = {
             self._sessions[key].episode_id.capture_key if key in self._sessions else key
             for key in self.legacy_episodes.blockers(self.legacy_episodes.blocker_count())
         }
-        restart_keys = set(self.legacy_episodes.restarts())
+        restart_keys = set(self.legacy_episodes.restarts()) | self._restart_sessions
         # A session being retired or closed blocks until its activation has stopped, whatever its state.
         # A restart's running session does not: nothing of it is in the checkpoint, and neither is a restart call.
         # Nor does anything of an episode an earlier prepare stage reported as a restart,
@@ -582,7 +697,7 @@ class AgentSessionParticipant(CheckpointParticipant):
                 return False
             if session.state == "running":
                 if restart_keys is None:
-                    restart_keys = set(self.legacy_episodes.restarts())
+                    restart_keys = set(self.legacy_episodes.restarts()) | self._restart_sessions
                 if key not in restart_keys:
                     return False
         return True
@@ -603,6 +718,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             first = not session.retired
             session.retired = True
             session.resume.set()
+            session.park_event.set()
             task = session.task
             if task is not None and task is not asyncio.current_task():
                 # A close may have cancelled it already.
@@ -622,13 +738,13 @@ class AgentSessionParticipant(CheckpointParticipant):
             seeding.attempt <= episode_id.attempt for seeding in self._rollout_seeds.get(episode_id.rollout_id, ())
         )
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         legacy = self.legacy_episodes.exported()
         # Only sessions within the commit's scope:
         # another participant may report one of these episodes as a restart,
         # and unclaimed restored sessions outside it are retired by the commit.
         scope = None if episode_ids is None else set(episode_ids)
-        restart_keys = set(self.legacy_episodes.restarts())
+        restart_keys = set(self.legacy_episodes.restarts()) | self._restart_sessions
         sessions = [
             session
             for key, session in self._sessions.items()
@@ -639,7 +755,9 @@ class AgentSessionParticipant(CheckpointParticipant):
         ]
         # Every session is parked, so its boundary cannot move while the hooks are awaited.
         boundaries = [self._export_boundary(session) for session in sessions]
-        states = await self.hooks.export_agent_sessions([session.key for session in sessions])
+        states = await self.hooks.export_agent_sessions(
+            [session.key for session in sessions], checkpoint_id=checkpoint_id
+        )
         missing = [session.key for session in sessions if session.key not in states]
         if missing:
             raise ControlError(f"the agent did not export sessions {missing}")

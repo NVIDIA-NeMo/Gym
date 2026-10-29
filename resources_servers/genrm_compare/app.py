@@ -1060,7 +1060,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             **outcome,
         ).model_dump(mode="json", exclude_none=True)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         """Export the outcome of each session's member whose cohort has finished; an empty state otherwise."""
         return {session_id: self._finished_member_state(session_id) for session_id in session_ids}
 
