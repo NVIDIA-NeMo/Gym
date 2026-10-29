@@ -194,6 +194,7 @@ class SuiteComparisonResult(_SuiteModel):
     warnings: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(
         default_factory=lambda: [
+            "Deltas are candidate minus baseline on the normalized score scale; positive deltas favor the candidate.",
             "Benchmarks form a fixed suite; uncertainty describes independent repeat collections.",
             "Baseline and candidate repeats are unpaired and independent within and across cells.",
             "Metrics are equally averaged within each repeat before estimating benchmark variance.",
