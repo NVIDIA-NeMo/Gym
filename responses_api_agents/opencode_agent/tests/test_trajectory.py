@@ -310,7 +310,7 @@ def test_compaction_boundary_uses_only_emitted_assistant_items(tmp_path, current
 
 @pytest.mark.parametrize("persisted_step", [False, True])
 def test_final_activation_preserves_native_step_or_explicit_gap(tmp_path, persisted_step):
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
+    from nemo_gym.agents import AgentCloseSessionResponse
     from responses_api_agents.opencode_agent.observability import scope_opencode_activation
     from responses_api_agents.opencode_agent.tests.test_model_call_correlation import (
         POLICY,

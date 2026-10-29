@@ -17,10 +17,16 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.supervisor_client import CLEANUP_PHASE_COUNT, STOP_REQUEST_FILE, parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
+from nemo_gym.agents import (
+    AgentCloseSessionRequest,
+    AgentOutcomePolicyConfig,
+    AgentSeedSessionRequest,
+    OutcomeAction,
+    SandboxSession,
+    agent_outcome_policy,
+)
+from nemo_gym.agents.base_responses_api_agent import _AgentSessionRecord
+from nemo_gym.agents.utils.supervisor_client import CLEANUP_PHASE_COUNT, STOP_REQUEST_FILE, parse_cleanup_receipt
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
@@ -1422,7 +1428,7 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
-    monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
+    monkeypatch.setattr("nemo_gym.agents.utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
     failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
     # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
@@ -1489,7 +1495,7 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
     factory.connect = AsyncMock(return_value=state.session.sandbox)
     monkeypatch.setattr(module, "AsyncSandbox", factory)
 
-    with caplog.at_level("WARNING", logger="nemo_gym.base_responses_api_agent"):
+    with caplog.at_level("WARNING", logger="nemo_gym.agents.base_responses_api_agent"):
         result = await agent.seed_agent_session(SimpleNamespace(session={}), state.request)
 
     assert result.agent_session_id == state.request.agent_session_id

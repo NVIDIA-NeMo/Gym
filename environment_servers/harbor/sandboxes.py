@@ -33,6 +33,7 @@ from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user, _is_root
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
+from nemo_gym.agents import sandbox_server_url
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import (
@@ -55,7 +56,6 @@ from nemo_gym.sandbox import (
     service_gpus,
     service_resources,
 )
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.compose_overlay import overlay_files
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
