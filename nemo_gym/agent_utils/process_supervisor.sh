@@ -16,9 +16,23 @@
 # Not reached: processes that had already left the harness when the stop began (detached
 # services), which are left for the sandbox owner, and a process that leaves the harness between two
 # scans after dropping the marker from its environment. The receipt confirms that no reached
-# process can still run; it is not a sandbox-empty check.
+# process can still run; it is not a sandbox-empty check. Its "stopped" field says the stop file,
+# not the harness's own exit or the deadline, ended the harness or fenced its launch.
 #
-# usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH -- COMMAND...
+# Pause and continue, for a checkpoint that snapshots the sandbox while the harness keeps its state:
+# writing a number N greater than any earlier one to the pause file sends STOP to every process the
+# harness reaches, as a stop would find them, and to every process carrying the marker, including
+# services that left the harness: unlike a kill, a pause is undone. The supervisor waits until each
+# is stopped (longer while some are in uninterruptible sleep) and acknowledges in the paused file:
+# {"seq": N, "confirmed": BOOL, "pids": [...], "error": STRING|null}. Writing N to the continue file
+# sends CONT to the same processes and acknowledges in the continued file the same way. The time
+# spent paused does not count against the deadline. A pause requested before the launch holds the
+# launch until it is continued. A stop requested while paused continues the processes first, so the
+# harness receives TERM and can save its state. The receipt, written when the harness ends, answers
+# any pause the supervisor never acknowledged.
+#
+# usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH
+#        [--pause-file PATH --paused PATH --continue-file PATH --continued PATH] -- COMMAND...
 
 # An inherited BASH_ENV or SHELLOPTS must not turn an expected failure into a missing receipt.
 set +o errexit +o nounset +o pipefail
@@ -178,8 +192,133 @@ reached_alive() {
 stopped() { ((stopping)) || [[ -e $stop_file ]]; }
 
 write_receipt() {
-    printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s}' \
-        "$1" "$return_code" "$2" "$timed_out" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
+    printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s, "stopped": %s}' \
+        "$1" "$return_code" "$2" "$timed_out" "$requested_stop" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
+}
+
+# Set SEQ to the sequence number in request file $1, or 0 when it is missing or malformed. Polled
+# every round, so it does not fork.
+request_seq() {
+    local value=
+    SEQ=0
+    [[ -n $1 && -e $1 ]] && IFS= read -r value 2>/dev/null <"$1"
+    [[ $value =~ ^[0-9]{1,15}$ ]] && SEQ=$((10#$value))
+    return 0
+}
+
+# Write acknowledgement $1 for request $2 atomically.
+acknowledge() {
+    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s}' "$2" "$3" "$4" "$5" >"$1.tmp" && mv -f "$1.tmp" "$1"
+}
+
+# Record in paused[PID]=START every process a pause reaches: what a stop would reach now, and
+# every marked process, including services that left the harness. Runs the scan in a subshell so
+# that the stop's own bookkeeping is unchanged.
+pause_scan() {
+    local pid start
+    while read -r pid start; do
+        [[ -n $pid ]] && paused[pid]=$start
+    done < <(
+        preserving=1 preserved=()
+        scan >/dev/null
+        for pid in "${!tracked[@]}"; do echo "$pid ${tracked[pid]}"; done
+    )
+}
+
+# Send signal $1 to every process recorded in paused whose start time still matches.
+signal_paused() {
+    local pid
+    for pid in "${!paused[@]}"; do
+        stat_fields "$pid" && [[ ${fields[19]} == "${paused[pid]}" ]] && kill "-$1" "$pid" 2>/dev/null
+    done
+    return 0
+}
+
+# Succeed once no recorded process is in a state other than $1 (a glob of /proc states); set
+# blocked to 1 when only processes in uninterruptible sleep are left.
+paused_settled() {
+    local pid others=0 waiting=0
+    for pid in "${!paused[@]}"; do
+        stat_fields "$pid" && [[ ${fields[19]} == "${paused[pid]}" ]] || continue
+        case ${fields[0]} in
+        [ZX]) ;;
+        $1) ;;
+        D) waiting=1 ;;
+        *) others=1 ;;
+        esac
+    done
+    blocked=$((waiting && !others))
+    ((!others && !waiting))
+}
+
+# Pause request $1: stop every reached process and acknowledge. A harness not launched yet has
+# nothing to stop; the launch waits instead.
+pause() {
+    local limit error=null pid list=
+    paused=()
+    if [[ -n ${harness-} ]]; then
+        pause_scan
+        [[ -n ${groups[harness]} ]] && owned_group "$harness" "${groups[harness]}" && kill -STOP -- "-$harness" 2>/dev/null
+        signal_paused STOP
+        # A process forked between the scan and its group's stop is found again.
+        pause_scan
+        signal_paused STOP
+    fi
+    now
+    limit=$((NOW + pause_wait))
+    while ! paused_settled '[Tt]'; do
+        now
+        if ((NOW >= limit + (blocked ? pause_blocked_wait : 0))); then
+            error='"A process the pause reached did not stop"'
+            break
+        fi
+        signal_paused STOP
+        sleep 0.02
+    done
+    for pid in "${!paused[@]}"; do list+="${list:+, }$pid"; done
+    acknowledge "$paused_ack" "$1" "$([[ $error == null ]] && echo true || echo false)" "$list" "$error"
+}
+
+# Continue request $1: continue every process the pause stopped and acknowledge.
+resume_paused() {
+    local limit error=null
+    now
+    limit=$((NOW + pause_wait))
+    signal_paused CONT
+    while ! paused_settled '[!Tt]'; do
+        now
+        if ((NOW >= limit)); then
+            error='"A paused process did not continue"'
+            break
+        fi
+        signal_paused CONT
+        sleep 0.02
+    done
+    paused=()
+    acknowledge "$continued_ack" "$1" "$([[ $error == null ]] && echo true || echo false)" "" "$error"
+}
+
+# Serve a new pause request: pause, wait for its continue or a stop, then continue. Succeeds when a
+# pause was served; the paused time is added to paused_total.
+serve_pause() {
+    # Not named started: pause_scan reads the supervisor's own start time under that name.
+    local paused_since
+    [[ -n $pause_file && -e $pause_file ]] || return 1
+    request_seq "$pause_file"
+    ((SEQ > pause_seq)) || return 1
+    pause_seq=$SEQ
+    now
+    paused_since=$NOW
+    pause "$pause_seq"
+    while request_seq "$continue_file" && ((SEQ < pause_seq)) && ! stopped; do
+        sleep 0.05
+    done
+    # A stop while paused continues the processes first, so TERM reaches a running harness.
+    request_seq "$continue_file"
+    resume_paused "$SEQ"
+    now
+    paused_total=$((paused_total + NOW - paused_since))
+    return 0
 }
 
 # Tests source the functions above without running the supervisor.
@@ -193,6 +332,10 @@ while (($#)) && [[ $1 != -- ]]; do
     --cleanup-timeout) cleanup=$(centiseconds "$2") || { echo "--cleanup-timeout must be finite and positive" >&2; exit 2; } ;;
     --receipt) receipt=$2 ;;
     --stop-file) stop_file=$2 ;;
+    --pause-file) pause_file=$2 ;;
+    --paused) paused_ack=$2 ;;
+    --continue-file) continue_file=$2 ;;
+    --continued) continued_ack=$2 ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
     shift 2
@@ -200,6 +343,12 @@ done
 [[ $1 == -- ]] || usage
 shift
 [[ -n ${timeout-} && -n ${cleanup-} && -n ${receipt-} && -n ${stop_file-} && $# -gt 0 ]] || usage
+pause_file=${pause_file-} paused_ack=${paused_ack-} continue_file=${continue_file-} continued_ack=${continued_ack-}
+if [[ -n $pause_file$paused_ack$continue_file$continued_ack ]] &&
+    [[ -z $pause_file || -z $paused_ack || -z $continue_file || -z $continued_ack ]]; then
+    echo "--pause-file, --paused, --continue-file and --continued go together" >&2
+    exit 2
+fi
 
 # Leave the provider's process group, so that a KILL sent to it cannot end the supervisor before
 # the receipt. This shell stays behind to pass on TERM and the exit status.
@@ -216,10 +365,21 @@ if [[ ${NEMO_GYM_SUPERVISOR-} != detached ]] && stat_fields $$ && [[ ${fields[2]
     exit
 fi
 
-return_code=null timed_out=false stopping=0 preserving=0 forced=0
-tracked=() groups=() preserved=()
+return_code=null timed_out=false stopping=0 preserving=0 forced=0 requested_stop=false
+tracked=() groups=() preserved=() paused=()
+# A pause waits this long (centiseconds) for reached processes to stop, and this much longer while
+# only processes in uninterruptible sleep are left.
+pause_wait=500 pause_blocked_wait=2500 pause_seq=0 paused_total=0 blocked=0
+# A pause already continued before this supervisor started is not served: the launch starts running,
+# and the continue is acknowledged for a client that waits for it.
+if [[ -n $pause_file ]]; then
+    request_seq "$continue_file"
+    pause_seq=$SEQ
+    ((pause_seq)) && acknowledge "$continued_ack" "$pause_seq" true "" null
+fi
 trap 'stopping=1' TERM
 if stopped; then
+    [[ -e $stop_file ]] && requested_stop=true
     write_receipt true null # Nothing was launched.
     exit 0
 fi
@@ -230,6 +390,13 @@ fi
 started=${fields[19]}
 identity=$$.$started
 marker=NEMO_GYM_SUPERVISOR=$identity
+# A pause requested before the launch holds it until continued.
+while ! stopped && serve_pause; do :; done
+if stopped; then
+    [[ -e $stop_file ]] && requested_stop=true
+    write_receipt true null # Nothing was launched.
+    exit 0
+fi
 
 # Job control gives the harness its own process group.
 set -m
@@ -241,11 +408,17 @@ stat_fields "$harness" && groups[harness]=${fields[19]} tracked[harness]=${field
 now
 deadline=$((NOW + timeout))
 while kill -0 "$harness" 2>/dev/null && ! stopped && ((NOW < deadline)); do
+    if serve_pause; then
+        # Paused time does not count against the deadline.
+        deadline=$((deadline + paused_total))
+        paused_total=0
+    fi
     sleep 0.05
     now
 done
 if kill -0 "$harness" 2>/dev/null; then
     stopped || timed_out=true
+    [[ $timed_out == false && -e $stop_file ]] && requested_stop=true
     forced=1
     scan
     kill -TERM "$harness" 2>/dev/null

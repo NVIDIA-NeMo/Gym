@@ -115,7 +115,13 @@ async def test_stop_wins_claim_and_fences_delayed_launch(session, caplog):
     receipt = await stop_and_confirm_cleanup(
         sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
     )
-    assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": None, "timed_out": False}
+    assert receipt == {
+        "cleanup_confirmed": True,
+        "error": None,
+        "return_code": None,
+        "timed_out": False,
+        "stopped": True,
+    }
     assert json.loads((session_dir / CLEANUP_RECEIPT_FILE).read_text()) == receipt
     assert "diagnostic fields" not in caplog.text
     assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
@@ -180,7 +186,13 @@ async def test_launch_supervises_harness_and_shares_its_output_log(session, tmp_
     receipt = await stop_and_confirm_cleanup(
         sandbox, session_dir=str(session_dir), workdir=str(tmp_path), timeout=2, harness="test"
     )
-    assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": 0, "timed_out": False}
+    assert receipt == {
+        "cleanup_confirmed": True,
+        "error": None,
+        "return_code": 0,
+        "timed_out": False,
+        "stopped": False,
+    }
     assert set((session_dir / OUTPUT_LOG_FILE).read_text().splitlines()) == {"$(literal)", "stderr"}
 
 
@@ -204,7 +216,7 @@ async def test_stop_reaches_running_supervisor_through_the_stop_file(session, tm
         )
     finally:
         await asyncio.wait_for(launch, timeout=10)
-    assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": 0, "timed_out": False}
+    assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": 0, "timed_out": False, "stopped": True}
     assert (session_dir / "checkpoint").read_text() == "saved\n"
 
 

@@ -17,7 +17,16 @@ supervisor.pid        Launch shell         After claiming launch, before exec (s
 stop.request          Stop shell           Polled by the supervisor to stop the harness
 cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
 output.log            Launch shell         Captures supervisor and harness diagnostics
+pause.request         Pause shell          Holds sequence number N to pause the harness
+paused.json           Supervisor           Acknowledges pause N once every reached process stopped
+continue.request      Continue shell       Holds sequence number N to continue after pause N
+continued.json        Supervisor           Acknowledges continue N once the processes run again
 ===================== ==================== ===========================================
+
+Pause and continue are re-armable: each checkpoint writes a sequence number greater than the last,
+and an acknowledgement names the number it answers, so a request is never mistaken for an earlier
+one and no file has to be removed. A pause written before the launch holds the launch until its
+continue; a pause the supervisor never acknowledges is answered by ``cleanup.json``.
 
 Agents in the task sandbox often clean up with ``pkill -f python3``, ``pkill python3`` or
 ``killall python3``. These must not stop the supervisor or a runner, which would end the
@@ -37,7 +46,7 @@ import json
 import logging
 from pathlib import Path
 from shlex import join, quote
-from typing import TypedDict
+from typing import Literal, NotRequired, TypedDict
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
@@ -54,6 +63,14 @@ SUPERVISOR_PID_FILE = "supervisor.pid"
 STOP_REQUEST_FILE = "stop.request"
 CLEANUP_RECEIPT_FILE = "cleanup.json"
 OUTPUT_LOG_FILE = "output.log"
+PAUSE_REQUEST_FILE = "pause.request"
+PAUSED_FILE = "paused.json"
+CONTINUE_REQUEST_FILE = "continue.request"
+CONTINUED_FILE = "continued.json"
+# How long a pause or continue waits for the supervisor's acknowledgement by default. The supervisor
+# waits up to 5 seconds for reached processes to stop, and 25 more while some are in uninterruptible
+# sleep.
+DEFAULT_PAUSE_TIMEOUT = 45.0
 
 DEFAULT_CLEANUP_TIMEOUT = 10.0
 CLEANUP_PHASE_COUNT = 3
@@ -70,22 +87,46 @@ class CleanupReceipt(TypedDict):
     that left between two scans without the marker, remain until the owner closes the
     sandbox; this is not a sandbox-empty check. ``return_code`` is the shell status:
     128+N for a harness killed by signal N, and 126 or 127 when the command could not
-    be run.
+    be run. ``stopped``, absent from receipts written before pausing existed, says the
+    stop request, not the harness's own exit or the deadline, ended the harness or
+    fenced its launch.
     """
 
     cleanup_confirmed: bool
     return_code: int | None
     error: str | None
     timed_out: bool
+    stopped: NotRequired[bool]
 
 
-def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
+class PauseAcknowledgement(TypedDict):
+    """A supervisor's answer to pause or continue request ``seq``, from ``paused.json`` or ``continued.json``."""
+
+    seq: int
+    confirmed: bool
+    pids: list[int]
+    error: str | None
+
+
+# What a pause or continue request found:
+# ``acknowledged`` - the supervisor answered (see the acknowledgement's ``confirmed``);
+# ``not_launched`` - no supervisor runs yet, and the launch will honour the request when it starts;
+# ``finished`` - the cleanup receipt exists, so the harness has ended;
+# ``timeout`` - nothing answered in time.
+SupervisorRequestOutcome = Literal["acknowledged", "not_launched", "finished", "timeout"]
+
+
+def exec_timeout(
+    *, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT, pause_allowance: float = 0.0
+) -> float:
     """Reserve TERM grace, direct-process reaping, and process-group reaping.
 
     The extra 30 seconds cover startup, polling, and receipt I/O beyond those
     bounded cleanup phases. Keep their count shared with the controller budget.
+    ``pause_allowance`` covers time the harness may spend paused for checkpoints,
+    which the supervisor does not count against ``timeout``.
     """
-    return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30
+    return timeout + CLEANUP_PHASE_COUNT * cleanup_timeout + 30 + pause_allowance
 
 
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
@@ -124,23 +165,29 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
         return _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
     except ValidationError:
         LOG.warning("Harness termination was confirmed, but its diagnostic fields did not match the receipt schema")
-    return {
+    receipt: CleanupReceipt = {
         "cleanup_confirmed": True,
         "return_code": payload.get("return_code") if type(payload.get("return_code")) is int else None,
         "timed_out": payload.get("timed_out") is True,
         "error": payload.get("error") if isinstance(payload.get("error"), str) else None,
     }
+    if isinstance(payload.get("stopped"), bool):
+        receipt["stopped"] = payload["stopped"]
+    return receipt
 
 
-def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float, float]:
+def supervision_timeouts(*, timeout: float, close_timeout: float, pause_allowance: float = 0.0) -> tuple[float, float]:
     """Return the per-cleanup-phase and provider execution deadlines.
 
     Divide the close budget across TERM grace, direct-process and group reaping.
     The provider deadline reserves all phases after
-    the harness timeout, plus 30 seconds for startup, polling, and receipt I/O.
+    the harness timeout, plus 30 seconds for startup, polling, and receipt I/O,
+    plus ``pause_allowance`` for time paused at checkpoints.
     """
     cleanup_timeout = close_timeout / CLEANUP_PHASE_COUNT
-    return cleanup_timeout, exec_timeout(timeout=timeout, cleanup_timeout=cleanup_timeout)
+    return cleanup_timeout, exec_timeout(
+        timeout=timeout, cleanup_timeout=cleanup_timeout, pause_allowance=pause_allowance
+    )
 
 
 def _seconds(value: float) -> str:
@@ -161,6 +208,7 @@ def supervised_launch_command(
     timeout: float,
     cleanup_timeout: float,
     stdlib_runner: bool = False,
+    pausable: bool = False,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -177,9 +225,20 @@ def supervised_launch_command(
     so that python-matching kills in the task skip it. The link resolves a virtual
     environment to its base interpreter, so only standard-library runners may opt in.
     When the link cannot be made, the argv runs unchanged.
+
+    With ``pausable``, the supervisor also serves pause and continue requests in
+    ``session_dir`` (see ``request_pause`` and ``request_continue``).
     """
     check_stdlib_runner(command, stdlib_runner=stdlib_runner)
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
+    pause_options = (
+        f"--pause-file {quote(f'{session_dir}/{PAUSE_REQUEST_FILE}')} "
+        f"--paused {quote(f'{session_dir}/{PAUSED_FILE}')} "
+        f"--continue-file {quote(f'{session_dir}/{CONTINUE_REQUEST_FILE}')} "
+        f"--continued {quote(f'{session_dir}/{CONTINUED_FILE}')} "
+        if pausable
+        else ""
+    )
     claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
     harness = join(command)
     runner = ""
@@ -201,7 +260,7 @@ def supervised_launch_command(
         f"exec bash {supervisor} "
         f"--timeout {_seconds(timeout)} --cleanup-timeout {_seconds(cleanup_timeout)} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
-        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {harness} "
+        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} {pause_options}-- {harness} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )
 
@@ -225,7 +284,9 @@ async def stop_and_confirm_cleanup(
         claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
         temporary = quote(f"{receipt_path}.{uuid4().hex}.tmp")
         stopped = quote(
-            json.dumps({"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False})
+            json.dumps(
+                {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False, "stopped": True}
+            )
         )
         script = (
             f"[ -f {quote(receipt_path)} ] && exit 0; "
@@ -266,3 +327,85 @@ async def remove_session_directory(
     )
     if result.return_code != 0 or result.error_type:
         raise RuntimeError(f"Could not remove {harness} session files")
+
+
+_PAUSE_ACKNOWLEDGEMENT = TypeAdapter(PauseAcknowledgement)
+
+
+async def _request(
+    sandbox: AsyncSandbox,
+    *,
+    session_dir: str,
+    workdir: str | None,
+    request_file: str,
+    acknowledgement_file: str,
+    seq: int,
+    timeout: float,
+) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
+    """Write request ``seq`` and wait for the supervisor's acknowledgement or the cleanup receipt, in one exec.
+
+    A session directory without a launch claim has no supervisor yet: the request stays for the launch to read.
+    A launch the stop fenced counts as finished.
+    """
+    receipt = quote(f"{session_dir}/{CLEANUP_RECEIPT_FILE}")
+    request = quote(f"{session_dir}/{request_file}")
+    temporary = quote(f"{session_dir}/{request_file}.{uuid4().hex}.tmp")
+    acknowledgement = quote(f"{session_dir}/{acknowledgement_file}")
+    claim = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
+    # The receipt is read first: a finished harness is never paused. The request is written before the claim is
+    # read, so a supervisor that claims the launch afterwards reads the request when it starts.
+    script = (
+        f"[ -f {receipt} ] && {{ echo finished; exit 0; }}; "
+        f"[ -d {quote(session_dir)} ] || {{ echo not_launched; exit 0; }}; "
+        f"printf '%s' {seq} > {temporary} && mv -f {temporary} {request} || exit 1; "
+        f'claim=$(readlink {claim} 2>/dev/null); [ -n "$claim" ] || {{ echo not_launched; exit 0; }}; '
+        '[ "$claim" = stop ] && { echo finished; exit 0; }; '
+        f"for _ in $(seq 1 {max(1, int(timeout * 20))}); do "
+        f"[ -f {receipt} ] && {{ echo finished; exit 0; }}; "
+        f"if [ -f {acknowledgement} ]; then ack=$(cat {acknowledgement}); "
+        f'case "$ack" in *{quote(f'"seq": {seq},')}*) echo acknowledged; printf "%s\\n" "$ack"; exit 0;; esac; fi; '
+        "sleep 0.05; done; echo timeout"
+    )
+    result = await sandbox.exec(script, cwd=workdir, timeout_s=timeout + 10)
+    if result.return_code != 0 or result.error_type:
+        raise RuntimeError(f"supervisor request {request_file} failed: {result.error_type or result.stderr}")
+    lines = (result.stdout or "").splitlines()
+    outcome = lines[0].strip() if lines else ""
+    if outcome == "acknowledged":
+        try:
+            return "acknowledged", _PAUSE_ACKNOWLEDGEMENT.validate_python(json.loads(lines[1]), strict=True)
+        except (IndexError, ValueError, ValidationError) as error:
+            raise RuntimeError(f"malformed supervisor acknowledgement in {acknowledgement_file}") from error
+    if outcome not in ("not_launched", "finished", "timeout"):
+        raise RuntimeError(f"unexpected supervisor request outcome {outcome!r}")
+    return outcome, None  # type: ignore[return-value]
+
+
+async def request_pause(
+    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, seq: int, timeout: float = DEFAULT_PAUSE_TIMEOUT
+) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
+    """Ask the supervisor in ``session_dir`` to pause the harness, as request ``seq``, and wait for its answer."""
+    return await _request(
+        sandbox,
+        session_dir=session_dir,
+        workdir=workdir,
+        request_file=PAUSE_REQUEST_FILE,
+        acknowledgement_file=PAUSED_FILE,
+        seq=seq,
+        timeout=timeout,
+    )
+
+
+async def request_continue(
+    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, seq: int, timeout: float = DEFAULT_PAUSE_TIMEOUT
+) -> tuple[SupervisorRequestOutcome, PauseAcknowledgement | None]:
+    """Ask the supervisor in ``session_dir`` to continue after pause ``seq`` and wait for its answer."""
+    return await _request(
+        sandbox,
+        session_dir=session_dir,
+        workdir=workdir,
+        request_file=CONTINUE_REQUEST_FILE,
+        acknowledgement_file=CONTINUED_FILE,
+        seq=seq,
+        timeout=timeout,
+    )
