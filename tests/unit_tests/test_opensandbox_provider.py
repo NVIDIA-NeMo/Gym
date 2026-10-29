@@ -306,6 +306,179 @@ async def test_provider_shutdown_cancels_renewal_without_terminating_sandbox(fak
     handle.raw.kill.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("create", "match"),
+    [
+        ({"renew_ttl_s": 1200}, "renew_ttl_s requires a shorter"),
+        ({"renew_ttl_s": 300, "renew_interval_s": 300}, "renew_ttl_s requires a shorter"),
+        ({"renew_ttl_s": 0, "renew_interval_s": 1}, "renew_ttl_s must be finite"),
+        ({"renew_ttl_s": float("inf"), "renew_interval_s": 1}, "renew_ttl_s must be finite"),
+        ({"renew_timeout_s": 0}, "renew_timeout_s must be finite"),
+        ({"renew_timeout_s": float("nan")}, "renew_timeout_s must be finite"),
+    ],
+)
+def test_lease_settings_are_validated(create: dict[str, float], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        opensandbox_provider.OpenSandboxCreateConfig(**create)
+
+
+async def test_a_lease_caps_the_spec_ttl_at_create_and_in_every_renewal(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": 1200, "renew_interval_s": 0.01, "renew_timeout_s": 7}, probe={"command": None}
+    )
+    budgets: list[float | None] = []
+    await_operation = provider._await_sdk_operation
+
+    async def recording(factory: Any, **kwargs: Any) -> Any:
+        if kwargs["operation"] == "renew":
+            budgets.append(kwargs["timeout_s"])
+        return await await_operation(factory, **kwargs)
+
+    monkeypatch.setattr(provider, "_await_sdk_operation", recording)
+    # Without a spec TTL the lease is the only lifetime; with a longer one the lease still caps each extension.
+    for ttl_s in (None, 18000):
+        handle = await provider.create(SandboxSpec(image="example", ttl_s=ttl_s))
+        assert FakeSandbox.created_kwargs["timeout"] == timedelta(seconds=1200)
+        durations: list[timedelta] = []
+        renewed = asyncio.Event()
+
+        async def renew(duration: timedelta) -> None:
+            durations.append(duration)
+            if len(durations) >= 2:
+                renewed.set()
+
+        handle.raw.renew = renew
+        handle.raw.kill = AsyncMock()
+        handle.raw.close = AsyncMock()
+        await asyncio.wait_for(renewed.wait(), timeout=1)
+        await provider.close(handle)
+        assert set(durations) == {timedelta(seconds=1200)}
+    assert budgets and set(budgets) == {7}
+    await provider.aclose()
+
+
+async def test_a_spec_ttl_within_the_lease_is_used_as_is_and_never_renewed(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": 1200, "renew_interval_s": 0.01}, probe={"command": None}
+    )
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=600))
+    assert FakeSandbox.created_kwargs["timeout"] == timedelta(seconds=600)
+    assert handle.sandbox_id not in provider._renewals
+    await provider.aclose()
+
+
+async def test_a_lease_is_never_renewed_past_the_spec_lifetime(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": 0.2, "renew_interval_s": 0.05}, probe={"command": None}
+    )
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=0.5))
+    durations: list[float] = []
+
+    async def renew(duration: timedelta) -> None:
+        durations.append(duration.total_seconds())
+
+    handle.raw.renew = renew
+    task = provider._renewals[handle.sandbox_id]
+    # The loop ends by itself once the spec's lifetime is used up; the service then ends the sandbox at its TTL.
+    await asyncio.wait_for(asyncio.shield(task), timeout=2)
+    assert durations and all(0 < duration <= 0.2 for duration in durations)
+    assert min(durations) < 0.2, "the last extensions are cut to what is left of the spec's lifetime"
+    await provider.aclose()
+
+
+async def test_a_failed_lease_renewal_is_logged_and_the_next_one_tries_again(
+    fake_opensandbox_sdk: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": 1200, "renew_interval_s": 0.01}, probe={"command": None}, operations={"retries": 0}
+    )
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
+    attempts: list[int] = []
+    renewed = asyncio.Event()
+
+    async def flaky_renew(duration: timedelta) -> None:
+        attempts.append(len(attempts))
+        if len(attempts) <= 2:
+            raise RuntimeError("renewal rejected")
+        renewed.set()
+
+    handle.raw.renew = flaky_renew
+    handle.raw.kill = AsyncMock()
+    handle.raw.close = AsyncMock()
+    task = provider._renewals[handle.sandbox_id]
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(renewed.wait(), timeout=1)
+    assert not task.done(), "the loop survives failed renewals"
+    assert "lifetime renewal failed" in caplog.text
+    # Other operations and the close are not held hostage by earlier renewal failures.
+    operation = AsyncMock(return_value="ok")
+    assert (
+        await provider._await_sdk_operation(operation, operation="get_info", sandbox_id=handle.sandbox_id, timeout_s=1)
+        == "ok"
+    )
+    await provider.close(handle)
+    assert task.cancelled()
+    handle.raw.kill.assert_awaited_once()
+    await provider.aclose()
+
+
+@pytest.mark.parametrize("lease", [False, True])
+async def test_a_renewal_that_finds_the_sandbox_gone_ends_quietly(fake_opensandbox_sdk: None, lease: bool) -> None:
+    create: dict[str, Any] = {"renew_interval_s": 0.01}
+    if lease:
+        create["renew_ttl_s"] = 1200
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create=create, probe={"command": None}, operations={"retries": 0}
+    )
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
+    gone = RuntimeError("Renew sandbox failed: [KUBERNETES::SANDBOX_NOT_FOUND]")
+    gone.status_code = 404  # type: ignore[attr-defined]
+    handle.raw.renew = AsyncMock(side_effect=gone)
+    handle.raw.kill = AsyncMock()
+    handle.raw.close = AsyncMock()
+    task = provider._renewals[handle.sandbox_id]
+
+    await asyncio.wait_for(asyncio.shield(task), timeout=1)
+
+    assert task.exception() is None and handle.raw.renew.await_count == 1
+    # A stopped or deleted sandbox is not a renewal failure: later operations and the close go ahead.
+    await provider.close(handle)
+    await provider.aclose()
+
+
+async def test_the_renewal_interval_is_jittered_within_ten_percent(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bounds: list[tuple[float, float]] = []
+    monkeypatch.setattr(opensandbox_provider.random, "uniform", lambda low, high: bounds.append((low, high)) or high)
+    sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    # Patched before create, so the renewal loop's first wait is recorded too, and returns at once.
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_ttl_s": 1200, "renew_interval_s": 300}, probe={"command": None}
+    )
+    handle = await provider.create(SandboxSpec(image="example"))
+    handle.raw.renew = AsyncMock()
+    handle.raw.kill = AsyncMock()
+    handle.raw.close = AsyncMock()
+    async with asyncio.timeout(1):
+        while handle.raw.renew.await_count < 2:
+            await real_sleep(0)
+    await provider.close(handle)
+    await provider.aclose()
+
+    assert bounds and set(bounds) == {(0.9, 1.1)}
+    assert sleeps.count(300 * 1.1) >= 2
+
+
 @dataclass(frozen=True)
 class FakePlatformSpec:
     os: str
