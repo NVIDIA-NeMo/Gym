@@ -648,6 +648,16 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             )
         atif_items = _atif_output_items(trajectories, response_text)
         native_items = _fabric_output_items(output, response_text)
+        if self.config.adapter_id == "nvidia.fabric.claude":
+            # Claude's Relay results can be hook payloads; its native events preserve model-visible text and call IDs.
+            native_outputs = {
+                item.call_id: item.output
+                for item in native_items
+                if isinstance(item, NeMoGymResponseFunctionCallOutput) and item.call_id
+            }
+            for item in atif_items:
+                if isinstance(item, NeMoGymResponseFunctionCallOutput):
+                    item.output = native_outputs.get(item.call_id, item.output)
         # Some adapters' trajectories drop tool outputs or collapse the run into one step. Keep the fuller record.
         atif_counts, native_counts = _tool_output_counts(atif_items), _tool_output_counts(native_items)
         output_items = (

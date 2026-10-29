@@ -565,6 +565,53 @@ def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(native_output: st
     assert fabric_result["relay_atif"] == [trajectory]
 
 
+@pytest.mark.parametrize("native_output", ["README.txt", ""])
+@pytest.mark.parametrize("relay_only_call", [False, True])
+def test_relay_preserves_native_text_by_call_id(native_output: str, relay_only_call: bool, tmp_path: Path) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.claude")
+    expected = {"c1": native_output, "c2": "second result"}
+    calls = [{"tool_call_id": key, "function_name": "bash", "arguments": {}} for key in expected]
+    results = [
+        {"source_call_id": key, "extra": {"tool_result": {"stdout": text, "stderr": "", "interrupted": False}}}
+        for key, text in expected.items()
+    ]
+    events = [
+        {"message": {"content": [{"id": key, "name": "bash", "input": {}} for key in expected]}},
+        # Native results may arrive in a different order than Relay's observations.
+        {"message": {"content": [{"tool_use_id": key, "content": expected[key]} for key in reversed(expected)]}},
+    ]
+    if relay_only_call:
+        calls.append({"tool_call_id": "c3", "function_name": "weather", "arguments": {}})
+        results.append({"source_call_id": "c3", "extra": {"tool_result": {"temperature_f": 72}}})
+        expected["c3"] = '{"temperature_f": 72}'
+    trajectory = {"steps": [{"source": "agent", "tool_calls": calls, "observation": {"results": results}}]}
+
+    async def run(config, **kwargs):
+        relay_dir = Path(config.to_mapping()["relay"]["output_dir"])
+        relay_dir.mkdir(parents=True)
+        path = relay_dir / "trajectory.json"
+        path.write_text(json.dumps(trajectory))
+        result = _FakeResult()
+        result.output.update(events=events, relay_artifacts=[{"kind": "atif", "path": str(path)}])
+        return result
+
+    fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
+    fabric.run = AsyncMock(side_effect=run)
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
+    ):
+        response, fabric_result = asyncio.run(
+            agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
+        )
+
+    outputs = {item.call_id: item.output for item in response.output if item.type == "function_call_output"}
+    assert outputs == expected
+    assert list(outputs) == list(expected)
+    assert fabric_result["relay_atif"] == [trajectory]
+
+
 def test_atif_keeps_relay_structured_tool_results() -> None:
     fixture = Path(__file__).parents[3] / "tests/unit_tests/fixtures/relay_atif_v1_7_tool_trajectory.json"
     items = _atif_output_items([json.loads(fixture.read_text())], "answer")
