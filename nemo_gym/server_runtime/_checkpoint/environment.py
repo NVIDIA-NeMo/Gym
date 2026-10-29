@@ -118,6 +118,12 @@ class EnvironmentParticipant(CheckpointParticipant):
     def continuation(self, episode_id: EpisodeId) -> Optional[Boundary]:
         return self.steps.continuation(episode_id.capture_key)
 
+    def elapsed(self, episode_id: EpisodeId) -> Optional[float]:
+        return self.steps.elapsed(episode_id.capture_key)
+
+    def charge(self, episode_id: EpisodeId, seconds: float) -> None:
+        self.steps.charge(episode_id.capture_key, seconds)
+
     async def boundary(self, episode_id: EpisodeId, state: Boundary) -> None:
         await self.steps.boundary(episode_id.capture_key, state)
 

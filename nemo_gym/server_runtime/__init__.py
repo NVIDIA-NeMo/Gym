@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
+        seed_rebinds_tools,
         seed_restarts,
         seed_verify_step_type,
     )
@@ -200,6 +201,7 @@ _PUBLIC_API = {
     "next_attempt": "_checkpoint.control",
     "observe_verifier": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
+    "seed_rebinds_tools": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
