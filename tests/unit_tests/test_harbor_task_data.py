@@ -20,7 +20,6 @@ from nemo_gym.data import (
 )
 from nemo_gym.data.dataset_preparation import TrainDataProcessor
 from nemo_gym.data.tasks.harbor import content_hash
-from nemo_gym.data.tasks.harbor.cli import prepare_target
 from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY
 from nemo_gym.data.tasks.harbor.materialize import (
     agent_instance,
@@ -29,6 +28,7 @@ from nemo_gym.data.tasks.harbor.materialize import (
     run_config,
     write_rows,
 )
+from nemo_gym.data.tasks.harbor.prepare import prepare_target
 from nemo_gym.data.tasks.harbor.task_data import (
     TASK_DATA_FILE,
     TASK_DATA_MODULE,
@@ -529,7 +529,7 @@ class TestMaterializeRefusesTheDataset:
     def test_a_violating_task_refuses_the_dataset_before_images_are_recorded_or_built(self, tmp_path, monkeypatch):
         # The fields need no loaded task, so a dataset refused as a whole does not first resolve every base image
         # against the registry and build and push every Dockerfile; nested task folders are walked like the loader's.
-        from nemo_gym.data.tasks.harbor import cli as cli_module
+        from nemo_gym.data.tasks.harbor import prepare as cli_module
         from tests.unit_tests.test_harbor_tasks import FakeRegistryClient
 
         monkeypatch.setattr(FakeRegistryClient, "resolved", [])

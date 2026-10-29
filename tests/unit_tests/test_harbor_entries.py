@@ -16,10 +16,9 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.data import HarborTaskError
-from nemo_gym.data.tasks.harbor import cli as harbor_cli
 from nemo_gym.data.tasks.harbor import entries as entries_module
 from nemo_gym.data.tasks.harbor import hub as hub_module
-from nemo_gym.data.tasks.harbor.cli import PulledDataset, entry_folder, prepare_target, pull_dataset
+from nemo_gym.data.tasks.harbor import prepare as harbor_cli
 from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig, read_dataset_config
 from nemo_gym.data.tasks.harbor.digest import content_hash
 from nemo_gym.data.tasks.harbor.entries import (
@@ -36,6 +35,7 @@ from nemo_gym.data.tasks.harbor.entries import (
 )
 from nemo_gym.data.tasks.harbor.hub import HubError, RegistryDataset, RegistryTask, declares_recorded_fetch
 from nemo_gym.data.tasks.harbor.manifest import Manifest, dataset_files_digest, dataset_toml_digest
+from nemo_gym.data.tasks.harbor.prepare import PulledDataset, entry_folder, prepare_target, pull_dataset
 from nemo_gym.data.tasks.harbor.task_data import load_task_data_schema
 from tests.unit_tests.test_harbor_tasks import (
     commit_repo,

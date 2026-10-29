@@ -22,7 +22,6 @@ import tests.unit_tests.test_harbor_package_store as test_harbor_package_store
 import tests.unit_tests.test_rollout_collection as collection_tests
 from nemo_gym.data import DIGEST_KEY, load_task
 from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-from nemo_gym.data.tasks.harbor.cli import build_run, prepare_target, resolve_agent
 from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig, apply_dataset_config, read_dataset_config
 from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, content_hash
 from nemo_gym.data.tasks.harbor.hub import HubError, RegistryDataset, RegistryTask, fetch_dataset
@@ -40,6 +39,7 @@ from nemo_gym.data.tasks.harbor.manifest import (
     task_differences,
 )
 from nemo_gym.data.tasks.harbor.materialize import run_config, write_rows
+from nemo_gym.data.tasks.harbor.prepare import build_run, prepare_target, resolve_agent
 from nemo_gym.data.tasks.harbor.task import MAX_DISCOVERY_DEPTH, iter_task_folders
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from tests.unit_tests.test_harbor_tasks import (  # noqa: F401  (fixtures)
@@ -818,13 +818,13 @@ class TestPrepareRecordsIdentity:
 
         # An edit that lands after the check and before the load: the loader's digest differs from the checked one,
         # so the folder is held to the manifest once more, as a dataset folder is, and refused.
-        discover = nemo_gym.data.tasks.harbor.cli.discover_tasks
+        discover = nemo_gym.data.tasks.harbor.prepare.discover_tasks
 
         def edit_then_discover(target, **kwargs):
             (folder / "other" / "instruction.md").write_text("Create a file called cheat.txt.\n")
             return discover(target, **kwargs)
 
-        monkeypatch.setattr(nemo_gym.data.tasks.harbor.cli, "discover_tasks", edit_then_discover)
+        monkeypatch.setattr(nemo_gym.data.tasks.harbor.prepare, "discover_tasks", edit_then_discover)
         with pytest.raises(ManifestError, match=r"\(changed: other\)"):
             prepare_target(str(folder / "other"), output_root=tmp_path / "out2")
         assert not (tmp_path / "out2" / "other" / "tasks.jsonl").exists()
@@ -1270,7 +1270,7 @@ class TestManifestQuoting:
 @pytest.mark.usefixtures("fake_registry")
 class TestPrepareOrderAndTrackedFolders:
     def test_prepare_refuses_a_hand_edited_fetched_dataset_before_any_build_or_push(self, tmp_path, monkeypatch):
-        import nemo_gym.data.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.prepare as harbor_cli
 
         calls: list[str] = []
         monkeypatch.setattr(harbor_cli, "record_base_images", lambda *a, **k: calls.append("images"))

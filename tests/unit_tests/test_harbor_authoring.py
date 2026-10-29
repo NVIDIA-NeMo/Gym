@@ -20,7 +20,6 @@ import pytest
 import nemo_gym.verifiers as verifiers_package
 from nemo_gym.data import DIGEST_KEY, HarborTaskError, VerifierShim, load_task, write_shim
 from nemo_gym.data.tasks.harbor import content_hash, parameterized
-from nemo_gym.data.tasks.harbor.cli import prepare_target
 from nemo_gym.data.tasks.harbor.parameterized import (
     ParameterizedError,
     is_template_folder,
@@ -30,6 +29,7 @@ from nemo_gym.data.tasks.harbor.parameterized import (
     rendered_name,
     rendered_task_toml,
 )
+from nemo_gym.data.tasks.harbor.prepare import prepare_target
 from nemo_gym.data.tasks.harbor.publish import PublishError, answer_write_command, publish_harbor, strip_gym_table
 from nemo_gym.data.tasks.harbor.python_verifier import (
     PYTHON_FLOOR,

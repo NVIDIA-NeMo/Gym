@@ -26,7 +26,6 @@ from nemo_gym.data import (
 from nemo_gym.data.tasks.harbor import image_configs
 from nemo_gym.data.tasks.harbor import registry as registry_module
 from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-from nemo_gym.data.tasks.harbor.cli import prepare_target
 from nemo_gym.data.tasks.harbor.compose_variables import compose_variables
 from nemo_gym.data.tasks.harbor.digest import content_hash, context_digest, is_covered
 from nemo_gym.data.tasks.harbor.image_configs import (
@@ -36,6 +35,7 @@ from nemo_gym.data.tasks.harbor.image_configs import (
     record_compose_images,
     with_built_images,
 )
+from nemo_gym.data.tasks.harbor.prepare import prepare_target
 from nemo_gym.data.tasks.harbor.records import write_json_record
 from nemo_gym.data.tasks.harbor.registry import RegistryClient, parse_image_ref
 from nemo_gym.data.tasks.harbor.task import discover_tasks

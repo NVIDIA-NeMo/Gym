@@ -290,6 +290,8 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/data/hf_utils"
   - source: "/nemo/gym/nemo-gym/nemo_gym/gitlab_utils"
     destination: "/nemo/gym/nemo-gym/nemo_gym/data/gitlab_utils"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/tasks/harbor/cli"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/data/tasks/harbor/prepare"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

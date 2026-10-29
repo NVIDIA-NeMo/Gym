@@ -25,9 +25,9 @@ from nemo_gym.data.tasks.harbor import image_configs
 from nemo_gym.data.tasks.harbor.build_options import BuildOptions
 from nemo_gym.data.tasks.harbor.build_plan import DEFAULT_PLATFORM, BuildError, plan_builds
 from nemo_gym.data.tasks.harbor.build_records import build_inputs_digest, settle_entry
-from nemo_gym.data.tasks.harbor.cli import prepare_target
 from nemo_gym.data.tasks.harbor.digest import context_digest
 from nemo_gym.data.tasks.harbor.image_configs import record_compose_images, without_pull_policy
+from nemo_gym.data.tasks.harbor.prepare import prepare_target
 from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
 from nemo_gym.data.tasks.harbor.task import discover_tasks
 
@@ -660,7 +660,7 @@ class TestPreparedImages:
         assert json.loads((tmp_path / "out" / "ds" / "images.json").read_text()) == list(prepared.images)
 
     def test_a_sidecar_image_is_listed_as_its_record_pins_it(self, tmp_path):
-        from nemo_gym.data.tasks.harbor.cli import run_images
+        from nemo_gym.data.tasks.harbor.prepare import run_images
 
         folder = tmp_path / "ds"
         folder.mkdir()

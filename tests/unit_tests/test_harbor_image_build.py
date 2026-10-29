@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import nemo_gym.cli.eval as cli_eval
 import nemo_gym.data.tasks.harbor.build_options as build_options
 import nemo_gym.data.tasks.harbor.prepare_builds as prepare_builds
 from nemo_gym.data import BUILT_IMAGES_FILE, RECORD_VERSION, HarborTaskError, load_task
@@ -107,7 +108,7 @@ class TestPrepareBuilds:
 
     def test_prepare_builds_once_and_the_tasks_load_in_pull_mode(self, tmp_path, fake_builder, capsys):
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -147,7 +148,7 @@ class TestPrepareBuilds:
         silently missing on every repeat preparation. The fast path records them too, and still needs no build tool."""
         from nemo_gym.data.tasks.harbor import image_configs
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_task(folder / "d")
@@ -194,7 +195,7 @@ class TestPrepareBuilds:
         built like world's, nothing is refused before the builder runs, and the task prepares with all three recorded."""
         from nemo_gym.data.tasks.harbor import image_configs
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
         from nemo_gym.data.tasks.harbor.prepare_builds import refused_before_build
 
         class NoRegistry:
@@ -236,7 +237,7 @@ class TestPrepareBuilds:
         was built but its verifier image never recorded and b failed to load. The plan is now made again without the
         refused tasks: b's main and the shared verifier are built, the verifier entry narrowed to b, only a left out."""
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         refused_compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n    privileged: true\n"
@@ -284,8 +285,8 @@ class TestPrepareBuilds:
     def test_prepare_records_a_sidecar_and_makes_no_registry_call_for_it(self, tmp_path, fake_builder, monkeypatch):
         from nemo_gym.data.tasks.harbor import image_configs
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
         from nemo_gym.data.tasks.harbor.image_configs import compose_image_references
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         class NoRegistry:
             def __init__(self, *args, **kwargs):
@@ -311,7 +312,7 @@ class TestPrepareBuilds:
 
     def test_builds_disabled_leaves_the_tasks_out_with_the_loader_message(self, tmp_path, fake_builder, capsys):
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -336,7 +337,7 @@ class TestPrepareBuilds:
         self, tmp_path, fake_builder, capsys, shape
     ):
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  world:\n    build: ./world\n"
@@ -383,7 +384,7 @@ class TestPrepareBuilds:
         by the dataset needs only the sidecar, so it loaded and ran the stale one. An unusable record is refused
         whatever else the context lacks."""
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         compose = (
@@ -433,7 +434,7 @@ class TestPrepareBuilds:
         """A record of another platform is no better than none: with builds disabled its tasks are left out with
         the reason, as the enabled path would rebuild it, and no row references the image."""
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -479,7 +480,7 @@ class TestPrepareBuilds:
         platform_pair) and its sidecar needs a build; before the check the sidecar was built with --platform
         linux/amd64/v3, pushed and recorded, and a later linux/amd64 run reused that record."""
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         with pytest.raises(BuildError, match="builds.platform: Unsupported platform: 'linux/amd64/v3'"):
             ImageBuilder(tool="docker", platform="linux/amd64/v3", run=FakeTool("docker"))
@@ -519,7 +520,7 @@ class TestPrepareBuilds:
         to build still needs one, and the error says how to run with recorded images only."""
         import nemo_gym.data.tasks.harbor.build_tools as image_build_module
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -536,7 +537,7 @@ class TestPrepareBuilds:
             prepare_target(str(folder), output_root=tmp_path / "out", build=BuildOptions())
 
     def test_a_failed_build_stops_prepare_naming_the_tasks(self, tmp_path, monkeypatch):
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -672,7 +673,7 @@ class TestBuildOptions:
         """Both entry points hand the block of the command line's configuration to prepare."""
         import argparse
 
-        import nemo_gym.data.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.prepare as harbor_cli
 
         seen: list[build_options.BuildOptions] = []
 
@@ -684,17 +685,21 @@ class TestBuildOptions:
             raise SystemExit(message)
 
         monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
+        monkeypatch.setattr(cli_eval, "prepare_target", fake_prepare)
         # The rows file is scoped to the agent, so the stub has to name one.
         monkeypatch.setattr(
             harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(tmp_path / "a.yaml", name, name)
+        )
+        monkeypatch.setattr(
+            cli_eval, "resolve_agent", lambda name: harbor_cli.AgentSelection(tmp_path / "a.yaml", name, name)
         )
         args = argparse.Namespace(
             target=str(tmp_path), agent="a", sandbox=None, _parser=argparse.Namespace(error=fail)
         )
         with pytest.raises(SystemExit, match="stop here"):
-            harbor_cli.run_target(args, ["++builds.enabled=false"])
+            cli_eval.run_target(args, ["++builds.enabled=false"])
         with pytest.raises(SystemExit, match="stop here"):
-            harbor_cli.validate_target(args, ["++builds.platform=linux/arm64"])
+            cli_eval.validate_target(args, ["++builds.platform=linux/arm64"])
         assert seen == [
             build_options.BuildOptions(enabled=False, tool="podman", repository="env.example/r"),
             build_options.BuildOptions(tool="podman", repository="env.example/r", platform="linux/arm64"),
@@ -893,7 +898,7 @@ class TestSeparateVerifierImage:
         """Review (M24): ``images.json`` named the task images, the declared verifier images and the Compose services
         but not a verifier image built from ``tests/Dockerfile``, which the episode starts like the others, so a host
         pre-pulling from the manifest did not have it."""
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
@@ -945,7 +950,7 @@ class TestSeparateVerifierImage:
         """A pull-mode main needs no build; the verifier's tests/Dockerfile does. With builds disabled the task is
         left out, in skipped.json and in prepare's message, as a task with an unrecorded environment/ build is."""
         from nemo_gym.data.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
@@ -973,7 +978,7 @@ class TestSeparateVerifierImage:
     ):
         """Harbor builds and starts every service of tests/docker-compose.yaml as the verifier's Compose project;
         this server starts one verifier sandbox, so such a task is refused, built image or declared one."""
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
@@ -1028,7 +1033,7 @@ class TestSeparateVerifierImage:
         the verifier from the TOML environment alone and used to accept the file silently, grading 0. A runtime key
         on main is refused like a sidecar; main's image, build section and pull_policy are still read for a verifier
         prepare builds from tests/Dockerfile."""
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_separate_task(folder / "a", dockerfile=PULL_DOCKERFILE)
@@ -1170,7 +1175,7 @@ class TestSeparateVerifierImage:
         project's default network) while this server's sandbox grades with it; ``volumes`` and the rest are refused
         as the class, so only ``services``, ``name``, ``version`` and ``x-`` extensions load. An empty file and a
         plain main-only one still load, and a built verifier's file is refused before any build as well."""
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_separate_task(
@@ -1326,7 +1331,7 @@ class TestSeparateVerifierImage:
         """a and b share tests/ (one verifier context) but own distinct environment/ folders; the shared verifier
         build fails after a's environment/ is built and before b's. b's environment/ is then skipped: b is already
         out, and a build for it alone would be wasted and recorded against a skipped task."""
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_separate_task(folder / "a", extra={"tools/setup.sh": "#!/bin/sh\necho a\n"})
@@ -1388,7 +1393,7 @@ class TestSeparateVerifierImage:
         assert task.image == "ubuntu:24.04" and task.verifier_image == verifier.tag
 
     def test_a_failed_verifier_build_leaves_its_task_out_and_the_others_prepare(self, tmp_path, monkeypatch, capsys):
-        from nemo_gym.data.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.prepare import prepare_target
 
         folder = tmp_path / "ds"
         write_separate_task(folder / "ok")
@@ -1422,8 +1427,8 @@ class TestSandboxProviderAtPrepare:
     """M28: prepare learns the deployment's provider name from the `sandbox:` block's keys, never its values."""
 
     def test_provider_name_is_read_from_the_block_keys_without_resolving_values(self, tmp_path, monkeypatch):
-        import nemo_gym.data.tasks.harbor.cli as harbor_cli
-        from nemo_gym.data.tasks.harbor.cli import sandbox_provider_from_overrides
+        import nemo_gym.data.tasks.harbor.prepare as harbor_cli
+        from nemo_gym.cli.eval import sandbox_provider_from_overrides
 
         dotenv = tmp_path / "env.yaml"
         dotenv.write_text("some_key: 1\n")
@@ -1441,6 +1446,7 @@ class TestSandboxProviderAtPrepare:
         provider_file = tmp_path / "docker.yaml"
         provider_file.write_text("sandbox:\n  docker:\n    create: {use_init: true}\n")
         monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider_file)
+        monkeypatch.setattr(cli_eval, "resolve_sandbox_config", lambda name: provider_file)
         assert sandbox_provider_from_overrides([], "docker") == "docker"
         # A ++ override on the command line is part of the picture too.
         assert sandbox_provider_from_overrides(["++sandbox.opensandbox.connection.domain=x"], None) == "opensandbox"
@@ -1448,7 +1454,7 @@ class TestSandboxProviderAtPrepare:
     def test_run_and_validate_hand_the_provider_to_prepare(self, tmp_path, monkeypatch):
         import argparse
 
-        import nemo_gym.data.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.prepare as harbor_cli
 
         seen = {}
 
@@ -1457,34 +1463,37 @@ class TestSandboxProviderAtPrepare:
             raise harbor_cli.HubError("stop here")
 
         monkeypatch.setattr(harbor_cli, "prepare_target", fake_prepare)
-        monkeypatch.setattr(harbor_cli, "build_options_from_overrides", lambda overrides: build_options.BuildOptions())
-        monkeypatch.setattr(harbor_cli, "sandbox_provider_from_overrides", lambda overrides, sandbox: f"p:{sandbox}")
-        monkeypatch.setattr(
-            harbor_cli, "gpu_sandbox_provider_from_overrides", lambda overrides, sandbox: f"g:{sandbox}"
-        )
-        monkeypatch.setattr(harbor_cli, "compose_platform_from_overrides", lambda overrides: "linux/arm64")
+        monkeypatch.setattr(cli_eval, "prepare_target", fake_prepare)
+        monkeypatch.setattr(cli_eval, "build_options_from_overrides", lambda overrides: build_options.BuildOptions())
+        monkeypatch.setattr(cli_eval, "sandbox_provider_from_overrides", lambda overrides, sandbox: f"p:{sandbox}")
+        monkeypatch.setattr(cli_eval, "gpu_sandbox_provider_from_overrides", lambda overrides, sandbox: f"g:{sandbox}")
+        monkeypatch.setattr(cli_eval, "compose_platform_from_overrides", lambda overrides: "linux/arm64")
         # The M22 readers of the same blocks are stubbed too: the sandbox file this test names does not exist.
-        monkeypatch.setattr(harbor_cli, "volume_sources_from_overrides", lambda overrides, sandbox: None)
-        monkeypatch.setattr(harbor_cli, "gpu_volume_sources_from_overrides", lambda overrides, sandbox: None)
-        monkeypatch.setattr(harbor_cli, "shared_storage_from_overrides", lambda overrides, sandbox: None)
-        monkeypatch.setattr(harbor_cli, "gpu_shared_storage_from_overrides", lambda overrides, sandbox: None)
-        monkeypatch.setattr(harbor_cli, "registry_credentials_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(cli_eval, "volume_sources_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(cli_eval, "gpu_volume_sources_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(cli_eval, "shared_storage_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(cli_eval, "gpu_shared_storage_from_overrides", lambda overrides, sandbox: None)
+        monkeypatch.setattr(cli_eval, "registry_credentials_from_overrides", lambda overrides, sandbox: None)
         # The rows file is scoped to the agent, so the stub has to name one.
         monkeypatch.setattr(
             harbor_cli, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
         )
+        monkeypatch.setattr(
+            cli_eval, "resolve_agent", lambda name: harbor_cli.AgentSelection(Path("a.yaml"), name, name)
+        )
         monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: tmp_path / f"{name}.yaml")
+        monkeypatch.setattr(cli_eval, "resolve_sandbox_config", lambda name: tmp_path / f"{name}.yaml")
         parser = argparse.ArgumentParser()
         parser.error = lambda message: (_ for _ in ()).throw(SystemExit(message))
         args = argparse.Namespace(target="run-target", agent="hermes_agent", sandbox="docker", _parser=parser)
         with pytest.raises(SystemExit, match="stop here"):
-            harbor_cli.run_target(args, [])
+            cli_eval.run_target(args, [])
         assert seen["run-target"]["sandbox_provider"] == "p:docker"
         assert seen["run-target"]["gpu_sandbox_provider"] == "g:docker"
         assert seen["run-target"]["compose_platform"] == "linux/arm64"
         args = argparse.Namespace(target="validate-target", sandbox=None, _parser=parser)
         with pytest.raises(SystemExit, match="stop here"):
-            harbor_cli.validate_target(args, [])
+            cli_eval.validate_target(args, [])
         assert seen["validate-target"]["sandbox_provider"] == "p:None"
         assert seen["validate-target"]["gpu_sandbox_provider"] == "g:None"
         assert seen["validate-target"]["compose_platform"] == "linux/arm64"
@@ -1492,7 +1501,7 @@ class TestSandboxProviderAtPrepare:
     def test_the_gpu_block_provider_and_the_platform_are_read_from_the_same_configuration(self, tmp_path, monkeypatch):
         """The server routes GPU sidecars to `gpu_sandbox_provider` and checks `platform` against
         `sandbox_provider_options.platform`; prepare reads both from the configuration the command names."""
-        from nemo_gym.data.tasks.harbor.cli import (
+        from nemo_gym.cli.eval import (
             GPU_SANDBOX_PROVIDER_KEY,
             SANDBOX_PROVIDER_OPTIONS_KEY,
             compose_platform_from_overrides,
@@ -1528,9 +1537,9 @@ class TestSandboxProviderAtPrepare:
         """Review: an OpenSandbox volume with `host.path: ${results_dir}/task-data` is a supported option whose
         default the server's configuration parser supplies at dispatch; run and validate read the platform before
         prepare_target, so only `sandbox_provider_options.platform` is resolved and the sibling volume is left."""
+        from nemo_gym.cli.eval import SANDBOX_PROVIDER_OPTIONS_KEY, compose_platform_from_overrides
         from nemo_gym.config.global_config import ConfigInterpolationError
         from nemo_gym.data.tasks.harbor.build_options import _block_from_overrides
-        from nemo_gym.data.tasks.harbor.cli import SANDBOX_PROVIDER_OPTIONS_KEY, compose_platform_from_overrides
 
         block: object = {
             "platform": {"os": "linux", "arch": "aarch64"},

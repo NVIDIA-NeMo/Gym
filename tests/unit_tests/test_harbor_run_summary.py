@@ -11,9 +11,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as main_module
 from nemo_gym.config import global_config
-from nemo_gym.data.tasks.harbor.cli import prepare_target, resolve_agent
+from nemo_gym.data.tasks.harbor.prepare import prepare_target, resolve_agent
 from nemo_gym.data.tasks.harbor.run_summary import build_run_summary, write_run_summary
 from nemo_gym.rollout_health import write_provisional_summary
 from nemo_gym.utils import failures_path_for, materialized_path_for
@@ -1107,8 +1108,6 @@ def test_a_resumed_run_summarizes_the_saved_schedule_it_resumed_not_the_current_
 
 
 def test_summary_writer_failure_never_hides_the_run(tmp_path, monkeypatch, capfd, validation_cli):
-    from nemo_gym.data.tasks.harbor import cli as cli_module
-
     write_task(tmp_path / "ds" / "a")
 
     def collect(target, tokens):
@@ -1120,6 +1119,6 @@ def test_summary_writer_failure_never_hides_the_run(tmp_path, monkeypatch, capfd
         raise OSError("disk full")
 
     monkeypatch.setattr(main_module, "dispatch", collect)
-    monkeypatch.setattr(cli_module, "write_run_summary", broken)
+    monkeypatch.setattr(cli_eval, "write_run_summary", broken)
     validation_cli()  # the validation itself still passes
     assert "Could not write the run summary" in capfd.readouterr().err

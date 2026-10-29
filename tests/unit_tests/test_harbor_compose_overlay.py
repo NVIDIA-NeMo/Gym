@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from nemo_gym.cli.eval import COMPOSE_OVERLAY_KEY, compose_overlay_from_overrides
 from nemo_gym.data import (
     BUILT_IMAGES_FILE,
     RECORD_VERSION,
@@ -28,12 +29,6 @@ from nemo_gym.data import (
     wrap_first_instruction,
 )
 from nemo_gym.data.tasks.harbor import image_configs
-from nemo_gym.data.tasks.harbor.cli import (
-    COMPOSE_OVERLAY_KEY,
-    compose_overlay_from_overrides,
-    prepare_target,
-    run_images,
-)
 from nemo_gym.data.tasks.harbor.compose_overlay import (
     RESET,
     OverrideMapping,
@@ -49,6 +44,7 @@ from nemo_gym.data.tasks.harbor.compose_overlay import (
 )
 from nemo_gym.data.tasks.harbor.digest import context_digest
 from nemo_gym.data.tasks.harbor.image_configs import record_compose_images
+from nemo_gym.data.tasks.harbor.prepare import prepare_target, run_images
 from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
 
 
