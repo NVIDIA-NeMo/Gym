@@ -342,6 +342,69 @@ def test_known_incomplete_coverage_suppresses_dependent_intervals(tmp_path: Path
     assert result.per_model[0].statistics.ci_high is None
     assert result.overall.weights == [0.5, 0.5]
     assert result.warnings
+    if mode == "missing_task":
+        assert "Results are missing 1 of 2 planned tasks (task indices: 1)." in incomplete.baseline.coverage.notes
+        assert "Results are missing 2 of 4 planned rollouts." in incomplete.baseline.coverage.notes
+    elif mode == "partial_repeat":
+        assert "Results are missing 1 of 4 planned rollouts." in incomplete.baseline.coverage.notes
+        assert not any("planned tasks (task indices:" in note for note in incomplete.baseline.coverage.notes)
+
+
+@pytest.mark.parametrize(
+    ("recorded_tasks", "planned_tasks", "expected_notes"),
+    [
+        ((0,), (0, 1), ["Results are missing 1 of 2 planned tasks (task indices: 1)."]),
+        (
+            (0, 2),
+            (0, 1),
+            [
+                "Results are missing 1 of 2 planned tasks (task indices: 1).",
+                "Results include 1 unplanned task (task indices: 2).",
+                "Results are missing 2 of 4 planned rollouts.",
+                "Results include 2 unplanned rollouts.",
+            ],
+        ),
+        (
+            (0, 4, 2),
+            (0,),
+            ["Results include 2 unplanned tasks (task indices: 2, 4).", "Results include 4 unplanned rollouts."],
+        ),
+        (
+            (0,),
+            tuple(range(12, -1, -1)),
+            [
+                "Results are missing 12 of 13 planned tasks "
+                "(task indices: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ... (+2 more))."
+            ],
+        ),
+    ],
+)
+def test_coverage_warnings_identify_missing_and_unplanned_tasks(
+    tmp_path: Path,
+    recorded_tasks: tuple[int, ...],
+    planned_tasks: tuple[int, ...],
+    expected_notes: list[str],
+) -> None:
+    pair = {
+        "baseline": {"rollouts": _write_run(tmp_path / "baseline", _values(0.2, 0.4), tasks=planned_tasks)},
+        "candidate": {
+            "rollouts": _write_run(
+                tmp_path / "candidate", _values(0.4, 0.6), tasks=recorded_tasks, planned_tasks=planned_tasks
+            )
+        },
+    }
+    path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
+    result = _compare(path)
+    cell = result.cells[0]
+    assert cell.candidate.coverage.status == "incomplete"
+    assert cell.candidate.coverage.recorded_task_count == len(recorded_tasks)
+    assert cell.candidate.coverage.planned_task_count == len(planned_tasks)
+    for note in expected_notes:
+        assert note in cell.candidate.coverage.notes
+        assert f"model/test candidate: {note}" in result.warnings
+    assert cell.statistics.delta == pytest.approx(20)
+    assert cell.statistics.ci_low is None
+    assert result.overall.statistics.ci_high is None
 
 
 def test_without_materialized_inputs_coverage_is_explicitly_unverified(tmp_path: Path) -> None:
@@ -515,7 +578,7 @@ def test_recorded_group_task_mismatch_without_rollout_infos_suppresses_ci(tmp_pa
     assert result.cells[0].candidate.coverage.status == "incomplete"
     assert result.overall.statistics.delta == pytest.approx(20)
     assert result.overall.statistics.ci_low is None
-    assert any("recorded task sets differ" in warning for warning in result.warnings)
+    assert any("Candidate and baseline have results for different tasks" in warning for warning in result.warnings)
 
 
 def test_recorded_group_subset_of_planned_tasks_without_rollout_infos_suppresses_ci(tmp_path: Path) -> None:
@@ -540,7 +603,7 @@ def test_recorded_group_subset_of_planned_tasks_without_rollout_infos_suppresses
     assert result.cells[0].baseline.coverage.planned_task_count == 2
     assert result.cells[0].baseline.coverage.status == "incomplete"
     assert result.overall.statistics.ci_low is None
-    assert any("task groups do not cover" in warning for warning in result.warnings)
+    assert "Results are missing 1 of 2 planned tasks (task indices: 1)." in result.cells[0].baseline.coverage.notes
 
 
 def test_same_rollouts_cannot_be_reused_through_different_aggregate_overrides(tmp_path: Path) -> None:
