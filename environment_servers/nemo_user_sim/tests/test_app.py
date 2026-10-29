@@ -805,7 +805,9 @@ async def test_committed_activation_fixtures_round_trip_through_real_bridge(
     assert len(bridge.invocations) == 1
     assert bridge.invocations[0].role == "assistant"
     # With checkpointing on, the agent refuses a session activation whose path does not name its attempt.
-    assert client.calls[0][1] == f"/ng-rollout/{request.episode_id.capture_key}/v1/responses"
+    assert (
+        client.calls[0][1] == f"/ng-rollout/{request.episode_id.capture_key}/ng-agent-instance/assistant/v1/responses"
+    )
     sent_tools = client.calls[0][2]["json"].tools
     if probe_type == "tool_calling":
         assert [tool["name"] for tool in sent_tools] == ["get_weather"]
@@ -947,6 +949,9 @@ async def test_non_retryable_assistant_response_failure_is_verified_as_reward_ze
     assert response.result.mask_sample is False
     assert response.result.usersim_result.simulation_outcome["failure_attribution"] == "assistant_model"
     assert "/verify" in [path for _, path, _ in client.calls]
+    # Each agent session is seeded as its own agent instance.
+    seeds = [call[2]["json"] for call in client.calls if call[1] == "/v1/agent_sessions"]
+    assert [seed["agent_instance"] for seed in seeds] == ["user", "assistant"]
 
     model = ModelServerRef(type="responses_api_models", name="support")
     resources_server = UserSimResourcesServer(

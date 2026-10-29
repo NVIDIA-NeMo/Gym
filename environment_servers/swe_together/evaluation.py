@@ -33,6 +33,9 @@ from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_sta
 
 PROMPTS = Path(__file__).with_name("prompts")
 PASS_THRESHOLD = 0.85
+# The episode's agent instances: the candidate agent and the judge that grades its submission.
+ASSISTANT_AGENT_INSTANCE = "assistant"
+JUDGE_AGENT_INSTANCE = "judge"
 BASE_TAGS = {"request", "question", "verification", "workflow", "approval", "context"}
 ALL_TAGS = BASE_TAGS | {"correction", "nudge"}
 
@@ -123,6 +126,7 @@ async def run_judge(
     patch: str,
     workdir: str,
     episode: EpisodeId,
+    activation_path: str,
     task_id: TaskId,
     timeout: float,
     cookies: dict[str, str],
@@ -135,11 +139,12 @@ async def run_judge(
     prompt = await stage_judge(sandbox, task_dir, patch, workdir)
     session_id = "judge-" + uuid4().hex
     judge_cookies = dict(cookies)
-    # The judge is a separate logical activation and has a separate capture identity.
-    judge_episode = EpisodeId(rollout_id=episode.capture_key + "-judge")
+    # The judge is the episode's agent instance ``judge``: its calls share the episode's capture key, so the
+    # episode's retire covers them, and its own name keeps them apart from the assistant's.
     seed = AgentSeedSessionRequest(
         agent_session_id=session_id,
-        episode_id=judge_episode,
+        episode_id=episode,
+        agent_instance=JUDGE_AGENT_INSTANCE,
         task_id=task_id,
         sandbox_access=SandboxAccess(
             connection=DirectSandboxConnection(provider_config_ref=provider, descriptor=await sandbox.serialize()),
@@ -164,9 +169,7 @@ async def run_judge(
                 "agent_timeout_sec": str(min(timeout, max(0.001, deadline - monotonic())) if deadline else timeout)
             },
         )
-        response = await client.post(
-            agent.name, f"/ng-rollout/{judge_episode.capture_key}/v1/responses", json=params, cookies=judge_cookies
-        )
+        response = await client.post(agent.name, activation_path, json=params, cookies=judge_cookies)
         await raise_for_status(response)
         transcript = await get_response_json(response)
         (artifact_dir / "judge-transcript.json").write_text(json.dumps(transcript, indent=2))
@@ -192,7 +195,7 @@ async def run_judge(
                 response = await client.post(
                     agent.name,
                     "/v1/agent_sessions/close",
-                    json=AgentCloseSessionRequest(agent_session_id=session_id, episode_id=judge_episode),
+                    json=AgentCloseSessionRequest(agent_session_id=session_id, episode_id=episode),
                     cookies=judge_cookies,
                     _control=True,
                 )
