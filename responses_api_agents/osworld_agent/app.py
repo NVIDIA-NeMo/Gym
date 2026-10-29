@@ -1210,6 +1210,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "mask_sample": result.mask_sample,
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
+        "episode_end": result.episode_end,
         "agent_contract": result.agent_contract,
         # Set only by the built-in rollout; a runner's own result type need not have it.
         "sandbox_start_failure": getattr(result, "sandbox_start_failure", None),
@@ -1906,6 +1907,14 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    episode_end = result.get("episode_end")
+    if episode_end is not None:
+        from responses_api_agents.osworld_agent.client import EPISODE_END_KINDS  # noqa: PLC0415
+
+        metadata["osworld_episode_end"] = episode_end
+        # Scalar top-level fields become per-step trainer metrics.
+        for kind in EPISODE_END_KINDS:
+            response_fields[f"episode_end_{kind}"] = float(episode_end == kind)
     if terminal_response_id is not None:
         # Names the scored (last) generation by the id the model server served.
         response_fields["terminal_response_id"] = terminal_response_id

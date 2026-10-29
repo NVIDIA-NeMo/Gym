@@ -1364,6 +1364,7 @@ def test_nemotron_v3_nano_omni_runner_uses_gym_messages_transport(monkeypatch) -
 
     assert result.reward == 1.0
     assert result.finished is True
+    assert result.episode_end == "done"
     assert result.steps[0].model_text == "Nemotron response"
     assert result.steps[0].actions == ["DONE"]
     assert result.steps[0].info["agent"]["thought"] == "Inspect then finish."
@@ -1416,6 +1417,7 @@ def test_nemotron_invalid_sample_stops_without_synthetic_fail(monkeypatch, agent
     assert result.runtime_eligible is True
     assert result.mask_sample is False
     assert result.termination_reason == agent_outcome
+    assert result.episode_end == "unterminated"
     assert result.steps[0].actions == []
     assert FakeEnv.instances[0].actions == []
 
@@ -1493,6 +1495,7 @@ def test_nemotron_context_limit_stop_is_evaluated_and_trainable(monkeypatch, mod
     assert result.runtime_eligible is True
     assert result.mask_sample is False
     assert result.termination_reason == "context_limit_reached"
+    assert result.episode_end == "unterminated"
     assert result.error is None
     assert FakeEnv.instances[0].actions == []
 
@@ -1524,7 +1527,41 @@ def test_nemotron_model_authored_fail_remains_unmasked(monkeypatch) -> None:
     assert result.finished is True
     assert result.mask_sample is False
     assert result.termination_reason == "agent_fail"
+    assert result.episode_end == "agent_fail"
     assert result.steps[0].actions == ["FAIL"]
+
+
+@pytest.mark.parametrize("forced_terminal", ["max_steps", "context_limit", "model_response_invalid"])
+def test_nemotron_adapter_forced_fail_is_reported_as_forced(monkeypatch, capsys, forced_terminal) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def forced_fail(_self, _instruction, _obs):
+        return "", ["FAIL"], {"forced_terminal": forced_terminal, "model_calls": []}
+
+    monkeypatch.setattr(FakeNemotronAgent, "predict", forced_fail)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-nano-forced-fail", "instruction": "Use the scaffold."},
+        model_fn=lambda *_args: pytest.fail("Nemotron should not use model_fn"),
+        runner_name="nemotron_v3_nano_omni_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeNemotronAgent",
+        messages_model_fn=lambda *_args: pytest.fail("predict is stubbed"),
+        policy_model_name="nemotron-3-nano-omni-under-test",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.termination_reason == "agent_fail"
+    assert result.episode_end == "forced_fail"
+    episode_lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("OSWORLD_EPISODE_END|")]
+    assert len(episode_lines) == 1
+    assert "|episode_end=forced_fail|" in episode_lines[0]
+    assert f"|forced_terminal={forced_terminal}|" in episode_lines[0]
+
+
+def test_rollout_result_rejects_unknown_episode_end() -> None:
+    with pytest.raises(ValueError, match="episode_end"):
+        osworld_client.RolloutResult(reward=0.0, score=0.0, steps=[], episode_end="quit")
 
 
 def test_qwen3_omni_runner_retries_and_merges_adjacent_pyautogui_actions(monkeypatch) -> None:

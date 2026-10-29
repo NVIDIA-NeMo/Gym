@@ -900,6 +900,30 @@ def test_build_response_preserves_evaluated_horizon_without_runtime_mask(score: 
     assert response.verifier_metadata["osworld_horizon_reached"] is True
 
 
+@pytest.mark.parametrize("episode_end", ["done", "agent_fail", "forced_fail", "unterminated"])
+def test_build_response_exposes_episode_end_as_one_hot_scalars(episode_end: str) -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+    result = {**DEFAULT_RUN_RESULT, "episode_end": episode_end}
+
+    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+    dumped = response.model_dump()
+
+    assert response.verifier_metadata["osworld_episode_end"] == episode_end
+    assert {key: value for key, value in dumped.items() if key.startswith("episode_end_")} == {
+        f"episode_end_{kind}": float(kind == episode_end)
+        for kind in ("done", "agent_fail", "forced_fail", "unterminated")
+    }
+
+
+def test_build_response_without_episode_end_adds_no_scalars() -> None:
+    request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
+
+    response = _build_response(request, dict(DEFAULT_RUN_RESULT), "test-policy", 1.0, 0.9)
+
+    assert "osworld_episode_end" not in response.verifier_metadata
+    assert not any(key.startswith("episode_end_") for key in response.model_dump())
+
+
 def test_build_response_rejects_inconsistent_legacy_runtime_mask() -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     result = {**DEFAULT_RUN_RESULT, "mask_sample": True}
@@ -2267,7 +2291,9 @@ def _chat_usage(prompt: int, cached: int, completion: int, reasoning: int) -> Di
 def _child_result(**fields: Any) -> SimpleNamespace:
     steps = [SimpleNamespace(**step, state=None, next_state=None) for step in DEFAULT_RUN_RESULT["steps"]]
     values = {k: v for k, v in DEFAULT_RUN_RESULT.items() if k != "steps"}
-    return SimpleNamespace(**values, termination_reason="done", agent_contract=None, steps=steps, **fields)
+    return SimpleNamespace(
+        **values, termination_reason="done", agent_contract=None, episode_end=None, steps=steps, **fields
+    )
 
 
 def _run_child(fake_run_osworld_task: Any, completions: list[Any]) -> Dict[str, Any]:
