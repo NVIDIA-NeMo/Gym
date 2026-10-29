@@ -863,7 +863,7 @@ class TestLLMClientTeardown:
 
 
 def test_startup_logs_the_deprecation_notice(caplog) -> None:
-    """The server says on startup that it is superseded by the Harbor task format and where that lives."""
+    """The server says on startup that it is deprecated, where its replacement lives, and that users need not act yet."""
     server = _make_server()
     with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent.app"):
         server.model_post_init(None)
@@ -874,4 +874,6 @@ def test_startup_logs_the_deprecation_notice(caplog) -> None:
     assert "environment_servers/harbor" in notice
     # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
     assert "docs.nvidia.com" not in notice
+    # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
+    assert "no action is needed" in notice
     assert server.sem is not None
