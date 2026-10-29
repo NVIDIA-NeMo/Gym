@@ -77,7 +77,9 @@ score is masked as `judge_failed`.
 Assistant-attributed simulation failures, including Assistant contract
 rejections and non-session 4xx responses, receive an unmasked reward of zero.
 Simulation failures that NeMo User Sim attributes outside the Assistant receive
-a masked reward of zero. Transport failures, participant timeouts, session 404 and 409
+a masked reward of zero. Their `failure_kind` is the reported `failure_class`
+(prefixed `usersim:` unless it is a shared name), or `usersim:simulation_failed`
+when none is reported. Transport failures, participant timeouts, session 404 and 409
 responses, and 408, 425, 429, and 5xx responses produce no reward; they are
 written to `rollouts_failures.jsonl`. Guarded health rows are rejected at seed
 time because the pinned NeMo User Sim revision cannot run their user-side tool
