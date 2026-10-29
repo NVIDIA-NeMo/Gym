@@ -19,7 +19,9 @@ Only independently constructed synthetic fixtures are committed.
 `REVERIFY_MODE=STATELESS` supports saved native Gym responses. The adaptive
 profile additionally verifies immutable upstream delivery receipts. A shared
 receipt filesystem must support POSIX advisory locks. Duplicate live callers
-share one saved grade; an abandoned in-flight dispatch requires reconciliation.
+share one saved grade; an abandoned in-flight dispatch requires
+[receipt reconciliation](../../benchmarks/agentic_if_realworld/reconciliation.md).
+The runbook covers saved-answer judge recovery as well as policy delivery failures.
 
 ## Public CI examples
 

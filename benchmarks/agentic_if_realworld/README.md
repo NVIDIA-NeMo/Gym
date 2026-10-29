@@ -166,8 +166,10 @@ incomplete delivery does, only when a response establishes the delivery outcome.
 A connection refusal or connect timeout stops the run; explicit resume retries
 the same seed and token cap while retaining the failed receipt. A complete saved
 SSE answer remains selected even if the connection fails after its final event.
-Uncertain dispatch or a run stopped mid-generation requires receipt reconciliation
-before resume. Keep N within the policy server's capacity.
+Uncertain dispatch or a run stopped mid-generation requires
+[receipt reconciliation](reconciliation.md) before resume. The runbook identifies
+safe resume cases and how to preserve a run that cannot be recovered automatically.
+Keep N within the policy server's capacity.
 
 ### Private YAML configuration
 
