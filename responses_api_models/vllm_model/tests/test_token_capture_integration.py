@@ -9,8 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import _CaptureMiddleware
-from nemo_gym.client import ServerClient
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
 from nemo_gym.models import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
@@ -21,7 +20,6 @@ from nemo_gym.models import (
     FileLineageStore,
     InMemoryLineageStore,
     LineageResolver,
-    NeMoGymAsyncOpenAI,
     ParentResolutionStatus,
     RolloutTokenCapture,
     StageResult,
@@ -35,6 +33,7 @@ from nemo_gym.models import (
     set_token_sink,
     trajectories_from_source,
 )
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -278,7 +277,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         raise ValueError("injected final conversion failure")
 
     if failure == "serialization":
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._orjson_dispatch_response", fail_conversion)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._orjson_dispatch_response", fail_conversion)
     elif endpoint == "responses":
         monkeypatch.setattr(type(model._converter), "chat_completion_to_response", fail_conversion)
     else:

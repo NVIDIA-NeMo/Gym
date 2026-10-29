@@ -15,11 +15,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletion
 from nemo_gym.models import (
+    ModelCallCaptureConfig,
     flatten_namespace_tools,
+    install_model_call_capture,
     restore_namespace_tool_calls,
     synthesize_chat_completion_sse,
     synthesize_responses_sse,

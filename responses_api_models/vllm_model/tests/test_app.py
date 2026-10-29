@@ -33,7 +33,7 @@ from yarl import URL
 
 import nemo_gym.server_runtime.base_server
 from nemo_gym import PARENT_DIR
-from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
+from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI, PermanentEndpointError, ServerClient, raise_for_status
 from nemo_gym.core import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymChatCompletion,
@@ -70,9 +70,7 @@ from nemo_gym.models import (
     CaptureAdmission,
     CaptureContext,
     InMemoryLineageStore,
-    NeMoGymAsyncOpenAI,
     ParentResolutionStatus,
-    PermanentEndpointError,
     PolicyModelParticipant,
     TokenCaptureStore,
     VLLMWorkerCaptureHandler,
@@ -1034,7 +1032,7 @@ class TestApp:
     ) -> None:
         # Once the keepalive has committed the SSE headers, the refusal can only be an error event;
         # it carries the same envelope as the HTTP path, so a chat-SSE harness can classify it too.
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
         server = self._setup_server(monkeypatch, propagate_context_overflow_errors=True)
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
@@ -1132,7 +1130,7 @@ class TestApp:
         )
         refusal = self._engine_window_refusal()
         if route == "chat-stream-after-keepalive":
-            monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+            monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
 
             async def slow_refusal(**_kwargs):
                 await asyncio.sleep(0.05)

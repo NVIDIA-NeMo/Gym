@@ -319,11 +319,15 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/server_runtime/verifier_observability"
   - source: "/nemo/gym/:version/nemo-gym/nemo_gym/observability/verifiers"
     destination: "/nemo/gym/:version/nemo-gym/nemo_gym/server_runtime/verifier_observability"
-  # Library reference pages of modules moved into nemo_gym/models (#5166).
+  # Library reference pages of modules moved into nemo_gym/models and nemo_gym/client (#5166).
   - source: "/nemo/gym/nemo-gym/nemo_gym/openai_utils"
-    destination: "/nemo/gym/nemo-gym/nemo_gym/models/openai_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/client/openai_client"
   - source: "/nemo/gym/:version/nemo-gym/nemo_gym/openai_utils"
-    destination: "/nemo/gym/:version/nemo-gym/nemo_gym/models/openai_utils"
+    destination: "/nemo/gym/:version/nemo-gym/nemo_gym/client/openai_client"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/models/openai_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/client/openai_client"
+  - source: "/nemo/gym/:version/nemo-gym/nemo_gym/models/openai_utils"
+    destination: "/nemo/gym/:version/nemo-gym/nemo_gym/client/openai_client"
   - source: "/nemo/gym/nemo-gym/nemo_gym/anthropic_utils"
     destination: "/nemo/gym/nemo-gym/nemo_gym/models/anthropic_utils"
   - source: "/nemo/gym/:version/nemo-gym/nemo_gym/anthropic_utils"
@@ -352,6 +356,10 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/models/token_capture/:path*"
   - source: "/nemo/gym/:version/nemo-gym/nemo_gym/token_id_capture/:path*"
     destination: "/nemo/gym/:version/nemo-gym/nemo_gym/models/token_capture/:path*"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/base_responses_api_model"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/models/base_responses_api_model"
+  - source: "/nemo/gym/:version/nemo-gym/nemo_gym/base_responses_api_model"
+    destination: "/nemo/gym/:version/nemo-gym/nemo_gym/models/base_responses_api_model"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

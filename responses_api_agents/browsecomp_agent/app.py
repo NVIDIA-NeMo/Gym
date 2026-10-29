@@ -31,7 +31,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
 from nemo_gym.config import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -50,7 +50,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.models import NeMoGymAsyncOpenAI
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from responses_api_models.vllm_model.app import VLLMConverter
 

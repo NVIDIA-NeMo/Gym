@@ -14,12 +14,14 @@
 # limitations under the License.
 """NeMo Gym Pydantic types for the Anthropic Messages API boundary.
 
-This mirrors the wrapping strategy in ``nemo_gym/core/responses_api_types.py``, but deliberately stays
-small. Anthropic is only a *wire format* at the proxy boundary — the internal canonical
-representation is the Responses API (the ``NeMoGym*`` types in ``openai_utils``). So unlike
-``openai_utils``, this module does not replicate the ``*ForTraining`` hierarchies or an async
-client (the ``anthropic`` SDK is never used as a client — it uses httpx, whose O(n^2)
-connection pooling hangs at high concurrency). Types only.
+This mirrors the wrapping strategy in ``nemo_gym/core/responses_api_types.py``, but deliberately stays small.
+Anthropic is only a *wire format* at the proxy boundary.
+Internally, Gym uses the Responses API: the ``NeMoGym*`` types in that module.
+Unlike those types, this module does not replicate the ``*ForTraining`` hierarchies.
+Unlike ``nemo_gym/client/openai_client.py``, it provides no async client.
+The ``anthropic`` SDK is never used as a client, because it uses httpx.
+httpx's O(n^2) connection pooling hangs at high concurrency.
+Types only.
 
 Two boundary types, one per direction:
 

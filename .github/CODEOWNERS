@@ -66,13 +66,13 @@ uv.lock @nvidia-nemo/automation
 # Core-Arch + RL
 # suggest: /responses_api_models/ @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_runtime/base_server.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/models/openai_utils.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/client/openai_client.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/anthropic_utils.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/anthropic_converter.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/chat_completions_converter.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_runtime/base_resources_server.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/base_responses_api_agent.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/base_responses_api_model.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/models/base_responses_api_model.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/agent_registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/rollout_collection.py @nvidia-nemo/gym_core
