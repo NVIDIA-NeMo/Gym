@@ -169,17 +169,141 @@ def _as_list(value: Any) -> list[str]:
     return list(value or [])
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_TEST_STATUSES = ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED")
+_VERBOSE_TEST_LINE = re.compile(r"^(\S+::\S.*?)\s+(PASSED|FAILED|ERROR|XFAIL|SKIPPED)(?:\s+\[\s*\d+%\])?$")
+
+
+def _r2e_test_aliases(name: str) -> list[str]:
+    """Return the spellings under which one test may be listed.
+
+    pytest's ``-rA`` summary prints node ids (``r2e_tests/test_core.py::TestMaskedArray::test_basic``) while R2E's
+    expected-output maps (and FAIL_TO_PASS lists derived from them) use unittest-style ``TestMaskedArray.test_basic``.
+    Expose the node id, the ``file::Class::method`` form without the directory, the ``Class.method`` form, and the
+    bare method name. These are aliases of the recorded test, not permission to discard a required test's class or
+    file. Parameter IDs stay intact even when they contain dots, spaces, or ``::``.
+    """
+    name = _ANSI_ESCAPE.sub("", name).strip()
+    aliases = [name]
+    test, bracket, parameter = name.partition("[")
+    suffix = bracket + parameter
+    if "::" in test:
+        parts = test.split("::")
+        aliases.append("::".join([parts[0].rsplit("/", 1)[-1], *parts[1:]]) + suffix)
+        aliases.append(".".join(parts[1:]) + suffix)
+        aliases.append(parts[-1] + suffix)
+    elif "." in test:
+        aliases.append(test.rsplit(".", 1)[-1] + suffix)
+    return list(dict.fromkeys(aliases))
+
+
+def _record_test_status(statuses: Dict[str, Dict[str, str]], test: str, status: str) -> None:
+    test = _ANSI_ESCAPE.sub("", test).strip()
+    for alias in _r2e_test_aliases(test):
+        matches = statuses.setdefault(alias, {})
+        # Keep concrete identities separate so a shortened name cannot hide mixed outcomes. A failing result for the
+        # same identity takes precedence over PASSED/XFAIL in either verbose output or the later summary.
+        # SKIPPED is the weakest record: pytest prints one node id twice when a data-driven case exists in two
+        # files (mypy's suites), once SKIPPED and once PASSED in either order, and a SKIPPED that stuck graded
+        # such passing patches 0.
+        current = matches.get(test)
+        if current is None or current == "SKIPPED" or (current in ("PASSED", "XFAIL") and status != "SKIPPED"):
+            matches[test] = status
+
+
+def _r2e_summary_test_name(text: str, known_tests: set[str]) -> str:
+    """Remove pytest's failure explanation without truncating a parameter ID containing `` - ``."""
+    # PASSED and verbose lines expose the complete identity without a diagnostic suffix.
+    # Prefer those identities: arbitrary parameter IDs need not have balanced brackets.
+    if text in known_tests:
+        return text
+    end = len(text)
+    while (separator := text.rfind(" - ", 0, end)) >= 0:
+        candidate = text[:separator].strip()
+        if candidate in known_tests:
+            return candidate
+        end = separator
+    depth = 0
+    for i, character in enumerate(text):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth = max(0, depth - 1)
+        elif depth == 0 and text.startswith(" - ", i):
+            return text[:i].strip()
+    return text.strip()
+
+
 def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
-    statuses: Dict[str, str] = {}
-    # pytest can color both the status and parts of the test ID in its summary.
-    plain_log = re.sub(r"\x1b\[[0-9;]*m", "", log)
-    for line in plain_log.splitlines():
-        fields = line.strip().replace(" - ", " ").split()
-        if len(fields) > 1 and fields[0] in ("PASSED", "FAILED", "ERROR", "XFAIL", "SKIPPED"):
-            statuses[fields[1]] = fields[0]
+    statuses: Dict[str, Dict[str, str]] = {}
+    lines = [_ANSI_ESCAPE.sub("", line).strip() for line in log.splitlines()]
+    known_tests = set()
+    for line in lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) == 2 and fields[0] == "PASSED":
+            known_tests.add(fields[1])
+        if verbose := _VERBOSE_TEST_LINE.match(line):
+            known_tests.add(verbose.group(1))
+    for line in lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) > 1 and fields[0] in _TEST_STATUSES:
+            # PASSED lines have no diagnostic suffix. Parameter IDs are arbitrary text, including unmatched
+            # brackets and " - ", so parsing them as a failure explanation loses valid identities.
+            name = fields[1] if fields[0] == "PASSED" else _r2e_summary_test_name(fields[1], known_tests)
+            _record_test_status(statuses, name, fields[0])
+            continue
+        # pytest's verbose per-test line "<node id> STATUS [ 42%]", for runners that suppress the -rA summary.
+        verbose = _VERBOSE_TEST_LINE.match(line)
+        if verbose:
+            _record_test_status(statuses, verbose.group(1), verbose.group(2))
     required = _as_list(instance.get("FAIL_TO_PASS") or instance.get("fail_to_pass"))
     required += _as_list(instance.get("PASS_TO_PASS") or instance.get("pass_to_pass"))
-    return bool(required) and all(statuses.get(test) == "PASSED" for test in required)
+
+    def status_of(test: str) -> Optional[str]:
+        # Match the requirement as supplied. Falling back from TestA.test_x to test_x could reward a different
+        # class's passing test even when the required test never ran.
+        matches = statuses.get(_ANSI_ESCAPE.sub("", test).strip(), {})
+        outcomes = set(matches.values())
+        return next(iter(outcomes)) if len(outcomes) == 1 else None
+
+    # Like swebench's grading, an expected failure (XFAIL) counts as passing.
+    return bool(required) and all(status_of(test) in ("PASSED", "XFAIL") for test in required)
+
+
+def _r2e_parse_log_pytest(log: str) -> Dict[str, str]:
+    """Read R2E's short-summary map using its established, lossy key encoding.
+
+    File names are dropped, all ``::`` separators become dots (including inside parameter IDs), and failure
+    explanations are truncated at `` - ``. Keep the last reported phase, including a teardown ERROR after PASSED.
+    """
+    statuses: Dict[str, str] = {}
+    if not log or "short test summary info" not in log:
+        return statuses
+    for line in log.split("short test summary info")[1].splitlines():
+        fields = _ANSI_ESCAPE.sub("", line).strip().split(maxsplit=1)
+        if len(fields) != 2 or fields[0] not in ("PASSED", "FAILED", "ERROR"):
+            continue
+        status, text = fields
+        name = ".".join(text.split("::")[1:])
+        if status != "PASSED":
+            name = name.split(" - ")[0]
+        statuses[name] = status
+    return statuses
+
+
+def _r2e_expected_resolved(expected_output_json: Any, log: str) -> bool:
+    """R2E-Gym's expected-map reward rule, including expected FAILED and ERROR outcomes.
+
+    Preserve the upstream serialized key schema on both sides. Its truncation can alias parameter IDs;
+    recovering those identities requires a dataset format change, not a different observed-log normalization.
+    """
+    if isinstance(expected_output_json, str):
+        expected_output_json = json.loads(expected_output_json)
+    parsed = {_ANSI_ESCAPE.sub("", k): v for k, v in _r2e_parse_log_pytest(log).items()}
+    expected = {_ANSI_ESCAPE.sub("", k): v for k, v in dict(expected_output_json or {}).items()}
+    parsed = {k.split(" - ")[0]: parsed[k] for k in sorted(parsed)}
+    expected = {k.split(" - ")[0]: expected[k] for k in sorted(expected)}
+    return bool(expected) and "" not in expected and parsed == expected
 
 
 class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
@@ -209,6 +333,7 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     agent_runtime_fetch_timeout_s: int = 600
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
+    save_eval_output: bool = False
     concurrency: int = 256
 
 
@@ -551,6 +676,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
 
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        if params.save_eval_output:
+            (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
         with tempfile.NamedTemporaryFile("w", suffix=".log") as log_file:
             log_file.write(log)
             log_file.flush()
@@ -598,6 +725,14 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             return False, "eval_timeout" if result.error_type == "timeout" else "sandbox"
 
         log = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        if params.save_eval_output:
+            (params.persistent_dir / "eval_output.txt").write_text(log[-200_000:])
+        has_lists = any(
+            _as_list(instance.get(key) or instance.get(key.lower())) for key in ("FAIL_TO_PASS", "PASS_TO_PASS")
+        )
+        if not has_lists and instance.get("expected_output_json"):
+            # R2E-Gym rows without test lists carry the verdict in expected_output_json; use R2E-Gym's own rule.
+            return _r2e_expected_resolved(instance["expected_output_json"], log), None
         return _r2e_resolved(instance, log), None
 
     async def _run_agent_in_sandbox(self, params: AnySweInstanceConfig) -> NeMoGymResponse:
@@ -787,8 +922,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         )
         persistent_dir.mkdir(parents=True, exist_ok=True)
         server_config = self._server.model_dump()
-        if not self.config.sandbox_model_base_url:
-            server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
+        # A sandbox_model_base_url relays to the same model server, so it keeps the rollout path that attributes calls.
+        server_config["model_server_url"] = _model_url_for_rollout(server_config["model_server_url"], rollout_id)
         params = AnySweInstanceConfig(
             **self.config.model_dump(),
             **server_config,

@@ -172,9 +172,13 @@ async function run(inputPath) {
         const baseUrl = `http://127.0.0.1:${server.address().port}`;
         command.splice(2, 0, "-c", `model_providers.gym.base_url=${JSON.stringify(baseUrl)}`);
     }
-    const env = {};
-    for (const key of INHERITED) {
-        if (process.env[key] !== undefined) env[key] = process.env[key];
+    // By default Codex gets the sandbox's PATH, locale, HOME and XDG directories; inherit_env passes the task's
+    // whole environment, as a harness started in the container sees it.
+    const env = params.inherit_env ? { ...process.env } : {};
+    if (!params.inherit_env) {
+        for (const key of INHERITED) {
+            if (process.env[key] !== undefined) env[key] = process.env[key];
+        }
     }
     const child = spawn(command[0], command.slice(1), {
         cwd: params.cwd,

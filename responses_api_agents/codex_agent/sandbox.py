@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import shlex
+import time
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
@@ -25,6 +26,25 @@ from nemo_gym.sandbox.utils import read_text, upload_text
 LOG = logging.getLogger(__name__)
 # Uploaded beside the runner; runs Codex behind the 429 forwarder on the runtime's Node.
 LAUNCHER_FILE = "sandbox_launcher.mjs"
+# The longest the optional session-rollout copy may take, and the part of the capture budget kept free after it.
+_ARCHIVE_TIMEOUT_S = 120.0
+_ARCHIVE_RESERVE_S = 1.0
+# Runner setup for raise_oom_score_adj: make the runner, and with it Codex and every tool, the memory-cgroup OOM
+# killer's preferred victims. Raise oom_score_adj to 1000, or to 0 when the sandbox starts it below zero (a
+# Guaranteed pod's -997), so the sandbox never becomes the node's first victim in a global OOM. Raising needs no
+# privilege; a failure leaves the score unchanged. The supervisor and the exec daemon keep the sandbox's own score.
+RAISE_OOM_SCORE_ADJ = """if read -r before 2>/dev/null </proc/self/oom_score_adj && [[ $before =~ ^-?[0-9]+$ ]]; then
+    after=1000
+    ((before < 0)) && after=0
+    if echo "$after" 2>/dev/null >/proc/self/oom_score_adj; then
+        echo "oom_score_adj: $before -> $after" >&2
+    else
+        echo "oom_score_adj: unchanged" >&2
+    fi
+else
+    echo "oom_score_adj: unchanged" >&2
+fi
+"""
 
 
 class HarnessProcessInfo(BaseModel):
@@ -50,12 +70,15 @@ class CodexSandboxSession(AgentSessionState):
 
     session: SandboxSession[str]
     runtime: str
+    logs_dir: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     native_transcript: str | None = None
     model_attempts: list[dict[str, JsonValue]] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
+    # The time SandboxSession allows artifact capture (its close timeout), so the optional copy fits inside it.
+    capture_budget_s: float | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage adapter input using the shared text-transfer utility."""
@@ -71,6 +94,8 @@ class CodexSandboxSession(AgentSessionState):
 
     async def close(self, timeout: float) -> None:
         """Capture and release before cancelling the HTTP activation."""
+        if self.capture_budget_s is None:
+            self.capture_budget_s = timeout
         await self.session.close(timeout=timeout)
         if self.task is not None and not self.task.done() and not self.task.cancelling():
             self.task.cancel()
@@ -87,6 +112,7 @@ class CodexSandboxSession(AgentSessionState):
 
     async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
         """Run through the common lifecycle; the adapter validates terminal events."""
+        self.capture_budget_s = close_timeout
         return await self.session.execute(
             stage_activation=lambda: self.stage_activation(payload),
             collect=self.collect_artifacts,
@@ -102,18 +128,47 @@ class CodexSandboxSession(AgentSessionState):
         params = {
             "cwd": self.session.workdir,
             "command": [f"{self.runtime}/node/bin/node", f"{directory}/{LAUNCHER_FILE}", f"{directory}/input.json"],
-            # The launcher passes Codex an allowlisted environment; task Node options must not reach the launcher.
-            "unset_env": ["NODE_OPTIONS"],
             "stdin": f"{directory}/prompt.txt",
             "stdout": f"{directory}/stdout.log",
             "stderr": f"{directory}/stderr.log",
             "events": f"{directory}/events.jsonl",
         }
+        if not payload.get("inherit_env"):
+            # The launcher passes Codex an allowlisted environment; task Node options must not reach the launcher.
+            # A Codex given the task's whole environment sees them, as a plain codex exec in the task would.
+            params["unset_env"] = ["NODE_OPTIONS"]
+        if payload.get("raise_oom_score_adj"):
+            # The runner's stderr is the supervisor's output.log, which records the change.
+            params["setup"] = RAISE_OOM_SCORE_ADJ
         await self.upload_text("params.sh", shell_assignments(params))
         return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
+    async def copy_session_rollouts(self, deadline: float | None = None) -> None:
+        """Copy Codex's session rollouts (CODEX_HOME/sessions) to logs_dir/sessions by ``deadline``
+        (``time.monotonic()``); never fails collection."""
+        if not self.logs_dir:
+            return
+        budget = _ARCHIVE_TIMEOUT_S if deadline is None else min(_ARCHIVE_TIMEOUT_S, deadline - time.monotonic())
+        if budget <= 0:
+            LOG.warning("Codex session rollouts not copied: no capture time left")
+            return
+        sessions = f"{self.session.session_dir}/home/.codex/sessions"
+        target = f"{self.logs_dir}/sessions"
+        command = (
+            f"if [ -d {shlex.quote(sessions)} ]; then mkdir -p {shlex.quote(target)} && "
+            f"cp -R {shlex.quote(sessions)}/. {shlex.quote(target)}/; fi"
+        )
+        try:
+            async with asyncio.timeout(budget):
+                result = await self.session.sandbox.exec(command, cwd="/", timeout_s=budget)
+            if result.return_code != 0 or result.error_type:
+                LOG.warning("Codex session rollouts not copied: %s", result.stderr or result.stdout)
+        except Exception:
+            LOG.exception("Codex session rollouts not copied")
+
     async def collect_artifacts(self) -> str:
         """Keep partial events even when worker metadata is unavailable."""
+        started = time.monotonic()
         try:
             events = await self.read_text("events.jsonl")
         except Exception as error:
@@ -151,4 +206,9 @@ class CodexSandboxSession(AgentSessionState):
             self.model_attempts = [json.loads(line) for line in attempts.splitlines()]
         except Exception:
             LOG.warning("Codex model attempt statuses unavailable", exc_info=True)
+        # The optional copy goes last and ends before the capture budget does, so a slow copy cannot cost the events.
+        if self.capture_budget_s is not None:
+            await self.copy_session_rollouts(deadline=started + self.capture_budget_s - _ARCHIVE_RESERVE_S)
+        else:
+            await self.copy_session_rollouts()
         return events

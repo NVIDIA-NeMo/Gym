@@ -18,7 +18,7 @@ tools over MCP, for harnesses such as Claude Code).
 ## Setup
 
 ```bash
-# gRNAde, its checkpoints (about 100 MB) and a torch env, no login needed. Runs on CPU or a GPU.
+# gRNAde, its checkpoints and a torch env (about 7 GB with CUDA), no login needed. Runs on CPU or a GPU.
 python responses_api_agents/rna_design_agent/prepare.py --setup ~/rna_env
 export RNA_WORKER_PYTHON=~/rna_env/venv/bin/python GRNADE_REPO=~/rna_env/geometric-rna-design
 ```
@@ -60,9 +60,13 @@ calls back to the Gym node for the model and the tools. The config sets `use_abs
 the node's address and works out the URLs itself. The sandbox must be able to reach the node. If it can only go
 through a relay, point the harness's `sandbox_model_base_url` at the relay.
 
+The env does not pick a [sandbox provider](../../nemo_gym/sandbox/providers): pass the provider's config to
+`gym env start`. For Apptainer (no root needed, e.g. `conda install -c conda-forge apptainer`), use the config in this
+folder. For OpenSandbox, export `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` and use
+`nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml`.
+
 ```bash
-export OPENSANDBOX_DOMAIN=https://<your cell> OPENSANDBOX_API_KEY=<key>
-gym env start --environment rna_design --model-type vllm_model
+gym env start --environment rna_design --config environments/rna_design/apptainer.yaml --model-type vllm_model
 gym eval run --no-serve --environment rna_design --model-type vllm_model --agent rna_design_claude_code_agent \
     --input resources_servers/rna_design/data/example.jsonl --output rollouts.jsonl
 ```
@@ -73,7 +77,8 @@ gym eval run --no-serve --environment rna_design --model-type vllm_model --agent
 `0.0`. Most suites need an exact fold (1.0). The pseudoknotted ones (ArchiveII, anta pseudo) need 0.8 of the
 crossing pairs. A rollout that measured nothing about the model is masked instead of scored: a timeout, a crashed
 worker, a tool that could not run on this machine, a model that was never reached, or a model endpoint that failed
-partway with nothing solved. Calls that fail on the model's own arguments count against it.
+partway with nothing solved. Calls that fail on the model's own arguments count against it. Claude Code stopping at
+its own time limit is not a timeout here: the designs it made are scored.
 
 gRNAde and RibonanzaNet-SS run on the first GPU whenever the worker can see one. On Linux `prepare.py --setup` installs
 the CUDA 12.8 build of torch, so starting Gym on a GPU node is all it takes. EternaFold runs on CPU. On CPU only, long

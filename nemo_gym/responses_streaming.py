@@ -28,7 +28,9 @@ this module provides:
 - the response-side synthesizer that re-emits a complete ``NeMoGymResponse`` as the minimal
   Responses SSE event sequence streaming clients require (``response.created`` ->
   ``response.output_item.done`` per output item -> the matching completed/incomplete/failed
-  terminal event), splitting flattened function-call names back into ``namespace`` + ``name``.
+  terminal event), splitting flattened function-call names back into ``namespace`` + ``name``;
+- the keepalive events (``response.created`` then repeated ``response.in_progress``) that hold
+  the stream open while a long backend call runs, when the server opts in.
 """
 
 import json
@@ -381,19 +383,23 @@ def _wire_usage(usage: Any) -> Any:
     return usage
 
 
-def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
+def synthesize_responses_sse(
+    response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None, *, include_created: bool = True
+) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
     Streaming clients build their view of the turn from ``response.output_item.done`` events.
     The terminal event reflects the response status, retaining partial output, usage and failure
-    details; ``response.created`` is included for clients waiting for an acknowledgement.
+    details; ``response.created`` is included for clients waiting for an acknowledgement, unless
+    ``include_created`` is false because keepalive events already opened the stream.
     """
     if "usage" in response_json:
         response_json = {**response_json, "usage": _wire_usage(response_json["usage"])}
     output_items = restore_namespace_tool_calls(response_json.get("output") or [], ns_map or {})
-    yield _sse_event(
-        {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
-    )
+    if include_created:
+        yield _sse_event(
+            {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
+        )
     for index, item in enumerate(output_items):
         yield _sse_event({"type": "response.output_item.done", "output_index": index, "item": item})
     terminal_event = {
@@ -403,7 +409,13 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
     yield _sse_event({"type": terminal_event, "response": {**response_json, "output": output_items}})
 
 
-def synthesize_responses_failure_sse(message: str, *, code: str = "server_error") -> Iterator[str]:
+def synthesize_responses_failure_sse(
+    message: str,
+    *,
+    code: Optional[str] = "server_error",
+    response_id: Optional[str] = None,
+    include_created: bool = True,
+) -> Iterator[str]:
     """Emit a terminal Responses SSE stream for a backend failure.
 
     Once the streaming contract is committed (HTTP 200 + ``text/event-stream``), a ``responses()``
@@ -412,13 +424,48 @@ def synthesize_responses_failure_sse(message: str, *, code: str = "server_error"
     application error from a transport failure. Emitting ``response.failed`` lets the client report
     a clean turn failure, and lets model-call capture classify it as an upstream error (its
     terminal-SSE table maps ``response.failed`` to an error) rather than a stream truncation.
+    A stream that keepalive events already opened passes their ``response_id`` and
+    ``include_created=False``, so it ends with the same response it announced.
     """
     response = {
-        "id": f"resp_{uuid4().hex}",
+        "id": response_id or f"resp_{uuid4().hex}",
         "object": "response",
         "status": "failed",
         "output": [],
         "error": {"code": code, "message": message},
     }
-    yield _sse_event({"type": "response.created", "response": {**response, "status": "in_progress"}})
+    if include_created:
+        yield _sse_event({"type": "response.created", "response": {**response, "status": "in_progress"}})
     yield _sse_event({"type": "response.failed", "response": response})
+
+
+def synthesize_responses_keepalive_sse(response_id: str, *, include_created: bool) -> Iterator[str]:
+    """Emit Responses SSE events that hold a stream open while the backend computes.
+
+    Gym's Responses streaming is buffered: the item events exist only once the whole generation
+    has returned. A client that bounds the silence between events (the Codex CLI's
+    ``stream_idle_timeout_ms``, 300 s by default) abandons a long turn and re-sends it, and SSE
+    comments do not reset that timer because the client's event parser drops them. The first
+    call opens the stream with ``response.created``; every call emits ``response.in_progress``.
+    Both name ``response_id``, the id of the response the stream ends with, and carry no output,
+    so clients that track only items and the terminal event ignore them.
+    """
+    response = {"id": response_id, "object": "response", "status": "in_progress", "output": []}
+    if include_created:
+        yield _sse_event({"type": "response.created", "response": response})
+    yield _sse_event({"type": "response.in_progress", "response": response})
+
+
+_RESPONSES_LIFECYCLE_SSE_PREFIXES = (b"event: response.created\n", b"event: response.in_progress\n")
+
+
+def is_responses_lifecycle_chunk(chunk: bytes) -> bool:
+    """Whether ``chunk`` is exactly one ``response.created`` or ``response.in_progress`` SSE event.
+
+    Those events carry no model output. With ``stream_keepalive_s`` they open and hold a stream
+    long before generation finishes, so like SSE comments they are liveness, not the start of the
+    answer. A chunk that also carries another event is output.
+    """
+    return (
+        chunk.startswith(_RESPONSES_LIFECYCLE_SSE_PREFIXES) and chunk.endswith(b"\n\n") and chunk.count(b"\n\n") == 1
+    )

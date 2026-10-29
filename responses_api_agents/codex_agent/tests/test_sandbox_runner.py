@@ -16,7 +16,7 @@ import pytest
 
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, RAISE_OOM_SCORE_ADJ, CodexSandboxSession
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
 
 
@@ -30,7 +30,7 @@ class LocalFiles:
         shutil.copyfile(source, destination)
 
 
-def stage(tmp_path, command, *, env=None, timeout=3, model_base_url=None):
+def stage(tmp_path, command, *, env=None, timeout=3, model_base_url=None, **activation_fields):
     """Stage ``command`` as the Codex CLI exactly as an activation does, and return the runner argv."""
     runtime = tmp_path / "runtime"
     (runtime / "node/bin").mkdir(parents=True)
@@ -53,6 +53,7 @@ def stage(tmp_path, command, *, env=None, timeout=3, model_base_url=None):
         "prompt": "task input",
         "cwd": str(tmp_path),
         "env": env or {},
+        **activation_fields,
     }
     return asyncio.run(state.stage_activation(payload)).argv
 
@@ -170,3 +171,49 @@ def test_stop_marker_prevents_process_launch(tmp_path):
     assert summary["cleanup_confirmed"] is True
     assert summary["return_code"] is None
     assert not (tmp_path / "should-not-exist").exists()
+
+
+def test_inherited_environment_is_opt_in_and_keeps_explicit_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("TASK_VARIABLE", "from-task-image")
+    monkeypatch.setenv("HOME", "/root")
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=2048")
+    script = (
+        'printf \'{"task": "%s", "home": "%s", "codex": "%s", "path": "%s", "node_options": "%s"}\\n\' '
+        '"$TASK_VARIABLE" "$HOME" "$CODEX_HOME" "$PATH" "$NODE_OPTIONS"'
+    )
+    process = launch(tmp_path, ["bash", "-c", script], inherit_env=True, env={"CODEX_HOME": "/tmp/session/.codex"})
+    assert result(tmp_path, process)["cleanup_confirmed"]
+    _, event = json.loads((tmp_path / "events.jsonl").read_text())
+    # The task's whole environment, Node options included, as a plain codex exec in the task sees it.
+    assert event == {
+        "task": "from-task-image",
+        "home": "/root",
+        "codex": "/tmp/session/.codex",
+        "path": os.environ["PATH"],
+        "node_options": "--max-old-space-size=2048",
+    }
+
+
+@pytest.mark.parametrize(("start", "expected"), [("0", "1000"), ("500", "1000"), ("-997", "0"), ("-1000", "0")])
+def test_oom_score_setup_raises_the_score_and_never_lowers_it(tmp_path, start, expected):
+    path = tmp_path / "oom_score_adj"
+    path.write_text(start + "\n")
+    setup = RAISE_OOM_SCORE_ADJ.replace("/proc/self/oom_score_adj", str(path))
+    ran = subprocess.run(["bash", "-c", setup], capture_output=True, text=True, timeout=10)
+    assert (ran.returncode, ran.stderr) == (0, f"oom_score_adj: {start} -> {expected}\n")
+    assert path.read_text().strip() == expected
+    missing = subprocess.run(
+        ["bash", "-c", setup.replace(str(path), str(tmp_path / "missing"))], capture_output=True, text=True, timeout=10
+    )
+    assert (missing.returncode, missing.stderr) == (0, "oom_score_adj: unchanged\n")
+
+
+@pytest.mark.parametrize("raise_score", [False, True])
+def test_codex_and_its_tools_inherit_the_raised_oom_score(tmp_path, raise_score):
+    start = int(Path("/proc/self/oom_score_adj").read_text())
+    # Stands in for Codex: a tool it starts reports the score it inherited.
+    process = launch(tmp_path, ["bash", "-c", "cat /proc/self/oom_score_adj >score"], raise_oom_score_adj=raise_score)
+    assert result(tmp_path, process)["return_code"] == 0
+    assert int((tmp_path / "score").read_text()) == ((0 if start < 0 else 1000) if raise_score else start)
+    # The runner reports the change in the supervisor's log, not in Codex's stderr.
+    assert "oom_score_adj:" not in (tmp_path / "stderr.log").read_text()
