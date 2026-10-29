@@ -2992,6 +2992,161 @@ class TestRunFromConfigResumeFromCache:
         assert all(r[AGENT_REF_KEY_NAME] == {"name": "agent_a"} for r in agg_rows)
 
 
+class TestResumeOfOutputCachedWithoutIdentityStamps:
+    """A resume of output written before reverification kept collection's identity stamps groups as a fresh run.
+
+    Real input, rollout and output files; the input join, cache drop, output loading and _call_aggregate_metrics
+    grouping run for real. Only the /verify dispatch, the reverify-mode guard, exporters and the resources server
+    behind /aggregate_metrics are stubbed. Each test reads the partition aggregation sends.
+    """
+
+    _STAMP = {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+
+    def _key(self, task: int) -> dict:
+        return {TASK_INDEX_KEY_NAME: task, ROLLOUT_INDEX_KEY_NAME: 0}
+
+    def _write(self, path: Path, rows: list[dict]) -> None:
+        path.write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
+
+    def _fixture(self, tmp_path: Path, *, source_stamp: dict, cached_tasks: list[int], drop_source: int | None = None):
+        agent = {AGENT_REF_KEY_NAME: {"name": "agent_a"}}
+        self._write(tmp_path / "inputs.jsonl", [self._key(t) | agent | {"question": f"q{t}"} for t in range(4)])
+        self._write(
+            tmp_path / "rollouts.jsonl",
+            [
+                self._key(t) | agent | source_stamp | {"response": {"output": f"answer {t}"}, "reward": 0.0}
+                for t in range(4)
+                if t != drop_source
+            ],
+        )
+        # As a reverification before the identity fix wrote them: agent_ref and keys, no identity stamps.
+        cached = [self._key(t) | agent | {"reward": 1.0} for t in cached_tasks]
+        if cached:
+            self._write(tmp_path / "output.jsonl", cached)
+        return cached
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, dispatched: list, posted: list) -> None:
+        monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
+        monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
+
+        def fake_run(payloads, semaphore=None):
+            dispatched.extend(p[TASK_INDEX_KEY_NAME] for p in payloads)
+
+            async def fut(p: dict) -> tuple[dict, dict]:
+                return p, {"reward": 0.5}
+
+            return [fut(p) for p in payloads]
+
+        monkeypatch.setattr("nemo_gym.rollout_reverification._run_verification_payloads", fake_run)
+        client = MagicMock(global_config_dict={})
+
+        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+            posted.append(sorted(r[TASK_INDEX_KEY_NAME] for r in json.verify_responses))
+            return MagicMock()
+
+        client.post = capture_post
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping", lambda _: {"agent_a": "rs_a"}
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(return_value={"agent_metrics": {}, "key_metrics": {}, "group_level_metrics": []}),
+        )
+
+    def _config(self, tmp_path: Path, *, resume: bool, **overrides: bool) -> RolloutReverificationConfig:
+        return RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
+            rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=resume,
+            **overrides,
+        )
+
+    async def test_cached_rows_take_their_source_stamps_and_group_with_the_new_rows(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cached = self._fixture(tmp_path, source_stamp=self._STAMP, cached_tasks=[0, 1])
+        on_disk = (tmp_path / "output.jsonl").read_bytes()
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=True))
+
+        assert dispatched == [2, 3]
+        assert posted == [[0, 1, 2, 3]]  # one group of four, as a fresh reverification
+        assert {(r["_ng_environment_server"], r["_ng_result_type"]) for r in returned} == {("env_a", "legacy_agent")}
+        # The cached rows keep their verdicts, and the file keeps its bytes: only the new rows were appended.
+        assert [r["reward"] for r in returned] == [1.0, 1.0, 0.5, 0.5]
+        assert (tmp_path / "output.jsonl").read_bytes().startswith(on_disk)
+        assert [orjson.loads(line) for line in on_disk.splitlines()] == cached
+
+    async def test_a_fresh_reverification_groups_the_same_way(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._fixture(tmp_path, source_stamp=self._STAMP, cached_tasks=[])
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=False))
+
+        assert dispatched == [0, 1, 2, 3] and posted == [[0, 1, 2, 3]]
+        assert {r["_ng_environment_server"] for r in returned} == {"env_a"}
+
+    async def test_no_stamp_is_invented_when_the_source_has_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Rollouts collected before collection stamped Environment Servers group by agent, cached or new."""
+        self._fixture(tmp_path, source_stamp={}, cached_tasks=[0, 1])
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=True))
+
+        assert posted == [[0, 1, 2, 3]]
+        assert not any("_ng_environment_server" in r or "_ng_result_type" in r for r in returned)
+
+    async def test_a_cached_row_without_a_source_rollout_stops_before_export_and_aggregation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """No identity is guessed and no split group is aggregated: the run stops with the remedy, and the output
+        keeps every row with its verdict."""
+        cached = self._fixture(tmp_path, source_stamp=self._STAMP, cached_tasks=[0, 1], drop_source=0)
+        on_disk = (tmp_path / "output.jsonl").read_bytes()
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+        upload, metrics = MagicMock(), MagicMock()
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", lambda: [MagicMock()])
+        monkeypatch.setattr("nemo_gym.rollout_reverification.export_rollouts", upload)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.export_metrics", metrics)
+
+        with pytest.raises(ConfigError, match=r"1 cached row\(s\).*\(0, 0\).*resume_from_cache=false"):
+            await RolloutReverificationHelper().run_from_config(
+                self._config(tmp_path, resume=True, upload_rollouts=True)
+            )
+
+        assert posted == [] and not upload.called and not metrics.called
+        assert dispatched == [2, 3]
+        rows = [orjson.loads(line) for line in (tmp_path / "output.jsonl").read_bytes().splitlines()]
+        assert (tmp_path / "output.jsonl").read_bytes().startswith(on_disk) and rows[:2] == cached
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2, 3]
+
+    async def test_cached_rows_without_any_stamp_still_aggregate_when_a_source_rollout_is_gone(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An unstamped run stays one group by agent even if a source rollout is gone: nothing to split."""
+        self._fixture(tmp_path, source_stamp={}, cached_tasks=[0, 1], drop_source=0)
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(self._config(tmp_path, resume=True))
+
+        assert posted == [[0, 1, 2, 3]]
+        assert not any("_ng_environment_server" in r for r in returned)
+
+
 class TestRunFromConfigJudgeFailedOnly:
     """Smoke test: the whole `gym eval reverify --judge-failed-only` recovery path end to end.
 
