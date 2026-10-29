@@ -7,21 +7,26 @@ task checks whether the model follows its instructions, graded against versioned
 ## Data
 
 - **Source:** NVIDIA-internal rows in Gym's GitLab dataset registry: dataset `partner_if`, version
-  `2.0.0`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
+  `2.1.5`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
   rows are not in this repository.
 - **License:** internal.
-- **Size:** 22 tasks with 83 IF rubric items, plus 4 completion items: 17 text tasks, 2 search-tool tasks and
-  3 build-tool tasks. There is one split, `benchmark`.
-- **Provenance:** 21 tasks reproduce a reported instruction-following failure and 1 reconstructs one. The
-  tool tasks' tools are simulations written for this benchmark, not real services.
+- **Size:** 27 tasks with 88 IF rubric items, plus 4 completion items: 18 text tasks, 2 search-tool tasks,
+  3 build-tool tasks, 3 SWE tasks and 1 native Prime task. There is one split, `benchmark`.
+- **Provenance:** reported instruction-following failures and reconstructions. The tool tasks' tools
+  are simulations written for this benchmark, not real services.
 - **Rows:** each row holds the prompt (`responses_create_params`) and the grading contract
   (`verifier_metadata.partner_if`). A tool task's row also holds its tool backend (`tool_backend`): the
   simulated tools' code, fixture and pinned requirements.
 
+The dataset pin includes native/SWE rows whose matching integrations are maintained separately.
+This branch adds the next-call checker and its text route; it does not supply the native Prime
+harness or the SWE integration from [#5007](https://github.com/NVIDIA-NeMo/Gym/pull/5007).
+The complete release needs those routes before an end-to-end full-cohort run.
+
 ## Task contract
 
 - **Harness:** the policy model runs in Gym's `simple_agent`.
-- **Routing:** `partner_if_dispatcher` routes each task to its environment, so all 22 tasks share one
+- **Routing:** `partner_if_dispatcher` routes each task to its environment, so supported profiles share one
   dataset and one score. Gym aggregates metrics per environment server, so without it the three task
   families would be three benchmarks with separate scores.
 - **Text tasks:** one reply from the policy model. Some rows include recorded tool calls and results, or ask
@@ -35,9 +40,9 @@ task checks whether the model follows its instructions, graded against versioned
     and 1 GiB.
   - By default the sandbox can reach only the package index, to install the backend's pinned requirements.
     With a prebuilt image, set `network: none`.
-- **Prompts:** the rows are prepared, so no template applies. Rows set no `temperature`, `top_p` or
-  `max_output_tokens`; some set `tool_choice`. Sampling and the output budget come from the run's policy
-  model settings, which every run must state.
+- **Prompts:** the rows are prepared, so no template applies. Some rows carry task-specific sampling
+  settings or `tool_choice`; preserve them when reproducing that task. Every run must state its
+  effective sampling and output budget.
 
 ## Scoring
 
@@ -51,7 +56,7 @@ task checks whether the model follows its instructions, graded against versioned
     with equal weight.
   - Also `if_partial`, the passed fraction of IF items.
   - `coverage/*` counts masked rollouts.
-- **Reference score:** 62.12 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±7.7 points (95%).
+- **Historical reference score (2.0.0, 22-task cohort; not a baseline for 2.1.5):** 62.12 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±7.7 points (95%).
   - Policy and judge: GLM 5.3 (`nvidia/zai-org/glm-5.3`).
   - Policy settings: temperature 1.0, top_p 1.0, 16384 output tokens, no reasoning-effort setting, 16 rollouts
     in parallel.

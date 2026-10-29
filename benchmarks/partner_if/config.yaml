@@ -139,6 +139,7 @@ partner_if_dispatcher:
         pif_020: {type: environment_servers, name: partner_if_build_tools}
         pif_021: {type: environment_servers, name: partner_if_build_tools}
         pif_022: {type: environment_servers, name: partner_if_build_tools}
+        pif_028: {type: environment_servers, name: partner_if_environment_server}
       datasets:
         - name: partner_if
           type: benchmark

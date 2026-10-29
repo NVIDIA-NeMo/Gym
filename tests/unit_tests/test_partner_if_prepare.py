@@ -71,7 +71,7 @@ def test_prepare_refuses_content_other_than_the_pinned_release(prepared, content
 def test_routes_cover_the_release_and_name_its_environments():
     config = yaml.safe_load((prepare_module.BENCHMARK_DIR / "config.yaml").read_text())
     routes = config["partner_if_dispatcher"]["responses_api_agents"]["partner_if_dispatcher"]["task_routes"]
-    assert list(routes) == [f"pif_{index:03d}" for index in range(1, prepare_module.ROW_COUNT + 1)]
+    assert list(routes) == [f"pif_{index:03d}" for index in (*range(1, 23), 24, 25, 26, 27, 28)]
     environments = {
         name for name, server in config.items() if isinstance(server, dict) and "environment_servers" in server
     }
