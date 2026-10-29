@@ -1189,6 +1189,33 @@ class TestValidate:
         )
         assert "valid" in capsys.readouterr().out.lower()
 
+    @pytest.mark.parametrize("command", [validate, dump_config])
+    @pytest.mark.parametrize(
+        "override,options",
+        [("+sampling_options={}", {}), ("+sampling_options.generation={}", {"generation": {}})],
+    )
+    def test_offline_commands_ignore_non_server_mappings(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, command, override: str, options: dict[str, object]
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "my_server:\n  resources_servers:\n    my_server:\n      entrypoint: app.py\n      domain: other\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["gym", f"+config_paths=[{config_file}]", override])
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        command()
+
+        captured = capsys.readouterr()
+        assert "Could not check" not in captured.err
+        if command is validate:
+            assert "Config is valid" in captured.out
+        else:
+            resolved = OmegaConf.create(captured.out)
+            assert OmegaConf.to_container(resolved.sampling_options) == options
+            assert resolved.my_server.resources_servers.my_server.entrypoint == "app.py"
+
     def test_unknown_cross_reference_exits_nonzero(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # An agent referencing a resources server that isn't defined -> ServerRefNotFoundError ->
         # clean exit(1) (real cross-reference validation, not a mock).
@@ -1203,6 +1230,81 @@ class TestValidate:
         with raises(SystemExit) as exc_info:
             self._validate_config(monkeypatch, tmp_path, bad)
         assert exc_info.value.code == 1
+
+    @staticmethod
+    def _environment_server_config(environment_server_block: str) -> str:
+        """A resources server and an agent fronted by `my_env`, whose server type and fields the block gives."""
+        return (
+            "my_resources:\n  resources_servers:\n    my_resources:\n      entrypoint: app.py\n      domain: other\n"
+            "my_agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      entrypoint: app.py\n"
+            "      resources_server:\n        type: resources_servers\n        name: my_resources\n"
+            "      model_server:\n        type: responses_api_models\n        name: policy_model\n"
+            "my_env:\n  environment_servers:\n" + environment_server_block
+        )
+
+    _SINGLE_AGENT_TURN_LEGACY = (
+        "    single_agent_turn_legacy:\n"
+        "      entrypoint: app.py\n"
+        "      resources_server:\n        type: resources_servers\n        name: my_resources\n"
+        "      agent_server:\n        type: responses_api_agents\n        name: my_agent\n"
+    )
+
+    def test_environment_server_block_is_checked_against_its_server_config(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys
+    ) -> None:
+        # The block passes every type-level check, so validation used to print "valid" and only `gym env start`
+        # failed, when single_agent_turn_legacy launched and validated it against its own config class.
+        monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the paths
+        block = self._SINGLE_AGENT_TURN_LEGACY + "      resources_tool_transport: [direct_http]\n"
+
+        with raises(SystemExit) as exc_info:
+            self._validate_config(monkeypatch, tmp_path, self._environment_server_config(block))
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert (
+            "'my_env' (environment_servers/single_agent_turn_legacy/app.py) does not match "
+            "SingleAgentTurnEnvironmentServerConfig:" in out
+        )
+        block_path = "my_env.environment_servers.single_agent_turn_legacy"
+        assert f"{block_path}.cleanup_timeout_seconds: Field required" in out
+        assert f"{block_path}.resources_tool_transport: Extra inputs are not permitted" in out
+        assert "Config is valid" not in out
+
+    def test_complete_environment_server_block_passes(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
+        block = self._SINGLE_AGENT_TURN_LEGACY + "      cleanup_timeout_seconds: 180\n"
+
+        self._validate_config(monkeypatch, tmp_path, self._environment_server_config(block))
+
+        assert "Config is valid" in capsys.readouterr().out
+
+    def test_environment_server_that_does_not_import_is_left_to_its_launch(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys
+    ) -> None:
+        # A server in the working directory whose own venv has a package this one lacks.
+        server_dir = tmp_path / "environment_servers" / "needs_its_venv"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("package_only_in_its_venv\n")
+        (server_dir / "app.py").write_text("import package_only_in_its_venv\n")
+        monkeypatch.setenv("COLUMNS", "1000")
+        block = (
+            "    needs_its_venv:\n"
+            "      entrypoint: app.py\n"
+            "      agent_server:\n        type: responses_api_agents\n        name: my_agent\n"
+        )
+
+        self._validate_config(monkeypatch, tmp_path, self._environment_server_config(block))
+
+        captured = capsys.readouterr()
+        assert "Config is valid" in captured.out
+        assert "Could not check Environment Server 'my_env' before launch" in captured.err
+        assert (
+            "Loading environment_servers/needs_its_venv/app.py here failed: "
+            "ModuleNotFoundError: No module named 'package_only_in_its_venv'" in captured.err
+        )
 
 
 class TestOnboardingCommandAdapters:

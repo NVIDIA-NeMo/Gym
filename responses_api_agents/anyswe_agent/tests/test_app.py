@@ -22,17 +22,22 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_utils import ServerClient
+from responses_api_agents.anyswe_agent import agent_runner
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
     AnySweRunRequest,
+    AnySweServerConfig,
     SWEBenchMetrics,
     _classify_agent_error,
     _dataset_family,
@@ -101,6 +106,50 @@ class TestAgentRunner:
         assert "image-dirty.txt" not in patch_text
         assert "image-untracked.txt" not in patch_text
 
+    def test_patch_is_written_when_the_harness_raises(self, tmp_path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i"],
+            cwd=repo,
+            check=True,
+        )
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        (mount / "instruction.txt").write_text("Fix it")
+
+        class FailingAgent:
+            def __init__(self, config, server_client) -> None:
+                pass
+
+            async def responses(self, request, body):
+                (repo / "fix.py").write_text("partial fix\n")
+                raise RuntimeError("max_turns reached")
+
+        class Config:
+            model_fields = {}
+
+            def __init__(self, **kwargs) -> None:
+                pass
+
+        module = SimpleNamespace(FailingAgent=FailingAgent, Config=Config)
+        monkeypatch.setitem(sys.modules, "fake_harness", module)
+        monkeypatch.setenv("NGSWE_MODEL_NAME", "policy")
+        monkeypatch.setenv("NGSWE_AGENT_MODULE", "fake_harness")
+        monkeypatch.setenv("NGSWE_AGENT_CLASS", "FailingAgent")
+        monkeypatch.setenv("NGSWE_AGENT_CONFIG_CLASS", "Config")
+        monkeypatch.setattr(agent_runner, "_find_repo", lambda: repo)
+        monkeypatch.setattr(
+            agent_runner, "Path", lambda path: Path(str(path).replace("/trajectories_mount", str(mount)))
+        )
+
+        with pytest.raises(RuntimeError, match="max_turns"):
+            agent_runner.main()
+
+        assert "partial fix" in (mount / "patch.diff").read_text()
+        assert not (mount / "response.json").exists()
+
     def test_sampling_is_forwarded(self) -> None:
         source = self._source()
         assert "NGSWE_SAMPLING" in source
@@ -127,6 +176,23 @@ class TestSandboxAPI:
         # No rollout id and no exported traces: byte-for-byte unchanged.
         assert _model_url_for_rollout("http://model-host:8000", None) == "http://model-host:8000"
         assert _model_url_for_rollout("", None) == ""
+
+    def test_sandbox_model_url_keeps_the_rollout_path(self, tmp_path) -> None:
+        # The relay reaches the same model server, which attributes the in-box calls by this path.
+        with patch.object(AnySweAgent, "model_post_init", lambda self, context: None):
+            agent = AnySweAgent(
+                config=_config(sandbox_model_base_url="http://relay:9000"), server_client=MagicMock(spec=ServerClient)
+            )
+        agent._server = AnySweServerConfig(
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://relay:9000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[], metadata={"instance_id": "repo__repo-1"})
+
+        assert agent._setup_params(body, "3-1").model_server_url == "http://relay:9000/ng-rollout/3-1"
 
     def test_model_url_carries_trace_context_without_a_rollout_id(self, monkeypatch) -> None:
         # Capture off, traces on: the harness still gets the current span in the URL.
@@ -264,9 +330,10 @@ class TestSandboxAPI:
             passing = passing.replace("::test_fix", "::\x1b[1mtest_fix\x1b[0m")
             passing = passing.replace("::test_stays_green", "::\x1b[1mtest_stays_green\x1b[0m")
         assert _r2e_resolved(instance, passing)
-        for status in ("FAILED", "ERROR", "XFAIL", "SKIPPED"):
+        for status in ("FAILED", "ERROR", "SKIPPED"):
             nonpassing = passing.replace("PASSED", status, 1)
             assert not _r2e_resolved(instance, nonpassing)
+        assert _r2e_resolved(instance, passing.replace("PASSED", "XFAIL", 1))
         assert not _r2e_resolved(instance, passing.splitlines()[0])
 
     def test_safe_config_redacts_provider_key(self) -> None:

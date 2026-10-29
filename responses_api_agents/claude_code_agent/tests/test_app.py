@@ -914,6 +914,8 @@ class TestParseStreamJson:
             ({"subtype": "success"}, 7, ("failed", "process_exit_7")),
             ({"subtype": "error_max_turns", "is_error": True}, 0, ("incomplete", "error_max_turns")),
             ({"subtype": "error_during_execution", "is_error": True}, 0, ("failed", "error_during_execution")),
+            ({"subtype": "success", "is_error": True}, 0, ("failed", "agent_error")),
+            ({"is_error": True}, 0, ("failed", "agent_error")),
             ({"subtype": "error_max_turns", "is_error": True}, 7, ("incomplete", "error_max_turns")),
             ({}, 7, ("failed", "process_exit_7")),
             ({}, 0, ("incomplete", "result_missing")),
@@ -1054,6 +1056,24 @@ class TestParseStreamJson:
             "is_error": False,
             "duration_ms": 1234,
         }
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage "
+                "Policy (https://www.anthropic.com/legal/aup). Try rephrasing the request.",
+                ("failed", "refusal"),
+            ),
+            ("API Error: 500 upstream unavailable", ("failed", "agent_error")),
+        ],
+    )
+    def test_error_result_with_success_subtype_is_classified(self, text: str, expected: tuple[str, str]) -> None:
+        # Claude Code 2.1.108 reports a model refusal or API error with subtype "success" and is_error true.
+        result = _event("result", subtype="success", is_error=True, result=text, stop_reason="stop_sequence")
+        _, metadata = parse_stream_json(result)
+        assert metadata["error_message"] == text
+        assert _invocation_outcome(metadata, 0) == expected
 
     def test_num_turns_absent_when_no_result_event(self) -> None:
         assistant = self._assistant([{"type": "text", "text": "hi"}])
