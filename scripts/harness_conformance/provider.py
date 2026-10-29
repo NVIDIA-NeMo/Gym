@@ -61,6 +61,13 @@ class Probe:
         }
         (self.directory / "witness.json").write_text(json.dumps(witness, indent=2) + "\n")
 
+    async def seed_sandbox(self) -> dict:
+        """Optional Resources-owned sandbox for harnesses that borrow their task environment."""
+        return {}
+
+    async def close_sandbox(self) -> None:
+        """Release a task sandbox, when the probe owns one."""
+
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
         for tool in tools:
@@ -315,13 +322,6 @@ class Probe:
         app.post("/v1/chat/completions", response_model=None)(self.model)
         app.post("/v1/responses", response_model=None)(self.model)
         return app
-
-    async def seed_sandbox(self) -> dict:
-        """Optional Resources-owned sandbox for harnesses that borrow their task environment."""
-        return {}
-
-    async def close_sandbox(self) -> None:
-        """Release a task sandbox, when the probe owns one."""
 
     def resources_app(self) -> FastAPI:
         app = FastAPI()
