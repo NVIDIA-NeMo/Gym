@@ -39,7 +39,7 @@ import orjson
 from fastapi import Request, Response
 from pydantic import BaseModel, model_validator
 
-from nemo_gym.core.correlation import CorrelationPathError, resolve
+from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
@@ -60,7 +60,7 @@ from nemo_gym.models.token_capture.protocols import (
     installed_lineage_store,
     installed_token_sink,
 )
-from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON, CallIdentity, ModelRef, agent_kind_of
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
@@ -243,16 +243,14 @@ class CaptureStore:
         return exchanges, invalid_count
 
 
+# Request-state key under which the capture middleware leaves the agent instance the stripped prefix named.
+AGENT_INSTANCE_STATE_KEY = "nemo_gym_agent_instance"
+
 _OBSERVED_PATHS = {
     "/v1/responses": "responses",
     "/v1/chat/completions": "chat",
     "/v1/messages": "messages",
 }
-
-
-# A client may declare its persisted session ID for exact correlation with an AgentInvocation.
-# It is correlation evidence, not authentication; absence is fail-safe.
-_CLIENT_SESSION_HEADER = b"x-session-id"
 
 
 _TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
@@ -610,6 +608,7 @@ def _record(
     *,
     verifier_invocation_id: Optional[str] = None,
     client_session_id: Optional[str] = None,
+    agent_instance: Optional[str] = None,
     client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
     model_call_id: str,
@@ -655,6 +654,9 @@ def _record(
             exchange["verifier_invocation_id"] = verifier_invocation_id
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
+        if agent_instance is not None:
+            exchange["agent_instance"] = agent_instance
+            exchange["agent_kind"] = agent_kind_of(agent_instance)
         if execution is not None:
             exchange.update(execution)
             if execution["local_response_reason"] == "context_length_exceeded":
@@ -708,7 +710,9 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
     try:
         # A disconnected caller must not cancel the write before it reaches the ledger.
         await asyncio.shield(
-            ledger.record_failure(context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON)
+            ledger.record_failure(
+                context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON, identity=context.identity
+            )
         )
     except Exception:
         logger.exception(
@@ -750,6 +754,8 @@ class _CaptureMiddleware:
         self._app = app
         self._store = store
         self._model_server_name = model_server_name
+        # Every capture record names the serving model server from this server's own configuration.
+        self._model_ref = ModelRef(name=model_server_name) if model_server_name else None
         self._assistant_message_header: bytes | None = (
             assistant_message_header.lower() if assistant_message_header else None
         )
@@ -779,6 +785,7 @@ class _CaptureMiddleware:
 
         path = scope.get("path", "")
         rollout_from_path: Optional[str] = None
+        agent_instance: Optional[str] = None
         token_capture_requested = False
         capture_prefix = ""
         try:
@@ -794,10 +801,13 @@ class _CaptureMiddleware:
         if resolved is not None and resolved[0].capture_key is not None:
             correlation, rest = resolved
             rollout_from_path = correlation.capture_key
+            agent_instance = correlation.agent_instance
             token_capture_requested = correlation.token_capture
             capture_prefix = path[: len(path) - len(rest)]
             path = rest
             scope = scope_with_routed_path(scope, path)
+            # Handlers that build their own capture context (context measurement) need the stripped name.
+            scope["state"][AGENT_INSTANCE_STATE_KEY] = agent_instance
 
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
@@ -839,7 +849,9 @@ class _CaptureMiddleware:
                     return
                 marked_incomplete = True
                 try:
-                    await token_sink.mark_incomplete(rollout_from_path, "")
+                    await token_sink.mark_incomplete(
+                        rollout_from_path, "", identity=CallIdentity(agent_instance, self._model_ref)
+                    )
                     logger.warning(
                         f"Marked rollout {rollout_from_path} incomplete because unclassified model request "
                         f"{method} {path} {reason}. Declare the exact request on the model server only if its "
@@ -893,7 +905,7 @@ class _CaptureMiddleware:
         verifier_invocation_id = _unique_request_header(
             scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
         )
-        client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        session_id = client_session_id(scope)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
             if self._assistant_message_header is not None
@@ -917,6 +929,8 @@ class _CaptureMiddleware:
                 external_staging=self._external_staging,
                 parent_resolution_mode=self._parent_resolution_mode,
                 admitted_at=time.time(),
+                agent_instance=agent_instance,
+                model_ref=self._model_ref,
             )
             sink_token = set_token_sink(capture_context)
             attach_capture_context(capture_context)
@@ -1026,7 +1040,8 @@ class _CaptureMiddleware:
                     self._model_server_name,
                     bytes(request_body),
                     verifier_invocation_id=verifier_invocation_id,
-                    client_session_id=client_session_id,
+                    client_session_id=session_id,
+                    agent_instance=agent_instance,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,
@@ -1104,7 +1119,8 @@ class _CaptureMiddleware:
                     model_server_name,
                     request_bytes,
                     verifier_invocation_id=verifier_invocation_id,
-                    client_session_id=client_session_id,
+                    client_session_id=session_id,
+                    agent_instance=agent_instance,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
                     model_call_id=model_call_id,

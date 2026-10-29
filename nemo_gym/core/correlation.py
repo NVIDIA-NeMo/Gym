@@ -48,6 +48,10 @@ RESERVED_AGENT_INSTANCE_NAMES = frozenset(
 # A W3C ``traceparent``, version 00, the only form the propagator writes.
 TRACEPARENT_PATTERN = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 
+# A client may declare its persisted session ID for exact correlation with an AgentInvocation.
+# It is correlation evidence, not authentication; absence is fail-safe. Gym records it, not interprets it.
+CLIENT_SESSION_HEADER = "x-session-id"
+
 CORRELATION_STATE_KEY = "nemo_gym.correlation"
 _SEGMENT_LITERALS = frozenset(
     {ROLLOUT_PATH_PREFIX, AGENT_INSTANCE_PATH_SEGMENT, TOKEN_CAPTURE_PATH_SEGMENT, TRACE_CONTEXT_PATH_SEGMENT}
@@ -204,3 +208,10 @@ def remember(scope: dict[str, Any], result: tuple[CorrelationContext, str] | Non
     rewritten path finds the context without parsing it again.
     """
     scope.setdefault("state", {})[CORRELATION_STATE_KEY] = _Resolved(scope.get("path", ""), result)
+
+
+def client_session_id(scope: dict[str, Any]) -> str | None:
+    """Return the request's ``x-session-id`` header, or ``None`` when absent or sent with conflicting values."""
+    name = CLIENT_SESSION_HEADER.encode("ascii")
+    values = {value.decode("latin-1") for key, value in scope.get("headers") or [] if key.lower() == name and value}
+    return values.pop() if len(values) == 1 else None

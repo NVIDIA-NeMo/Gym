@@ -1070,18 +1070,18 @@ async def test_cancelled_chat_keepalive_retains_uncertain_capture(monkeypatch, t
     failure_written = threading.Event()
     record_failure = harness.ledger._record_failure
 
-    def persist_failure(*args):
-        record_failure(*args)
+    def persist_failure(*args, **kwargs):
+        record_failure(*args, **kwargs)
         failure_written.set()
 
     monkeypatch.setattr(harness.ledger, "_record_failure", persist_failure)
     if delay_failure_write:
         record_failure_async = harness.ledger.record_failure
 
-        async def delayed_failure(*args):
+        async def delayed_failure(*args, **kwargs):
             # Exercise cancellation before the ledger submits work to its executor.
             await asyncio.sleep(0.01)
-            await record_failure_async(*args)
+            await record_failure_async(*args, **kwargs)
 
         monkeypatch.setattr(harness.ledger, "record_failure", delayed_failure)
     worker = NeMoGymAsyncOpenAI.create_chat_completion
