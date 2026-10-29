@@ -71,6 +71,16 @@ Close raises if the worker stop is unconfirmed or the remaining activation canno
 the session stays available for a close retry. The bounded join also applies to embedded mode. An activation
 interrupted by session close returns HTTP 409 to a caller whose request was not itself cancelled.
 
+### NOOA trace files
+
+`trace_jsonl: true` makes the worker route NOOA's OpenTelemetry spans to OTLP JSONL files (one per NOOA session,
+so an Atom root and its children are separate files) and join them into `traces.jsonl` beside `result.json` before
+the result is published. The runner copies that file to `<artifacts_dir>/<rollout_id>/traces.jsonl` on the agent
+server host (`artifacts_dir` defaults to `nooa-artifacts/`, gitignored). It is a debugging artifact for reading
+what the harness did inside the sandbox; Gym's model-call capture and the rollout's observation bundle remain the
+evidence that grading, export and training use. A worker that dies before flushing leaves no file and the rollout
+is collected as usual.
+
 
 ## Sandbox worker supervision
 

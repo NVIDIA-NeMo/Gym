@@ -57,6 +57,9 @@ class SandboxInput(BaseModel):
     model_server_name: str
     max_policy_calls: int | None = Field(default=None, gt=0)
     context_window: int | None = Field(default=None, gt=0)
+    trace_dir: str | None = Field(
+        default=None, description="Sandbox directory for NOOA's OTLP JSONL trace files; None disables tracing."
+    )
 
 
 class RunnerError(BaseModel):
@@ -221,6 +224,8 @@ async def execute(
     result = None
     error = None
     try:
+        if payload.trace_dir is not None:
+            enable_trace_export(payload.trace_dir)
         runner = InProcessNOOARunner(
             invocation=payload.invocation,
             server_client=_ModelClient(str(payload.model_base_url)),
@@ -258,6 +263,37 @@ async def execute(
     )
 
 
+def enable_trace_export(trace_dir: str) -> None:
+    """Route NOOA's OpenTelemetry spans to OTLP JSONL files, one per NOOA session, under ``trace_dir``."""
+    from nooa.tracing import enable_tracing, exporters
+
+    Path(trace_dir).mkdir(parents=True, exist_ok=True)
+    enable_tracing(exporters=[exporters.jsonl(trace_dir)])
+
+
+def collect_trace_export(trace_dir: str, output: Path) -> int:
+    """Flush the exporters and join the per-session JSONL files into ``output``; return the line count.
+
+    Each line is a complete OTLP ``TracesData`` object that carries its ``session.id`` attribute, so joining the
+    files loses nothing and the controller reads one known file. Best effort: a missing directory yields 0 lines.
+    """
+    try:
+        from nooa.tracing import flush_traces
+
+        flush_traces()
+    except Exception:  # noqa: BLE001 - tracing is diagnostics; never fail the result for it
+        logger.warning("NOOA trace flush failed", exc_info=True)
+    files = sorted(Path(trace_dir).glob("*.jsonl")) if Path(trace_dir).is_dir() else []
+    lines = 0
+    with output.open("w", encoding="utf-8") as joined:
+        for file in files:
+            for line in file.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.strip():
+                    joined.write(line + "\n")
+                    lines += 1
+    return lines
+
+
 async def _main(input_path: Path, output_path: Path) -> None:
     payload = SandboxInput.model_validate_json(input_path.read_text())
     client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
@@ -270,6 +306,14 @@ async def _main(input_path: Path, output_path: Path) -> None:
             result = await task
         finally:
             await writer.close()
+            if payload.trace_dir is not None:
+                # Written before the result so a collector that sees result.json also sees the trace.
+                try:
+                    await asyncio.to_thread(
+                        collect_trace_export, payload.trace_dir, output_path.with_name("traces.jsonl")
+                    )
+                except Exception:  # noqa: BLE001 - diagnostics must not displace the result
+                    logger.warning("NOOA trace collection failed", exc_info=True)
         # Final evidence takes precedence only after it has been fully published.
         await _join_write(asyncio.create_task(asyncio.to_thread(_write_json, output_path, result)))
     finally:

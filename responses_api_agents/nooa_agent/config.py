@@ -62,6 +62,18 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int | None = Field(
         default=None, gt=0, description="Known policy context window used by NOOA's context planner."
     )
+    trace_jsonl: bool = Field(
+        default=False,
+        description=(
+            "Write NOOA's OTLP JSONL trace in the sandbox for each rollout and copy it to "
+            "<artifacts_dir>/<rollout_id>/traces.jsonl on this host. A debugging artifact, not evidence: Gym's own "
+            "capture and the rollout record remain authoritative."
+        ),
+    )
+    artifacts_dir: Path = Field(
+        default=Path("nooa-artifacts"),
+        description="Host directory for per-rollout NOOA artifacts such as the trace file; relative to the server's cwd.",
+    )
 
     sandbox_runner_timeout_seconds: float = Field(
         default=21420,
