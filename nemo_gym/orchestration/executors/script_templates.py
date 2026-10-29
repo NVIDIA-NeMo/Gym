@@ -195,6 +195,11 @@ def render_write_file_from_base64(content: str, dest_path: str) -> str:
     return f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(dest_path)}"
 
 
+# Set for a driver whose script has exports: a file this attempt creates once its evaluation has succeeded. The
+# job script watches the services only until then (see `_render_watched_driver`).
+EVAL_SUCCEEDED_MARKER_ENV = "GYM_EVAL_SUCCEEDED_MARKER"
+
+
 def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) -> str:
     """Render the part of the driver script that runs `gym eval run`, then each export of its rollouts.
 
@@ -220,6 +225,7 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
         f"mkdir -p {bench}/exports || true",
         f'echo "$gym_run_rc" > {bench}/eval.exit || true',
         'if [ "$gym_run_rc" -eq 0 ]; then',
+        f'    [ -z "${{{EVAL_SUCCEEDED_MARKER_ENV}:-}}" ] || : > "${EVAL_SUCCEEDED_MARKER_ENV}" || true',
         *(f"    gym eval export {shlex.quote(name)} {' '.join(args)} || true" for name, args in exports),
         "fi",
         'exit "$gym_run_rc"',
