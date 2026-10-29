@@ -22,7 +22,7 @@ from nemo_gym.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnRequest,
@@ -101,6 +101,10 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
                 failure[NG_AGENT_OBSERVATIONS_KEY] = response.failure.agent_observations.model_dump(mode="json")
             if response.failure.trajectory is not None:
                 failure[NG_TRAJECTORY_KEY] = response.failure.trajectory.model_dump(mode="json")
+            if response.failure.verifier_invocations is not None:
+                failure[NG_VERIFIER_INVOCATIONS_KEY] = [
+                    invocation.model_dump(mode="json") for invocation in response.failure.verifier_invocations
+                ]
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")

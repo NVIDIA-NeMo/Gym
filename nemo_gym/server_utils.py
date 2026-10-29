@@ -94,7 +94,9 @@ from nemo_gym.global_config import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
     ROUTED_PATH_STATE_KEY,
+    VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
+    current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
     rollout_context,
     scope_with_routed_path,
@@ -130,6 +132,7 @@ except ImportError:  # the telemetry extra is optional; without the SDK there is
 logger = logging.getLogger(__name__)
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _GLOBAL_AIOHTTP_CLIENT_CONFIG: Optional["GlobalAIOHTTPAsyncClientConfig"] = None
 _GLOBAL_AIOHTTP_CONTROL_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
@@ -469,9 +472,10 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         cookie_jar=DummyCookieJar(),
     )
 
-    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_CONFIG, _GLOBAL_AIOHTTP_CLIENT_LOOP
     _GLOBAL_AIOHTTP_CLIENT = client_session
     _GLOBAL_AIOHTTP_CLIENT_CONFIG = cfg
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = asyncio.get_running_loop()
 
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
@@ -513,22 +517,58 @@ def is_global_aiohttp_client_request_debug_enabled() -> bool:
     return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
 
 
-def global_aiohttp_client_exit():  # pragma: no cover
-    if not is_global_aiohttp_client_setup():
-        return
+def _detach_global_aiohttp_clients() -> list[ClientSession]:
+    """Clear the process-wide data and control clients and return the ones still open."""
 
-    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CONTROL_CLIENT, _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
-
-    async def close() -> None:
-        await _GLOBAL_AIOHTTP_CLIENT.close()
-        if _GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
-            await _GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
-
-    asyncio.run(close())
-
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP, _GLOBAL_AIOHTTP_CONTROL_CLIENT
+    global _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
+    clients = [
+        client
+        for client in (_GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CONTROL_CLIENT)
+        if client is not None and not client.closed
+    ]
     _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = None
     _GLOBAL_AIOHTTP_CONTROL_CLIENT = None
     _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = False
+    return clients
+
+
+async def close_global_aiohttp_client() -> None:
+    """Close the process-wide data and control clients on their owning event loop."""
+
+    for client in _detach_global_aiohttp_clients():
+        await client.close()
+
+
+def global_aiohttp_client_exit():  # pragma: no cover
+    # The control pool is created on demand from requests running on the data client's loop.
+    owner_loop = _GLOBAL_AIOHTTP_CLIENT_LOOP
+    clients = _detach_global_aiohttp_clients()
+    if not clients:
+        return
+
+    async def close_client() -> None:
+        for client in clients:
+            await client.close()
+
+    if owner_loop is None or owner_loop.is_closed():
+        # aiohttp has no owner-loop work left once the loop is closed, but the
+        # coroutine must still run so the session transitions to closed.
+        asyncio.run(close_client())
+        return
+
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is owner_loop:
+        owner_loop.create_task(close_client())
+    elif owner_loop.is_running():
+        asyncio.run_coroutine_threadsafe(close_client(), owner_loop).result(timeout=5)
+    else:
+        owner_loop.run_until_complete(close_client())
 
 
 atexit.register(global_aiohttp_client_exit)
@@ -871,6 +911,16 @@ DEFAULT_HEAD_SERVER_PORT = 11000
 ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
 
 
+def _connectable_client_host(host: str) -> str:
+    """Return a connectable client host for a server bind address."""
+
+    if host == "0.0.0.0":
+        return "127.0.0.1"
+    if host in {"::", "[::]"}:
+        return "[::1]"
+    return host
+
+
 class ServerClient(BaseModel):
     head_server_config: BaseServerConfig
 
@@ -891,6 +941,17 @@ class ServerClient(BaseModel):
         if self._checkpoint_enabled is None:
             self._checkpoint_enabled = checkpoint_settings(self.global_config_dict) is not None
         return self._checkpoint_enabled
+
+    @staticmethod
+    def _client_host(host: str) -> str:
+        """Return a connectable host for a server bind address.
+
+        Wildcard addresses are valid for binding a server but are not valid
+        advertised client targets. In particular, proxy-aware HTTP clients can
+        route ``0.0.0.0`` through an external proxy instead of reaching the
+        local server.
+        """
+        return _connectable_client_host(host)
 
     def assistant_message_header(self, model_server_name: str) -> bytes | None:
         """Read the optional header property of harnesses using this model server.
@@ -938,7 +999,8 @@ class ServerClient(BaseModel):
             )
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
-        head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
+        head_server_host = _connectable_client_host(head_server_config.host)
+        head_server_url = f"http://{head_server_host}:{head_server_config.port}"
         try:
             response = requests.get(
                 f"{head_server_url}/global_config_dict_yaml",
@@ -1010,6 +1072,12 @@ class ServerClient(BaseModel):
             and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
+            verifier_invocation_id = current_verifier_invocation_id()
+            if verifier_invocation_id is not None:
+                kwargs["headers"] = {
+                    **(kwargs.get("headers") or {}),
+                    VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
+                }
 
         return await request(
             method=method,
@@ -1096,7 +1164,10 @@ class ServerClient(BaseModel):
         return base_url
 
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
-        return f"http://{server_config_dict.host}:{server_config_dict.port}"
+        # Use the module helper so this method remains safe when borrowed by a
+        # duck-typed or mocked ServerClient.
+        host = _connectable_client_host(server_config_dict.host)
+        return f"http://{host}:{server_config_dict.port}"
 
 
 def _has_injected_global_config_env() -> bool:

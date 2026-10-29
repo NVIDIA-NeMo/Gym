@@ -12,6 +12,7 @@ from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsReq
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import EnvironmentServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, ToolCallObservation, TrajectoryRecord
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 
 
@@ -33,6 +34,38 @@ _SKIPPED_HEADERS = frozenset(
 
 def _relayed_headers(headers: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
     return [(name, value) for name, value in headers if name.lower() not in _SKIPPED_HEADERS]
+
+
+def _with_reply_tool_observations(body: bytes) -> bytes:
+    """Add the tool executions in the agent reply's trajectory to the episode's agent observations.
+
+    In an agent session simple_agent returns only its invocations at close, but its reply keeps the whole
+    trajectory, and rollout collection builds `ng_trajectory.tool_calls` only from the observations. Each
+    execution is added once, without its output, which collection joins from the invocation's conversation.
+    Any other body is returned unchanged.
+    """
+    try:
+        result = json.loads(body)
+        records = result[NG_AGENT_OBSERVATIONS_KEY]["records"]
+        trajectory = TrajectoryRecord.model_validate(result["response"]["_ng_trajectory"])
+    except (ValueError, KeyError, TypeError):
+        return body
+    if not isinstance(records, list):
+        return body
+    observed = {
+        (record.get("invocation_id"), record.get("tool_call_id"))
+        for record in records
+        if isinstance(record, dict) and record.get("kind") == "tool_call"
+    }
+    added = [
+        ToolCallObservation.model_validate(tool.model_dump(exclude={"output"})).model_dump(mode="json")
+        for tool in trajectory.tool_calls
+        if (tool.invocation_id, tool.tool_call_id) not in observed
+    ]
+    if not added:
+        return body
+    records.extend(added)
+    return json.dumps(result, ensure_ascii=False).encode()
 
 
 class PartnerIFDispatcherConfig(BaseResponsesAPIAgentConfig):
@@ -124,6 +157,8 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
             cookies=request.cookies,
         )
         body = await upstream.read()
+        if upstream.status == 200:
+            body = _with_reply_tool_observations(body)
         response = Response(content=body, status_code=upstream.status)
         response.raw_headers = [
             (name.lower().encode("latin-1"), value.encode("latin-1"))

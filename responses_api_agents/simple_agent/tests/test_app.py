@@ -22,16 +22,20 @@ from unittest.mock import AsyncMock, MagicMock, call
 import httpx
 import orjson
 import pytest
+from aiohttp import ClientResponseError, RequestInfo
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
+from yarl import URL
 
 from nemo_gym._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord
 from nemo_gym._checkpoint.control import CheckpointRequest, CommitRequest, ParticipantControlPlane, RestoreRequest
 from nemo_gym._checkpoint.environment import EnvironmentParticipant
 from nemo_gym._checkpoint.errors import RolloutIdRequiredError, StaleAttemptError
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -393,16 +397,11 @@ class TestApp:
         # A session returns its agent evidence at close, which becomes the episode's ng_agent_observations.
         observations = close.json()["agent_observations"]
         if observability_enabled:
-            invocation, tool = observations["records"]
-            assert invocation["kind"] == "agent_invocation"
-            # The executed tool call comes back without its output, which stays in the invocation's conversation.
-            assert (tool["kind"], tool["invocation_id"], tool["tool_name"], tool["status"]) == (
-                "tool_call",
-                "root",
-                "get_weather",
-                "completed",
-            )
-            assert "output" not in tool
+            assert [record["kind"] for record in observations["records"]] == ["agent_invocation", "tool_call"]
+            tool = observations["records"][1]
+            assert tool["tool_name"] == "get_weather"
+            assert tool["status"] == "completed"
+            assert tool["invocation_id"] == observations["records"][0]["invocation_id"]
             assert observations["source"] == "simple_agent"
         else:
             assert observations is None
@@ -3158,3 +3157,130 @@ async def test_a_skip_verification_run_parks_at_its_return_boundary_until_resume
     # Restored at its return step: no seed, model call, tool call, or verification runs again.
     assert calls == []
     assert result.reward == 0.25 and result.response.output == first.response.output
+
+
+def _model_http_error(status: int) -> MagicMock:
+    response = _mock_response(status=status, content='{"error":{"message":"controlled model failure"}}')
+    url = URL("http://model/v1/responses")
+    response.raise_for_status.side_effect = ClientResponseError(
+        RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url), (), status=status, message="model failure"
+    )
+    return response
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 503])
+async def test_model_http_retries_keep_one_decision(status: int, monkeypatch: MonkeyPatch) -> None:
+    server, client = _make_agent(True)
+    client.post = AsyncMock(
+        side_effect=[_model_http_error(status), _model_http_error(status), _message_response("ok")]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", sleep)
+
+    response, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        collect_trajectory=True,
+    )
+
+    assert response.output[-1].content[0].text == "Done."
+    assert client.post.await_count == 3
+    requests = [call.kwargs for call in client.post.await_args_list]
+    assert requests[0] == requests[1] == requests[2]
+    assert requests[0]["headers"] == {"x-session-id": "root"}
+    assert len(trajectory.turns) == 1
+    assert trajectory.invocations[0].status == "completed"
+    assert [ref.response_id for ref in trajectory.invocations[0].model_calls] == ["ok"]
+    assert sleep.await_args_list == [call(0.5), call(1.0)]
+
+
+@pytest.mark.parametrize(
+    ("status", "retries", "attempts"), [(400, 2, 1), (401, 2, 1), (422, 2, 1), (429, 0, 1), (500, 2, 3)]
+)
+async def test_terminal_model_http_error_returns_cause_and_zero_usage(
+    status: int, retries: int, attempts: int, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    server.config.max_model_retries = retries
+    client.post = AsyncMock(side_effect=[_model_http_error(status) for _ in range(attempts)])
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    response, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        collect_trajectory=True,
+    )
+
+    assert client.post.await_count == attempts
+    assert response.status == "failed"
+    assert "controlled model failure" in response.error.message
+    assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+        failure_kind="model_request_error", status_code=status
+    )
+    assert response.output == [] and response.usage.total_tokens == 0
+    assert trajectory.turns == [] and trajectory.tool_calls == []
+    invocation = trajectory.invocations[0]
+    assert invocation.status == "failed" and invocation.error_type == "model_request_error"
+    assert invocation.model_calls == []  # The rejected attempts have no provider response IDs.
+
+
+@pytest.mark.parametrize("has_usage", [False, True])
+async def test_exhausted_model_retries_preserve_partial_work_without_repeating_tools(
+    has_usage: bool, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    tool_response = {
+        "id": "tool-response",
+        "created_at": 1,
+        "model": "model",
+        "object": "response",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": [
+            {
+                "type": "function_call",
+                "id": "tool-1",
+                "call_id": "tool-1",
+                "name": "bash",
+                "arguments": '{"command":"printf done"}',
+            }
+        ],
+    }
+    if has_usage:
+        tool_response["usage"] = {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "total_tokens": 28,
+            "input_tokens_details": {"cached_tokens": 3},
+            "output_tokens_details": {"reasoning_tokens": 2},
+        }
+    client.post = AsyncMock(side_effect=[_mock_response(tool_response), *[_model_http_error(500) for _ in range(3)]])
+    tool = AsyncMock(return_value=_mock_response(content="done"))
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", tool)
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    response, trajectory, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        tool_access=DirectHTTPToolAccess(name="resources", base_url="http://resources", required=True),
+        collect_trajectory=True,
+    )
+
+    assert response.status == "failed"
+    assert client.post.await_count == 4
+    assert tool.await_count == 1
+    requests = [entry.kwargs["json"].model_dump() for entry in client.post.await_args_list]
+    assert requests[1] == requests[2] == requests[3]
+    assert requests[1]["input"][-1]["output"] == "done"
+    assert response.output[-1].output == "done"
+    assert len(trajectory.turns) == len(trajectory.tool_calls) == 1
+    assert trajectory.tool_calls[0].status == "completed"
+    assert [ref.response_id for ref in trajectory.invocations[0].model_calls] == ["tool-response"]
+    if has_usage:
+        assert response.usage.total_tokens == 28
+    else:
+        assert response.usage is None

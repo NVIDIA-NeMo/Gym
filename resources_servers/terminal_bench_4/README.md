@@ -153,7 +153,12 @@ the same rows uses the same denominator for both. `evaluation_completed: false` 
 
 ## Non-root Compose services
 
-When loading agent Compose YAML, three task-specific adaptations use the
+`environment.compose_service_overrides` maps a short task name and a Compose service to a
+[JSON merge patch](https://www.rfc-editor.org/rfc/rfc7396) for that service in the agent's
+generated Compose YAML: mappings merge, other values replace, and `null` removes a setting.
+As with `by_task`, a task name that the manifest lacks stops the server at startup, and a
+service that the task's Compose file lacks fails the task at seed. The Terminal-Bench 4
+profile uses it for two services that run as non-root users, with the
 [Compose extensions](../../fern/versions/latest/pages/infrastructure/sandbox/compose.mdx):
 
 - `medical-claims-processing`: `playwright-mcp` keeps `pwuser`, disables host-file
@@ -162,15 +167,20 @@ When loading agent Compose YAML, three task-specific adaptations use the
 - `payments-pipeline-fix`: `kafka` keeps `appuser` and disables host-file injection.
   Its single-broker controller uses localhost; clients retain the `kafka` alias
   needed by the advertised listener.
-- Terminal-Bench-Science `protein-active-learning`: `submission` keeps its `submission`
-  user, disables host-file injection, and receives its only peer URL as
-  `ASSAY_STATUS=http://assay:8080/status`, resolved to the assay sandbox IP. The image's
-  server must read that variable; see the
-  [benchmark README](../../benchmarks/terminal_bench_science/README.md#protein-active-learning-submission).
 
-These services use their image's default user, omitting the redundant explicit
-`user` value copied from image metadata. This avoids the provider attempting
-`su` from a non-root process to the same user.
+```yaml
+compose_service_overrides:
+  medical-claims-processing:
+    playwright-mcp:
+      x-sandbox: {hosts: [], resolve_environment: [BROWSER_URL]}
+      user: null
+```
+
+`user: null` makes these services use their image's default user, omitting the
+redundant explicit `user` value copied from image metadata. This avoids the provider
+attempting `su` from a non-root process to the same user. Terminal-Bench-Science's
+profile patches its `protein-active-learning` `submission` service the same way; see the
+[benchmark README](../../benchmarks/terminal_bench_science/README.md#protein-active-learning-submission).
 
 These changes apply only to the generated runtime YAML. Pinned task packages,
 other services, and verifier environments retain their original configuration.
