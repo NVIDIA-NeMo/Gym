@@ -15,6 +15,7 @@
 import asyncio
 import runpy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
@@ -242,7 +243,7 @@ class TestJuryRoundCancellation:
         started, cancelled = [], []
         server, _ = make_server({})
 
-        async def judge(judge_ref, prompt, round_idx):
+        async def judge(judge_ref, prompt, round_idx, juror):
             if judge_ref.name == "judge_c" and round_idx == failing_round:
                 await TestJuryRoundCancellation._until(lambda: len(started) == 2)
                 raise JudgeError("judge_c failed")
@@ -275,6 +276,31 @@ class TestJuryRoundCancellation:
             await asyncio.wait_for(round_task, timeout=5)
 
         assert sorted(cancelled) == sorted(JUDGES)
+
+
+@pytest.mark.parametrize("in_verifier_run", [False, True])
+async def test_each_juror_is_its_own_agent_instance_outside_a_verifier_run(monkeypatch, in_verifier_run):
+    import resources_servers.proof_jury_judge.app as app_module
+    from nemo_gym.rollout_correlation import agent_instance_context
+
+    named = []
+
+    async def fake_call_judge(server_client, *, server_name, agent_instance, **kwargs):
+        named.append((server_name, agent_instance))
+        return SimpleNamespace(incomplete_details=None)
+
+    monkeypatch.setattr(app_module, "call_judge", fake_call_judge)
+    monkeypatch.setattr(app_module, "response_text", lambda response: "\\boxed{7}")
+    server, _ = make_server({})
+
+    if in_verifier_run:
+        with agent_instance_context("verify.abc"):
+            await server._round("prompt", 0)
+    else:
+        await server._round("prompt", 0)
+
+    expected = [None] * len(JUDGES) if in_verifier_run else [f"judge.{i}" for i in range(len(JUDGES))]
+    assert [name for _, name in sorted(named)] == expected
 
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch):

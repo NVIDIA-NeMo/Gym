@@ -21,6 +21,7 @@ from typing import Any, Optional
 from pydantic import BaseModel
 
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.correlation import validate_agent_instance
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
@@ -30,11 +31,9 @@ from nemo_gym.global_config import (
 )
 
 
-VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
-
-
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
 _VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifier_invocation_id", default=None)
+_AGENT_INSTANCE: ContextVar[Optional[str]] = ContextVar("nemo_gym_agent_instance", default=None)
 
 # A capture id is a path segment in ``/ng-rollout/<id>/...``.
 # Restrict it to characters that survive a path round trip.
@@ -122,6 +121,25 @@ def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
         yield
     finally:
         _ROLLOUT_ID.reset(token)
+
+
+def current_agent_instance() -> Optional[str]:
+    """Return the agent instance the current model calls are made for, if one was named."""
+    return _AGENT_INSTANCE.get()
+
+
+@contextmanager
+def agent_instance_context(agent_instance: Optional[str]) -> Iterator[None]:
+    """Name the agent instance whose model calls run inside this block.
+
+    ``ServerClient`` puts the name in the model-server path when it adds the rollout prefix itself, and the
+    agent URL helpers use it when no explicit name is passed. ``None`` clears an enclosing name.
+    """
+    token = _AGENT_INSTANCE.set(validate_agent_instance(agent_instance) if agent_instance is not None else None)
+    try:
+        yield
+    finally:
+        _AGENT_INSTANCE.reset(token)
 
 
 def current_verifier_invocation_id() -> Optional[str]:

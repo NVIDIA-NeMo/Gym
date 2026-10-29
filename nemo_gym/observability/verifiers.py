@@ -17,8 +17,10 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse, Response
 
+from nemo_gym.correlation import VERIFIER_AGENT_KIND
 from nemo_gym.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.rollout_correlation import (
+    agent_instance_context,
     current_rollout_id,
     verifier_invocation_context,
 )
@@ -87,8 +89,13 @@ def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> 
     async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T | Response:
         if current_rollout_id() is None:
             return await verify_fn(*args, **kwargs)
-        invocation = VerifierInvocation(invocation_id=f"verify-{uuid4().hex}")
-        with verifier_invocation_context(invocation.invocation_id):
+        invocation = VerifierInvocation(invocation_id=uuid4().hex)
+        # The run is the agent instance ``verify.<id>``: every model call it makes carries the name in its path,
+        # and the model server records the id back as ``verifier_invocation_id``.
+        with (
+            verifier_invocation_context(invocation.invocation_id),
+            agent_instance_context(f"{VERIFIER_AGENT_KIND}.{invocation.invocation_id}"),
+        ):
             try:
                 result = await verify_fn(*args, **kwargs)
             except Exception as error:

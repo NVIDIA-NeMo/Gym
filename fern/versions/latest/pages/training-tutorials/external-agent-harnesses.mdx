@@ -151,6 +151,28 @@ The built-in external agents, such as Claude Code, add this prefix when `token_i
 
 Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. While the agent exports traces, `base_url_for_run` also appends `/ng-trace/<traceparent>` after the prefix so the model server can parent the harness's calls to the run's span; the model server strips it, and a harness that inspects the URL should keep it (see [Distributed Tracing](/main/observability/distributed-tracing#trace-context-in-the-model-url)). The built-in agents known to rewrite the model URL, `harness_agent` (replaces a loopback host) and `vibench_agent` (replaces the host and keeps the path), keep every path segment; the OpenHands capture overlay only appends to the base URL. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture. [Model-Call Capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
 
+### 6. Name agent instances in multi-agent episodes
+
+An episode can have several agent instances calling model servers: an assistant, a judge, a simulated user, two debaters. The component that starts an agent instance names it in the URL, so each model server records which agent instance made each call and keeps their capture apart. The full prefix is:
+
+```text
+/ng-rollout/<capture key>[/ng-agent-instance/<name>][/training-token-capture][/ng-trace/<traceparent>]/v1/...
+```
+
+The segments appear in exactly this order. A name is `<agent kind>[.<n>]` in lowercase letters, digits, `_` and `-`, for example `assistant`, `judge`, `user` or `debater.1`. When an episode runs several agent instances of one kind, each gets its own `<kind>.<n>`. A name may not be a segment literal (`ng-rollout`, `ng-agent-instance`, `training-token-capture`, `ng-trace`) or `v1`. A model server answers a malformed prefix (segments out of order, an invalid name) with HTTP 400.
+
+An agent's own `/run` names no agent instance, so single-agent episodes keep the URLs above. In a multi-agent episode every agent instance is named, including the assistant. Parent links, retry grouping and terminal calls never cross agent instances or model servers, and one agent instance's capture failure never masks another's sample.
+
+Only the agent instances that `token_id_capture.training_agent_instances` selects carry the training tag. The default is `["assistant"]`. Entries match an agent instance name (`debater.1`) or an agent kind (`debater`):
+
+```yaml
+token_id_capture:
+  enabled: true
+  training_agent_instances: [assistant, user]
+```
+
+Agents build named URLs with `base_url_for_run(base_url, body, agent_instance="user", token_capture=self.training_tag_for("user"))` or `resolve_model_base_url(..., agent_instance=...)`. Code that calls a model server through Gym's `ServerClient` names its calls with `with agent_instance_context("judge"):`. `call_judge` names its calls `judge` unless the caller passes `agent_instance` or a name is already set. Inside a verifier run, every model call is named `verify.<invocation id>`.
+
 ## Run a first rollout with Claude Code
 
 This example collects captured rollouts from the Claude Code agent on the `reasoning_gym` example tasks. It combines the settings from the previous section into one file. Run the commands from the root of the Gym repository.

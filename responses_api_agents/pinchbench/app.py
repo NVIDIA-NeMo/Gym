@@ -201,12 +201,22 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
 
     def _task_env(self, task_id: str, rollout_id: Optional[str] = None) -> dict:
         model_base_url = (
-            self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+            self.resolve_model_base_url(
+                self.config.model_server.name,
+                rollout_id,
+                agent_instance="assistant",
+                token_capture=self.training_tag_for("assistant"),
+            )
             if self.config.model_server is not None
             else self.config.model_base_url
         )
         judge_base_url = (
-            self.resolve_model_base_url(self.config.judge_model_server.name, rollout_id)
+            self.resolve_model_base_url(
+                self.config.judge_model_server.name,
+                rollout_id,
+                agent_instance="judge",
+                token_capture=self.training_tag_for("judge"),
+            )
             if self.config.judge_model_server is not None
             else self.config.judge_base_url
         )

@@ -175,10 +175,36 @@ async def test_model_calls_use_the_seeded_rollout_correlation_prefix() -> None:
         model_server=ModelServerRef(type="responses_api_models", name="simulator_model"),
         params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         messages=[NeMoGymEasyInputMessage(role="user", content="Generate.")],
+        agent_instance="tool_simulation",
         rollout_id="7-2",
     )
 
-    assert server.server_client.post.await_args.kwargs["url_path"] == "/ng-rollout/7-2/v1/responses"
+    assert (
+        server.server_client.post.await_args.kwargs["url_path"]
+        == "/ng-rollout/7-2/ng-agent-instance/tool_simulation/v1/responses"
+    )
+
+
+async def test_a_model_call_without_a_rollout_id_names_its_agent_instance_in_context() -> None:
+    from nemo_gym.rollout_correlation import current_agent_instance
+
+    server = make_server()
+    names = []
+
+    async def post(**kwargs):
+        names.append((kwargs["url_path"], current_agent_instance()))
+        return JsonResponseStub(make_judge_response('{"ok":true}').model_dump(mode="json"))
+
+    server.server_client.post = post
+    for name in ("user", "judge"):
+        await server._call_model(
+            model_server=ModelServerRef(type="responses_api_models", name="simulator_model"),
+            params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            messages=[NeMoGymEasyInputMessage(role="user", content="Generate.")],
+            agent_instance=name,
+        )
+
+    assert names == [("/v1/responses", "user"), ("/v1/responses", "judge")]
 
 
 async def test_seed_session_starts_from_prefilled_policy_user_message() -> None:

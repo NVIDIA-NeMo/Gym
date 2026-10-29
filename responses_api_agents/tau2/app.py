@@ -321,10 +321,25 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         config: TextRunConfig = body_dict["config"]
 
+        # The assistant and the user simulator are two agent instances. The user simulator's calls carry the
+        # training tag only when token_id_capture.training_agent_instances selects it.
+        user_base_url = self.base_url_for_run(
+            get_server_url(self.config.user_model_server.name),
+            body,
+            agent_instance="user",
+            token_capture=self.training_tag_for("user"),
+        )
+        assistant_base_url = self.base_url_for_run(
+            get_server_url(self.config.model_server.name),
+            body,
+            agent_instance="assistant",
+            token_capture=self.training_tag_for("assistant"),
+        )
+
         # Need `openai/` provider prefix for LiteLLM
         config.llm_user = TAU2_USER_MODEL
         config.llm_args_user |= {
-            "api_base": f"{self.base_url_for_run(get_server_url(self.config.user_model_server.name), body)}/v1",
+            "api_base": f"{user_base_url}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | self.config.user_llm_args
 
@@ -336,7 +351,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         # Need `openai/` provider prefix for LiteLLM
         config.llm_agent = TAU2_AGENT_MODEL
         config.llm_args_agent = {
-            "api_base": f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1",
+            "api_base": f"{assistant_base_url}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | extra_agent_args
 

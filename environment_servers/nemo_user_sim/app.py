@@ -61,6 +61,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
+from nemo_gym.rollout_correlation import agent_instance_context
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from nemo_gym.server_utils import format_exception_with_response_body, get_response_json, raise_for_status
 from nemo_gym.server_utils import request as http_request
@@ -275,11 +276,14 @@ class _ConversationBridge:
             except Exception as error:
                 raise _ParticipantActivationError(alias, error) from error
         else:
-            response = await self.environment_server.server_client.post(
-                server_name=target.name,
-                url_path="/v1/responses",
-                json=request_params,
-            )
+            # Support calls (judge, summary, tool simulation) are agent instances named by the role their
+            # invocation records already carry. They never carry the training tag.
+            with agent_instance_context(_INVOCATION_ROLE_BY_ALIAS[alias]):
+                response = await self.environment_server.server_client.post(
+                    server_name=target.name,
+                    url_path="/v1/responses",
+                    json=request_params,
+                )
             await raise_for_status(response)
             response_data = await get_response_json(response)
             trajectory_data = response_data.pop(_INTERNAL_TRAJECTORY_KEY, None)

@@ -134,6 +134,10 @@ class TokenIdCaptureSettings(BaseModel):
     # Capture model calls from every agent.
     # The default keeps capture scoped by each agent's ``token_id_capture`` setting.
     all_agents: bool = False
+    # In an episode that names its agent instances, the agent instances whose model URLs carry the training
+    # tag, by agent instance name (``debater.1``) or agent kind (``debater``). The unnamed agent of a
+    # single-agent episode follows the agent's own setting. Gym records; the trainer selects what it trains on.
+    training_agent_instances: list[str] = Field(default_factory=lambda: ["assistant"])
     # Where the default file store writes.
     # Falls back to ``model_call_capture_dir``.
     dir: Path | None = None
@@ -379,6 +383,17 @@ def check_one_capture_directory(global_config_dict: Any) -> None:
             "model servers with token_id_capture enabled must share one capture directory, so each episode has "
             f"one ledger; they resolve to {dict(sorted((name, str(path)) for name, path in directories.items()))}"
         )
+
+
+def agent_instance_carries_training_tag(global_config_dict: Any, agent_instance: str | None) -> bool:
+    """Whether model URLs of this agent instance carry ``/training-token-capture``.
+
+    The caller combines this with the agent's own capture setting. An unnamed agent always does.
+    """
+    if agent_instance is None:
+        return True
+    selected = token_id_capture_config(global_config_dict).token_id_capture.training_agent_instances
+    return agent_instance in selected or agent_instance.partition(".")[0] in selected
 
 
 def token_id_capture_enabled_for_agent(
