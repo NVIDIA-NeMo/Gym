@@ -383,6 +383,7 @@ class TestRewriteText:
 class TestMain:
     def test_rewrites_files_and_check_mode_reports_them(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(migrate_imports, "_load_moves", lambda: (MODULES, NAMES))
+        monkeypatch.setattr(migrate_imports, "_load_public_apis", dict)  # the fixture moves have no public APIs
         (tmp_path / "app.py").write_text("from nemo_gym.server_utils import ServerClient\n")
         (tmp_path / "README.md").write_text("Import `nemo_gym.server_utils.ServerClient`.\n")
         (tmp_path / "untouched.py").write_text("import os\n")
@@ -444,6 +445,7 @@ class TestMainKeepsFilesValid:
     @pytest.fixture(autouse=True)
     def _fixture_moves(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(migrate_imports, "_load_moves", lambda: (MODULES, NAMES))
+        monkeypatch.setattr(migrate_imports, "_load_public_apis", dict)  # the fixture moves have no public APIs
 
     def test_crlf_and_a_byte_order_mark_come_back_as_they_were(self, tmp_path: Path) -> None:
         path = tmp_path / "app.py"
@@ -505,3 +507,48 @@ class TestStringPatchTargets:
             'import nemo_gym.server_utils as su\nmonkeypatch.setattr(su, "request", fake)\n'
         )
         assert migrate_imports.main(["--check", str(tmp_path)]) == 1
+
+
+class TestPublicApiForm:
+    """Outside nemo_gym/, a name the package's public API exports is imported from the package."""
+
+    @staticmethod
+    def _migrator() -> "migrate_imports.Migrator":
+        return migrate_imports.Migrator(
+            {"nemo_gym.old_mod": "nemo_gym.pkg.mod"}, {}, public_apis={"pkg": {"Exported": "mod"}}
+        )
+
+    def test_code_outside_the_library_imports_exported_names_from_the_package(self, tmp_path: Path) -> None:
+        source = "from nemo_gym.old_mod import Exported, Private\n"
+        new, _ = self._migrator().rewrite_python(source, path=str(tmp_path / "server.py"))
+        assert new == "from nemo_gym.pkg import Exported\nfrom nemo_gym.pkg.mod import Private\n"
+
+    def test_code_inside_the_library_imports_the_submodule(self) -> None:
+        source = "from nemo_gym.old_mod import Exported, Private\n"
+        new, _ = self._migrator().rewrite_python(source, path=str(migrate_imports.LIBRARY / "server_runtime.py"))
+        assert new == "from nemo_gym.pkg.mod import Exported, Private\n"
+
+    def test_public_apis_are_read_from_each_package_without_importing_it(self) -> None:
+        apis = migrate_imports._load_public_apis()
+        assert apis["config"]["ModelServerRef"] == "config_types"
+
+
+class TestPublicApiFormInDocs:
+    def test_docs_import_a_whole_moved_modules_exported_names_from_the_package(self, tmp_path: Path) -> None:
+        migrator = migrate_imports.Migrator(
+            {"nemo_gym.old_mod": "nemo_gym.pkg.mod"}, {}, public_apis={"pkg": {"Exported": "mod"}}
+        )
+        text = "```python\nfrom nemo_gym.old_mod import Exported\nfrom nemo_gym.old_mod import Private\n```\n"
+        assert migrator.rewrite_dotted(text, public=True) == (
+            "```python\nfrom nemo_gym.pkg import Exported\nfrom nemo_gym.pkg.mod import Private\n```\n"
+        )
+
+
+class TestLibraryTestsKeepFullPaths:
+    def test_the_librarys_own_tests_import_from_the_submodule(self) -> None:
+        migrator = migrate_imports.Migrator(
+            {"nemo_gym.old_mod": "nemo_gym.pkg.mod"}, {}, public_apis={"pkg": {"Exported": "mod"}}
+        )
+        library_test = migrate_imports.LIBRARY.parent / "tests" / "unit_tests" / "test_app.py"
+        new, _ = migrator.rewrite_python("from nemo_gym.old_mod import Exported\n", path=str(library_test))
+        assert new == "from nemo_gym.pkg.mod import Exported\n"

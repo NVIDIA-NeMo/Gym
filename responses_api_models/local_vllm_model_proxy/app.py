@@ -22,8 +22,7 @@ from typing import List, Union
 import requests
 from pydantic import Field
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 

@@ -13,7 +13,7 @@ from typing import Any, Literal, Mapping, Optional
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.observability.verifiers import merge_verifier_call_observation
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (

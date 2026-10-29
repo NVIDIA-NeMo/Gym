@@ -23,7 +23,7 @@ AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
 # The Harbor step a turn's request belongs to, in its `responses_create_params.metadata`.
 STEP_METADATA_KEY = "harbor_step"
 # The dataset a row came from, on every row: the dataset folder's name (the taskset, unless the target is a single
-# task folder, whose dataset is its parent). The same string as `nemo_gym.global_config.TASK_SOURCE_KEY_NAME`,
+# task folder, whose dataset is its parent). The same string as `nemo_gym.config.global_config.TASK_SOURCE_KEY_NAME`,
 # which this module does not import; rollout collection copies the key from a row onto the record it writes, so
 # every results row names its dataset.
 TASK_SOURCE_KEY = "task_source"

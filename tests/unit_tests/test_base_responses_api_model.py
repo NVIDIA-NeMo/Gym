@@ -36,7 +36,7 @@ from nemo_gym.base_responses_api_model import (
     install_model_call_capture,
     make_capture_store,
 )
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.observability.model_calls import read_model_call_records
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -737,7 +737,7 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
     from pydantic import BaseModel, ConfigDict
 
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
     from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
@@ -1562,7 +1562,7 @@ def _run_capture_middleware_on(path: str, *, token_store, sent: list | None = No
 def test_unobserved_dialect_under_capture_prefix_marks_incomplete(tmp_path):
     # The middleware cannot capture tokens from /v1/completions.
     # Its output can still feed later prompts.
-    from nemo_gym.token_id_capture import TokenCaptureStore
+    from nemo_gym.token_id_capture.store import TokenCaptureStore
 
     token_store = TokenCaptureStore(tmp_path)
     forwarded, sent = _run_capture_middleware_on(
@@ -1588,7 +1588,7 @@ def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
 
 
 def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path):
-    from nemo_gym.token_id_capture import TokenCaptureStore
+    from nemo_gym.token_id_capture.store import TokenCaptureStore
 
     token_store = TokenCaptureStore(tmp_path)
     forwarded, _sent = _run_capture_middleware_on(

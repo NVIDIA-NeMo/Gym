@@ -46,7 +46,7 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     BaseNeMoGymCLIConfig,
     BenchmarkDatasetConfig,
     ConfigError,
@@ -54,16 +54,7 @@ from nemo_gym.config_types import (
     DatasetConfig,
     ServerInstanceConfig,
 )
-from nemo_gym.discovery import read_config_metadata
-from nemo_gym.eval_plan import (
-    PlanBenchmark,
-    PlanGym,
-    build_eval_plan,
-    eval_plan_json_schema,
-    write_eval_plan,
-)
-from nemo_gym.exporters import mark_run_failed
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
@@ -76,6 +67,15 @@ from nemo_gym.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
+from nemo_gym.discovery import read_config_metadata
+from nemo_gym.eval_plan import (
+    PlanBenchmark,
+    PlanGym,
+    build_eval_plan,
+    eval_plan_json_schema,
+    write_eval_plan,
+)
+from nemo_gym.exporters import mark_run_failed
 from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
@@ -838,7 +838,7 @@ def health_check_rollouts(
 
 @exit_cleanly_on_config_error
 def export_run() -> None:  # pragma: no cover
-    from nemo_gym.config_types import RunExportConfig
+    from nemo_gym.config.config_types import RunExportConfig
     from nemo_gym.exporters import load_run_exporter_class
     from nemo_gym.exporters.base import ExportState
     from nemo_gym.run_artifacts import RunArtifacts

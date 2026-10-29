@@ -59,7 +59,7 @@ def test_shared_or_unknown_dependencies_run_all(path):
 @pytest.mark.parametrize(
     "paths",
     [
-        ["resources_servers/ether0/.gitignore", "tests/unit_tests/test_global_config.py"],
+        ["resources_servers/ether0/.gitignore", "tests/unit_tests/config/test_global_config.py"],
         ["resources_servers/sav_tracks/app.py", "resources_servers/sav_tracks/README.md"],
         ["resources_servers/aviary/hypotest_app.py", "responses_api_agents/aviary_agent/app.py"],
         [
