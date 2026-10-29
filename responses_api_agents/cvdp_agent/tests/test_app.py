@@ -593,7 +593,9 @@ class TestSimpleRunAttemptEvidence:
             }
         return body
 
-    def _run(self, model_replies: list, parse_failed: list[bool], *, capture: bool = True):
+    def _run(
+        self, model_replies: list, parse_failed: list[bool], *, capture: bool = True, max_steps: int | None = None
+    ):
         """Run /run in process: model and resources servers are scripted, the self-call reaches this agent's app."""
         config = CVDPAgentConfig(
             host="0.0.0.0",
@@ -601,6 +603,7 @@ class TestSimpleRunAttemptEvidence:
             entrypoint="",
             name="cvdp_agent",
             simple_agent=True,
+            max_steps=max_steps,
             resources_server=ResourcesServerRef(type="resources_servers", name="cvdp"),
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         )
@@ -746,3 +749,58 @@ class TestSimpleRunAttemptEvidence:
             ("agent_observations_invalid", "attempt:1:ValueError")
         ]
         assert result["ng_trajectory"]["invocations"][0]["model_calls"] == []
+        assert result["ng_trajectory"]["invocations"][0]["status"] == "unknown"
+
+    @pytest.mark.parametrize("usage", [(10, 5), None], ids=["usage", "missing_usage"])
+    @pytest.mark.parametrize(
+        ("outcome", "expected_status", "expected_stop_reason"),
+        [
+            ("iteration_limit", "incomplete", "max_iterations"),
+            ("failed", "failed", None),
+            ("incomplete", "incomplete", "max_output_tokens"),
+            ("completed", "completed", None),
+            ("legacy", "completed", None),
+        ],
+    )
+    def test_invocation_outcome_preserves_requests_verification_and_results(
+        self, outcome: str, expected_status: str, expected_stop_reason: str | None, usage: tuple[int, int] | None
+    ) -> None:
+        reply = self._reply("resp_a", "module a; endmodule", usage)
+        if outcome == "iteration_limit":
+            reply["status"] = "completed"
+            reply["output"] = [{"id": "reason_a", "type": "reasoning", "summary": []}]
+        elif outcome == "failed":
+            reply["status"] = "failed"
+            reply["error"] = {"code": "server_error", "message": "synthetic failure with partial output"}
+        elif outcome == "incomplete":
+            reply["status"] = "incomplete"
+            reply["incomplete_details"] = {"reason": "max_output_tokens"}
+        elif outcome == "completed":
+            reply["status"] = "completed"
+
+        result, requests, verified, _ = self._run([reply], [False], max_steps=1)
+        without_capture, plain_requests, plain_verified, _ = self._run([reply], [False], capture=False, max_steps=1)
+
+        invocation = result["ng_trajectory"]["invocations"][0]
+        assert (invocation["status"], invocation["stop_reason"]) == (expected_status, expected_stop_reason)
+        assert [ref["response_id"] for ref in invocation["model_calls"]] == ["resp_a"]
+        assert len(requests) == len(verified) == 1
+        assert requests == plain_requests
+        assert verified == plain_verified
+        assert {key: value for key, value in result.items() if key != "ng_trajectory"} == without_capture
+        assert result["response"] == verified[0]["response"]
+        assert result["reward"] == 0.0
+
+    def test_recovered_iteration_limit_uses_final_attempt_outcome_and_keeps_both_calls(self) -> None:
+        first = self._reply("resp_a", None, None)
+        first["output"] = [{"id": "reason_a", "type": "reasoning", "summary": []}]
+        last = self._reply("resp_b", "module a; endmodule", (10, 5))
+        result, requests, verified, _ = self._run([first, last], [True, False], max_steps=1)
+        invocation = result["ng_trajectory"]["invocations"][0]
+        assert (invocation["status"], invocation["stop_reason"]) == ("completed", None)
+        assert [ref["response_id"] for ref in invocation["model_calls"]] == ["resp_a", "resp_b"]
+        assert len(requests) == len(verified) == 2
+        assert requests[0] == requests[1]
+        assert result["response"]["usage"] is None
+        assert result["response"]["output"] == verified[-1]["response"]["output"]
+        assert result["reward"] == 0.0

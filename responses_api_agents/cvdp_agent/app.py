@@ -308,6 +308,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         usage = None
         usage_complete = True
         step = 0
+        stop_reason = None
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
 
@@ -380,6 +381,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
+                stop_reason = "max_output_tokens"
                 break
 
             all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [o for o in output if o.type == "function_call"]
@@ -412,6 +414,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
+                stop_reason = "max_iterations"
                 break
 
         # Propogate any extra cookies necessary for downstream verification
@@ -425,8 +428,21 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             # Only a partial sum needs the flag; a reply without usage already reports it as unknown.
             evidence[_INTERNAL_USAGE_COMPLETE_KEY] = False
         if collect_trajectory:
+            # Record why this invocation ended without changing the model response sent to verification.
+            if model_response.status == "failed" or model_response.error:
+                status = "failed"
+            elif stop_reason or model_response.incomplete_details or model_response.status == "incomplete":
+                status = "incomplete"
+            else:
+                status = "completed" if model_response.status in (None, "completed") else "unknown"
+            if stop_reason is None and model_response.incomplete_details:
+                stop_reason = model_response.incomplete_details.reason
             evidence[_INTERNAL_TRAJECTORY_KEY] = TrajectoryRecord(
-                task_id="unscoped", rollout_id=rollout_id, turns=turns, gaps=gaps
+                task_id="unscoped",
+                rollout_id=rollout_id,
+                invocations=[AgentInvocation(invocation_id="root", status=status, stop_reason=stop_reason)],
+                turns=turns,
+                gaps=gaps,
             ).model_dump(mode="json")
         return model_response.model_copy(update=evidence) if evidence else model_response
 
@@ -458,6 +474,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         turns: list[TrajectoryTurn] = []
         gaps: list[ObservationGap] = []
         attempt_usages: list[Optional[NeMoGymResponseUsage]] = []
+        invocation: Optional[AgentInvocation] = None
         attempt = 0
         while True:
             attempt += 1
@@ -477,7 +494,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 raw_trajectory = response_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
                 usage_complete = response_json.pop(_INTERNAL_USAGE_COMPLETE_KEY, True) is not False
                 replied = True
-                self._record_attempt(
+                invocation = self._record_attempt(
                     attempt,
                     response_json.get("usage") if usage_complete else None,
                     raw_trajectory if collect_trajectory else None,
@@ -520,7 +537,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     print(f"[RETRY] exception for task_id={task_id}, retries_left={retries_left}, error={e}")
                     continue
                 raise
-        return self._with_attempt_evidence(result, body, rollout_id, turns, gaps, attempt_usages)
+        return self._with_attempt_evidence(result, body, rollout_id, turns, gaps, attempt_usages, invocation)
 
     @staticmethod
     def _record_attempt(
@@ -532,8 +549,8 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         gaps: list[ObservationGap],
         attempt_usages: list[Optional[NeMoGymResponseUsage]],
         collect_trajectory: bool,
-    ) -> None:
-        """Keep one replied attempt's usage (None when unknown) and its turns; evidence errors become gaps."""
+    ) -> Optional[AgentInvocation]:
+        """Keep one replied attempt's usage and turns, and return its observed invocation outcome."""
         try:
             attempt_usages.append(NeMoGymResponseUsage.model_validate(usage_json) if usage_json is not None else None)
         except Exception:
@@ -564,6 +581,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             for n, turn in enumerate(attempt_trajectory.turns, start=1)
         )
         gaps.extend(attempt_trajectory.gaps)
+        return next((item for item in attempt_trajectory.invocations if item.invocation_id == "root"), None)
 
     def _with_attempt_evidence(
         self,
@@ -573,6 +591,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         turns: list[TrajectoryTurn],
         gaps: list[ObservationGap],
         attempt_usages: list[Optional[NeMoGymResponseUsage]],
+        invocation: Optional[AgentInvocation],
     ) -> CVDPAgentVerifyResponse:
         """Account the verified result for every attempt that reached a reply, after verification ran.
 
@@ -590,7 +609,9 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         try:
             return result.model_copy(
                 update={
-                    "ng_trajectory": self._trajectory(body, rollout_id, result, turns, gaps).model_dump(mode="json")
+                    "ng_trajectory": self._trajectory(body, rollout_id, invocation, turns, gaps).model_dump(
+                        mode="json"
+                    )
                 }
             )
         except Exception:
@@ -601,7 +622,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
     def _trajectory(
         body: CVDPAgentRunRequest,
         rollout_id: str,
-        result: CVDPAgentVerifyResponse,
+        invocation: Optional[AgentInvocation],
         turns: list[TrajectoryTurn],
         gaps: list[ObservationGap],
     ) -> TrajectoryRecord:
@@ -610,10 +631,8 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             (str(fields[key]) for key in TASK_ID_FIELDS if fields.get(key) is not None),
             str(fields.get(TASK_INDEX_KEY_NAME, "unknown")),
         )
-        invocation = AgentInvocation(
-            invocation_id="root",
-            status="incomplete" if result.response.incomplete_details else "completed",
-            model_calls=[ref for turn in turns for ref in turn.model_calls],
+        invocation = (invocation or AgentInvocation(invocation_id="root")).model_copy(
+            update={"model_calls": [ref for turn in turns for ref in turn.model_calls]}
         )
         return TrajectoryRecord(
             task_id=task_id,
