@@ -1653,18 +1653,6 @@ COMMANDS = {
         summary="Compare a baseline eval run against candidate runs.",
         flags=(
             _value_flag(
-                "level",
-                "comparison_level",
-                "Comparison level: run (default) or an explicitly configured benchmark suite.",
-                choices=("run", "suite"),
-            ),
-            _value_flag("suite", "suite_fpath", "Suite YAML, required with --level suite.", quote=True),
-            _value_flag(
-                "confidence-level",
-                "confidence_level",
-                "Suite confidence level as a fraction between 0 and 1 (default: 0.90).",
-            ),
-            _value_flag(
                 "baseline",
                 "baseline_rollouts_jsonl_fpath",
                 "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read today).",
@@ -1700,6 +1688,31 @@ COMMANDS = {
                 "output-dir",
                 "output_dirpath",
                 "Where to write the report (default: the candidate run's own directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
+            ),
+        ),
+    ),
+    "eval compare-suite": Command(
+        target="nemo_gym.cli.eval:compare_suite",
+        summary="Compare baseline and candidate runs across a configured benchmark and model suite.",
+        flags=(
+            _value_flag("suite", "suite_fpath", "Path to the benchmark and model suite YAML (required).", quote=True),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Confidence level as a fraction between 0 and 1 (default: 0.90).",
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the reports (default: the suite YAML's directory).",
                 aliases=("-o",),
                 quote=True,
             ),

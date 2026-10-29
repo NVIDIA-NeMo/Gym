@@ -97,7 +97,7 @@ def _manifest(tmp_path: Path, *, benchmarks: dict, models: dict) -> Path:
 
 def _compare(path: Path, confidence: float = 0.90) -> SuiteComparisonResult:
     return build_suite_comparison(
-        SuiteComparisonConfig(suite_fpath=str(path), confidence_level=confidence), "gym eval compare --level suite"
+        SuiteComparisonConfig(suite_fpath=str(path), confidence_level=confidence), "gym eval compare-suite"
     )
 
 

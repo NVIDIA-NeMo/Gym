@@ -6,12 +6,12 @@ position: 6
 
 # Compare Results
 
-Use `gym eval compare` to inspect a candidate's change from a baseline. Compare one benchmark's runs directly, or select `--level suite` to combine benchmarks within each model and across a model–benchmark matrix.
+Use `gym eval compare` to inspect a candidate's change from a baseline for one benchmark. Use `gym eval compare-suite` to combine benchmarks within each model and across a model–benchmark matrix.
 
 | Goal | Command | Confidence level |
 | --- | --- | --- |
 | Inspect one benchmark's metrics and task changes | `gym eval compare --baseline ... --candidates ...` | 95% for eligible metric differences |
-| Aggregate selected benchmarks and models | `gym eval compare --level suite --suite suite.yaml` | 90% by default; adjustable |
+| Aggregate selected benchmarks and models | `gym eval compare-suite --suite suite.yaml` | 90% by default; adjustable |
 
 ## Prepare comparable runs
 
@@ -48,7 +48,7 @@ Outputs are `compare_report.md` and `compare_report.json` (schema version `"1"`)
 
 ## Compare a benchmark suite
 
-Suite mode calculates one score difference per model–benchmark pair, one aggregate per model, and one overall aggregate. Configure exactly one baseline and one candidate run for each included pair. Sources are not pooled.
+`gym eval compare-suite` calculates one score difference per model–benchmark pair, one aggregate per model, and one overall aggregate. Configure exactly one baseline and one candidate run for each included pair. Sources are not pooled.
 
 Save a manifest such as `suite.yaml`:
 
@@ -98,18 +98,18 @@ Paths are relative to the YAML file. Model names are report labels; each model's
 This example uses MCQA's existing dual scoring for MMLU-Redux. Collect both sides with the resources-server override `mmlu-redux_mcqa_resources_server.resources_servers.mcqa.grading_mode=boxed_and_normalized` to record both selected reward metrics. Selecting a metric in the suite YAML does not compute a missing metric.
 
 ```bash
-gym eval compare --level suite \
+gym eval compare-suite \
     --suite suite.yaml \
     --output-dir results/suite
 
 # Recalculate the interval at a different confidence level using the same data.
-gym eval compare --level suite \
+gym eval compare-suite \
     --suite suite.yaml \
     --confidence-level 0.95 \
     --output-dir results/suite-95
 ```
 
-`--confidence-level` accepts a fraction strictly between zero and one; the suite default is `0.90`. Run-level comparison retains its 95% difference intervals. In suite mode, sources and agent selection come from the YAML rather than the run-level input flags.
+`--confidence-level` accepts a fraction strictly between zero and one; the default is `0.90`. The separate `gym eval compare` command retains its 95% difference intervals. For `compare-suite`, sources and agent selection come from the YAML. See the [CLI reference](/reference/cli-commands#gym-eval-compare-suite) for all command options.
 
 ### Source options
 
@@ -161,11 +161,11 @@ The interval quantifies repeat uncertainty for the fixed selected benchmarks, mo
 
 A positive gap favors the candidate. An interval containing zero does not demonstrate a change at the selected confidence level; it also does not prove equivalence or an acceptable regression margin. Inspect individual benchmark results alongside the aggregate, because positive and negative gaps can cancel.
 
-Confidence intervals are not clipped to the score bounds. A constant-score cell retains its weight; when total empirical variance is zero, suite mode reports the point estimate and zero SE with an unavailable interval and degrees of freedom.
+Confidence intervals are not clipped to the score bounds. A constant-score cell retains its weight; when total empirical variance is zero, suite comparison reports the point estimate and zero SE with an unavailable interval and degrees of freedom.
 
 ## Check exclusions and coverage
 
-Suite mode requires stored `repeat_level_metrics`. If the field is missing, regenerate aggregation; this mode does not reconstruct repeat statistics from embedded rollout summaries. If either side has only one repeat, Gym excludes the entire model–benchmark pair with a warning. Remaining eligible cells receive recomputed equal weights. The requested suite, exclusions, and effective weights are recorded; no eligible cells is an error.
+`gym eval compare-suite` requires stored `repeat_level_metrics`. If the field is missing, regenerate aggregation; this command does not reconstruct repeat statistics from embedded rollout summaries. If either side has only one repeat, Gym excludes the entire model–benchmark pair with a warning. Remaining eligible cells receive recomputed equal weights. The requested suite, exclusions, and effective weights are recorded; no eligible cells is an error.
 
 Every selected metric must be present in every included repeat. Gym does not silently remove missing metric values or change metric weights between repeats.
 
@@ -173,7 +173,7 @@ Recorded task sets must agree across repeats and sides. When materialized inputs
 
 ## Read the reports
 
-Suite mode writes these files to `--output-dir`, defaulting to the YAML file's directory:
+`gym eval compare-suite` writes these files to `--output-dir`, defaulting to the YAML file's directory:
 
 | File | Contents |
 | --- | --- |
