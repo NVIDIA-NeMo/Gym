@@ -70,5 +70,11 @@ policy_model:
 # Sandboxes call Gym's servers back over the network, so advertise this host's resolvable address.
 use_absolute_ip: true
 
+# The provider's create budget must cover the create request bound (1200 s) plus the task's ready_timeout_s (1200 s).
+sandbox:
+  opensandbox:
+    create:
+      timeout_s: 2400
+
 # Tasks at once; PARALLEL overrides it. Each task is an OpenSandbox container.
 num_samples_in_parallel: 8
