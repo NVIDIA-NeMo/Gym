@@ -23,8 +23,9 @@ from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
 import orjson
 
-from nemo_gym.comparison.diff import _comparison_value
-from nemo_gym.comparison.schema import (
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.eval.comparison.diff import _comparison_value
+from nemo_gym.eval.comparison.schema import (
     MAX_FLIPS_SHOWN,
     AgentComparison,
     ComparisonResult,
@@ -33,7 +34,6 @@ from nemo_gym.comparison.schema import (
     MetricValue,
     RunFile,
 )
-from nemo_gym.config.config_types import ConfigError
 
 
 if TYPE_CHECKING:

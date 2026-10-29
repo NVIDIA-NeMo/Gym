@@ -30,8 +30,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.rollout_compare.join import _lookup, task_id_of
-from nemo_gym.rollout_compare.schema import (
+from nemo_gym.eval.rollout_compare.join import _lookup, task_id_of
+from nemo_gym.eval.rollout_compare.schema import (
     FAILURES_SUFFIX,
     SIDECAR_FLAG,
     TASK_KEY_CANDIDATES,

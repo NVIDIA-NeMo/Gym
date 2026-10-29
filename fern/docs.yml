@@ -541,6 +541,23 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/orchestration/server_venv"
   - source: "/nemo/gym/:version/nemo-gym/nemo_gym/cli/setup_command"
     destination: "/nemo/gym/:version/nemo-gym/nemo_gym/orchestration/server_venv"
+  # Library reference pages of modules moved into nemo_gym/eval (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/rollout_reverification"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/eval/rollout_reverification"
+  - source: "/nemo/gym/:version/nemo-gym/nemo_gym/rollout_reverification"
+    destination: "/nemo/gym/:version/nemo-gym/nemo_gym/eval/rollout_reverification"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/eval_plan"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/eval/eval_plan"
+  - source: "/nemo/gym/:version/nemo-gym/nemo_gym/eval_plan"
+    destination: "/nemo/gym/:version/nemo-gym/nemo_gym/eval/eval_plan"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/comparison"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/eval/comparison"
+  - source: "/nemo/gym/:version/nemo-gym/nemo_gym/comparison"
+    destination: "/nemo/gym/:version/nemo-gym/nemo_gym/eval/comparison"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/rollout_compare"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/eval/rollout_compare"
+  - source: "/nemo/gym/:version/nemo-gym/nemo_gym/rollout_compare"
+    destination: "/nemo/gym/:version/nemo-gym/nemo_gym/eval/rollout_compare"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

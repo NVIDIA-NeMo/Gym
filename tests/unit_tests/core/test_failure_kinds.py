@@ -154,7 +154,7 @@ class TestNamesTheRepoAlreadyProduces:
         assert is_registered(AGENT_REQUEST_FAILED_FAILURE_CLASS)
 
     def test_the_judge_failsafe_class(self) -> None:
-        from nemo_gym.rollout_reverification import JUDGE_FAILED_FAILURE_CLASS
+        from nemo_gym.eval.rollout_reverification import JUDGE_FAILED_FAILURE_CLASS
 
         assert is_registered(JUDGE_FAILED_FAILURE_CLASS)
 
