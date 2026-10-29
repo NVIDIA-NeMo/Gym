@@ -14,7 +14,7 @@ import hashlib
 import os
 import warnings
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
@@ -78,6 +78,9 @@ _PROCESS_POOL_CHUNKS_PER_WORKER = 4
 _PROCESS_POOL_MAX_CHUNKSIZE = 128
 
 
+HealthProgressCallback = Callable[[str, int, int | None], None]
+
+
 __all__ = [
     "CHECK_REGISTRY",
     "CheckInput",
@@ -86,6 +89,7 @@ __all__ = [
     "CheckSubject",
     "Finding",
     "HealthCheckResult",
+    "HealthProgressCallback",
     "RolloutDigest",
     "Verdict",
     "evaluate_record",
@@ -94,6 +98,27 @@ __all__ = [
     "normalize_ignored_checks",
     "run_health_checks",
 ]
+
+
+def _notify_progress(progress: HealthProgressCallback | None, phase: str, completed: int, total: int | None) -> None:
+    if progress is not None:
+        progress(phase, completed, total)
+
+
+def _collect_worker_results(
+    results: Iterable[RolloutDigest],
+    *,
+    progress: HealthProgressCallback | None,
+    total: int,
+    phase: str = "checking records",
+) -> list[RolloutDigest]:
+    """Consume ordered results in the caller process, preserving the pool's map semantics."""
+    collected = []
+    _notify_progress(progress, phase, 0, total)
+    for digest in results:
+        collected.append(digest)
+        _notify_progress(progress, phase, len(collected), total)
+    return collected
 
 
 def _process_pool_chunksize(item_count: int, workers: int) -> int:
@@ -281,9 +306,10 @@ def evaluate_record(
     )
 
 
-def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
+def _index_jsonl(paths: Sequence[Path], *, progress: HealthProgressCallback | None = None) -> list[_LineSlice]:
     slices: list[_LineSlice] = []
     ordinal = 0
+    _notify_progress(progress, "indexing rollout files", 0, None)
     for source_index, path in enumerate(paths):
         with path.open("rb") as handle:
             line_number = 0
@@ -294,6 +320,7 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
                     break
                 line_number += 1
                 if not line.strip():
+                    _notify_progress(progress, "indexing rollout files", ordinal, None)
                     continue
                 slices.append(
                     _LineSlice(
@@ -306,6 +333,7 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
                     )
                 )
                 ordinal += 1
+                _notify_progress(progress, "indexing rollout files", ordinal, None)
     return slices
 
 
@@ -478,10 +506,17 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     }
 
 
-def _jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
+def _jsonl_rows(
+    path: Path,
+    *,
+    progress: HealthProgressCallback | None = None,
+    phase: str = "reading JSONL",
+) -> Iterator[dict[str, Any]]:
     """Stream a JSONL file's objects; an inventory can be hundreds of MB."""
+    _notify_progress(progress, phase, 0, None)
     with path.open("rb") as handle:
-        for line in handle:
+        for line_number, line in enumerate(handle, 1):
+            _notify_progress(progress, phase, line_number, None)
             try:
                 row = orjson.loads(line)
             except orjson.JSONDecodeError:
@@ -501,7 +536,9 @@ class _Failures:
     any_sidecar: bool
 
 
-def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Failures:
+def _read_failures(
+    landed: set[tuple[Any, ...]], paths: Sequence[Path], *, progress: HealthProgressCallback | None = None
+) -> _Failures:
     """Read every input's failures sidecar and inventory.
 
     The last attempt of a rollout stands, and a rollout that later landed is not failed. With an inventory, only
@@ -516,7 +553,7 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
     for source_index, path in enumerate(paths):
         if failures_path_for(path).is_file():
             any_sidecar = True
-            for row in _jsonl_rows(failures_path_for(path)):
+            for row in _jsonl_rows(failures_path_for(path), progress=progress, phase="reading failure records"):
                 # Main's rule: a row the dispatch budget never started is no attempt and selects nothing.
                 if is_unstarted_rollout_row(row):
                     continue
@@ -526,7 +563,7 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
         elif owed is not None:
             owed.update(
                 (source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))
-                for row in _jsonl_rows(materialized_path_for(path))
+                for row in _jsonl_rows(materialized_path_for(path), progress=progress, phase="reading input inventory")
             )
     # Main's rule: a rollout whose latest attempt recorded no result is missing, not failed.
     failed = {key: row for key, row in failed.items() if not is_omitted_rollout_row(row)}
@@ -663,13 +700,20 @@ def _report_sources(paths: Sequence[Path], report_dir: Path) -> list[str]:
     return [Path(os.path.relpath(path.parent.resolve() / path.name, base)).as_posix() for path in paths]
 
 
-def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output_dir: Path) -> tuple[Path, Path]:
+def _write_reports(
+    summary: dict[str, Any],
+    digests: list[RolloutDigest],
+    output_dir: Path,
+    *,
+    progress: HealthProgressCallback | None = None,
+) -> tuple[Path, Path]:
+    _notify_progress(progress, "writing health reports", 0, len(digests))
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / QUALITY_SUMMARY_FILENAME
     verdicts_path = output_dir / ROLLOUT_VERDICTS_FILENAME
     summary_path.write_bytes(orjson.dumps(summary, option=orjson.OPT_INDENT_2))
     with verdicts_path.open("wb") as handle:
-        for digest in sorted(digests, key=_sort_key):
+        for completed, digest in enumerate(sorted(digests, key=_sort_key), 1):
             findings = [
                 finding.model_dump(mode="json", exclude={"subject"}, exclude_none=True) for finding in digest.findings
             ]
@@ -684,6 +728,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
             if digest.stage_index is not None:
                 row["stage_index"] = digest.stage_index
             handle.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
+            _notify_progress(progress, "writing health reports", completed, len(digests))
     return summary_path, verdicts_path
 
 
@@ -762,11 +807,15 @@ def run_health_checks(
     limits: RunHealthLimits = RunHealthLimits(),
     limits_source: LimitsSource | Mapping[str, LimitsSource] = "config",
     model_call_capture_dirs: Sequence[Path] = (),
+    progress: HealthProgressCallback | None = None,
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports.
 
     ``model_call_capture_dirs`` are the run's model-call capture directories. A failed rollout's row carries no
     capture, so its timing in ``run.stats.timeouts`` is read from these instead.
+    ``progress`` receives a phase, processed count, and optional total from the caller
+    process while reading rows, consuming worker results, and writing reports. It is
+    silent by default; callers can throttle updates for their presentation layer.
     """
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
     paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
@@ -776,7 +825,7 @@ def run_health_checks(
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
-    lines = _index_jsonl(paths)
+    lines = _index_jsonl(paths, progress=progress)
     worker_inputs = [
         _WorkerInput(
             line=line,
@@ -789,7 +838,9 @@ def run_health_checks(
     if max_workers < 1:
         raise ValueError("workers must be at least 1")
     if len(worker_inputs) <= 1 or max_workers == 1:
-        worker_results = [_worker(item) for item in worker_inputs]
+        worker_results = _collect_worker_results(
+            (_worker(item) for item in worker_inputs), progress=progress, total=len(worker_inputs)
+        )
     else:
         try:
             pool = ProcessPoolExecutor(max_workers=max_workers)
@@ -799,16 +850,23 @@ def run_health_checks(
                 RuntimeWarning,
                 stacklevel=2,
             )
-            worker_results = [_worker(item) for item in worker_inputs]
+            worker_results = _collect_worker_results(
+                (_worker(item) for item in worker_inputs),
+                progress=progress,
+                total=len(worker_inputs),
+                phase="checking records serially",
+            )
         else:
             try:
                 with pool:
-                    worker_results = list(
+                    worker_results = _collect_worker_results(
                         pool.map(
                             _worker,
                             worker_inputs,
                             chunksize=_process_pool_chunksize(len(worker_inputs), max_workers),
-                        )
+                        ),
+                        progress=progress,
+                        total=len(worker_inputs),
                     )
             except (BrokenProcessPool, OSError) as exc:
                 warnings.warn(
@@ -816,14 +874,21 @@ def run_health_checks(
                     RuntimeWarning,
                     stacklevel=2,
                 )
-                worker_results = [_worker(item) for item in worker_inputs]
+                worker_results = _collect_worker_results(
+                    (_worker(item) for item in worker_inputs),
+                    progress=progress,
+                    total=len(worker_inputs),
+                    phase="checking records serially",
+                )
 
     digests = worker_results
+    _notify_progress(progress, "summarizing health checks", 0, len(digests))
     _mark_duplicate_identities(digests, lines, ignored)
     summary = _reduce(digests, ignored)
     artifacts = summary["run"]["artifacts"]
     landed = {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)}
-    failures = _read_failures(landed, paths)
+    failures = _read_failures(landed, paths, progress=progress)
+    _notify_progress(progress, "accounting for rollouts", 0, None)
     artifacts.update(
         _rollout_accounting(
             landed,
@@ -841,8 +906,9 @@ def run_health_checks(
         read_rollout_timing(row)
         for path in paths
         if failures_path_for(path).is_file()
-        for row in _jsonl_rows(failures_path_for(path))
+        for row in _jsonl_rows(failures_path_for(path), progress=progress, phase="reading failure timings")
     )
+    _notify_progress(progress, "summarizing rollout timings", 0, None)
     summary["run"]["stats"]["timeouts"] = summarize_timeouts(timings, attempts).model_dump(mode="json")
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
     _judge_run(artifacts, run_findings, run_coverage)
@@ -850,7 +916,7 @@ def run_health_checks(
     summary["run"]["findings"] = [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings]
     report_dir = output_dir or paths[0].parent
     summary["run"][QUALITY_SUMMARY_SOURCES_KEY] = _report_sources(paths, report_dir)
-    summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
+    summary_path, verdicts_path = _write_reports(summary, digests, report_dir, progress=progress)
     return HealthCheckResult(
         summary=summary,
         rollouts=digests,

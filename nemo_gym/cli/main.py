@@ -1720,6 +1720,12 @@ COMMANDS = {
                 "Worker processes for --check-health (default: up to 8 available CPUs).",
             ),
             _value_flag(
+                "health-check-output-dir",
+                "health_check_output_dirpath",
+                "Keep full health reports per source in this directory (default: temporary storage).",
+                quote=True,
+            ),
+            _value_flag(
                 "output-dir",
                 "output_dirpath",
                 "Where to write the reports (default: the suite YAML's directory).",

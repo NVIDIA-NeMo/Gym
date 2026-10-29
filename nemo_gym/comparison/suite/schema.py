@@ -36,6 +36,7 @@ class SuiteComparisonConfig(BaseNeMoGymCLIConfig):
     report_format: ReportFormat = "both"
     check_health: bool = False
     health_check_workers: int | None = Field(default=None, ge=1)
+    health_check_output_dirpath: str | None = None
 
 
 class SuiteMetricDefinition(_SuiteModel):
@@ -125,6 +126,8 @@ class SuiteHealthSummary(_SuiteModel):
     run_healthy: bool | None = None
     run_unhealthy_reasons: list[str] = Field(default_factory=list)
     unavailable_reason: str | None = None
+    summary_path: Path | None = None
+    verdicts_path: Path | None = None
 
 
 class SuiteRunSummary(_SuiteModel):

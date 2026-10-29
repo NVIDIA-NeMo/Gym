@@ -4,6 +4,7 @@
 """Exercise optional suite health checks against actual persisted trajectory evidence."""
 
 import builtins
+import shutil
 from pathlib import Path
 
 import orjson
@@ -12,8 +13,10 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym.comparison.suite.health import check_rollout_file_health, rollout_health_warning
+from nemo_gym.comparison.suite.report import render_suite_markdown, write_suite_reports
 from nemo_gym.comparison.suite.runner import build_suite_comparison
 from nemo_gym.comparison.suite.schema import SuiteComparisonConfig, SuiteComparisonResult
+from nemo_gym.config_types import ConfigError
 from nemo_gym.path_utils import aggregate_metrics_path_for, aggregation_sources_path_for, materialized_path_for
 
 
@@ -124,9 +127,16 @@ def _suite(tmp_path: Path, *, candidate_state: str = "healthy") -> tuple[Path, P
     return path, baseline, candidate
 
 
-def _compare(path: Path, *, check_health: bool = False) -> SuiteComparisonResult:
+def _compare(
+    path: Path, *, check_health: bool = False, health_output_dir: Path | None = None
+) -> SuiteComparisonResult:
     return build_suite_comparison(
-        SuiteComparisonConfig(suite_fpath=str(path), check_health=check_health, health_check_workers=1),
+        SuiteComparisonConfig(
+            suite_fpath=str(path),
+            check_health=check_health,
+            health_check_workers=1,
+            health_check_output_dirpath=str(health_output_dir) if health_output_dir is not None else None,
+        ),
         "gym eval compare-suite",
     )
 
@@ -171,6 +181,7 @@ def test_health_verdicts_are_computed_from_current_records_without_altering_stat
     assert getattr(summary, state) == 2
     assert summary.healthy + summary.unhealthy + summary.unobserved == 2
     assert summary.run_healthy is True
+    assert summary.summary_path is summary.verdicts_path is None
     assert result.overall.statistics == without.overall.statistics
     assert result.per_model == without.per_model
     assert result.cells[0].statistics == without.cells[0].statistics
@@ -283,13 +294,16 @@ def test_multiple_agents_in_one_file_are_checked_once_for_the_entire_file(tmp_pa
         return original_check(rollout_path, **kwargs)
 
     monkeypatch.setattr(health, "run_health_checks", checked_source)
-    result = _compare(path, check_health=True)
+    output = tmp_path / "health-reports"
+    result = _compare(path, check_health=True, health_output_dir=output)
 
     assert calls == [baseline.resolve()]
     assert result.cells[0].baseline.health == result.cells[0].candidate.health
     assert result.cells[0].baseline.health.record_count == 3
     assert result.cells[0].baseline.health.unhealthy == 2
     assert result.cells[0].baseline.health.issues["model_call_zero_completion_tokens"] == 1
+    assert result.cells[0].baseline.health.summary_path.is_file()
+    assert len(list(output.glob("*/quality_summary.json"))) == 1
     assert len(result.warnings) == 2
     assert all("Rollout file health:" in warning and "2 unhealthy" in warning for warning in result.warnings)
 
@@ -297,6 +311,124 @@ def test_multiple_agents_in_one_file_are_checked_once_for_the_entire_file(tmp_pa
 def test_health_checker_worker_count_must_be_positive(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="greater than or equal to 1"):
         SuiteComparisonConfig(suite_fpath=str(tmp_path / "suite.yaml"), health_check_workers=0)
+
+
+@pytest.mark.parametrize("under_source", [False, True])
+def test_full_health_reports_persist_per_source_without_changing_inputs(tmp_path: Path, under_source: bool) -> None:
+    path, baseline, _ = _suite(tmp_path, candidate_state="unhealthy")
+    before = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+    output = baseline.parent if under_source else tmp_path / "saved-health"
+    result = _compare(path, check_health=True, health_output_dir=output)
+    cell = result.cells[0]
+    directories = set()
+    for run in (cell.baseline, cell.candidate):
+        summary = run.health
+        assert summary.summary_path.is_file()
+        assert summary.verdicts_path.is_file()
+        assert summary.summary_path.parent == summary.verdicts_path.parent
+        assert summary.summary_path.parent.parent == output
+        directories.add(summary.summary_path.parent)
+        saved = orjson.loads(summary.summary_path.read_bytes())
+        assert saved["run"]["verdicts"] == {
+            "healthy": summary.healthy,
+            "unhealthy": summary.unhealthy,
+            "unobserved": summary.unobserved,
+        }
+        verdicts = [orjson.loads(line)["verdict"] for line in summary.verdicts_path.read_bytes().splitlines()]
+        assert verdicts == (["healthy", "healthy"] if run is cell.baseline else ["unhealthy", "unhealthy"])
+    assert len(directories) == 2
+    assert {file: file.read_bytes() for file in before} == before
+    markdown = render_suite_markdown(result)
+    assert all(str(run.health.summary_path) in markdown for run in (cell.baseline, cell.candidate))
+    assert all(str(run.health.verdicts_path) in markdown for run in (cell.baseline, cell.candidate))
+    restored = SuiteComparisonResult.model_validate_json(result.model_dump_json())
+    assert restored == result
+
+
+def test_omitted_health_output_directory_cleans_up_temporary_reports(tmp_path: Path, monkeypatch) -> None:
+    import nemo_gym.comparison.suite.health as suite_health
+
+    path, _, _ = _suite(tmp_path)
+    temporary_directories = []
+    original_temporary_directory = suite_health.TemporaryDirectory
+
+    def track_temporary_directory(**kwargs):
+        context = original_temporary_directory(**kwargs)
+        temporary_directories.append(Path(context.name))
+        return context
+
+    monkeypatch.setattr(suite_health, "TemporaryDirectory", track_temporary_directory)
+    result = _compare(path, check_health=True)
+    assert len(temporary_directories) == 2
+    assert all(not directory.exists() for directory in temporary_directories)
+    assert result.cells[0].baseline.health.healthy == result.cells[0].candidate.health.healthy == 2
+    for run in (result.cells[0].baseline, result.cells[0].candidate):
+        assert run.health.summary_path is run.health.verdicts_path is None
+
+
+def test_output_directory_alone_does_not_enable_health_checks(tmp_path: Path) -> None:
+    path, baseline, candidate = _suite(tmp_path)
+    baseline.unlink()
+    candidate.unlink()
+    output = tmp_path / "unused-health-output"
+    result = _compare(path, health_output_dir=output)
+    assert result.health_check_enabled is False
+    assert not output.exists()
+    assert result.cells[0].baseline.health is result.cells[0].candidate.health is None
+    assert not result.warnings
+
+
+@pytest.mark.parametrize("collision", ["directory", "aggregate", "quality_summary.json", "rollout_verdicts.jsonl"])
+def test_health_report_symlinks_cannot_overwrite_another_source(tmp_path: Path, collision: str) -> None:
+    path, _, candidate = _suite(tmp_path)
+    (candidate.parent / "quality_summary.json").write_text('{"source_health": "preserve"}')
+    (candidate.parent / "rollout_verdicts.jsonl").write_text('{"source_verdict": "preserve"}\n')
+    output = tmp_path / "health-output"
+    result = _compare(path, check_health=True, health_output_dir=output)
+    summary = result.cells[0].baseline.health
+    if collision == "directory":
+        directory = summary.summary_path.parent
+        shutil.rmtree(directory)
+        directory.symlink_to(candidate.parent, target_is_directory=True)
+    else:
+        summary.summary_path.unlink()
+        destination = (
+            aggregate_metrics_path_for(candidate) if collision == "aggregate" else candidate.parent / collision
+        )
+        summary.summary_path.symlink_to(destination)
+    sources = [file for file in tmp_path.rglob("*") if file.is_file()]
+    before = {file: file.read_bytes() for file in sources}
+    with pytest.raises(ConfigError, match="choose another --health-check-output-dir"):
+        _compare(path, check_health=True, health_output_dir=output)
+    assert {file: file.read_bytes() for file in sources} == before
+
+
+def test_suite_report_cannot_overwrite_retained_health_report(tmp_path: Path) -> None:
+    path, _, _ = _suite(tmp_path)
+    result = _compare(path, check_health=True, health_output_dir=tmp_path / "health")
+    health_summary = result.cells[0].baseline.health.summary_path
+    before = health_summary.read_bytes()
+    report_dir = tmp_path / "comparison"
+    report_dir.mkdir()
+    (report_dir / "suite_compare_report.json").symlink_to(health_summary)
+    with pytest.raises(ConfigError, match="would overwrite a source artifact"):
+        write_suite_reports(result, report_dir, "json")
+    assert health_summary.read_bytes() == before
+
+
+def test_different_sources_cannot_share_a_health_report_through_file_symlinks(tmp_path: Path) -> None:
+    path, _, _ = _suite(tmp_path)
+    output = tmp_path / "health"
+    result = _compare(path, check_health=True, health_output_dir=output)
+    cell = result.cells[0]
+    baseline_summary = cell.baseline.health.summary_path
+    candidate_summary = cell.candidate.health.summary_path
+    baseline_summary.unlink()
+    baseline_summary.symlink_to(candidate_summary)
+    before = candidate_summary.read_bytes()
+    with pytest.raises(ConfigError, match="overlap other reports"):
+        _compare(path, check_health=True, health_output_dir=output)
+    assert candidate_summary.read_bytes() == before
 
 
 def test_health_warning_limits_check_ids_but_preserves_full_typed_findings(tmp_path: Path) -> None:

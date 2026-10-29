@@ -1186,12 +1186,15 @@ gym eval compare-suite \
 | `--confidence-level FRACTION` | Two-sided confidence level, strictly between zero and one. Defaults to `0.90`. |
 | `--check-health` | Recheck the suite's rollout JSONL files and include health warnings. Off by default. Checks all agents in each file. |
 | `--health-check-workers INTEGER` | Positive number of workers for `--check-health`. Defaults to the available CPU count, capped at eight. |
+| `--health-check-output-dir DIR` | Retain full health reports under a separate subdirectory per rollout file. Defaults to temporary files that are deleted after checking. Does not enable checks; add `--check-health` too. |
 | `--output-dir DIR`, `-o` | Report directory; defaults to the suite YAML's directory. |
 | `--report-format` | `md`, `json`, or `both` (default). |
 
 Run paths and agent selectors come from the suite YAML. See [Compare Results](/evaluation/compare-results#compare-a-benchmark-suite) for a complete multi-model suite YAML, source options, theoretical metric bounds, normalization, equal weighting, statistical assumptions, and coverage/exclusion behavior.
 
 With `--check-health`, Gym checks the saved rollout files and their own failure and materialized-input siblings afresh. It adds one line per affected source to the report's **Warnings** section and terminal output, distinguishing unhealthy trajectories, unobserved checks, and unavailable health results. Health counts and issue summaries are retained in the comparison JSON. These warnings do not change scores, weights, or confidence intervals. See [optional rollout health checks](/main/evaluation/compare-results#optionally-check-rollout-health) for an example and scope details.
+
+Progress messages are enabled by default: each file's start, phase changes, record-progress updates approximately every 30 seconds, and final counts and elapsed time. With `--health-check-output-dir`, the detailed files `quality_summary.json` and `rollout_verdicts.jsonl` are retained under `health-check-<source-path-hash>/` and their paths appear in the comparison reports. Without this option, detailed health reports are temporary.
 
 Writes `suite_compare_report.md` and/or `suite_compare_report.json` (schema version `"2"`). The separate [`gym eval compare`](#gym-eval-compare) command keeps its run-level reports and 95% difference intervals.
 

@@ -188,16 +188,19 @@ gym eval compare-suite \
     --suite suite.yaml \
     --check-health \
     --health-check-workers 8 \
+    --health-check-output-dir results/health-checks \
     --output-dir results/suite-with-health
 ```
 
 Gym checks each rollout JSONL referenced by the suite, together with its own failure and materialized-input siblings. The check covers **all agents in each file**, even when the comparison selects one agent. It scans the saved records afresh rather than reading an existing `quality_summary.json`. `--health-check-workers` must be a positive integer; by default Gym uses up to eight available CPUs.
 
+During checking, the terminal shows each file when its scan starts, phase changes, record-progress updates approximately every 30 seconds, and final health counts and elapsed time. These progress messages are enabled by default; no `--verbose` flag is needed.
+
 The report's **Warnings** section and terminal output show one summary line per affected source. A source with detected findings is **unhealthy**; missing evidence is **unobserved**, which does not establish that the trajectories are unhealthy. If a source cannot be checked, for example because its rollout file is missing or unreadable, the warning reports health as unavailable. The comparison JSON retains health counts and issue summaries.
 
 Health findings are advisory: they do not change comparison scores, weights, or confidence intervals. Without `--check-health`, comparison continues to read aggregate metrics without opening the rollout JSONL. The separate `gym eval compare` command is unchanged.
 
-For full per-rollout health reports, run [`gym eval health-check`](/main/evaluation/rollout-health#when-health-checks-run) separately; suite comparison keeps only the summary and uses temporary files for the detailed health reports.
+`--health-check-output-dir` retains full reports in a separate subdirectory for each rollout file: `health-check-<source-path-hash>/quality_summary.json` and `rollout_verdicts.jsonl`. The comparison's Markdown and JSON reports include these retained paths. If you omit the option, detailed health reports use temporary files that are deleted after checking; the comparison still retains health counts and issue summaries. Setting an output directory alone does not enable checking: include `--check-health` too. See [Rollout Health Checks](/main/evaluation/rollout-health) for check definitions and detailed report schemas.
 
 ## Read the reports
 

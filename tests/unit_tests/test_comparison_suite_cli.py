@@ -94,7 +94,17 @@ def test_suite_flags_survive_the_hydra_translation() -> None:
 
 def test_optional_health_flags_survive_the_hydra_translation() -> None:
     args, unknown = build_parser().parse_known_args(
-        ["eval", "compare-suite", "--suite", "suite.yaml", "--check-health", "--health-check-workers", "2"]
+        [
+            "eval",
+            "compare-suite",
+            "--suite",
+            "suite.yaml",
+            "--check-health",
+            "--health-check-workers",
+            "2",
+            "--health-check-output-dir",
+            "results/[v2] health",
+        ]
     )
     assert unknown == []
     tokens = [token for flag in args._command.flags for token in flag.translate_to_hydra(args)]
@@ -103,6 +113,7 @@ def test_optional_health_flags_survive_the_hydra_translation() -> None:
         "suite_fpath": "suite.yaml",
         "check_health": True,
         "health_check_workers": 2,
+        "health_check_output_dirpath": "results/[v2] health",
     }
 
 
@@ -207,6 +218,48 @@ def test_cli_health_check_unavailable_warns_without_losing_comparison(suite_path
     for warning in health_warnings:
         assert warning in markdown
         assert f"Warning: {warning}" in stdout
+
+
+def test_cli_retains_full_health_reports_in_the_requested_directory(suite_path: Path, monkeypatch) -> None:
+    manifest = yaml.safe_load(suite_path.read_text())
+    for pair in manifest["models"]["model-a"].values():
+        for source in pair.values():
+            path = Path(source["rollouts"])
+            aggregate = json.loads(path.with_name("rollouts_aggregate_metrics.json").read_text())[0]
+            rows = [
+                {"_ng_task_index": task, "_ng_rollout_index": repeat["_ng_rollout_index"]}
+                for repeat in aggregate["repeat_level_metrics"]
+                for task in range(2)
+            ]
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    output = suite_path.parent / "comparison"
+    health_output = suite_path.parent / "full health reports"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "gym",
+            "eval",
+            "compare-suite",
+            "--suite",
+            str(suite_path),
+            "--output-dir",
+            str(output),
+            "--check-health",
+            "--health-check-workers",
+            "1",
+            "--health-check-output-dir",
+            str(health_output),
+        ],
+    )
+    main()
+    result = SuiteComparisonResult.model_validate_json((output / "suite_compare_report.json").read_bytes())
+    summaries = [run.health for cell in result.cells for run in (cell.baseline, cell.candidate)]
+    assert len({summary.summary_path.parent for summary in summaries}) == 4
+    for summary in summaries:
+        assert summary.summary_path.parent.parent == health_output
+        assert json.loads(summary.summary_path.read_bytes())["run"]["verdicts"]["unobserved"] == summary.record_count
+        assert len(summary.verdicts_path.read_text().splitlines()) == summary.record_count
+    assert result.overall.statistics.delta == pytest.approx(15)
 
 
 def test_markdown_uses_four_significant_digits_without_rounding_json(tmp_path: Path, monkeypatch) -> None:

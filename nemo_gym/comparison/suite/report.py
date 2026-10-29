@@ -139,6 +139,9 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
             )
             if run.materialized_inputs:
                 lines.append(f"  Materialized inputs: `{_text(run.materialized_inputs)}`.")
+            if run.health and run.health.summary_path:
+                lines.append(f"  Health summary: `{_text(run.health.summary_path)}`.")
+                lines.append(f"  Health verdicts: `{_text(run.health.verdicts_path)}`.")
             for note in run.coverage.notes:
                 lines.append(f"  {_text(note)}")
         if cell.statistics and cell.statistics.interval_unavailable_reason:
@@ -161,6 +164,10 @@ def write_suite_reports(result: SuiteComparisonResult, output_dir: Path, report_
             sources.update((run.rollouts.resolve(), run.aggregate_metrics.resolve()))
             if run.materialized_inputs:
                 sources.add(run.materialized_inputs.resolve())
+            if run.health:
+                sources.update(
+                    path.resolve() for path in (run.health.summary_path, run.health.verdicts_path) if path is not None
+                )
     names = [
         name
         for extension, name in (("md", "suite_compare_report.md"), ("json", "suite_compare_report.json"))
