@@ -79,3 +79,9 @@ def hydra_literal(value: Any) -> str:
             if _hydra_parses_to(text, list(value)):
                 return text
     raise ValueError(f"{value!r} cannot be written as a Hydra override value.")
+
+
+def listed_names(names: list[str], *, limit: int = 10) -> str:
+    """Quote and join names for an error message, showing at most ``limit`` of them."""
+    shown = ", ".join(repr(name) for name in names[:limit])
+    return f"{shown} and {len(names) - limit} more" if len(names) > limit else shown
