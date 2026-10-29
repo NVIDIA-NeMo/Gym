@@ -11,14 +11,16 @@ from fastapi.testclient import TestClient
 from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.bird_interact.app import (
+    SANDBOX_FAILED,
     USER_SIMULATOR_FAILED,
     BirdInteractResourcesServer,
     BirdInteractResourcesServerConfig,
 )
-from resources_servers.bird_interact.grading import grade, split_statements, strip_round_calls
+from resources_servers.bird_interact.grading import grade, main, split_statements, strip_round_calls
 from resources_servers.bird_interact.schemas import BirdInteractTask
 from resources_servers.bird_interact.simulator import UNANSWERABLE_REPLY, parse_action
 
@@ -27,6 +29,15 @@ DATA = Path(__file__).parents[1] / "data"
 TASKS = {row["instance_id"]: row for row in map(json.loads, (DATA / "example.jsonl").read_text().splitlines())}
 EPISODE = {"rollout_id": "rollout", "attempt": 0}
 CORRECT_1 = TASKS["bookshop_1"]["sol_sql"][0]
+# Session sandboxes run on the host; each test gets its own workspace (see `sandbox_workspace`).
+LOCAL_SANDBOX: dict[str, dict[str, str]] = {"local": {}}
+
+
+@pytest.fixture(autouse=True)
+def sandbox_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    workspace = tmp_path / "sandboxes"
+    monkeypatch.setitem(LOCAL_SANDBOX["local"], "workspace_root", str(workspace))
+    return workspace
 
 
 def _model_reply(text: str) -> MagicMock:
@@ -65,11 +76,16 @@ def _server(**config) -> tuple[BirdInteractResourcesServer, MagicMock]:
             entrypoint="app.py",
             database_dir=str(DATA / "example_databases"),
             user_model=ModelServerRef(type="responses_api_models", name="user_model"),
-            **config,
+            **({"sandbox_provider": LOCAL_SANDBOX} | config),
         ),
         server_client=server_client,
     )
     return server, server_client
+
+
+def _sandbox_root(server: BirdInteractResourcesServer, task: str) -> Path:
+    """The host directory of a session's sandbox files, which the local provider exposes."""
+    return Path(server._sessions[f"session-{task}"].sandbox.root)
 
 
 def _seed(client: TestClient, task: str, mode: str = "c_interact", **overrides):
@@ -128,6 +144,26 @@ class TestGrading:
         database = _bookshop(tmp_path)
         grade(database, "DELETE FROM authors; SELECT 1", CORRECT_1, ordered=False, timeout_seconds=5)
         assert grade(database, CORRECT_1, CORRECT_1, ordered=True, timeout_seconds=5).passed
+
+    def test_the_sandbox_runner_sets_up_the_database_and_reports_a_broken_solution(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        def run(command: str, request: dict) -> dict:
+            request_path = tmp_path / f"{command}.json"
+            request_path.write_text(json.dumps(request | {"database": str(tmp_path / "episode.sqlite")}))
+            main([command, str(request_path)])
+            return json.loads(capsys.readouterr().out)
+
+        source = str(DATA / "example_databases/bookshop/bookshop.sql")
+        assert run("setup", {"source": source, "preprocess_sql": ["DELETE FROM authors WHERE author_id > 1"]}) == {}
+        executed = run("execute", {"sql": "SELECT COUNT(*) FROM authors", "timeout_seconds": 5})
+        graded = run(
+            "grade",
+            {"predicted_sql": CORRECT_1, "solution_sql": "SELECT nope", "ordered": False, "timeout_seconds": 5},
+        )
+
+        assert executed == {"error": None, "row_count": 1, "preview": ["(1,)"]}
+        assert graded == {"solution_error": "The ground-truth SQL failed: no such column: nope"}
 
 
 def _bookshop(tmp_path: Path) -> Path:
@@ -349,3 +385,102 @@ class TestAgenticMode:
         _seed(client, "bookshop_1")
 
         assert client.post("/a_interact/get_schema").status_code == 409
+
+
+class TestSessionSandbox:
+    def test_each_session_has_its_own_sandbox_and_close_stops_it(self) -> None:
+        server, _ = _server()
+        client = TestClient(server.setup_webserver())
+        _seed(client, "bookshop_1")
+        _seed(client, "bookshop_2")
+        first, second = _sandbox_root(server, "bookshop_1"), _sandbox_root(server, "bookshop_2")
+        assert first != second
+        assert (first / "episode.sqlite").exists() and (second / "episode.sqlite").exists()
+
+        closed = client.post(
+            "/close_session", json={"resources_session_id": "session-bookshop_1", "episode_id": EPISODE}
+        )
+
+        assert closed.status_code == 200
+        assert not first.parent.exists() and second.exists()
+
+    def test_preprocess_sql_runs_in_the_sandbox_before_the_episode(self) -> None:
+        client = TestClient(_server()[0].setup_webserver())
+        _seed(client, "bookshop_1", mode="a_interact", preprocess_sql=["DELETE FROM sales"])
+
+        result = client.post("/a_interact/execute", json={"sql": "SELECT COUNT(*) FROM sales"}).json()
+
+        assert result["observation"] == "1 rows\n(0,)"
+
+    def test_a_command_that_fails_runs_again_on_a_fresh_sandbox(self) -> None:
+        server, _ = _server()
+        client = TestClient(server.setup_webserver())
+        _seed(client, "bookshop_1")
+        broken = _sandbox_root(server, "bookshop_1")
+        (broken / "grading.py").unlink()
+
+        submitted = client.post("/submit", json={"sql": CORRECT_1})
+
+        assert submitted.json()["passed"] is True
+        assert _sandbox_root(server, "bookshop_1") != broken
+        assert not broken.parent.exists()
+
+    def test_a_sandbox_that_keeps_failing_is_retryable_in_c_interact(self) -> None:
+        server, _ = _server(inconclusive_verification_retries=0)
+        client = TestClient(server.setup_webserver())
+        _seed(client, "bookshop_1")
+        (_sandbox_root(server, "bookshop_1") / "grading.py").unlink()
+
+        submitted = client.post("/submit", json={"sql": CORRECT_1})
+
+        assert submitted.status_code == 503
+        assert "grading.py grade failed in the sandbox" in submitted.json()["detail"]
+
+    def test_a_sandbox_failure_masks_an_a_interact_sample(self) -> None:
+        server, _ = _server(inconclusive_verification_retries=0)
+        client = TestClient(server.setup_webserver())
+        _seed(client, "bookshop_1", mode="a_interact")
+        (_sandbox_root(server, "bookshop_1") / "grading.py").unlink()
+
+        assert client.post("/a_interact/execute", json={"sql": "SELECT 1"}).status_code == 503
+
+        verification = _verify(client)
+        assert (verification["mask_sample"], verification["failure_kind"]) == (True, SANDBOX_FAILED)
+
+    def test_a_sandbox_that_cannot_start_fails_the_seed_as_retryable(self) -> None:
+        client = TestClient(_server(sandbox_provider={"local": {"shell": "/missing/shell"}})[0].setup_webserver())
+
+        seeded = _seed(client, "bookshop_1")
+
+        assert seeded.status_code == 503
+        assert "Could not start the session sandbox" in seeded.json()["detail"]
+
+    def test_a_failed_close_keeps_the_session_so_the_next_close_stops_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        server, _ = _server()
+        client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+        _seed(client, "bookshop_1")
+        stop = AsyncSandbox.stop
+        failures = iter([RuntimeError("provider unavailable")])
+
+        async def flaky_stop(sandbox: AsyncSandbox) -> None:
+            if (error := next(failures, None)) is not None:
+                raise error
+            await stop(sandbox)
+
+        monkeypatch.setattr(AsyncSandbox, "stop", flaky_stop)
+        close = {"resources_session_id": "session-bookshop_1", "episode_id": EPISODE}
+
+        assert client.post("/close_session", json=close).status_code == 500
+        assert "session-bookshop_1" in server._sessions
+        assert client.post("/close_session", json=close).status_code == 200
+        assert "session-bookshop_1" not in server._sessions
+
+    def test_shutdown_stops_the_sandboxes_left_open(self, sandbox_workspace: Path) -> None:
+        server, _ = _server()
+        with TestClient(server.setup_webserver()) as client:
+            _seed(client, "bookshop_1")
+            assert any(sandbox_workspace.iterdir())
+
+        assert not any(sandbox_workspace.iterdir())

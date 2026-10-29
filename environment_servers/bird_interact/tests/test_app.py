@@ -34,6 +34,13 @@ from resources_servers.bird_interact.schemas import BirdInteractTask
 
 DATA = Path(__file__).parents[2].parent / "resources_servers/bird_interact/data"
 TASKS = {row["instance_id"]: row for row in map(json.loads, (DATA / "example.jsonl").read_text().splitlines())}
+# The Resources Server's session sandboxes run on the host, in each test's own workspace.
+LOCAL_SANDBOX: dict[str, dict[str, str]] = {"local": {}}
+
+
+@pytest.fixture(autouse=True)
+def sandbox_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(LOCAL_SANDBOX["local"], "workspace_root", str(tmp_path / "sandboxes"))
 
 
 def _message(text: str) -> dict:
@@ -148,6 +155,7 @@ def _servers(mode: str, agent_turns: list[AgentTurn], *, max_turns: int, user_mo
             entrypoint="app.py",
             database_dir=str(DATA / "example_databases"),
             user_model=ModelServerRef(type="responses_api_models", name="user_model"),
+            sandbox_provider=LOCAL_SANDBOX,
         ),
         server_client=resources_client,
     )

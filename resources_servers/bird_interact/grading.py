@@ -1,16 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Grade a submitted SQL query against the ground truth by comparing result sets.
+"""Create the episode database, run queries on it and grade a submission, inside the session sandbox.
 
-This is an independent implementation of BIRD-Interact's default test case for tasks without custom test cases:
+Grading is an independent implementation of BIRD-Interact's default test case for tasks without custom test cases:
 remove comments, ``DISTINCT`` and ``ROUND(...)`` from both queries, run them, round floats to two places, and compare
 the rows in order when ``conditions.order`` is set, or as sets otherwise. An empty result on either side fails.
+
+The Resources Server uploads this file to the session sandbox and runs ``python3 grading.py <command> <request>``
+(see ``main``), so it imports only the standard library.
 """
 
+import json
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -41,6 +46,10 @@ class Grade:
     passed: bool
     # Set when the submitted SQL did not run; the agent sees it in the debug message.
     execution_error: str | None = None
+
+
+class SolutionFailedError(RuntimeError):
+    """The ground-truth SQL did not run: the task data is wrong, not the submission."""
 
 
 def split_statements(sql: str) -> list[str]:
@@ -129,10 +138,63 @@ def grade(database: Path, predicted_sql: str, solution_sql: str, *, ordered: boo
         return Grade(passed=False, execution_error=predicted.error)
     solution = run_on_copy(database, normalize_sql(solution_sql), timeout_seconds=timeout_seconds)
     if not solution.ok:
-        raise RuntimeError(f"The ground-truth SQL failed: {solution.error}")
+        raise SolutionFailedError(f"The ground-truth SQL failed: {solution.error}")
     if not predicted.rows or not solution.rows:
         return Grade(passed=False)
     predicted_rows, solution_rows = _normalize_rows(predicted.rows), _normalize_rows(solution.rows)
     if ordered:
         return Grade(passed=predicted_rows == solution_rows)
     return Grade(passed=set(predicted_rows) == set(solution_rows))
+
+
+def create_database(source: Path, database: Path, preprocess_sql: list[str]) -> None:
+    """Create ``database`` from ``source``, a SQLite file or a SQL script, and apply ``preprocess_sql``."""
+    if source.suffix == ".sql":
+        with sqlite3.connect(database) as connection:
+            connection.executescript(source.read_text())
+    else:
+        shutil.copyfile(source, database)
+    if preprocess_sql:
+        with sqlite3.connect(database) as connection:
+            for statement in split_statements(";\n".join(preprocess_sql)):
+                connection.execute(statement)
+
+
+def main(argv: list[str]) -> None:
+    """Run ``setup``, ``execute`` or ``grade`` with the JSON request in the file ``argv[1]`` and print a JSON result.
+
+    The agent's SQL failing is a result. A non-zero exit means the command itself did not run.
+    """
+    command, request_path = argv
+    request = json.loads(Path(request_path).read_text())
+    database = Path(request["database"])
+    if command == "setup":
+        create_database(Path(request["source"]), database, request["preprocess_sql"])
+        result: dict[str, object] = {}
+    elif command == "execute":
+        query = run_on_copy(database, request["sql"], timeout_seconds=request["timeout_seconds"])
+        rows = query.rows or []
+        result = {
+            "error": query.error,
+            "row_count": len(rows),
+            "preview": [repr(row) for row in rows[:MAX_PREVIEW_ROWS]],
+        }
+    elif command == "grade":
+        try:
+            outcome = grade(
+                database,
+                request["predicted_sql"],
+                request["solution_sql"],
+                ordered=request["ordered"],
+                timeout_seconds=request["timeout_seconds"],
+            )
+            result = {"passed": outcome.passed, "execution_error": outcome.execution_error}
+        except SolutionFailedError as error:
+            result = {"solution_error": str(error)}
+    else:
+        raise SystemExit(f"Unknown command {command!r}; expected setup, execute or grade")
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

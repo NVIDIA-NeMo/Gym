@@ -38,6 +38,17 @@ bird_interact_resources:
       user_model:
         type: responses_api_models
         name: user_model
+      # Each session's database runs in its own sandbox. `sandbox` names the provider block that a provider config
+      # binds, such as nemo_gym/sandbox/providers/docker/configs/docker.yaml; add one with a second --config.
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.12-slim
+        ttl_s: 7200
+        resources:
+          cpu: 1
+          memory_mib: 1024
+        metadata:
+          benchmark: bird-interact
       datasets:
         - name: c_interact_example
           type: example

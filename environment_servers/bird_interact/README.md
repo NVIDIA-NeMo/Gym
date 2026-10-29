@@ -2,7 +2,7 @@
 
 Runs [BIRD-Interact](https://bird-interact.github.io/) episodes on `BaseUserSimulationEnvironmentServer`
 (`nemo_gym/base_user_simulation_environment_server.py`). The `bird_interact` Resources Server holds each episode's
-database copy, user simulator and grader; see `resources_servers/bird_interact/README.md`.
+database sandbox, user simulator and grader; see `resources_servers/bird_interact/README.md`.
 
 | `mode` | Turns | Agent access | `next_user_turn` |
 |---|---|---|---|

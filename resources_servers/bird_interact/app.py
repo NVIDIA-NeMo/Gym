@@ -1,25 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""BIRD-Interact episode state: the database copy, the user simulator, the grader and the budgets.
+"""BIRD-Interact episode state: the database sandbox, the user simulator, the grader and the budgets.
 
-One session holds one task. The Environment Server calls ``/ask`` and ``/submit`` in c-Interact. In a-Interact the
-agent calls the same actions as tools under ``/a_interact/``, where each one costs BIRD-COIN. Only that prefix is
-granted to the agent, so it cannot reach ``/verify`` or the c-Interact routes.
+One session holds one task. Its database lives in a sandbox that the session starts at seed and stops at close; the
+agent's SQL and the grading run there (``grading.py``). The Environment Server calls ``/ask`` and ``/submit`` in
+c-Interact. In a-Interact the agent calls the same actions as tools under ``/a_interact/``, where each one costs
+BIRD-COIN. Only that prefix is granted to the agent, so it cannot reach ``/verify`` or the c-Interact routes, and the
+agent never gets the sandbox itself.
 """
 
 import asyncio
 import json
 import logging
-import shutil
-import sqlite3
+import posixpath
+import shlex
 import tempfile
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt, PrivateAttr
 
 from nemo_gym import PARENT_DIR
@@ -39,8 +43,9 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
-from resources_servers.bird_interact.grading import MAX_PREVIEW_ROWS, Grade, grade, run_on_copy, split_statements
+from resources_servers.bird_interact.grading import MAX_PREVIEW_ROWS
 from resources_servers.bird_interact.schemas import (
     AskRequest,
     AskResponse,
@@ -67,6 +72,11 @@ from resources_servers.bird_interact.simulator import (
 
 LOGGER = logging.getLogger(__name__)
 USER_SIMULATOR_FAILED = "bird_interact:user_simulator_failed"
+SANDBOX_FAILED = "bird_interact:sandbox_failed"
+# Runs inside the session sandbox; see its module docstring.
+_SANDBOX_RUNNER = Path(__file__).with_name("grading.py")
+# Time for a sandbox command beyond its two queries: the scratch copies and the round trip.
+_SANDBOX_COMMAND_SLACK_SECONDS = 60.0
 # BIRD-Interact's a-Interact action costs, in BIRD-COIN.
 DEFAULT_ACTION_COSTS = {
     "ask": 2.0,
@@ -88,6 +98,28 @@ class PhaseReward(BaseModel):
     after_debug: float
 
 
+class BirdInteractSandboxConfig(BaseModel):
+    """The session sandbox. The image needs ``python3``; the database and the runner are uploaded at seed."""
+
+    image: str = "python:3.12-slim"
+    # The provider reclaims a sandbox that a crashed server never stopped.
+    ttl_s: PositiveFloat | None = 7200.0
+    ready_timeout_s: PositiveFloat | None = None
+    resources: dict[str, float] = Field(default_factory=dict)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    provider_options: dict[str, Any] = Field(default_factory=dict)
+
+
+class SandboxCommandError(HTTPException, RuntimeError):
+    """The session sandbox could not run a command: an infrastructure failure, not the agent's mistake.
+
+    FastAPI answers it with HTTP 503, which an Environment Server treats as retryable.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(503, detail[:2000])
+
+
 class BirdInteractResourcesServerConfig(BaseResourcesServerConfig):
     """Data location, simulator model and the protocol's budgets and rewards."""
 
@@ -95,7 +127,14 @@ class BirdInteractResourcesServerConfig(BaseResourcesServerConfig):
         description="Holds <db>/<db>.sqlite (or <db>.sql), <db>_schema.txt, <db>_column_meaning_base.json, <db>_kb.jsonl."
     )
     user_model: ModelServerRef
+    sandbox_provider: str | dict[str, Any] = Field(
+        description="A sandbox provider block name, such as `sandbox`, or an inline mapping like `{local: {}}`."
+    )
+    sandbox_config: BirdInteractSandboxConfig = Field(default_factory=BirdInteractSandboxConfig)
+    # A command that fails for infrastructure reasons runs again on a fresh sandbox this many times.
+    inconclusive_verification_retries: NonNegativeInt = 1
     sql_timeout_seconds: PositiveFloat = 30.0
+    # Sandbox commands (queries and grading) running at once across sessions.
     max_concurrent_queries: PositiveInt = 16
     # c-Interact: clarifying questions beyond one for each ambiguity.
     question_patience: NonNegativeInt = 3
@@ -120,13 +159,22 @@ class _DatabaseFiles:
 
 
 @dataclass
+class _SessionSandbox:
+    sandbox: AsyncSandbox
+    # The directory in the sandbox that holds the runner, the database source and the episode database.
+    root: str = ""
+
+    def path(self, name: str) -> str:
+        return posixpath.join(self.root, name)
+
+
+@dataclass
 class _Session:
     episode_id: EpisodeId
     task_id: TaskId
     task: BirdInteractTask
     mode: InteractionMode
-    workdir: Path
-    database: Path
+    sandbox: _SessionSandbox
     files: _DatabaseFiles
     coin_budget: float | None
     phase: int = 1
@@ -135,7 +183,9 @@ class _Session:
     coins_spent: float = 0.0
     phases: list[PhaseResult] = field(default_factory=list)
     finished: bool = False
-    infrastructure_error: str | None = None
+    # Set when an infrastructure failure disrupted an a-Interact episode, so verify masks the sample.
+    failure_kind: str | None = None
+    failure_reason: str | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -161,6 +211,17 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI) -> AsyncIterator[Any]:
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                await self._stop_all_sandboxes()
+
+        app.router.lifespan_context = lifespan
         app.post("/episode_context")(self.episode_context)
         app.post("/ask")(self.ask)
         app.post("/submit")(self.submit)
@@ -204,7 +265,8 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             if session is not None and session.episode_id != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             if session is not None:
-                shutil.rmtree(session.workdir, ignore_errors=True)
+                # A failed stop keeps the session, so the next close retries it.
+                await session.sandbox.sandbox.stop()
                 self._sessions.pop(session_id, None)
             self._fence.mark_closed(session_id, body.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
@@ -229,13 +291,13 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
                 f"Task {task.instance_id} has custom test cases, which this server does not run yet."
             )
         files = self._database_files(task.selected_database)
-        workdir = Path(tempfile.mkdtemp(prefix="bird-interact-"))
+        self._database_source(task.selected_database)
         try:
-            database = workdir / f"{task.selected_database}.sqlite"
-            await asyncio.to_thread(self._create_database, task, database)
-        except Exception:
-            shutil.rmtree(workdir, ignore_errors=True)
-            raise
+            sandbox = await self._start_sandbox(task)
+        except Exception as error:
+            raise SandboxCommandError(
+                f"Could not start the session sandbox: {type(error).__name__}: {error}"
+            ) from error
         coin_budget = None
         if mode == "a_interact":
             coin_budget = (
@@ -246,27 +308,109 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             task_id=body.task_id,
             task=task,
             mode=mode,
-            workdir=workdir,
-            database=database,
+            sandbox=sandbox,
             files=files,
             coin_budget=coin_budget,
         )
 
-    def _create_database(self, task: BirdInteractTask, database: Path) -> None:
-        directory = self._database_root() / task.selected_database
-        source = directory / f"{task.selected_database}.sqlite"
-        script = directory / f"{task.selected_database}.sql"
-        if source.exists():
-            shutil.copyfile(source, database)
-        elif script.exists():
-            with sqlite3.connect(database) as connection:
-                connection.executescript(script.read_text())
-        else:
-            raise ResourcesSeedRejectedError(f"No database for {task.selected_database!r} in {directory}")
-        if task.preprocess_sql:
-            with sqlite3.connect(database) as connection:
-                for statement in split_statements(";\n".join(task.preprocess_sql)):
-                    connection.execute(statement)
+    def _database_source(self, name: str) -> Path:
+        """The database file, ``<db>.sqlite``, or else the script ``<db>.sql``."""
+        directory = self._database_root() / name
+        for source in (directory / f"{name}.sqlite", directory / f"{name}.sql"):
+            if source.exists():
+                return source
+        raise ResourcesSeedRejectedError(f"No database for {name!r} in {directory}")
+
+    # ----- session sandbox ----- #
+
+    async def _start_sandbox(self, task: BirdInteractTask) -> _SessionSandbox:
+        """Start a sandbox holding the task's database with ``preprocess_sql`` applied. A failed setup stops it."""
+        global_config = self.server_client.global_config_dict
+        sandbox_config = self.config.sandbox_config
+        spec = SandboxSpec(
+            image=sandbox_config.image,
+            ttl_s=sandbox_config.ttl_s,
+            ready_timeout_s=sandbox_config.ready_timeout_s,
+            metadata=resolve_provider_metadata(self.config.sandbox_provider, global_config)
+            | sandbox_config.metadata
+            | {"nemo_gym_resources": self.config.name[:63], "instance_id": task.instance_id[:63]},
+            resources=sandbox_config.resources,
+            provider_options=dict(sandbox_config.provider_options),
+        )
+        source = self._database_source(task.selected_database)
+        handle = _SessionSandbox(AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config)))
+
+        async def setup(sandbox: AsyncSandbox) -> None:
+            # The sandbox's working directory: the container's own, or a fresh host directory for the local provider.
+            result = await sandbox.exec("pwd", timeout_s=60)
+            if result.error_type is not None or result.return_code != 0 or not (result.stdout or "").strip():
+                raise SandboxCommandError(f"pwd failed in the sandbox: {result.error_type or result.return_code}")
+            handle.root = posixpath.join((result.stdout or "").strip(), "bird_interact")
+            await sandbox.upload(_SANDBOX_RUNNER, handle.path(_SANDBOX_RUNNER.name))
+            await sandbox.upload(source, handle.path(source.name))
+            await self._run_command(
+                handle, "setup", {"source": handle.path(source.name), "preprocess_sql": task.preprocess_sql}
+            )
+
+        await handle.sandbox.start_with_setup(spec, setup)
+        return handle
+
+    async def _run_command(self, handle: _SessionSandbox, command: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Run ``grading.py <command>`` in the sandbox and return its JSON result."""
+        name = f"request-{uuid4().hex}.json"
+        try:
+            with tempfile.TemporaryDirectory(prefix="bird-interact-") as scratch:
+                local = Path(scratch) / name
+                # Text goes in a file, not in the command line.
+                local.write_text(json.dumps(request | {"database": handle.path("episode.sqlite")}))
+                await handle.sandbox.upload(local, handle.path(name))
+            result = await handle.sandbox.exec(
+                shlex.join(["python3", handle.path(_SANDBOX_RUNNER.name), command, handle.path(name)]),
+                timeout_s=2 * self.config.sql_timeout_seconds + _SANDBOX_COMMAND_SLACK_SECONDS,
+            )
+        except Exception as error:
+            raise SandboxCommandError(f"grading.py {command}: {type(error).__name__}: {error}") from error
+        if result.error_type is not None or result.return_code != 0:
+            outcome = result.error_type or f"exit code {result.return_code}"
+            raise SandboxCommandError(f"grading.py {command} failed in the sandbox ({outcome}): {result.stderr or ''}")
+        try:
+            return json.loads(result.stdout or "")
+        except json.JSONDecodeError as error:
+            raise SandboxCommandError(f"grading.py {command} printed no JSON result: {result.stdout!r}") from error
+
+    async def _in_sandbox(self, session: _Session, command: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Run a command in the session sandbox, retrying an infrastructure failure on a fresh sandbox.
+
+        Only setup writes the session database, so a fresh sandbox holds the same state.
+        """
+        async with self._queries:
+            for _ in range(self.config.inconclusive_verification_retries):
+                try:
+                    return await self._run_command(session.sandbox, command, request)
+                except SandboxCommandError as error:
+                    LOGGER.warning(f"Retrying {command} on a fresh sandbox for {session.task.instance_id}: {error}")
+                    await self._replace_sandbox(session)
+            return await self._run_command(session.sandbox, command, request)
+
+    async def _replace_sandbox(self, session: _Session) -> None:
+        try:
+            fresh = await self._start_sandbox(session.task)
+        except Exception as error:
+            raise SandboxCommandError(f"Could not start a fresh sandbox: {type(error).__name__}: {error}") from error
+        stale, session.sandbox = session.sandbox, fresh
+        try:
+            await stale.sandbox.stop()
+        except Exception:
+            LOGGER.exception("Could not stop a failed BIRD-Interact sandbox; the provider's ttl_s reclaims it")
+
+    async def _stop_all_sandboxes(self) -> None:
+        sessions = list(self._sessions.values())
+        results = await asyncio.gather(
+            *(session.sandbox.sandbox.stop() for session in sessions), return_exceptions=True
+        )
+        for session, result in zip(sessions, results):
+            if isinstance(result, BaseException):
+                LOGGER.error(f"Could not stop the sandbox of {session.task.instance_id} at shutdown: {result!r}")
 
     def _database_files(self, name: str) -> _DatabaseFiles:
         if name not in self._files:
@@ -345,9 +489,9 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
         if session.attempts and all(phase.phase != session.phase for phase in phases):
             phases.append(PhaseResult(phase=session.phase, passed=False, attempts=session.attempts, reward=0.0))
         fields = {}
-        if session.infrastructure_error is not None:
-            fields = {"mask_sample": True, "failure_kind": USER_SIMULATOR_FAILED}
-            fields["failure_reason"] = session.infrastructure_error
+        if session.failure_kind is not None:
+            fields = {"mask_sample": True, "failure_kind": session.failure_kind}
+            fields["failure_reason"] = session.failure_reason
         return BirdInteractVerifyResponse(
             **body.model_dump(),
             reward=sum(phase.reward for phase in phases),
@@ -366,31 +510,36 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             try:
                 return await self._simulate(session, body.question)
             except Exception as error:
-                # An infrastructure failure must not read as the agent's mistake, so verify masks the sample.
-                session.infrastructure_error = f"User simulator failed: {type(error).__name__}: {error}"[:2000]
+                _record_infrastructure_failure(session, USER_SIMULATOR_FAILED, "User simulator failed", error)
                 raise
 
         return await self._tool(request, "ask", act)
 
     async def tool_submit(self, request: Request, body: SQLRequest) -> ToolObservation:
         async def act(session: _Session) -> str:
-            result = await self._submit(session, body.sql)
+            try:
+                result = await self._submit(session, body.sql)
+            except SandboxCommandError as error:
+                _record_infrastructure_failure(session, SANDBOX_FAILED, "Sandbox failed", error)
+                raise
             return result.feedback
 
         return await self._tool(request, "submit", act)
 
     async def tool_execute(self, request: Request, body: SQLRequest) -> ToolObservation:
         async def act(session: _Session) -> str:
-            async with self._queries:
-                result = await asyncio.to_thread(
-                    run_on_copy, session.database, body.sql, timeout_seconds=self.config.sql_timeout_seconds
-                )
-            if not result.ok:
-                return f"Error: {result.error}"
-            rows = result.rows or []
-            shown = "\n".join(repr(row) for row in rows[:MAX_PREVIEW_ROWS])
-            more = f"\n... {len(rows) - MAX_PREVIEW_ROWS} more rows" if len(rows) > MAX_PREVIEW_ROWS else ""
-            return f"{len(rows)} rows\n{shown}{more}"
+            request = {"sql": body.sql, "timeout_seconds": self.config.sql_timeout_seconds}
+            try:
+                result = await self._in_sandbox(session, "execute", request)
+            except SandboxCommandError as error:
+                _record_infrastructure_failure(session, SANDBOX_FAILED, "Sandbox failed", error)
+                raise
+            if result["error"] is not None:
+                return f"Error: {result['error']}"
+            count = result["row_count"]
+            shown = "\n".join(result["preview"])
+            more = f"\n... {count - MAX_PREVIEW_ROWS} more rows" if count > MAX_PREVIEW_ROWS else ""
+            return f"{count} rows\n{shown}{more}"
 
         return await self._tool(request, "execute", act)
 
@@ -489,17 +638,20 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             (task.sol_sql, task.conditions) if phase == 1 else (task.follow_up.sol_sql, task.follow_up.conditions)
         )
         session.attempts += 1
-        async with self._queries:
-            result: Grade = await asyncio.to_thread(
-                grade,
-                session.database,
-                sql,
-                ";\n".join(solution),
-                ordered=conditions.order,
-                timeout_seconds=self.config.sql_timeout_seconds,
-            )
+        result = await self._in_sandbox(
+            session,
+            "grade",
+            {
+                "predicted_sql": sql,
+                "solution_sql": ";\n".join(solution),
+                "ordered": conditions.order,
+                "timeout_seconds": self.config.sql_timeout_seconds,
+            },
+        )
+        if "solution_error" in result:
+            raise RuntimeError(f"Task {task.instance_id}: {result['solution_error']}")
         rewards = self.config.phase_rewards[phase - 1]
-        if result.passed:
+        if result["passed"]:
             debugged = session.mode == "c_interact" and session.attempts > 1
             reward = rewards.after_debug if debugged else rewards.first_attempt
             session.phases.append(PhaseResult(phase=phase, passed=True, attempts=session.attempts, reward=reward))
@@ -517,8 +669,8 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             return SubmitResponse(
                 passed=False, feedback="That is still not right. Let's stop here.", finished=True, phase=phase
             )
-        if result.execution_error is not None:
-            feedback = f"Your SQL failed with this error: {result.execution_error}"
+        if result["execution_error"] is not None:
+            feedback = f"Your SQL failed with this error: {result['execution_error']}"
         else:
             feedback = "Your SQL runs, but the result is not what I need."
         feedback += (
@@ -527,6 +679,12 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             else " You can try again."
         )
         return SubmitResponse(passed=False, feedback=feedback, finished=False, phase=phase)
+
+
+def _record_infrastructure_failure(session: _Session, kind: str, what: str, error: BaseException) -> None:
+    """An infrastructure failure must not read as the agent's mistake, so verify masks the sample."""
+    session.failure_kind = kind
+    session.failure_reason = f"{what}: {type(error).__name__}: {error}"[:2000]
 
 
 if __name__ == "__main__":
