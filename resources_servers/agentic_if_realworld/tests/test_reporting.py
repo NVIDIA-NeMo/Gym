@@ -3,20 +3,23 @@
 import asyncio
 import json
 from copy import deepcopy
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
 from benchmarks.agentic_if_realworld.rollout_driver import write_reports
+from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import E2ERolloutCollectionConfig
+from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.server_utils import ServerClient
 from resources_servers.agentic_if_realworld.app import FixtureVerifier, ResourcesConfig, ResourcesServer, VerifyRequest
 from resources_servers.agentic_if_realworld.benchmark.core import Dataset, digest, judge, read, unscored, write
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create, delivery
+from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_response
 
 
 def test_complete_accuracy_stays_null_until_all_tasks_scored(tmp_path):
@@ -139,6 +142,80 @@ def test_native_aggregation_rejects_inconsistent_saved_results(aggregation, dama
         rows[0]["mask_sample"] = True
     with pytest.raises(ValueError):
         asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows)))
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_adaptive_profile_reaggregation_preserves_saved_metrics(aggregation, tmp_path, monkeypatch, partial):
+    server, dataset, record = aggregation
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                {"config_paths": ["benchmarks/agentic_if_realworld/config.yaml"]},
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    assert resolved.agentic_if_realworld_agent.responses_api_agents.simple_agent.skip_verification is True
+    relay_name = "agentic_if_realworld_environment"
+    config = LegacyAgentEnvironmentServerConfig.model_validate(
+        {
+            **OmegaConf.to_container(resolved[relay_name].environment_servers.legacy_agent, resolve=True),
+            "name": relay_name,
+            "host": "localhost",
+            "port": 0,
+        }
+    )
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = resolved
+    relay = LegacyAgentEnvironmentServer(config=config, server_client=client)
+    apps = {
+        relay_name: TestClient(relay.setup_webserver()),
+        server.config.name: TestClient(server.setup_webserver()),
+    }
+
+    async def post(*, server_name, url_path, json):
+        # Any policy, judge, /run or /verify dispatch fails this test.
+        assert url_path == "/aggregate_metrics"
+        response = apps[server_name].post(url_path, json=json.model_dump())
+        assert response.status_code == 200
+        return _mock_response(response.json())
+
+    client.post = AsyncMock(side_effect=post)
+    monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda _: client)
+    rows = (
+        [record(0, "pass"), record(1, None)]
+        if partial
+        else [record(index, "pass" if index < 3 else "fail") for index in range(5)]
+    )
+    for row in rows:
+        row["agent_ref"] = {"name": "agentic_if_realworld_agent"}
+    output = tmp_path / "rollouts.jsonl"
+    write_reports(output, rows, dataset)
+    metrics_path = tmp_path / "rollouts_aggregate_metrics.json"
+    before = read(metrics_path)[0]["key_metrics"]
+    saved = asyncio.run(RolloutCollectionHelper()._call_aggregate_metrics(rows, rows, output))
+    assert saved == metrics_path
+    metrics = read(saved)[0]["key_metrics"]
+    assert metrics == before
+    assert metrics["expected_items"] == 5
+    assert (metrics["pass"], metrics["fail"], metrics["masked"], metrics["unattempted"]) == (
+        (1, 0, 1, 3) if partial else (3, 2, 0, 0)
+    )
+    assert metrics["composite/complete_accuracy"] == (None if partial else 0.6)
+    assert [call.kwargs["server_name"] for call in client.post.call_args_list] == [relay_name, server.config.name]
+    assert client.post.call_args_list[0].kwargs["json"] == client.post.call_args_list[1].kwargs["json"]
+
+
+def test_generic_agent_still_skips_aggregation():
+    agent, client = _make_agent(True)
+    agent.config.skip_verification = True
+    with pytest.warns(RuntimeWarning, match="Skipping aggregate metrics"):
+        aggregate = asyncio.run(agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[])))
+    assert aggregate.key_metrics == aggregate.agent_metrics == {}
+    client.post.assert_not_called()
 
 
 @pytest.mark.parametrize(

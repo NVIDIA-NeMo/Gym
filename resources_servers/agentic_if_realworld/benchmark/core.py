@@ -38,15 +38,25 @@ def digest(path: Path) -> str:
 
 
 def frozen_policy_bytes(name: str) -> bytes:
-    """Return original policy bytes before the explicitly added public SPDX header."""
+    """Return original policy bytes after validating the exact public provenance header."""
     raw = (ROOT / "policy" / name).read_bytes()
-    if name in {"validate_response_judge.py", "test_contract.py"}:
+    original_files = {
+        "validate_response_judge.py": "run_scripts/validate_agentic_if_response_judge_v2_2.py",
+        "test_contract.py": "tests/test_agentic_if_response_judge_v2_2.py",
+    }
+    if name in original_files:
         prefix = (
-            b"# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
-            b"# SPDX-License-Identifier: Apache-2.0\n"
-        )
+            "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
+            "# SPDX-License-Identifier: Apache-2.0\n"
+            "# Origin: NVIDIA Agentic IF strict-v2.2; NVIDIA-authored code, Apache-2.0.\n"
+            f"# Original file: {original_files[name]}\n"
+            "# First tracked package revision: df90e68292130bb21ffe8a023fc5d0a6e1be0878\n"
+            "# Public source archive (exact publication revision):\n"
+            "# https://github.com/ericyang0/agentic-if-benchmark/tree/b9b32049d48b3296614df71968a634c07779d5c7\n"
+            f"# Archived file: resources_servers/agentic_if_realworld/benchmark/policy/{name}\n"
+        ).encode()
         if not raw.startswith(prefix):
-            raise ValueError("Missing public policy license header")
+            raise ValueError("Missing or changed frozen policy provenance header")
         return raw[len(prefix) :]
     return raw
 

@@ -20,7 +20,7 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServerConfig,
     CleanupContext,
 )
-from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 
@@ -60,6 +60,8 @@ class LegacyAgentEnvironmentServerConfig(BaseEnvironmentServerConfig):
     model_config = ConfigDict(extra="forbid")
 
     agent_server: AgentServerRef
+    # Drivers that grade outside the agent can aggregate through their resources server.
+    aggregate_metrics_server: ResourcesServerRef | None = None
 
     # A relay enforces none of these; the agent keeps its own limits. They carry defaults only
     # because the base declares them, so configs need not repeat values that do nothing.
@@ -92,9 +94,9 @@ class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
         return app
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Forward to the agent server, which aggregates its own rollouts today."""
+        """Forward unchanged metrics input to the configured aggregator, defaulting to the agent."""
         response = await self.server_client.post(
-            server_name=self.config.agent_server.name,
+            server_name=(self.config.aggregate_metrics_server or self.config.agent_server).name,
             url_path="/aggregate_metrics",
             json=body,
         )

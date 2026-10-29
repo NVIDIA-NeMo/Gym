@@ -17,6 +17,7 @@ agentic_if_realworld_environment:
     legacy_agent:
       entrypoint: app.py
       agent_server: {type: responses_api_agents, name: agentic_if_realworld_agent}
+      aggregate_metrics_server: {type: resources_servers, name: agentic_if_realworld_resources}
 policy_model:
   responses_api_models:
     agentic_if_text:

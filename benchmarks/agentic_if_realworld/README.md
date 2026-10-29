@@ -225,6 +225,9 @@ The two Python files in `benchmark/policy/` are frozen source artifacts:
 from automatic lint/format edits, which would change their recorded hashes.
 `test_frozen_assets_are_unchanged` checks their original bodies; the surrounding
 runtime and other policy-directory files use the normal repository checks.
+Their headers record the [frozen source provenance](validation.md#frozen-code-provenance),
+original filenames and Apache-2.0 license. Packaging headers are checked exactly
+and removed only for the original-body hash comparison.
 
 ## Synthetic smoke without registry credentials or paid inference
 

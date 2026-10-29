@@ -117,6 +117,18 @@ def test_frozen_assets_are_unchanged():
             assert hashlib.sha256(frozen_policy_bytes(name)).hexdigest() == expected
 
 
+@pytest.mark.parametrize("name", ["validate_response_judge.py", "test_contract.py"])
+def test_frozen_policy_header_must_match_exactly(tmp_path, monkeypatch, name):
+    raw = (ROOT / "policy" / name).read_bytes()
+    (tmp_path / "policy").mkdir()
+    (tmp_path / "policy" / name).write_bytes(
+        raw.replace(b"# First tracked package revision:", b"# Changed revision:", 1)
+    )
+    monkeypatch.setattr("resources_servers.agentic_if_realworld.benchmark.core.ROOT", tmp_path)
+    with pytest.raises(ValueError, match="provenance header"):
+        frozen_policy_bytes(name)
+
+
 def test_private_judge_prompt_is_exact_and_rechecked_before_each_use(tmp_path):
     content = b"Synthetic test of a private frozen prompt.\r\n"
     path = tmp_path / "judge_prompt.md"

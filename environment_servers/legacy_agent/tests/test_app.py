@@ -13,7 +13,7 @@ from pydantic import ConfigDict
 
 import nemo_gym.server_utils
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
-from nemo_gym.config_types import AgentServerRef
+from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
 
 
@@ -51,20 +51,27 @@ def _config(**limits: float) -> LegacyAgentEnvironmentServerConfig:
     )
 
 
-def _app(*responses: _Upstream) -> tuple[TestClient, _Client]:
+def _app(
+    *responses: _Upstream, aggregate_metrics_server: ResourcesServerRef | None = None
+) -> tuple[TestClient, _Client]:
     client = _Client(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create({}),
         calls=[],
         responses=list(responses),
     )
-    server = LegacyAgentEnvironmentServer(config=_config(), server_client=client)
+    config = _config()
+    config.aggregate_metrics_server = aggregate_metrics_server
+    server = LegacyAgentEnvironmentServer(config=config, server_client=client)
     return TestClient(server.setup_webserver()), client
 
 
-def test_run_relays_body_headers_and_cookies_to_the_agent() -> None:
+@pytest.mark.parametrize(
+    "aggregate_metrics_server", [None, ResourcesServerRef(type="resources_servers", name="scorer")]
+)
+def test_run_relays_body_headers_and_cookies_to_the_agent(aggregate_metrics_server) -> None:
     body = orjson.dumps({"responses_create_params": {"input": "task"}, "_ng_task_index": 3})
-    app, client = _app(_Upstream(b'{"reward": 1.0}'))
+    app, client = _app(_Upstream(b'{"reward": 1.0}'), aggregate_metrics_server=aggregate_metrics_server)
 
     response = app.post(
         "/run",
@@ -96,14 +103,21 @@ def test_run_returns_upstream_status_and_repeated_set_cookie_headers() -> None:
     assert response.headers["content-length"] == str(len(response.content))
 
 
-def test_aggregate_metrics_is_forwarded_to_the_agent() -> None:
-    app, client = _app(_Upstream(orjson.dumps({"agent_metrics": {"mean/reward": 0.5}})))
+@pytest.mark.parametrize(
+    "aggregate_metrics_server", [None, ResourcesServerRef(type="resources_servers", name="scorer")]
+)
+def test_aggregate_metrics_is_forwarded_to_the_selected_server(aggregate_metrics_server) -> None:
+    app, client = _app(
+        _Upstream(orjson.dumps({"agent_metrics": {"mean/reward": 0.5}})),
+        aggregate_metrics_server=aggregate_metrics_server,
+    )
 
     response = app.post("/aggregate_metrics", json={"verify_responses": [{"_ng_task_index": 0, "reward": 0.5}]})
 
     assert response.status_code == 200
     assert response.json()["agent_metrics"] == {"mean/reward": 0.5}
-    assert [(server, path) for server, path, _ in client.calls] == [("agent", "/aggregate_metrics")]
+    target = aggregate_metrics_server.name if aggregate_metrics_server else "agent"
+    assert [(server, path) for server, path, _ in client.calls] == [(target, "/aggregate_metrics")]
 
 
 def test_setting_a_limit_the_relay_does_not_enforce_warns() -> None:

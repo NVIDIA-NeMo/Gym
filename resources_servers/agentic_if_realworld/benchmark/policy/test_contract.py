@@ -1,5 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Origin: NVIDIA Agentic IF strict-v2.2; NVIDIA-authored code, Apache-2.0.
+# Original file: tests/test_agentic_if_response_judge_v2_2.py
+# First tracked package revision: df90e68292130bb21ffe8a023fc5d0a6e1be0878
+# Public source archive (exact publication revision):
+# https://github.com/ericyang0/agentic-if-benchmark/tree/b9b32049d48b3296614df71968a634c07779d5c7
+# Archived file: resources_servers/agentic_if_realworld/benchmark/policy/test_contract.py
 """Synthetic strict-scoring contracts; no source traces or empirical judge claims."""
 import copy
 import json
