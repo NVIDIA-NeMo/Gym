@@ -99,6 +99,9 @@ class HermesSandboxSession(AgentSessionState):
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         await self.session.sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
+        await self.session.sandbox.upload(
+            Path(__file__).with_name("history_delta.py"), f"{_SANDBOX_RUNTIME_DIR}/history_delta.py"
+        )
 
     async def upload_json(self, name: str, payload: dict[str, JsonValue]) -> None:
         """Write a Hermes input under the session directory using file transfer."""

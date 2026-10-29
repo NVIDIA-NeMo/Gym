@@ -47,6 +47,7 @@ from nemo_gym.models._checkpoint import (
     attach_capture_context,
     ledger_removal_refusal,
 )
+from nemo_gym.models.history_delta import HistoryBuffer, HistoryTransportProtocol
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
 )
@@ -773,6 +774,8 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
+        history_delta_enabled: bool = False,
+        history_transport_protocol: HistoryTransportProtocol | None = None,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -791,6 +794,10 @@ class _CaptureMiddleware:
         self._delta_records = delta_records
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
+        self._history_buffer = HistoryBuffer() if history_delta_enabled else None
+        self._history_transport_protocol = (
+            history_transport_protocol if history_transport_protocol is not None else HistoryTransportProtocol()
+        )
         self._external_staging = external_staging
         self._parent_resolution_mode = parent_resolution_mode
         self._capture_ledger: CaptureLedger | None = (
@@ -822,6 +829,24 @@ class _CaptureMiddleware:
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
         known_non_generating = (method, path) in self._non_generating_requests
+
+        if (
+            rollout_from_path
+            and method == "POST"
+            and dialect in {"chat", "responses"}
+            and self._history_transport_protocol.matches_request(scope)
+        ):
+            reconstructed = await self._history_transport_protocol.reconstruct_request(
+                self._history_buffer,
+                scope,
+                receive,
+                send,
+                rollout_from_path,
+                history_field="input" if dialect == "responses" else "messages",
+            )
+            if reconstructed is None:
+                return
+            scope, receive = reconstructed
 
         # State is shared with the handler even through middleware scope copies.
         request_state = scope.setdefault("state", {})
@@ -1164,6 +1189,7 @@ def install_model_call_capture(
     global_config_dict: Any = None,
     num_workers: int | None = None,
     non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
+    history_transport_protocol: HistoryTransportProtocol | None = None,
 ) -> CaptureLedger | None:
     """Install model-call capture middleware and return the capture ledger when staging is external.
 
@@ -1243,6 +1269,11 @@ def install_model_call_capture(
                 await _close_capture_endpoints()
 
         app.router.lifespan_context = _capture_lifespan
+    history_delta_enabled = bool(
+        global_config_dict is not None and global_config_dict.get("history_delta_enabled", False)
+    )
+    if history_delta_enabled and (num_workers or 1) != 1:
+        raise ValueError("Experimental history_delta_enabled requires exactly one model-proxy worker")
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),
@@ -1256,6 +1287,8 @@ def install_model_call_capture(
         parent_resolution_mode=(
             capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
         ),
+        history_delta_enabled=history_delta_enabled,
+        history_transport_protocol=history_transport_protocol,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
     )
