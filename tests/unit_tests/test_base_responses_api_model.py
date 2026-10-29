@@ -1071,16 +1071,16 @@ def test_base_agent_all_agents_overrides_the_agent_opt_in():
 def test_base_agent_url_path_for_request_propagates_inbound_prefix():
     agent = _make_base_agent({})
 
-    prefixed = SimpleNamespace(path_params={"rollout_id": "7-0"})
+    def inbound(path: str) -> SimpleNamespace:
+        return SimpleNamespace(scope={"type": "http", "path": path})
+
+    prefixed = inbound("/ng-rollout/7-0/v1/responses")
     assert agent.url_path_for_request("/v1/responses", prefixed) == "/ng-rollout/7-0/v1/responses"
-    assert agent.url_path_for_request("/v1/responses", SimpleNamespace(path_params={})) == "/v1/responses"
+    assert agent.url_path_for_request("/v1/responses", inbound("/v1/responses")) == "/v1/responses"
     assert agent.url_path_for_request("/v1/responses", SimpleNamespace()) == "/v1/responses"
     assert agent.url_path_for_request("/v1/responses", None) == "/v1/responses"
 
-    capture_prefixed = SimpleNamespace(
-        path_params={"rollout_id": "7-0"},
-        url=SimpleNamespace(path="/ng-rollout/7-0/training-token-capture/v1/responses"),
-    )
+    capture_prefixed = inbound("/ng-rollout/7-0/training-token-capture/v1/responses")
     assert (
         agent.url_path_for_request("/v1/responses", capture_prefixed)
         == "/ng-rollout/7-0/training-token-capture/v1/responses"
@@ -1381,15 +1381,31 @@ def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
 
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware, maybe_rollout_id_from_run_body
+    from nemo_gym.correlation import parse_path
+    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     # The id becomes a path segment.
-    # Middleware must return every accepted id unchanged.
+    # Every reader must return every accepted id unchanged.
     for candidate in ["s7-3-2", "step7.task3", "a", "A_b-1.2"]:
         rollout_id = maybe_rollout_id_from_run_body({"_ng_rollout_id": candidate})
-        match = RolloutContextMiddleware._PREFIX.match(f"/ng-rollout/{rollout_id}/v1/responses")
-        assert match is not None and match.group("rollout_id") == candidate
-        assert match.group("rest") == "/v1/responses"
+        context, rest = parse_path(f"/ng-rollout/{rollout_id}/v1/responses")
+        assert context.capture_key == candidate
+        assert rest == "/v1/responses"
+
+
+@pytest.mark.parametrize("key", [".hidden", "bad%20key", "a:b"])
+def test_a_capture_key_outside_the_documented_rule_is_refused_with_400(key):
+    # Deliberate: the model server now applies ROLLOUT_ID_PATTERN like every other reader, instead of
+    # accepting anything up to the next slash.
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def _cc() -> dict:
+        return {"ok": True}
+
+    install_model_call_capture(app, ModelCallCaptureConfig())
+
+    assert TestClient(app).post(f"/ng-rollout/{key}/v1/chat/completions", json={}).status_code == 400
 
 
 def test_rollout_prefix_stripped_when_capture_disabled():

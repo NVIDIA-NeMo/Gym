@@ -45,6 +45,9 @@ AGENT_INSTANCE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)?$")
 RESERVED_AGENT_INSTANCE_NAMES = frozenset(
     {ROLLOUT_PATH_PREFIX, AGENT_INSTANCE_PATH_SEGMENT, TOKEN_CAPTURE_PATH_SEGMENT, TRACE_CONTEXT_PATH_SEGMENT, "v1"}
 )
+# A capture key is a path segment and a filename component: characters that survive a path round trip,
+# without a leading dot.
+ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # A W3C ``traceparent``, version 00, the only form the propagator writes.
 TRACEPARENT_PATTERN = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
 
@@ -108,7 +111,7 @@ class CorrelationContext:
     trace_parent: str | None = None
 
     def __post_init__(self) -> None:
-        if self.capture_key is not None and (not self.capture_key or "/" in self.capture_key):
+        if self.capture_key is not None and not ROLLOUT_ID_PATTERN.match(self.capture_key):
             raise ValueError(f"invalid capture key {self.capture_key!r}")
         if self.capture_key is None and (self.agent_instance is not None or self.token_capture):
             raise ValueError("an agent instance or the training tag requires a capture key")

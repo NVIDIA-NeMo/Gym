@@ -32,7 +32,6 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
 )
 from nemo_gym.config_types import (
-    TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -553,8 +552,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         token_capture = bool(block.get("enabled", False)) and (
             bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
         )
-        capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        return f"{rollout_path_prefix(request.episode_id.capture_key, token_capture=token_capture)}/v1/responses"
 
     @staticmethod
     def _failure(

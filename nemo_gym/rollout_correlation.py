@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -20,8 +19,12 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.correlation import validate_agent_instance
+from nemo_gym.correlation import (
+    ROLLOUT_ID_PATTERN,
+    CorrelationPathError,
+    resolve,
+    validate_agent_instance,
+)
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
@@ -37,11 +40,6 @@ _AGENT_INSTANCE: ContextVar[Optional[str]] = ContextVar("nemo_gym_agent_instance
 # Within one environment server episode: each named agent instance's last activation response id.
 _AGENT_ACTIVATIONS: ContextVar[Optional[dict[str, str]]] = ContextVar("nemo_gym_agent_activations", default=None)
 
-# A capture id is a path segment in ``/ng-rollout/<id>/...``.
-# Restrict it to characters that survive a path round trip.
-# Exclude leading dots because stores also use the id as a filename component.
-# Middleware uses the same pattern.
-ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 ROUTED_PATH_STATE_KEY = "nemo_gym.routed_path"
 
 
@@ -187,22 +185,20 @@ def verifier_invocation_context(invocation_id: str) -> Iterator[None]:
 class RolloutContextMiddleware:
     """Strip a rollout prefix and expose it to downstream Gym calls for this request."""
 
-    # Match the same id characters as ``ROLLOUT_ID_PATTERN``.
-    # Anchor the id between the prefix and the remaining path.
-    _PREFIX = re.compile(
-        rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>{ROLLOUT_ID_PATTERN.pattern.strip('^$')})(?P<rest>/.*)$"
-    )
-
     def __init__(self, app: Any) -> None:
         self._app = app
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        match = self._PREFIX.match(scope.get("path", "")) if scope.get("type") == "http" else None
-        if match is None:
+        try:
+            resolved = resolve(scope) if scope.get("type") == "http" else None
+        except CorrelationPathError:
+            # The outermost middleware answers a malformed prefix; route the path unchanged.
+            resolved = None
+        if resolved is None or resolved[0].capture_key is None:
             await self._app(scope, receive, send)
             return
 
-        path = match.group("rest")
+        context, path = resolved
         scope = scope_with_routed_path(scope, path)
-        with rollout_context(match.group("rollout_id")):
+        with rollout_context(context.capture_key):
             await self._app(scope, receive, send)

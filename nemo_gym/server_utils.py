@@ -1071,17 +1071,8 @@ class ServerClient(BaseModel):
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
                 url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
-        if (
-            rollout_id is not None
-            and attribute_rollout
-            and server_entry is not None
-            and "responses_api_models" in server_entry
-            and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
-            and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
-        ):
-            # The agent instance a caller named with ``agent_instance_context`` travels with the prefix this
-            # client adds. A caller that builds its own prefix passes ``agent_instance`` to ``rollout_path_prefix``.
-            url_path = f"{rollout_path_prefix(rollout_id, agent_instance=current_agent_instance())}{url_path}"
+        if server_entry is not None and "responses_api_models" in server_entry:
+            url_path = _with_model_call_identity(url_path, rollout_id if attribute_rollout else None)
 
         response = await request(
             method=method,
@@ -2294,6 +2285,40 @@ def get_server_url(server_name: str) -> str:
     )
 
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
+
+
+_GENERATION_PATHS = frozenset({"/v1/responses", "/v1/chat/completions", "/v1/messages"})
+
+
+def _with_model_call_identity(url_path: str, rollout_id: Optional[str]) -> str:
+    """Put the rollout and the agent instance named in context on a model-server generation path.
+
+    An unprefixed path gets the rollout's prefix with the name. A path the caller already prefixed without a
+    name gets the name inserted, so a name set in context is never dropped; a path that names an agent
+    instance already keeps it.
+    """
+    agent_instance = current_agent_instance()
+    path, query_mark, query = url_path.partition("?")
+    try:
+        resolved = parse_path(path)
+    except CorrelationPathError:
+        return url_path
+    if resolved is None:
+        if rollout_id is None or path not in _GENERATION_PATHS:
+            return url_path
+        return f"{rollout_path_prefix(rollout_id, agent_instance=agent_instance)}{url_path}"
+    context, rest = resolved
+    if agent_instance is None or context.agent_instance is not None or context.capture_key is None:
+        return url_path
+    if rest not in _GENERATION_PATHS:
+        return url_path
+    named = CorrelationContext(
+        capture_key=context.capture_key,
+        agent_instance=agent_instance,
+        token_capture=context.token_capture,
+        trace_parent=context.trace_parent,
+    )
+    return f"{encode(named)}{rest}{query_mark}{query}"
 
 
 async def _record_agent_activation(url_path: str, response: ClientResponse) -> None:
