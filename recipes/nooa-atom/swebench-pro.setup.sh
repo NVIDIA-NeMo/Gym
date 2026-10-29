@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Sourced by run.sh and preflight.sh after the benchmark is prepared: checks the roster's hash, writes the
-# prepared rows of the roster's instances to a dedicated file, and makes the run collect exactly those rows.
+# Sourced by run.sh and preflight.sh after the benchmark is prepared: checks the roster's hash and writes the
+# prepared rows of the roster's instances to the file the recipe's dataset entry names.
 RECIPE="$RECIPES_DIR/swebench-pro.yaml"
 ROSTER="$(sed -n 's/^roster:[[:space:]]*\(.*\)$/\1/p' "$RECIPE")"
 ROSTER_SHA="$(sed -n 's/^roster_sha256:[[:space:]]*\([0-9a-f]\{64\}\).*/\1/p' "$RECIPE")"
@@ -41,7 +41,6 @@ with open(out, "w") as f:
         f.write(json.dumps(r) + "\n")
 print(f"swebench-pro: {len(selected)} roster rows written to {out}")
 EOF
-  export INPUT="$ROWS"
 else
   echo "swebench-pro: $PREPARED not prepared yet (gym eval prepare runs first; the roster rows are written on the next pass)"
 fi

@@ -36,6 +36,19 @@ benchmark_config:
   - benchmarks/swebench/pro/atom.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+# The benchmark reads the roster rows that swebench-pro.setup.sh writes after `gym eval prepare` (the prepare
+# script always writes the full benchmark to data/swebench_pro_benchmark.jsonl; the dataset entry is re-declared
+# whole because a list override replaces the list).
+swebench_pro_nooa_resources_server:
+  resources_servers:
+    swebench_pro:
+      datasets:
+        - name: swebench_pro
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_swe120.jsonl
+          prepare_script: benchmarks/swebench/pro/prepare.py
+          num_repeats: 1
+
 # The agent SWE-bench Pro's resources server binds (see benchmarks/swebench/pro/nooa.yaml).
 swebench_pro_nooa_agent:
   responses_api_agents:

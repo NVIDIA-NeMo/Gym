@@ -67,13 +67,12 @@ HYDRA=(hydra.run.dir="$OUT/hydra" hydra.output_subdir=null)
 export NOOA_ARTIFACTS_DIR="${NOOA_ARTIFACTS_DIR:-$OUT/nooa-artifacts}"
 
 gym eval prepare "${CONFIGS[@]}" "${HYDRA[@]}"
-# The recipe's setup runs after preparation: it may pin a task repo, or select the rows to collect (INPUT).
+# The recipe's setup runs after preparation: it may pin a task repo, or write the rows the dataset entry names.
 SETUP="$RECIPES/$BENCH.setup.sh"
 [ -f "$SETUP" ] && source "$SETUP"
 gym eval run \
   "${CONFIGS[@]}" \
   --output "$OUT/evaluator_rollouts.jsonl" \
-  ${INPUT:+--input "$INPUT"} \
   ${RESUME:+--resume} \
   ${LIMIT:+--limit "$LIMIT"} \
   ${PARALLEL:+--concurrency "$PARALLEL"} \
