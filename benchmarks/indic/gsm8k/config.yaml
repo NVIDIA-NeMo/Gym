@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 config_paths:
   - resources_servers/gsm8k_reference/configs/gsm8k_reference.yaml
   - responses_api_models/vllm_model/configs/vllm_model_completions.yaml

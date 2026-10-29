@@ -88,33 +88,40 @@ def prepare(
     output_fpath: Path = OUTPUT_FPATH,
 ) -> Path:
     selected_languages = list(LANGUAGES) if languages is None else languages
+    if (
+        isinstance(selected_languages, str)
+        or not selected_languages
+        or len(set(selected_languages)) != len(selected_languages)
+    ):
+        raise ValueError("languages must contain unique language codes")
     unknown = sorted(set(selected_languages) - LANGUAGES.keys())
     if unknown:
         raise ValueError(f"Unsupported languages: {', '.join(unknown)}")
 
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
-    count = 0
-    with output_fpath.open("w", encoding="utf-8") as output_file:
-        for language_code in selected_languages:
-            dataset = load_dataset(
-                SOURCE_ID,
-                language_code,
-                split=SOURCE_SPLIT,
-                revision=SOURCE_REVISION,
-                token=True,
-            )
-            rows = [dict(row) for row in dataset]
-            if len(rows) < NUM_FEWSHOT + 1:
-                raise ValueError(f"Language {language_code} has fewer than {NUM_FEWSHOT + 1} rows")
+    prepared_rows = []
+    for language_code in selected_languages:
+        dataset = load_dataset(
+            SOURCE_ID,
+            language_code,
+            split=SOURCE_SPLIT,
+            revision=SOURCE_REVISION,
+            token=True,
+        )
+        rows = [dict(row) for row in dataset]
+        if len(rows) < NUM_FEWSHOT + 1:
+            raise ValueError(f"Language {language_code} has fewer than {NUM_FEWSHOT + 1} rows")
 
-            rng = random.Random(FEWSHOT_SEED)
-            for row_index, source_row in enumerate(rows):
-                prompt = render_prompt(rows, row_index, rng)
-                prepared = _to_row(source_row, language_code, row_index, prompt)
-                output_file.write(json.dumps(prepared, ensure_ascii=False) + "\n")
-                count += 1
+        rng = random.Random(FEWSHOT_SEED)
+        for row_index, source_row in enumerate(rows):
+            prompt = render_prompt(rows, row_index, rng)
+            prepared = _to_row(source_row, language_code, row_index, prompt)
+            prepared_rows.append(prepared)
 
-    print(f"Wrote {count} problems to {output_fpath}")
+    output_fpath.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in prepared_rows), encoding="utf-8"
+    )
+    print(f"Wrote {len(prepared_rows)} problems to {output_fpath}")
     return output_fpath
 
 

@@ -100,3 +100,28 @@ def test_compute_metrics_includes_language_breakdown() -> None:
     assert metrics["pass@1/flexible_extract"] == 100.0
     assert metrics["hi/pass@1/strict_match"] == 100.0
     assert metrics["ta/pass@1/strict_match"] == 0.0
+
+
+def test_reference_metrics_do_not_vote_using_a_different_extractor() -> None:
+    tasks = [
+        [
+            {
+                "strict_match": 0.0,
+                "flexible_extract": 1.0,
+                "strict_prediction": INVALID,
+                "flexible_prediction": "42",
+                "language_code": "hi",
+            },
+            {
+                "strict_match": 0.0,
+                "flexible_extract": 0.0,
+                "strict_prediction": INVALID,
+                "flexible_prediction": "43",
+                "language_code": "hi",
+            },
+        ]
+    ]
+    metrics = _server().compute_metrics(tasks)
+    assert metrics["pass@1/flexible_extract"] == 50.0
+    assert metrics["pass@1/strict_match"] == 0.0
+    assert not any("majority@" in key for key in metrics)

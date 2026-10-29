@@ -53,14 +53,6 @@ def exact_match(prediction: str, reference: str) -> float:
     return float(normalize_exact_match(prediction) == normalize_exact_match(reference))
 
 
-def _assistant_text(body: BaseVerifyRequest) -> str:
-    parts = []
-    for output in body.response.output:
-        if output.type == "message":
-            parts.extend(item.text for item in output.content if item.type == "output_text")
-    return "".join(parts)
-
-
 class GSM8KReferenceConfig(BaseResourcesServerConfig):
     name: str = "gsm8k_reference"
 
@@ -91,7 +83,7 @@ class GSM8KReferenceResourcesServer(SimpleResourcesServer):
     config: GSM8KReferenceConfig
 
     async def verify(self, body: GSM8KReferenceVerifyRequest) -> GSM8KReferenceVerifyResponse:
-        generation = _assistant_text(body)
+        generation = body.response.output_text
         strict_prediction = strict_extract(generation)
         flexible_prediction = flexible_extract(generation)
         strict_score = exact_match(strict_prediction, body.expected_answer)
@@ -118,14 +110,12 @@ class GSM8KReferenceResourcesServer(SimpleResourcesServer):
         metrics = compute_pass_majority_metrics(
             tasks,
             score_fn=self._score_fn,
-            answer_key="strict_prediction",
         )[0]
         metrics.update(
             compute_subset_metrics(
                 tasks,
                 subset_key="language_code",
                 score_fn=self._score_fn,
-                answer_key="strict_prediction",
             )
         )
         return metrics

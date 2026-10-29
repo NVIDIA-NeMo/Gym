@@ -5,6 +5,7 @@ import json
 import random
 from pathlib import Path
 
+import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.indic.gsm8k import prepare as prepare_module
@@ -89,3 +90,23 @@ def test_config_disables_chat_template_and_pins_generation() -> None:
     assert model.get("render_chat_template", False) is False
     assert model.sampling_overrides.temperature == 0.0
     assert list(model.sampling_overrides.stop) == ["Question:", "</s>", "<|im_end|>"]
+
+
+@pytest.mark.parametrize("languages", [[], ["hi", "hi"], "hi"])
+def test_prepare_rejects_invalid_language_selection(languages, tmp_path) -> None:
+    with pytest.raises(ValueError, match="unique language codes"):
+        prepare_module.prepare(languages, tmp_path / "out.jsonl")
+
+
+def test_failed_language_download_preserves_existing_output(monkeypatch, tmp_path) -> None:
+    def load(source_id, language_code, **kwargs):
+        if language_code == "ta":
+            raise RuntimeError("download failed")
+        return _rows(language_code)
+
+    monkeypatch.setattr(prepare_module, "load_dataset", load)
+    output = tmp_path / "prepared.jsonl"
+    output.write_text("previous complete dataset\n")
+    with pytest.raises(RuntimeError, match="download failed"):
+        prepare_module.prepare(["hi", "ta"], output)
+    assert output.read_text() == "previous complete dataset\n"
