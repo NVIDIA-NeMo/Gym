@@ -10,7 +10,8 @@ database sandbox, user simulator and grader; see `resources_servers/bird_interac
 | `a_interact` | One (`max_turns: 1`). | The Resources Server's tools under `/a_interact/` | `Stop("agent_finished")` |
 
 The opening request has the instructions and the user's ambiguous request. In c-Interact it also has the schema,
-the column meanings and the visible knowledge base. In a-Interact it has the nine tool definitions instead.
+the column meanings and the visible knowledge base. In a-Interact it has the nine tool definitions instead. It is
+built from the context in the Resources Server's seed reply.
 
 `finish_episode` calls the Resources Server's `/verify`. The result has the base fields (`reward`, `turns`,
 `stop_reason`, agent observations) and BIRD's (`phases`, `questions_asked`, `coins_spent`, `finished`).

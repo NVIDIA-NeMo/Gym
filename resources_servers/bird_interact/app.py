@@ -33,7 +33,6 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
     ResourcesSessionFence,
     ResourcesSessionLostError,
@@ -49,6 +48,7 @@ from resources_servers.bird_interact.grading import MAX_PREVIEW_ROWS
 from resources_servers.bird_interact.schemas import (
     AskRequest,
     AskResponse,
+    BirdInteractSeedSessionResponse,
     BirdInteractTask,
     BirdInteractVerifyRequest,
     BirdInteractVerifyResponse,
@@ -222,7 +222,6 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
                 await self._stop_all_sandboxes()
 
         app.router.lifespan_context = lifespan
-        app.post("/episode_context")(self.episode_context)
         app.post("/c_interact/ask")(self.ask)
         app.post("/c_interact/submit")(self.submit)
         app.post("/a_interact/ask")(self.tool_ask)
@@ -238,7 +237,9 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
 
     # ----- session lifecycle ----- #
 
-    async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest
+    ) -> BirdInteractSeedSessionResponse:
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
             self._fence.raise_if_closed(session_id)
@@ -251,7 +252,8 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             else:
                 self._sessions[session_id] = await self._open_session(body)
             request.session[SESSION_ID_KEY] = session_id
-        return ResourcesSeedSessionResponse(resources_session_id=session_id)
+            context = self._episode_context(self._sessions[session_id])
+        return BirdInteractSeedSessionResponse(resources_session_id=session_id, context=context)
 
     async def close_resources_session(
         self, request: Request, body: ResourcesCloseSessionRequest
@@ -443,22 +445,23 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             raise ResourcesSessionConflictError("c-Interact routes are not available in an a-Interact session")
         return session
 
-    # ----- routes for the Environment Server ----- #
-
-    async def episode_context(self, request: Request) -> EpisodeContext:
-        session = self._session(request)
-        question_budget = None
-        if session.mode == "c_interact":
-            question_budget = session.task.ambiguity_count + self.config.question_patience
+    def _episode_context(self, session: _Session) -> EpisodeContext:
+        if session.mode == "a_interact":
+            return EpisodeContext(
+                database=session.task.selected_database,
+                question=session.task.amb_user_query,
+                coin_budget=session.coin_budget,
+            )
         return EpisodeContext(
             database=session.task.selected_database,
             question=session.task.amb_user_query,
             schema_text=session.files.schema_text,
             column_meanings=json.dumps(session.files.column_meanings, indent=1),
             knowledge="\n".join(json.dumps(entry) for entry in session.visible_knowledge()),
-            question_budget=question_budget,
-            coin_budget=session.coin_budget,
+            question_budget=session.task.ambiguity_count + self.config.question_patience,
         )
+
+    # ----- routes for the Environment Server ----- #
 
     async def ask(self, request: Request, body: AskRequest) -> AskResponse:
         """Answer a c-Interact clarifying question: in phase 1, before the first submission, within the budget."""

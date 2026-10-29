@@ -30,6 +30,7 @@ def check_resources_session_contract(
     keeps_state: bool,
     holds_state: Callable[[str], bool] | None = None,
     verify_body: Mapping[str, object] | None = None,
+    seed_response_model: type[ResourcesSeedSessionResponse] = ResourcesSeedSessionResponse,
 ) -> None:
     """Seed, re-seed, and close a session through ``app``, and raise AssertionError on a contract violation.
 
@@ -48,6 +49,9 @@ def check_resources_session_contract(
     With ``verify_body`` (requires ``keeps_state``), a ``/verify`` sent with the closed session's cookie must
     return a masked sample whose ``failure_kind`` is ``session_lost`` or ``session_expired``, not a reward of 0.
     Pass it for a server whose score depends on per-rollout state.
+
+    ``seed_response_model`` validates each seed reply. A server whose seed reply adds typed fields for its
+    Environment Server passes its subclass of ``ResourcesSeedSessionResponse``; the base model forbids extra fields.
     """
     from fastapi.testclient import TestClient
 
@@ -63,7 +67,7 @@ def check_resources_session_contract(
     for attempt in ("seed", "repeated seed"):
         response = client.post("/seed_session", json=seed_body)
         assert response.status_code == 200, f"{attempt} failed: {response.status_code} {response.text}"
-        seeded = ResourcesSeedSessionResponse.model_validate(response.json())
+        seeded = seed_response_model.model_validate(response.json())
         assert seeded.resources_session_id == seed.resources_session_id, f"{attempt} returned another session"
     session_cookies = dict(client.cookies)
 

@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import ConfigDict, PrivateAttr, ValidationError
 
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
@@ -433,6 +433,27 @@ class TestLostSeedReplyConformance:
                 keeps_state=True,
                 holds_state=lambda resources_session_id: resources_session_id in server._held.values(),
             )
+
+    def test_a_seed_reply_with_typed_fields_passes_with_its_own_model(self) -> None:
+        class SeedReplyWithContext(ResourcesSeedSessionResponse):
+            context: str
+
+        base = _cookie_keyed_server()
+
+        class ContextServer(type(base)):
+            async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> SeedReplyWithContext:
+                seeded = await super().seed_session(request, body)
+                return SeedReplyWithContext(**seeded.model_dump(), context="opening request")
+
+        def server() -> SimpleResourcesServer:
+            return ContextServer(config=base.config, server_client=base.server_client)
+
+        # The base model stays strict, so a server must name the model of its seed reply.
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            check_resources_session_contract(server().setup_webserver(), self.SEED, keeps_state=True)
+        check_resources_session_contract(
+            server().setup_webserver(), self.SEED, keeps_state=True, seed_response_model=SeedReplyWithContext
+        )
 
     def test_a_server_that_releases_by_resources_session_id_passes(self) -> None:
         server = _cookie_keyed_server(releases_by_resources_session_id=True)

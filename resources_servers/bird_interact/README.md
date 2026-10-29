@@ -18,8 +18,12 @@ The `bird_interact` Environment Server (`environment_servers/bird_interact`) run
 
 | Mode | Who owns the loop | Routes |
 |---|---|---|
-| c-Interact | The Environment Server. Each agent reply is a question (`/c_interact/ask`) or SQL (`/c_interact/submit`). | `/episode_context`, `/c_interact/ask`, `/c_interact/submit`, `/verify` |
+| c-Interact | The Environment Server. Each agent reply is a question (`/c_interact/ask`) or SQL (`/c_interact/submit`). | `/c_interact/ask`, `/c_interact/submit`, `/verify` |
 | a-Interact | The agent, in one turn. | Nine tools under `/a_interact/`: `ask`, `submit`, `execute`, `get_schema`, `get_all_column_meanings`, `get_column_meaning`, `get_all_external_knowledge_names`, `get_knowledge_definition`, `get_all_knowledge_definitions` |
+
+The seed reply carries the context for the Environment Server's opening request. In c-Interact it has the schema,
+the column meanings, the visible knowledge base and the question budget. In a-Interact it has only the database, the
+request and the BIRD-COIN budget, because the tools charge for the rest.
 
 Both modes use the same simulator and grader. The agent's tool grant covers only `/a_interact/`. Each mode's routes
 refuse a session of the other mode, so an a-Interact agent cannot submit through `/c_interact/submit` without paying

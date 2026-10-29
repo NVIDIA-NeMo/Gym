@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse, ResourcesSeedSessionResponse
 
 
 InteractionMode = Literal["c_interact", "a_interact"]
@@ -80,19 +80,30 @@ class BirdInteractTask(BaseModel):
 
 
 class EpisodeContext(BaseModel):
-    """What the agent may see at the start of an episode."""
+    """What the agent sees at the start of an episode.
+
+    In a-Interact the agent pays BIRD-COIN for the schema, the column meanings and the knowledge base, so the context
+    leaves them out.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     database: str
     question: str
-    schema_text: str
-    column_meanings: str
-    knowledge: str
+    # c-Interact only.
+    schema_text: str | None = None
+    column_meanings: str | None = None
+    knowledge: str | None = None
     # c-Interact: clarifying questions the agent may ask. a-Interact: None.
     question_budget: int | None = None
     # a-Interact: BIRD-COIN for all actions. c-Interact: None.
     coin_budget: float | None = None
+
+
+class BirdInteractSeedSessionResponse(ResourcesSeedSessionResponse):
+    """The seed reply, with the context that the Environment Server's opening request shows."""
+
+    context: EpisodeContext
 
 
 class AskRequest(BaseModel):

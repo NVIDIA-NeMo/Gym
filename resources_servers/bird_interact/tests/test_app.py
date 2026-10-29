@@ -21,7 +21,7 @@ from resources_servers.bird_interact.app import (
     BirdInteractResourcesServerConfig,
 )
 from resources_servers.bird_interact.grading import grade, main, split_statements, strip_round_calls
-from resources_servers.bird_interact.schemas import BirdInteractTask
+from resources_servers.bird_interact.schemas import BirdInteractSeedSessionResponse, BirdInteractTask
 from resources_servers.bird_interact.simulator import UNANSWERABLE_REPLY, parse_action
 
 
@@ -198,6 +198,7 @@ class TestSeed:
             keeps_state=True,
             holds_state=lambda session_id: session_id in server._sessions,
             verify_body={"responses_create_params": {"input": "q"}, "response": _response()},
+            seed_response_model=BirdInteractSeedSessionResponse,
         )
 
     @pytest.mark.parametrize(
@@ -215,16 +216,26 @@ class TestSeed:
         assert refused.status_code == 422
         assert message in refused.json()["detail"]
 
-    def test_the_context_hides_the_knowledge_the_task_masks(self) -> None:
+    def test_the_seed_reply_s_context_hides_the_knowledge_the_task_masks(self) -> None:
         client = TestClient(_server()[0].setup_webserver())
-        _seed(client, "bookshop_1")
 
-        context = client.post("/episode_context").json()
+        context = _seed(client, "bookshop_1").json()["context"]
 
         assert "Bestseller" not in context["knowledge"]
         assert "Revenue" in context["knowledge"]
         # One critical and one knowledge ambiguity, plus the default patience of 3.
         assert context["question_budget"] == 5
+
+    def test_the_a_interact_context_leaves_out_what_the_tools_charge_for(self) -> None:
+        client = TestClient(_server()[0].setup_webserver())
+
+        context = _seed(client, "bookshop_1", mode="a_interact").json()["context"]
+
+        assert (context["schema_text"], context["column_meanings"], context["knowledge"]) == (None, None, None)
+        # 6, plus one ask (2) for each of the two ambiguities, plus the default patience of 6.
+        assert context["coin_budget"] == 16.0
+        # No other route returns the context, so the agent cannot reach it through its tool grant.
+        assert client.post("/episode_context").status_code == 404
 
 
 class TestConversationalMode:

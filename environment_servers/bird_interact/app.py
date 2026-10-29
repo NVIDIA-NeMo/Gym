@@ -17,11 +17,7 @@ from pydantic import BaseModel, model_validator
 from typing_extensions import Self
 
 from nemo_gym.base_environment_server import CleanupContext
-from nemo_gym.base_resources_server import (
-    ResourcesCloseSessionRequest,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
-)
+from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.base_user_simulation_environment_server import (
     AgentAccess,
     BaseUserSimulationEnvironmentServer,
@@ -43,6 +39,7 @@ from nemo_gym.tool_access import DirectHTTPToolAccess
 from resources_servers.bird_interact.schemas import (
     AskRequest,
     AskResponse,
+    BirdInteractSeedSessionResponse,
     BirdInteractTask,
     BirdInteractVerifyRequest,
     BirdInteractVerifyResponse,
@@ -174,7 +171,7 @@ class BirdInteractEnvironmentServer(
         # Registered before the seed, so a cancellation releases a session whose seed reply was lost.
         cleanup.register_cleanup("resources session", lambda: self._close_resources(episode))
         task_data = request.task.task_input.model_dump(mode="json") | {"interaction_mode": self.config.mode}
-        await self._call_resources(
+        seed = await self._call_resources(
             episode,
             "/seed_session",
             ResourcesSeedSessionRequest(
@@ -183,10 +180,10 @@ class BirdInteractEnvironmentServer(
                 task_id=request.task.task_id,
                 task_data=task_data,
             ),
-            ResourcesSeedSessionResponse,
+            BirdInteractSeedSessionResponse,
             stage="seed",
         )
-        episode.context = await self._call_resources(episode, "/episode_context", None, EpisodeContext, stage="seed")
+        episode.context = seed.context
         return episode
 
     async def agent_access(self, episode: _Episode) -> AgentAccess:
@@ -267,7 +264,7 @@ class BirdInteractEnvironmentServer(
         )
 
     async def _call_resources(
-        self, episode: _Episode, path: str, body: BaseModel | None, model: type[ModelT], *, stage: FailureStage
+        self, episode: _Episode, path: str, body: BaseModel, model: type[ModelT], *, stage: FailureStage
     ) -> ModelT:
         try:
             response = await self.server_client.post(
