@@ -1623,7 +1623,9 @@ def _model_attempt_failure(
     )
 
 
-async def _raise_exhausted(response: ClientResponse, content: bytes, last_failure: Optional[NgFailureEvent]) -> None:
+async def _raise_exhausted(
+    response: ClientResponse, content: Optional[bytes], last_failure: Optional[NgFailureEvent]
+) -> None:
     """``raise_for_status`` for the last attempt; its error's explicit cause is that attempt's observed failure.
 
     A cause ``raise_for_status`` set itself (a Gym server's rebuilt failure) is kept.
@@ -1781,7 +1783,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     # Spent-key/auth trip: (status, body, url). Later calls raise a fresh exception.
     _permanent_trip: Optional[tuple[int, bytes, str]] = PrivateAttr(default=None)
 
-    def _raise_permanent_error(self) -> None:
+    def _raise_permanent_error(self, cause: Optional[NgFailureEvent] = None) -> None:
         assert self._permanent_trip is not None
         status, body, url = self._permanent_trip
         snippet = body.decode("utf-8", errors="replace")[:200]
@@ -1796,16 +1798,21 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             headers=None,
         )
         error.response_content = body
+        if cause is not None:
+            raise error from cause
         raise error
 
-    def _trip_permanent_error(self, status: int, content: bytes | str, url: Any) -> None:
+    def _trip_permanent_error(
+        self, status: int, content: bytes | str, url: Any, cause: Optional[NgFailureEvent] = None
+    ) -> None:
         body = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
         self._permanent_trip = (status, body, str(url))
         print(
             f"[model_retry_stop url={url} status={status} error_msg={body.decode('utf-8', errors='replace')[:200]}]",
             flush=True,
         )
-        self._raise_permanent_error()
+        # Only the attempt that tripped it is the cause; later calls raise without one (no attempt was made).
+        self._raise_permanent_error(cause)
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
@@ -1860,6 +1867,22 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             last_transport_failure = (error, failure)
             observe_failure(failure)
 
+        def observe_http_failure(response: ClientResponse) -> Optional[NgFailureEvent]:
+            # A Gym server's reply already forwards its own record; it is not recorded twice.
+            forwarded = FailureHeader.decode(getattr(response, "headers", None))
+            if forwarded is not None and forwarded.failure_id is not None:
+                return None
+            failure = _model_attempt_failure(
+                f"HTTP {response.status} from the model server",
+                operation_id=operation_id,
+                attempt_id=f"{operation_id}-{tries}",
+                http_status=response.status,
+            )
+            observe_failure(failure)
+            # Kept on this response, so the error a caller raises for it names this attempt as its cause.
+            response._ng_attempt_failure = failure
+            return failure
+
         while tries < max_num_tries:
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
@@ -1873,29 +1896,24 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 raise
 
             if response.status in (401, 403):
+                failure = observe_http_failure(response)
                 content = await response.content.read()
                 if _error_body_is_permanent_auth(content):
-                    self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
+                    self._trip_permanent_error(response.status, content, request_kwargs.get("url"), failure)
                 return response
 
             if response.status not in RETRY_ERROR_CODES:
+                if response.status >= 400:
+                    # The caller raises or handles it; the status is still this call's last observed attempt.
+                    observe_http_failure(response)
                 return response
 
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
             # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
-            last_failure = None
-            forwarded = FailureHeader.decode(getattr(response, "headers", None))
-            if forwarded is None or forwarded.failure_id is None:
-                last_failure = _model_attempt_failure(
-                    f"HTTP {response.status} from the model server",
-                    operation_id=operation_id,
-                    attempt_id=f"{operation_id}-{tries}",
-                    http_status=response.status,
-                )
-                observe_failure(last_failure)
+            last_failure = observe_http_failure(response)
             content = await response.content.read()
             if response.status == 429 and _error_body_is_permanent_quota(content):
-                self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
+                self._trip_permanent_error(response.status, content, request_kwargs.get("url"), last_failure)
 
             wait = _retry_wait_seconds(tries, response)
             # Internal NeMo Gym servers extend max tries for retryable errors unless
@@ -1934,7 +1952,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         if not response.ok and is_global_aiohttp_client_request_debug_enabled():
             print(f"Request kwargs: {json.dumps(request_kwargs)}")
 
-        await raise_for_status(response)
+        await _raise_exhausted(response, None, getattr(response, "_ng_attempt_failure", None))
 
     async def create_models(self):
         request_kwargs = dict(url=f"{self.base_url}/models")
