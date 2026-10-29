@@ -912,6 +912,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             )
         )
 
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better.
+
+        Status, discovery and seed replies report it.
+        A server whose capture depends on its configuration, such as on a sandbox provider that can snapshot,
+        overrides it.
+        """
+        return self.checkpoint_mode
+
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         # The declarations are class attributes nothing else checks: a typo would act as a mode of its own.
         for name, allowed in (("checkpoint_mode", CheckpointMode), ("checkpoint_verify", StepType)):
@@ -927,7 +936,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if self.checkpoint_mode == "exported":
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in get_args(CheckpointMode):
+            raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        if mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [
                 name
@@ -941,7 +953,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 )
         participant = ResourcesParticipant(
             self,
-            self.checkpoint_mode,
+            mode,
             verify_step_type=self.checkpoint_verify,
             session_release_pending=self.session_release_pending,
         )
@@ -1026,8 +1038,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if lifetimes is not None and session_id is not None:
             lifetimes.ended(session_id)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
-        """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        """Return each session's state for checkpoint ``checkpoint_id``, leaving out sessions this server no longer
+        holds."""
         raise NotImplementedError
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
@@ -1046,6 +1059,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         async with self.session_lock(session_id):
             await self.release_session_state(session_id)
             self._forget_session(session_id)
+
+    async def release_external_state(self, kept: frozenset[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as sandbox snapshots.
+
+        Called while no checkpoint is open, after the controller published one and pruned old ones;
+        an empty ``kept`` means nothing will be restored again. The default keeps nothing outside Gym.
+        """
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""

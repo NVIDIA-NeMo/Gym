@@ -65,7 +65,7 @@ class CounterServer(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         return {
             session_id: {"count": self.counters[session_id]}
             for session_id in session_ids
@@ -352,10 +352,10 @@ async def test_a_declared_session_start_during_a_commit_s_export_waits_for_resum
     exporting, release_export = asyncio.Event(), asyncio.Event()
     export = participant.export
 
-    async def held_export(episode_ids: Any) -> Any:
+    async def held_export(episode_ids: Any, *, checkpoint_id: str) -> Any:
         exporting.set()
         await release_export.wait()
-        return await export(episode_ids)
+        return await export(episode_ids, checkpoint_id=checkpoint_id)
 
     participant.export = held_export
     async with client:
@@ -831,7 +831,7 @@ async def test_a_seed_that_finishes_after_its_retire_was_cut_short_registers_its
         seeded = await seed
         # A tool call without a rollout prefix names only its session.
         late = await client.post("/increment")
-        exported = await server._checkpoint.export(None)
+        exported = await server._checkpoint.export(None, checkpoint_id="c")
         refused = await client.post("/ng-control/v1/checkpoint/forget", json=forget, headers=AUTH)
         retried = await client.post("/ng-control/v1/checkpoint/retire", json=retire, headers=AUTH)
         forgotten = await client.post("/ng-control/v1/checkpoint/forget", json=forget, headers=AUTH)
