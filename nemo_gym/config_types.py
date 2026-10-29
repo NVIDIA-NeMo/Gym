@@ -191,6 +191,10 @@ class AlmostServerError(ConfigError, ValueError):
     `error_on_almost_servers` is set, so the run is aborted."""
 
 
+class EnvironmentServerConfigError(ConfigError, ValueError):
+    """An Environment Server block fails its server's own config class, which its launch would reject."""
+
+
 class AgentWithoutEnvironmentServerError(ConfigError, ValueError):
     """An agent instance has no environment server."""
 

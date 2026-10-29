@@ -216,10 +216,10 @@ def sanitize_streaming_responses_body(
                 kept_items.append(item)
                 continue
             if isinstance(item, dict) and item.get("type") == "reasoning":
-                # Codex 0.144.4 replays complete reasoning content without its ID.
-                # Supply only that missing identifier; retain malformed reasoning
-                # for strict request validation instead of losing model history.
-                item.setdefault("id", f"rs_{uuid4().hex}")
+                # Codex 0.144.4 replays complete reasoning content without its ID, and
+                # encrypted content only verifies under the original ID, so none is
+                # invented. Malformed reasoning is kept for strict request validation
+                # instead of losing model history.
                 kept_items.append(item)
                 continue
             if (
