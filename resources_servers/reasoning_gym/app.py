@@ -162,7 +162,11 @@ def _last_boxed_content(text: str) -> Optional[str]:
 
 
 def _normalize_latex_text(answer: str) -> str:
-    """Turn LaTeX text markup inside a box back into plain text: ``\\ `` spaces, ``\\text{...}`` wrappers, ``$``."""
+    """Turn LaTeX text markup inside a box back into plain text: ``\\ `` spaces, ``\\text{...}`` wrappers, ``$``.
+
+    Whitespace collapses within a line, never across lines: grid tasks such as ``rotate_matrix`` and
+    ``binary_matrix`` score newline-separated rows against the oracle by exact match.
+    """
     text = answer.strip().strip("$").strip()
     # Unwrap \text{...}-style wrappers wherever they appear, innermost last, so nested wrappers all go.
     while True:
@@ -173,10 +177,12 @@ def _normalize_latex_text(answer: str) -> str:
         if end is None:
             break
         text = text[: match.start()] + text[match.end() : end] + text[end + 1 :]
+    # A thin space between digits is a thousands separator (1\,000); elsewhere \, is a space, like \  and \;.
+    text = re.sub(r"(?<=\d)\\,(?=\d)", "", text)
     text = text.replace("\\ ", " ").replace("\\,", " ").replace("\\;", " ").replace("\\!", "")
     # A tilde between words is LaTeX's non-breaking space; leave other tildes (operators) alone.
     text = re.sub(r"(?<=\w)~(?=\w)", " ", text)
-    return " ".join(text.split())
+    return "\n".join(" ".join(line.split()) for line in text.splitlines()).strip()
 
 
 if __name__ == "__main__":
