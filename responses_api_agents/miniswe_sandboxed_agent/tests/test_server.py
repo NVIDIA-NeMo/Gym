@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import io
 import json
+import tarfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,7 +20,7 @@ from resources_servers.terminal_bench_4.app import (
     TerminalBench4ResourcesServer,
     TerminalBench4RunRequest,
 )
-from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest
+from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest, SessionRequest
 from resources_servers.terminal_bench_4.task import TaskSettings
 from resources_servers.terminal_bench_4.tests.test_environment import environment_config
 from responses_api_agents.miniswe_sandboxed_agent import app as module
@@ -957,3 +960,145 @@ async def test_shutdown_finishes_seeding_and_requests_cleanup_within_budget(fixt
     session = next(iter(f.server._sessions.values()))
     assert session.expiry_task.cancelled()
     f.grade.assert_not_awaited()
+
+
+async def test_artifact_recovery_authenticates_episode_and_preserves_storage_zero_replay(fixture, tmp_path):
+    f = fixture
+    seed = await f.server.seed_session(f.request, f.body)
+    session = f.server._sessions[seed.session_id]
+    archive = tmp_path / "checkpoint.tar"
+    archive.write_bytes(b"streamed checkpoint archive")
+    logs = SimpleNamespace(
+        snapshot_agent_artifacts=AsyncMock(return_value=archive),
+        session_id=seed.session_id + "__logs",
+        closed=False,
+        resources=[],
+        cleanup_errors=[],
+        resource_identities=lambda: [],
+        stop=AsyncMock(),
+    )
+    session.environment.shared_logs = session.shared_logs = logs
+    body = SessionRequest(session_id=seed.session_id)
+    wrong_owner = SimpleNamespace(session={SESSION_ID_KEY: "another owner"})
+    with pytest.raises(HTTPException) as error:
+        await f.server.agent_artifacts(wrong_owner, body)
+    assert error.value.status_code == 404
+    logs.snapshot_agent_artifacts.assert_not_awaited()
+    responses = await asyncio.gather(
+        f.server.agent_artifacts(f.request, body), f.server.agent_artifacts(f.request, body)
+    )
+    assert [Path(response.path) for response in responses] == [archive, archive]
+    logs.snapshot_agent_artifacts.assert_awaited_once_with(
+        session.directory / "agent" / "miniswe.tar", max_bytes=f.server.config.agent_artifact_max_bytes
+    )
+    extra = {
+        "mini_swe_trajectory": {"messages": [{"role": "user", "content": "original evidence"}]},
+        "mini_swe_artifact_recovery": {"recovered": True, "error": None},
+    }
+    verify = SandboxedVerifyRequest(
+        session_id=seed.session_id,
+        responses_create_params=f.body.responses_create_params,
+        response=module.empty_response(f.body.responses_create_params, "model"),
+        termination=HarnessOutcome(
+            reason="infrastructure_error",
+            detail="[SANDBOX::ENDED] Sandbox has ended (Evicted): Pod ephemeral local storage usage exceeds the total limit of containers 4Gi",
+        ).model_dump(),
+        agent_started=True,
+        harness_metadata=extra,
+    )
+    result = await f.server.verify(f.request, verify)
+    assert result.reward == 0.0 and result.evaluation_completed
+    assert result.sandbox_resource_limit.resource == "storage"
+    assert result.infrastructure_error is None
+    assert result.model_dump()["mini_swe_trajectory"] == extra["mini_swe_trajectory"]
+    assert await f.server.verify(f.request, verify) is result
+    replay = await f.server.seed_session(f.request, f.body)
+    assert replay.verified_response.model_dump() == result.model_dump()
+    f.grade.assert_not_awaited()
+
+
+async def test_cleanup_cancels_and_joins_artifact_snapshot_before_helper_teardown(fixture):
+    f = fixture
+    seed = await f.server.seed_session(f.request, f.body)
+    session = f.server._sessions[seed.session_id]
+    started = asyncio.Event()
+    events = []
+
+    async def snapshot(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append("snapshot joined")
+
+    async def stop(**kwargs):
+        events.append("helper stopped")
+
+    logs = SimpleNamespace(
+        snapshot_agent_artifacts=snapshot,
+        session_id=seed.session_id + "__logs",
+        stop=stop,
+        closed=False,
+        resources=[],
+        cleanup_errors=[],
+        resource_identities=lambda: [],
+    )
+    session.environment.shared_logs = session.shared_logs = logs
+    recovering = asyncio.create_task(f.server.agent_artifacts(f.request, SessionRequest(session_id=seed.session_id)))
+    async with asyncio.timeout(5):
+        await started.wait()
+        await lifecycle.cleanup(session)
+    with pytest.raises(asyncio.CancelledError):
+        await recovering
+    assert events == ["snapshot joined", "helper stopped"]
+
+
+@pytest.mark.parametrize("artifact_name", ["trajectory.json", "../foreign.json", "near_limit"])
+async def test_agent_recovery_streams_and_validates_fixed_artifacts(fixture, tmp_path, artifact_name):
+    f = fixture
+    near_limit = artifact_name == "near_limit"
+    artifact_name = "trajectory.json" if near_limit else artifact_name
+    payload = b"x" * 9999 if near_limit else b'{"messages":[]}'
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as tar:
+        member = tarfile.TarInfo(artifact_name)
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+        if near_limit:
+            tar.addfile(tarfile.TarInfo("agent.log"), io.BytesIO())
+
+    class Content:
+        async def iter_chunked(self, size):
+            data = output.getvalue()
+            for offset in range(0, len(data), 97):
+                yield data[offset : offset + 97]
+
+    response = SimpleNamespace(content=Content(), release=MagicMock())
+    f.agent.server_client.post = AsyncMock(return_value=response)
+    state = SimpleNamespace(
+        seed=module.SeedSessionResponse(session_id="episode", agent_artifact_max_bytes=10000 if near_limit else 2**31),
+        resource_cookies={"session": "resource-owned-cookie"},
+    )
+    target = tmp_path / "agent-recovery"
+    if artifact_name.startswith("../"):
+        with pytest.raises(ValueError, match="unexpected mini-SWE artifact"):
+            await f.agent._recover_artifacts(state, target)
+        assert not (tmp_path / "foreign.json").exists()
+    else:
+        assert await f.agent._recover_artifacts(state, target)
+        assert (target / artifact_name).read_bytes() == payload
+    assert not list(target.glob("*.tmp"))
+    response.release.assert_called_once()
+    f.agent.server_client.post.assert_awaited_once_with(
+        server_name="tb4", url_path="/agent_artifacts", json={"session_id": "episode"}, cookies=state.resource_cookies
+    )
+
+
+async def test_recovery_releases_http_response_on_status_failure(fixture, tmp_path, monkeypatch):
+    response = SimpleNamespace(release=MagicMock())
+    fixture.agent.server_client.post = AsyncMock(return_value=response)
+    monkeypatch.setattr(module, "raise_for_status", AsyncMock(side_effect=RuntimeError("recovery refused")))
+    state = SimpleNamespace(seed=module.SeedSessionResponse(session_id="episode"), resource_cookies={})
+    with pytest.raises(RuntimeError, match="recovery refused"):
+        await fixture.agent._recover_artifacts(state, tmp_path / "recovery")
+    response.release.assert_called_once()

@@ -14,6 +14,7 @@ from typing import ClassVar, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import Field
 
 from nemo_gym.base_resources_server import (
@@ -36,6 +37,7 @@ from resources_servers.terminal_bench_4.models import (
     SandboxedVerifyRequest,
     SandboxedVerifyResponse,
     SeedSessionResponse,
+    SessionRequest,
     TerminalBench4RunRequest,
     VerifierTestCounts,
 )
@@ -56,6 +58,8 @@ class TerminalBench4Config(BaseResourcesServerConfig):
     shutdown_timeout_sec: float = Field(default=30, ge=0)
     seeded_session_timeout_sec: float = Field(default=10 * 60 * 60, gt=0)
     task_download_dir: Path | None = None
+    agent_artifact_max_bytes: int = Field(default=2 * 1024**3, gt=0)
+    agent_artifact_timeout_sec: float = Field(default=600, gt=0)
 
 
 def atomic_json(path, value):
@@ -120,6 +124,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def setup_webserver(self):
         app = super().setup_webserver()
         app.post("/seed_session")(self.seed_session)
+        app.post("/agent_artifacts")(self.agent_artifacts)
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -243,6 +248,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     agent_timeout_sec=session.task.config.agent.timeout_sec,
                     mcp_servers=[s.model_dump() for s in session.task.config.environment.mcp_servers],
                     skills_dir=session.task.config.environment.skills_dir,
+                    durable_agent_logs=session.environment.shared_logs is not None,
+                    agent_artifact_max_bytes=self.config.agent_artifact_max_bytes,
+                    agent_artifact_timeout_sec=self.config.agent_artifact_timeout_sec,
                 )
                 session.phase = "ready"
                 session.agent_deadline = asyncio.get_running_loop().time() + self.config.seeded_session_timeout_sec
@@ -421,6 +429,27 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             session.finalization = asyncio.create_task(self._finalize_session(session))
         await asyncio.shield(session.finalization)
         return session.verified_response
+
+    async def agent_artifacts(self, request: Request, body: SessionRequest) -> FileResponse:
+        """Recover fixed agent evidence for the authenticated episode before verification cleanup."""
+        session = self._session(request, body.session_id)
+        self._check_expiry(session)
+        if session.environment is None or session.environment.shared_logs is None:
+            raise HTTPException(409, "This episode has no durable agent logs")
+        if session.finalization is not None:
+            raise HTTPException(409, "Episode verification has already started")
+        if session.agent_artifact_snapshot is None:
+            session.agent_artifact_snapshot = asyncio.create_task(
+                asyncio.wait_for(
+                    session.environment.shared_logs.snapshot_agent_artifacts(
+                        session.directory / "agent" / "miniswe.tar",
+                        max_bytes=self.config.agent_artifact_max_bytes,
+                    ),
+                    timeout=self.config.agent_artifact_timeout_sec,
+                )
+            )
+        archive = await asyncio.shield(session.agent_artifact_snapshot)
+        return FileResponse(archive, media_type="application/x-tar", filename="miniswe.tar")
 
 
 if __name__ == "__main__":

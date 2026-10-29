@@ -37,6 +37,7 @@ class Session:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     execution: asyncio.Task | None = None
     finalization: asyncio.Task | None = None
+    agent_artifact_snapshot: asyncio.Task | None = None
     expiry_task: asyncio.Task | None = None
     agent_deadline: float | None = None
     task: Any = None
@@ -68,6 +69,15 @@ async def cleanup(session):
         session.expiry_task.cancel()
     session.subphase = "cleanup"
     session.persist()
+    if session.agent_artifact_snapshot is not None:
+        snapshot = session.agent_artifact_snapshot
+        if not snapshot.done():
+            snapshot.cancel()
+        [result] = await asyncio.gather(snapshot, return_exceptions=True)
+        if isinstance(result, Exception):
+            session.diagnostics.append(
+                {"operation": "agent_artifacts", "exception_type": type(result).__name__, "error": str(result)}
+            )
     for env in (session.environment, session.verifier_environment):
         if env is None or env.closed:
             continue
