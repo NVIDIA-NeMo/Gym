@@ -65,9 +65,20 @@ Provider implementations should preserve the same lifecycle contract as the buil
 
 - Return a `SandboxHandle` from `create()` only after the sandbox is ready enough to run commands and transfer files.
 - Return command status through `SandboxExecResult` for process exits, including nonzero exits.
+- Raise `SandboxBackendUnreachableError` only when the backend is unavailable and the command outcome is unknown.
+- Raise `SandboxCommandStatusTimeoutError` only after status recovery for an already-submitted command is exhausted;
+  use `TimeoutError` for a command that actually exceeded its execution timeout.
+- Raise `SandboxIOTimeoutError` when a provider request or file transfer expires with an unknown outcome. Do not
+  convert that ambiguity into a command execution timeout.
+- Raise `SandboxOOMKilledError` only with affirmative evidence that the current sandbox was OOM-killed, and pass
+  `sandbox_id=handle.sandbox_id`. An exit code, historical state, or another container's OOM is not enough.
+  These four errors are siblings under `SandboxLostError`, so catch the specific outcome you intend to handle.
 - Raise `SandboxCreateError` or `SandboxCreateVerificationError` for sandbox allocation and readiness failures.
 - Make `close()` safe to call from cleanup paths.
 - Use `aclose()` for provider-scoped resources such as SDK clients.
+
+OpenSandbox implements these typed runtime errors. Docker, Daytona, and E2B currently return process exits as
+`SandboxExecResult` and do not raise the typed runtime errors.
 
 ## Provider Config
 
