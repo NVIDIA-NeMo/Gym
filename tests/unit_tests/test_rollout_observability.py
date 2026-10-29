@@ -16,6 +16,7 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryModelCall,
     TrajectoryRecord,
+    invocation_of_client_session,
     join_agent_model_calls,
 )
 
@@ -472,3 +473,44 @@ def test_capture_merge_joins_declared_message_ids_for_any_harness(tmp_path):
     assert [call.model_call_id for call in compaction.model_calls] == ["summary-call"]
     assert not observations.gaps
     assert all(not turn.model_calls for turn in trajectory.turns)
+
+
+@pytest.mark.parametrize(
+    ("client_session_id", "invocation_id"),
+    (
+        ("agent-session-1:activation-2:launch-3:ses_abc", "agent-session-1:activation-2:ses_abc"),
+        ("agent-session-1:activation-2:ses_abc", "agent-session-1:activation-2:ses_abc"),
+        # Only a launch right after an activation is a relaunch; a harness session that names one is kept.
+        ("agent-session-1:activation-2:ses_launch-3:x", "agent-session-1:activation-2:ses_launch-3:x"),
+        ("agent-session-1:launch-3:ses_abc", "agent-session-1:launch-3:ses_abc"),
+        (None, None),
+    ),
+)
+def test_invocation_of_client_session_drops_only_the_relaunch_segment(
+    client_session_id: str | None, invocation_id: str | None
+) -> None:
+    assert invocation_of_client_session(client_session_id) == invocation_id
+
+
+def test_join_model_calls_gives_every_launch_of_an_activation_to_its_invocation() -> None:
+    invocation_id = "agent-session-1:activation-1:ses_abc"
+    bundle = AgentObservationBundle(source="test", records=[AgentInvocation(invocation_id=invocation_id)])
+    calls = [
+        ModelCallRecord(
+            model_call_id="call-launch-1", client_session_id="agent-session-1:activation-1:ses_abc", call_index=0
+        ),
+        ModelCallRecord(
+            model_call_id="call-launch-2",
+            client_session_id="agent-session-1:activation-1:launch-2:ses_abc",
+            call_index=1,
+        ),
+        # Another activation's relaunch is not this invocation's.
+        ModelCallRecord(
+            model_call_id="call-other", client_session_id="agent-session-1:activation-2:launch-2:ses_abc", call_index=2
+        ),
+    ]
+
+    joined = join_agent_model_calls(bundle, calls)
+
+    [invocation] = [record for record in joined.records if isinstance(record, AgentInvocation)]
+    assert [ref.model_call_id for ref in invocation.model_calls] == ["call-launch-1", "call-launch-2"]
