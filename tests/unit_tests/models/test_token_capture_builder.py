@@ -321,7 +321,7 @@ def test_consumer_reads_and_freezes_an_external_source():
     class Source:
         async def freeze(self, rollout_id):
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=tuple(APPEND_ONLY),
                 incomplete=False,
                 snapshot_id="snapshot-1",
@@ -358,7 +358,7 @@ def test_external_source_offloads_trajectory_assembly(monkeypatch):
     class Source:
         async def freeze(self, rollout_id):
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=tuple(APPEND_ONLY),
                 incomplete=False,
                 snapshot_id="snapshot-thread",
@@ -387,7 +387,7 @@ def test_consumer_masks_an_incomplete_external_snapshot():
     class Source:
         async def freeze(self, rollout_id):
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=(APPEND_ONLY[0],),
                 incomplete=True,
                 snapshot_id="snapshot-2",
@@ -410,7 +410,7 @@ def test_consumer_masks_an_empty_external_snapshot():
     class Source:
         async def freeze(self, rollout_id):
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=(),
                 incomplete=False,
                 snapshot_id="snapshot-empty",
@@ -677,7 +677,7 @@ class _FrozenSource:
 
     async def freeze(self, rollout_id):
         return TokenCaptureSnapshot(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             entries=self._entries,
             incomplete=self._incomplete,
             snapshot_id="frozen-1",
@@ -970,7 +970,7 @@ def _commit_delta_entry(
     )
     stamp_continuation(entry, request)
     context = CaptureContext(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=call_id,
         token_sink=store,
         lineage_store=lineage,

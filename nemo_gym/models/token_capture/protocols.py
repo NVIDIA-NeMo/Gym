@@ -128,7 +128,7 @@ class TokenCaptureSnapshot:
     without the ``record_engine_refusal`` extension leaves it empty.
     """
 
-    rollout_id: str
+    capture_key: str
     entries: tuple[TokenEntry, ...]
     incomplete: bool
     snapshot_id: str
@@ -233,7 +233,7 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+    async def record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
         """Record a call whose token capture did not complete.
 
         Failure rows do not participate in parent resolution.
@@ -241,7 +241,7 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def manifest(self, rollout_id: str) -> dict:
+    async def manifest(self, capture_key: str) -> dict:
         """Return the rollout's token-free ledger as plain wire data.
 
         The shape validates as ``staging.records.RolloutManifest``:
@@ -259,7 +259,7 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Remove the ledgers of rollouts the framework is done with, and fence them.
 
         Retire a finished rollout once its manifest has been read and the receipt built from it,
@@ -273,7 +273,7 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def delete(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         """Remove the ledgers and fences of rollouts, as ``TokenCaptureStore.delete`` does.
 
         Delete retired rollouts once nothing of those attempts can still write, for example after every
@@ -310,7 +310,7 @@ class TokenSink(Protocol):
         """
         ...
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, capture_key: str, model_call_id: str = "") -> None:
         """Durably record that a call of this rollout failed to capture.
 
         The rollout is now missing a turn.

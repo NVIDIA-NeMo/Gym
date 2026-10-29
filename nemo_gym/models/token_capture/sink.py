@@ -84,7 +84,7 @@ class CaptureContext:
     Prefix supply and token capture read the same immutable decision.
     """
 
-    rollout_id: str
+    capture_key: str
     model_call_id: str
     # ``None`` means another process owns record staging.
     # The context still carries the capture identity.
@@ -200,11 +200,11 @@ def mark_external_staging_committed(*, rollout_id: str, model_call_id: str) -> N
     context = _CAPTURE_CONTEXT.get()
     if context is None:
         raise RuntimeError("no training-token capture context is active")
-    if context.rollout_id != rollout_id or context.model_call_id != model_call_id:
+    if context.capture_key != rollout_id or context.model_call_id != model_call_id:
         raise ValueError(
             "external staging acknowledgement does not match the active capture "
             f"context ({rollout_id}/{model_call_id} != "
-            f"{context.rollout_id}/{context.model_call_id})"
+            f"{context.capture_key}/{context.model_call_id})"
         )
     context.committed = True
 
@@ -259,14 +259,14 @@ async def resolve_parent(request_messages: list | None) -> None:
                     "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
                 )
         else:
-            context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
+            context.parent_resolution = await context.lineage_store.resolve(context.capture_key, request_messages)
         _count_resolution(context.parent_resolution.status.value)
     except Exception as error:
         # Worker custody fails closed: an unresolved parent would silently
         # break the ledger's chained-ancestry guarantees.
         if context.external_staging:
-            raise RuntimeError(f"ledger lineage resolution failed for rollout {context.rollout_id}") from error
-        logger.warning("Could not resolve a parent for rollout %s.", context.rollout_id, exc_info=True)
+            raise RuntimeError(f"ledger lineage resolution failed for rollout {context.capture_key}") from error
+        logger.warning("Could not resolve a parent for rollout %s.", context.capture_key, exc_info=True)
         context.parent_resolution = LineageResolution(
             ParentResolutionStatus.UNRESOLVED,
             reason="lookup_error",
@@ -291,7 +291,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         # except path below poisons the call (fail closed).
         try:
             context.capture_admission = CaptureAdmission(
-                capture_key=context.rollout_id,
+                capture_key=context.capture_key,
                 model_call_id=context.model_call_id,
                 parent_call_id=match.model_call_id,
                 prev_len=match.prev_len,
@@ -305,30 +305,30 @@ async def resolve_parent(request_messages: list | None) -> None:
                 "Parent %s of model call %s (rollout %s) cannot admit a chained child; poisoning the call.",
                 match.model_call_id,
                 context.model_call_id,
-                context.rollout_id,
+                context.capture_key,
                 exc_info=True,
             )
             await ledger.record_failure(
-                context.rollout_id,
+                context.capture_key,
                 context.model_call_id,
                 UNRESOLVED_PARENT_REASON,
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
     try:
-        has_rows = await ledger.has_rows(context.rollout_id)
+        has_rows = await ledger.has_rows(context.capture_key)
     except RolloutRetiredError:
         # A late call of an abandoned attempt, or the first call of a duplicate run. Admitting it would stage
         # tokens that the ledger then refuses to record, so no manifest would ever name them.
         logger.warning(
             "Model call %s of rollout %s arrived after the rollout was retired; its tokens are not captured.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
         return
     if is_root or not has_rows:
         context.capture_admission = CaptureAdmission(
-            capture_key=context.rollout_id,
+            capture_key=context.capture_key,
             model_call_id=context.model_call_id,
             mode="text",
         )
@@ -336,10 +336,10 @@ async def resolve_parent(request_messages: list | None) -> None:
     logger.warning(
         "Unresolved parent for model call %s of rollout %s; poisoning the call.",
         context.model_call_id,
-        context.rollout_id,
+        context.capture_key,
     )
     await ledger.record_failure(
-        context.rollout_id,
+        context.capture_key,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
     )
@@ -358,7 +358,7 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
     if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
         raise ValueError("Source-history parent resolution requires an external capture ledger")
     try:
-        manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.rollout_id))
+        manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.capture_key))
     except RolloutRetiredError as error:
         raise CaptureAdmissionError(str(error)) from error
     predecessor = None
@@ -426,7 +426,7 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
         chain.reverse()
     context.parent_staging_chain = chain
     context.capture_admission = CaptureAdmission(
-        capture_key=context.rollout_id,
+        capture_key=context.capture_key,
         model_call_id=context.model_call_id,
         mode="candidate" if predecessor is not None else "text",
         parent_call_id=predecessor.model_call_id if predecessor is not None else None,
@@ -459,7 +459,7 @@ async def register_call_intent() -> None:
         if begin is None or context.capture_admission is None:
             raise ValueError("Framework-owned capture requires durable call intents")
         try:
-            await begin(context.rollout_id, context.model_call_id)
+            await begin(context.capture_key, context.model_call_id)
         except RolloutRetiredError as error:
             raise CaptureAdmissionError(str(error)) from error
         context.intent_registered = True
@@ -469,7 +469,7 @@ async def register_call_intent() -> None:
     begin = getattr(context.token_sink, "begin_call", None)
     if begin is None:
         return
-    await begin(context.rollout_id, context.model_call_id)
+    await begin(context.capture_key, context.model_call_id)
     context.intent_registered = True
 
 
@@ -512,7 +512,7 @@ async def capture_engine_refusal(code: str | None) -> None:
         resolution = context.parent_resolution
         match = resolution.match if resolution is not None else None
         await refuse(
-            context.rollout_id,
+            context.capture_key,
             model_call_id=context.model_call_id,
             code=code,
             parent_call_id=match.model_call_id if match is not None else None,
@@ -525,13 +525,13 @@ async def capture_engine_refusal(code: str | None) -> None:
             "The engine refusal of model call %s of rollout %s arrived after the capture was frozen; "
             "the refusal is not recorded.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
     except Exception:
         logger.warning(
             "Could not record the engine refusal of model call %s of rollout %s.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
             exc_info=True,
         )
 
@@ -549,7 +549,7 @@ async def _record_external_refusal(context: CaptureContext) -> None:
     ledger = context.lineage_store
     if context.capture_admission is None or context.committed or not isinstance(ledger, CaptureLedger):
         return
-    await ledger.record_failure(context.rollout_id, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
+    await ledger.record_failure(context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
     context.engine_refusal_recorded = True
 
 
@@ -566,7 +566,7 @@ def _note_missing_refuse_call(context: CaptureContext) -> None:
             "dangling, and the rollout is masked by default (first seen on model call %s of rollout %s).",
             type(context.token_sink).__name__,
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
 
 
@@ -617,7 +617,7 @@ async def capture_tokens(
                 reason="not_attempted",
             )
         entry = TokenEntry(
-            rollout_id=context.rollout_id,
+            rollout_id=context.capture_key,
             model_call_id=context.model_call_id,
             model=context.model or str(payload.get("model") or ""),
             prompt_token_ids=info["prompt_token_ids"],
@@ -661,12 +661,12 @@ async def commit_entry(
     context = _CAPTURE_CONTEXT.get()
     if context is None:
         return
-    if entry.rollout_id != context.rollout_id or entry.model_call_id != context.model_call_id:
+    if entry.rollout_id != context.capture_key or entry.model_call_id != context.model_call_id:
         if await _mark_incomplete(context):
             logger.warning(
                 "Training-token capture identity mismatch for model call %s of rollout %s.",
                 context.model_call_id,
-                context.rollout_id,
+                context.capture_key,
             )
         return
     if context.token_sink is None:
@@ -720,7 +720,7 @@ async def commit_entry(
             "Training-token capture for model call %s of rollout %s arrived after the capture "
             "was frozen or retired; the late record is dropped.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
     except Exception:
         await _capture_failed(context, "write")
@@ -745,7 +745,7 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
         "Training-token capture failed to %s the record for model call %s of rollout %s.",
         stage,
         context.model_call_id,
-        context.rollout_id,
+        context.capture_key,
         exc_info=True,
     )
 
@@ -768,7 +768,7 @@ async def _capture_missing(context: CaptureContext, reason: str) -> None:
         logger.warning(
             "Training-token capture has no token ids for model call %s of rollout %s: %s.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
             reason,
         )
 
@@ -786,20 +786,20 @@ async def _mark_incomplete(context: CaptureContext) -> bool:
             "Sink %s does not implement mark_incomplete. Rollout %s cannot be marked incomplete "
             "and may be trained on with a missing call.",
             type(context.token_sink).__name__,
-            context.rollout_id,
+            context.capture_key,
         )
         return True
     try:
-        await mark(context.rollout_id, context.model_call_id)
+        await mark(context.capture_key, context.model_call_id)
     except TokenCaptureFrozenError:
         # The rollout was frozen or retired while this call was in flight, for example an abandoned attempt's
         # late call. Its verdict is sealed, or nobody will read it, so there is nothing to mark.
         logger.warning(
             "Model call %s of rollout %s finished after the capture was frozen or retired; not marking it incomplete.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
         return False
     except Exception:
-        logger.warning("Could not mark rollout %s incomplete.", context.rollout_id, exc_info=True)
+        logger.warning("Could not mark rollout %s incomplete.", context.capture_key, exc_info=True)
     return True
