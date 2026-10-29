@@ -131,6 +131,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         terminal_error=scenario.terminal_error,
         tool_steps=scenario.tool_steps,
         expected_reward=scenario.expected_reward,
+        judge_verifier=scenario.judge_verifier,
         fingerprint=_fingerprint,
     )
     health_inputs = [path for path in [rollouts_path, failures_path] if path.is_file()]
@@ -267,7 +268,6 @@ def run_suite(
         "harnesses": rows,
         "limits": [
             "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
-            "all current checks are P0, including ownership and call-to-step checks",
             "multimodal, compaction, parallelism and deployment health are outside this suite",
         ],
     }

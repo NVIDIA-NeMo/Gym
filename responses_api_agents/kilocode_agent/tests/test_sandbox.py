@@ -219,6 +219,7 @@ async def test_seed_selects_owner_and_installs_in_sandbox(borrowed: bool) -> Non
     provider = AsyncMock()
     with (
         patch(f"{APP}.resolve_provider_config", return_value={}),
+        patch(f"{APP}.resolve_provider_metadata", return_value={"source": "provider", "gym-agent": "overridden"}),
         patch(f"{APP}.get_global_config_dict", return_value={}),
         patch(f"{APP}.create_provider", return_value=provider),
         patch(f"{APP}.AsyncSandbox", return_value=sandbox) as api,
@@ -239,6 +240,12 @@ async def test_seed_selects_owner_and_installs_in_sandbox(borrowed: bool) -> Non
     else:
         spec = sandbox.start.call_args.args[0]
         assert spec.workdir == "/app" and spec.ttl_s == 2400
+        assert spec.metadata == {
+            "source": "provider",
+            "gym-agent": "kilocode",
+            "gym-session": "session-1",
+            "gym-rollout": "rollout-1-a2",
+        }
         assert agent.config.sandbox_config == {"image": "test"}
         sandbox.exec.assert_awaited_once_with("mkdir -p -- /app", cwd="/", timeout_s=30)
 
@@ -536,16 +543,25 @@ class LocalFiles:
         shutil.copyfile(source, destination)
 
 
-async def stage_locally(directory: Path, workdir: Path, command: list[str]) -> list[str]:
+async def stage_locally(
+    directory: Path,
+    workdir: Path,
+    command: list[str],
+    *,
+    config: str = "{}",
+    required_mcp_servers: tuple[str, ...] = (),
+    mcp_preflight: bool = False,
+) -> list[str]:
     """Stage an activation into ``directory`` as the sandbox would receive it; return the runner argv."""
     session = KiloSandboxSession(
         request=seed(workdir=str(workdir)),
+        required_mcp_servers=required_mcp_servers,
         session=SandboxSession(
             sandbox=LocalFiles(), session_dir=str(directory), workdir=str(workdir), harness="KiloCode"
         ),
     )
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
-    return (await session.stage_activation(command=command, config="{}")).argv
+    return (await session.stage_activation(command=command, config=config, mcp_preflight=mcp_preflight)).argv
 
 
 @pytest.mark.parametrize("exit_code", [0, 3])
@@ -727,6 +743,7 @@ async def test_owned_sandbox_whose_start_cleanup_fails_is_retained_for_close() -
     sandbox.start.side_effect = RuntimeError("initial upload failed")
     with (
         patch(f"{APP}.resolve_provider_config", return_value={}),
+        patch(f"{APP}.resolve_provider_metadata", return_value={}),
         patch(f"{APP}.get_global_config_dict", return_value={}),
         patch(f"{APP}.create_provider", return_value=AsyncMock()),
         patch(f"{APP}.AsyncSandbox", return_value=sandbox),

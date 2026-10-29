@@ -258,6 +258,36 @@ Apply this pattern to each variant so every agent has a declared environment ser
 Alternatively, point the existing server's field at one agent and ensure the other agents also have environment servers.
 Do not add a second server in front of an agent, because that makes agent-routed rows ambiguous.
 
+#### Move a `simple_agent` Off the Relay
+
+A `legacy_agent` relay sends the whole episode to the agent's `/run` as one request, so a crash repeats the whole episode.
+`single_agent_turn_legacy` runs the same episode in steps (seed, agent turn, agent close, verify), so a crash repeats only the current step, and `simple_agent` resumes inside its turn.
+To replace the relays in front of `simple_agent` in your configs:
+
+```bash
+# Report what would switch and what stays on the relay
+python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent path/to/configs/ --check
+
+# Switch them
+python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent path/to/configs/
+```
+
+Pass the configs that declare the relays yours inherit as well, such as the Resources Server configs a benchmark includes; run without paths to switch this repository's configs.
+
+Each relay is replaced by a `single_agent_turn_legacy` server of the same name, which binds the agent's Resources Server and grants the agent direct HTTP access to its tools, as the relay's `/run` used them.
+A relay stays, and is listed with its reason, when:
+
+- the agent binds no Resources Server, or declares a required MCP tool access or another direct HTTP tool access, which `simple_agent` sessions reject;
+- the agent's Resources Server has a `seed_session` that accepts only the legacy body rather than the `ResourcesSeedSessionRequest` an Environment Server sends, has request models that read the row's `_ng_*` rollout coordinates, which an Environment Server does not forward, or has no source under `resources_servers/` to check;
+- the relay sets keys the switched server would not keep, such as `port`;
+- another config merges it with a `legacy_agent` server of the same name, such as a benchmark variant that points it at another harness;
+- the run cannot load one of its included configs.
+
+A relay that inherits another relay keeps its `_inherit_from`, and the two must switch in the same run; the script exits with 2 and names the relays when only one would switch.
+It also exits with 2 when another config merges an inheriting relay with a `legacy_agent` server while the relay it inherits switches. That config should keep the server's name, so rows keep their routing, and replace its definition, as `benchmarks/hle/opencode.yaml` does: `_delete_key: _inherit_from` detaches it from the switched relay, `_delete_key: single_agent_turn_legacy` under its `environment_servers` removes the migrated type, and a complete `legacy_agent` server fronts its harness. Set the inherited relay to `null` when nothing else in the run uses it.
+The script writes nothing when it exits with 2.
+Compare the reward profile of a switched config with the relay's before relying on it.
+
 #### Require Declared Environment Servers
 
 To make a missing environment server an error instead (`AgentWithoutEnvironmentServerError`):
