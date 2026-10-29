@@ -24,7 +24,7 @@ from fastapi import Request
 from omegaconf import OmegaConf
 
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.conversational_tool_use_domain_generation.app import (
     FOLLOWUP_INSTRUCTION,

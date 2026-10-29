@@ -39,7 +39,7 @@ from environment_servers.harbor.tests.conftest import (
     write_image_config,
 )
 from environment_servers.harbor.verifier import _verifier_image, _verifier_runs_task_image, _verifier_start
-from nemo_gym import failure_kinds
+from nemo_gym.core import failure_kinds
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
 

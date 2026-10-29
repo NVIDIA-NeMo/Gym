@@ -5,7 +5,7 @@ import time
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
 
 
 class SampleHarnessConfig(BaseResponsesAPIAgentConfig):

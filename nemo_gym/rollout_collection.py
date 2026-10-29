@@ -83,10 +83,11 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
+from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -97,7 +98,6 @@ from nemo_gym.observability.model_calls import (
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -1858,7 +1858,7 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
 
     ``timeout_exceeded`` is an ``_ng_failure_class`` label that agents already
     write to the failures sidecar (pinchbench, nooa). It predates
-    ``nemo_gym.failure_kinds`` and is not registered there; ``agent_timeout`` is
+    ``nemo_gym.core.failure_kinds`` and is not registered there; ``agent_timeout`` is
     the shared name.
 
     As ``failure_kinds`` requires, this function decides retryability for the

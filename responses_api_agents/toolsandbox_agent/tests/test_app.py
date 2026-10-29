@@ -28,7 +28,7 @@ from pytest import fixture, mark, raises
 from tenacity import RetryError, wait_none
 
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -415,6 +415,6 @@ class TestApp:
 )
 def test_response_builders_are_valid(payload: dict[str, Any]) -> None:
     # Guard the canned fixtures themselves: each must parse as a model response.
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     NeMoGymResponse.model_validate(payload)

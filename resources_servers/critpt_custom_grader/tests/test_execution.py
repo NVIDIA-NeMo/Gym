@@ -16,7 +16,7 @@ from unittest.mock import Mock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym import failure_kinds
+from nemo_gym.core import failure_kinds
 from resources_servers.critpt_custom_grader import execution, reference_cache, runner, sandbox_domain, task_data
 from resources_servers.critpt_custom_grader.execution import (
     DOMAINS,

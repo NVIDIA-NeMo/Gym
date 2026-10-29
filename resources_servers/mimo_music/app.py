@@ -22,7 +22,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.mimo_music.scorer.pipeline import extract_abc
 from resources_servers.mimo_music.setup_abc2midi import ensure_abc2midi
 

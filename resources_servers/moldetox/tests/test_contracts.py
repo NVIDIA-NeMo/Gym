@@ -28,7 +28,7 @@ from app import MolDeToxResourcesServer, MolDeToxStatus, MolDeToxVerifyRequest
 from metrics import decode_safe, exact_match, fragment_levenshtein, parse_fragments, score_fragments, score_safe
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

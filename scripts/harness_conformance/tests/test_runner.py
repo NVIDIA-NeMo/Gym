@@ -163,7 +163,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         BaseResponsesAPIAgentConfig,
         SimpleResponsesAPIAgent,
     )
-    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.rollout_observability import AgentObservationBundle
 
     calls = []

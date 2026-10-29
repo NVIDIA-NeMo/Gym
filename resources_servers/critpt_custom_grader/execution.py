@@ -28,7 +28,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym import failure_kinds
+from nemo_gym.core import failure_kinds
 from nemo_gym.sandbox import SandboxProvider, SandboxSpec
 
 from .reference_cache import CachedReference, ReferenceCache, provider_class_name

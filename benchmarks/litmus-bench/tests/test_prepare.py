@@ -16,8 +16,8 @@ from omegaconf import OmegaConf
 
 from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.config import DatasetConfig, GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.environment.manifest import EnvironmentManifest
-from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.litmus_agent.app import LitmusAgentConfig, LitmusAgentResourcesServer, LitmusAgentVerifyRequest
 

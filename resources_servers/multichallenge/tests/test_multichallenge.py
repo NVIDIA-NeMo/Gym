@@ -20,13 +20,13 @@ import pytest
 import yaml
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import ServerClient
 from resources_servers.multichallenge.app import (
     AggregationMode,

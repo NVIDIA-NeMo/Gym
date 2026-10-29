@@ -34,7 +34,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
