@@ -28,6 +28,7 @@ from omegaconf import OmegaConf
 from nemo_gym.cli.main import COMMANDS, _eval_resubmit
 from nemo_gym.orchestration.api import SAVED_CONFIG, ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
+from nemo_gym.orchestration.executors.capabilities import Resubmittable
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.otel import render_collector_config
@@ -202,12 +203,13 @@ def test_the_cli_takes_a_gym_job_id_and_a_benchmark(
 def test_which_executors_support_resubmit(tmp_path: Path, slurm_bin: Path, executor: type, supported: bool) -> None:
     job_dir = _staged_run(tmp_path, executor=executor.name)
 
+    assert issubclass(executor, Resubmittable) is supported
     if supported:
         assert resubmit(*_handle(job_dir)).job_id == "4242"
     else:
-        with pytest.raises(UnsupportedOperationError, match="Kubernetes executor does not support resubmit"):
+        with pytest.raises(UnsupportedOperationError, match="kubernetes executor does not support resubmit"):
             resubmit(*_handle(job_dir))
-    assert "resubmit" in BaseExecutor.__abstractmethods__
+    assert BaseExecutor.__abstractmethods__ == {"run"}
     assert set(_EXECUTORS_BY_NAME) == {"slurm", "kubernetes"}
 
 

@@ -14,27 +14,14 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
 import yaml
 
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-from nemo_gym.orchestration.jobs import (
-    MANIFEST_NAME,
-    RESOLVED_CONFIG_NAME,
-    BenchmarkJob,
-    JobInfo,
-    JobKey,
-    JobRef,
-    JobStatus,
-    LogSource,
-    ObservedStatus,
-    Progress,
-    SubmissionRecord,
-    SubmissionStatus,
-)
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, SubmissionRecord
 
 
 class UnsupportedOperationError(RuntimeError):
@@ -42,6 +29,13 @@ class UnsupportedOperationError(RuntimeError):
 
 
 class BaseExecutor(ABC):
+    """What a new executor extends: implement `run` and it can submit.
+
+    Everything else is opt-in. `executors/capabilities.py` has an interface for each further feature
+    (`Resubmittable`, `Inspectable`, `Terminable`, `LogReadable`); an executor lists the ones it
+    supports in its bases and implements every abstract method of each.
+    """
+
     # Whether this executor can auto-resubmit a benchmark that gets killed by
     # the scheduler (time limit, preemption, node failure). False means asking
     # for `resumable` on this executor is a config error, not a silent no-op.
@@ -57,140 +51,6 @@ class BaseExecutor(ABC):
         anything is submitted; every other path either returns a record or
         raises.
         """
-
-    @abstractmethod
-    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
-        """Queue `benchmark` of `record` again, in place, and return its updated entry.
-
-        Refuses while a job of that benchmark is still active, so two jobs never write one run.
-        Persists the updated record before returning. An executor that cannot do this raises
-        `UnsupportedOperationError`.
-        """
-
-    # The primitives job management is built on. Each one is the only place an executor talks to its
-    # scheduler, and each raises `UnsupportedOperationError` until the executor implements it, so an
-    # executor without them keeps working. They are not abstract: that would break every subclass that
-    # only submits.
-
-    def connection_key(self, record: SubmissionRecord) -> str:
-        """Which connection serves `record`; records with the same key can be queried over one connection.
-
-        Records are grouped by this key so that asking about many submissions costs one connection per
-        scheduler, not one per submission.
-        """
-        raise self._unsupported("connection_key")
-
-    def query_states(self, refs: list[JobRef]) -> dict[JobKey, ObservedStatus]:
-        """What the scheduler says about each of `refs`: one `ObservedStatus` per `JobKey`.
-
-        Every ref shares one `connection_key`, so an implementation opens one connection and asks the
-        scheduler once for all of them. The record locates a job and the scheduler decides: look the job
-        up by where it runs, not by the recorded id, so a job started by hand or resubmitted from another
-        machine is still seen. When several jobs belong to one benchmark, aggregate them into one status
-        whose `job_id` is the one observed. `state` is the executor's own mapping onto `JobState`; an
-        unreachable scheduler yields `UNKNOWN` with the reason in `detail`, not an exception.
-        """
-        raise self._unsupported("query_states")
-
-    def terminate(self, record: SubmissionRecord, job: BenchmarkJob) -> None:
-        """Stop `job`, and everything that would start it again (a queued follow-up, say).
-
-        Does only that: it neither checks the job's state nor touches the record. Raises when the
-        scheduler refuses, so the caller can report it for this benchmark and go on with the others.
-        """
-        raise self._unsupported("terminate")
-
-    def stream_logs(
-        self, record: SubmissionRecord, job: BenchmarkJob, *, source: LogSource, tail: int | None, follow: bool
-    ) -> Iterator[str]:
-        """Yield the lines of `source`, a resolved `LogSource` whose location already names the job.
-
-        `tail` keeps only the last lines. `follow` keeps yielding as the log grows.
-        """
-        raise self._unsupported("stream_logs")
-
-    def read_run_files(self, record: SubmissionRecord, paths: list[Path]) -> dict[Path, str | None]:
-        """The contents of files in the run directory, `None` for one that is missing or unreadable.
-
-        The default reads nothing, which is right for an executor that cannot reach the run directory.
-        """
-        return {path: None for path in paths}
-
-    def read_progress(self, record: SubmissionRecord, job: BenchmarkJob) -> Progress | None:
-        """How far `job`'s run got, or `None` when this executor cannot tell."""
-        return None
-
-    def log_sources(self, record: SubmissionRecord, benchmark: str) -> list[LogSource]:
-        """The logs `benchmark`'s job was set up to write, as planned at submit time.
-
-        Read from the record, so it costs no remote call. A record written before sources were
-        planned has none. Raises `ValueError` naming the known benchmarks for one the record lacks.
-        """
-        return list(record.benchmark_job(benchmark).log_sources)
-
-    # The operations built on the primitives. They hold all the policy -- guards, ordering, partial
-    # failure, the mapping to `JobState` -- so that every executor gets them by implementing the
-    # primitives above. Executors do not override them.
-
-    def status(self, records: list[SubmissionRecord], benchmarks: list[str] | None = None) -> list[SubmissionStatus]:
-        """The live status of `records`, one `SubmissionStatus` each, in the order given.
-
-        `benchmarks` limits each submission to those benchmarks. Records are grouped by
-        `connection_key` and `query_states` is called once per group, so the cost grows with the number
-        of connections, not submissions; the groups run concurrently. A group whose connection fails
-        yields `UNKNOWN` for its records and does not hide the others. The executor's `state` is
-        reconciled with the files the job wrote, and `CANCELLED` is never overridden by a file.
-        Read-only: it never writes the record.
-        """
-        raise NotImplementedError
-
-    def info(self, record: SubmissionRecord, benchmark: str | None = None) -> JobInfo:
-        """Describe `record`, or only `benchmark` of it: its directories, the job ids observed, its log
-        sources and, when `read_run_files` can read it, the resolved config. Read-only."""
-        raise NotImplementedError
-
-    def cancel(self, record: SubmissionRecord, benchmark: str) -> JobStatus:
-        """Stop `benchmark`'s job and return its status as observed afterwards.
-
-        Re-queries the scheduler first, so it acts on the jobs that exist now and not on a stale
-        record, and leaves a job that is already terminal alone. Calls `terminate` and writes nothing to
-        the record. A refusal from the scheduler (permission denied, say) is raised for the caller to
-        report against this benchmark.
-        """
-        raise NotImplementedError
-
-    def cancel_submission(self, record: SubmissionRecord, *, confirm: str) -> list[JobStatus]:
-        """Stop every live benchmark of `record`, and return each one's status as observed afterwards.
-
-        `confirm` has no default and must equal `record.gym_job_id`, or `ValueError` is raised: cancelling
-        a whole submission by accident costs more than typing its id. A benchmark that cannot be stopped
-        is reported on its own and the others proceed.
-        """
-        raise NotImplementedError
-
-    def logs(
-        self,
-        record: SubmissionRecord,
-        benchmark: str,
-        *,
-        source: str = "driver",
-        instance: str | None = None,
-        tail: int | None = None,
-        follow: bool = False,
-    ) -> Iterator[str]:
-        """Yield the lines of one of `benchmark`'s logs.
-
-        `source` and `instance` are resolved against `log_sources`, so `stream_logs` receives one
-        `LogSource` and executors never validate names. A name that matches nothing, or a source with
-        several instances and none chosen, raises `ValueError` listing what exists. The current job is
-        found with `query_states`, and its id fills the location's `{job_id}`.
-        """
-        raise NotImplementedError
-
-    def _unsupported(self, operation: str) -> UnsupportedOperationError:
-        return UnsupportedOperationError(
-            f"{getattr(self, 'name', type(self).__name__)} executor does not support {operation}"
-        )
 
     def persist(
         self,
