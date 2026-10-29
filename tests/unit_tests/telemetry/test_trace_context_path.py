@@ -236,7 +236,7 @@ class TestServerSpanParent:
         """FastAPI redirects the trailing-slash form; the client only has the URL, so the segment must come back.
 
         This app has the plain rollout middleware, which does not restore the rollout prefix on a redirect
-        (the model server's capture middleware does; see test_token_id_capture), so here the segment goes
+        (the model server's capture middleware does; see test_token_capture), so here the segment goes
         back at the root. With the prefix restored it goes right after it: see TestRedirectLocation.
         """
         client = TestClient(app, follow_redirects=False)

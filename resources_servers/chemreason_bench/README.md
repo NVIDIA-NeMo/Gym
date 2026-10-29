@@ -127,7 +127,7 @@ distinguishes a parse failure from a scored answer.
 Upstream decides an `lm` row from token probabilities, never from text. Each `lm` row
 therefore asks for them: `logprobs` is not a Responses API field and `top_logprobs` alone is
 inert in vLLM, so both travel on the row's `metadata.extra_body`, and
-`nemo_gym/responses_converter.py` carries the choice-level logprobs back onto the output text.
+`nemo_gym/models/chat_completions_converter.py` carries the choice-level logprobs back onto the output text.
 The decision follows the paper's appendix F.3.2: eq. (1), a softmax over `{YES, NO}` with
 label `P(YES) >= 0.5`, and eq. (2), an argmax over the option indices. The distribution is read
 at the first token of the output text; with a reasoning parser that is the first token after the

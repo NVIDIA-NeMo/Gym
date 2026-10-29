@@ -52,7 +52,7 @@ from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_pre
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
-    TOKEN_ID_CAPTURE_BLOCK,
+    TOKEN_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
 from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body, rollout_context
@@ -1122,7 +1122,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return False
-        block = global_config.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        block = global_config.get(TOKEN_CAPTURE_BLOCK) or {}
         if not isinstance(block, Mapping) or not block.get("enabled", False):
             return False
         return bool(block.get("all_agents", False)) or bool(
@@ -1272,3 +1272,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return response.model_copy(
             update={"metadata": {**(response.metadata or {}), ROLLOUT_STOP_METADATA_KEY: marker}}
         )
+
+
+# Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

@@ -60,7 +60,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models import ResponsesConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,

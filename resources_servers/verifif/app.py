@@ -34,7 +34,7 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, ValidationError
 
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models import NeMoGymAsyncOpenAI
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,

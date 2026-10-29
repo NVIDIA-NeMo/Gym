@@ -34,7 +34,7 @@ from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.client import SESSION_ID_KEY, request
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.openai_utils import RETRY_ERROR_CODES
+from nemo_gym.models import RETRY_ERROR_CODES
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,

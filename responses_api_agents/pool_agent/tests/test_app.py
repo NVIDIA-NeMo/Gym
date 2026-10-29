@@ -15,7 +15,7 @@ from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest, AgentSessionSetupError
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.pool_agent.app import PoolAgent, PoolAgentConfig, prompt_from_request
 from responses_api_agents.pool_agent.configuration import pool_config
 from responses_api_agents.pool_agent.sandbox import PoolArtifacts, PoolSession

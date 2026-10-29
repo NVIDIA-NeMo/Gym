@@ -34,8 +34,8 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.models import PermanentEndpointError
 from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
-from nemo_gym.openai_utils import PermanentEndpointError
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -933,8 +933,8 @@ class TestApp:
         async def record_sleep(seconds):
             backoff_sleeps.append(seconds)
 
-        monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", transport)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", AsyncMock())
         monkeypatch.setattr(openai_model_module.asyncio, "sleep", record_sleep)
         server = self._setup_server(
             upstream_max_num_tries=1,
@@ -971,8 +971,8 @@ class TestApp:
                 status, body = reply.status_code, reply.content
             return SimpleNamespace(status=status, content=SimpleNamespace(read=AsyncMock(return_value=body)))
 
-        monkeypatch.setattr("nemo_gym.openai_utils.request", transport)
-        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.models.openai_utils.request", transport)
+        monkeypatch.setattr("nemo_gym.models.openai_utils.sleep", AsyncMock())
         receiving_client = NeMoGymAsyncOpenAI(base_url="http://model-server/v1", api_key="dummy", internal=True)
 
         # The first call stops after one model-server reply; the second never reaches the model server.

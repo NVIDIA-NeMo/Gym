@@ -44,6 +44,7 @@ from starlette.routing import Mount
 
 pytest.importorskip("mcp")
 
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient  # noqa: E402
 from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -53,18 +54,14 @@ from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
     mcp_session_token_serializer,
     normalize_tool_name,
 )
+from nemo_gym.server_runtime.base_server import SimpleServer  # noqa: E402
 from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
     bind_route,
     install_auto_exposure,
     maybe_auto_expose,
 )
-from nemo_gym.server_utils import (  # noqa: E402
-    SESSION_ID_KEY,
-    ClientDisconnectCancellationMiddleware,
-    ServerClient,
-    SimpleServer,
-)
+from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware  # noqa: E402
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
