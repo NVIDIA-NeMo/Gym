@@ -62,6 +62,26 @@ def prepare(include_evidence: bool = True, dscp: str = "name_or_col_dscp") -> Pa
     with open(dev_json_path) as f:
         entries: List[Dict[str, Any]] = json.load(f)
 
+    return write_benchmark_rows(entries, dev_databases_dir, OUTPUT_FPATH, include_evidence=include_evidence, dscp=dscp)
+
+
+def write_benchmark_rows(
+    entries: List[Dict[str, Any]],
+    dev_databases_dir: Path,
+    output_fpath: Path,
+    *,
+    include_evidence: bool,
+    dscp: str,
+) -> Path:
+    """Write one benchmark row per BIRD ``entries`` item to ``output_fpath``. Returns ``output_fpath``.
+
+    ``entries`` use BIRD's ``dev.json`` fields (``db_id``, ``question``, ``evidence``, ``SQL``,
+    ``difficulty``); each row's ``id`` is the entry's index. ``dev_databases_dir`` holds one
+    ``<db_id>/<db_id>.sqlite`` plus ``<db_id>/database_description/`` per database. Shared with
+    ``benchmarks/birdbench_dev1106`` so both BIRD dev releases render identically.
+    """
+    output_fpath.parent.mkdir(parents=True, exist_ok=True)
+
     print("Building per-db schemas (types, PK/FK, descriptions, BM25 indexes)...")
     db_ids = sorted({entry["db_id"] for entry in entries})
     db_handles: Dict[str, DbHandle] = {}
@@ -73,7 +93,7 @@ def prepare(include_evidence: bool = True, dscp: str = "name_or_col_dscp") -> Pa
         db_handles[db_id] = DbHandle(conn.cursor(), dev_databases_dir / db_id / "database_description", dscp=dscp)
 
     count = 0
-    with open(OUTPUT_FPATH, "w") as f_out:
+    with open(output_fpath, "w") as f_out:
         for i, entry in enumerate(entries):
             db_id = entry["db_id"]
             evidence = entry.get("evidence")
@@ -95,8 +115,8 @@ def prepare(include_evidence: bool = True, dscp: str = "name_or_col_dscp") -> Pa
             f_out.write(json.dumps(row) + "\n")
             count += 1
 
-    print(f"Wrote {count} BIRD dev entries to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+    print(f"Wrote {count} BIRD dev entries to {output_fpath}")
+    return output_fpath
 
 
 if __name__ == "__main__":
