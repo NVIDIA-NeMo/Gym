@@ -12,9 +12,13 @@ under the working directory when Gym is installed as a package (``gym dataset pu
 ``[gym] source`` and is pulled into its own folder (:mod:`nemo_gym.data.tasks.harbor.entries`).
 """
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.data.tasks.harbor.digest import DIGEST_KEY, content_hash
 from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.data.tasks.harbor.task import HarborTask, discover_tasks, load_task
 
 
 __all__ = ["DIGEST_KEY", "HarborTask", "HarborTaskConfig", "content_hash", "discover_tasks", "load_task"]
+
+# `from nemo_gym.data.tasks.harbor import cli` gets the module that moved out of the old package.
+__getattr__ = moved_names_getattr(__name__)
