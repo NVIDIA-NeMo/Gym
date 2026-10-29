@@ -101,7 +101,10 @@ EOF
 grep -q "agent_class: nooa_atom.gym:AtomHarness" "$OUT/resolved.yaml" || fail 4 "resolved config does not run AtomHarness"
 grep -q "runtime_wheelhouse_required: true" "$OUT/resolved.yaml" || fail 4 "resolved config does not require the offline runtime"
 sha256sum "$OUT/resolved.yaml" | tee "$OUT/resolved.sha256"
-echo "preflight: pins, environment, runtime and config OK"
+
+# 4b. Warm the per-server venvs now, where the network is, so the run itself installs nothing.
+gym env prefetch "${CONFIGS[@]}" "${HYDRA[@]}" > "$OUT/prefetch.log" 2>&1 || { tail -20 "$OUT/prefetch.log" >&2; fail 3 "server venv prefetch failed"; }
+echo "preflight: pins, environment, runtime, config and server venvs OK"
 
 # 5. One real row through the same path as the full run. The row's own outcome is not judged here;
 #    the path is: a rollout row (or a recorded failure row) must come back.

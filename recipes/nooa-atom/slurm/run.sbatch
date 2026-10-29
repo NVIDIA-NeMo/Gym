@@ -40,6 +40,7 @@ echo "attempt $ATTEMPT on $(hostname) ($(uname -m)); checkout $(git rev-parse HE
 set -a; source .env; set +a
 [ -x .venv/bin/gym ] || [ -x "${VIRTUAL_ENV:-/nonexistent}/bin/gym" ] || { echo "no Gym venv in $PWD" >&2; exit 3; }
 [ -x .venv/bin/gym ] && export PATH="$PWD/.venv/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"   # uv, for Gym's per-server venvs
 export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS="${NEMO_GYM_MAX_ROLLOUT_ATTEMPTS:-1}"
 
 # Preflight writes its own one-row result; the full run only starts if it passes.
