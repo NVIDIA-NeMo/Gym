@@ -233,6 +233,18 @@ class TestAnswerExtraction:
         assert result.reward == 1.0
 
     @pytest.mark.asyncio
+    async def test_multipart_final_message_keeps_every_content_part(self, server):
+        # One assistant message whose answer is split over two output_text parts: the parts are fragments of one
+        # reply, so the whole message is scored, not its last part.
+        entry, gold, wrong = _knights_knaves_entry()
+        split = len(gold) // 2
+        message = _message(0, gold[:split])
+        message["content"].append({"type": "output_text", "text": gold[split:], "annotations": []})
+        result = await server.verify(_verify_request(entry, [message]))
+        assert result.extracted_answer == gold
+        assert result.reward == 1.0
+
+    @pytest.mark.asyncio
     @pytest.mark.xfail(
         strict=True,
         reason=(
