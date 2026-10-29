@@ -94,13 +94,13 @@ def test_write_resolved_config_overwrites_and_leaves_no_temp_files(tmp_path: Pat
 def test_hide_secrets_in_container_masks_every_header_value_and_keeps_header_names() -> None:
     original = {
         "openai_default_headers": {"X-Auth": "credential-canary", "Authorization": "Bearer another-canary"},
-        "token_id_capture": {"enabled": True, "sink": "pkg:Sink"},
+        "token_capture": {"enabled": True, "sink": "pkg:Sink"},
     }
 
     masked = hide_secrets_in_container(original)
 
     assert masked["openai_default_headers"] == {"X-Auth": MASKED_VALUE, "Authorization": MASKED_VALUE}
-    assert masked["token_id_capture"] == {"enabled": True, "sink": "pkg:Sink"}
+    assert masked["token_capture"] == {"enabled": True, "sink": "pkg:Sink"}
     assert original["openai_default_headers"]["X-Auth"] == "credential-canary"
 
 

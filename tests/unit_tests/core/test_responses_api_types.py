@@ -110,7 +110,7 @@ from nemo_gym.core.responses_api_types import (
     accumulate_response_usage,
     training_variant_of,
 )
-from nemo_gym.responses_converter import (
+from nemo_gym.models.chat_completions_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
@@ -1833,7 +1833,7 @@ def test_gym_union_represents_every_sdk_item_type(tag: str) -> None:
         f"openai {openai.__version__} accepts a {tag!r} item and "
         f"NeMoGymResponseInputItem has no member for it.\n"
         f"Fix: add a NeMoGym* wrapper in nemo_gym/core/responses_api_types.py and list it in "
-        f"NeMoGymResponseInputItem. Then classify it in nemo_gym/responses_converter.py as "
+        f"NeMoGymResponseInputItem. Then classify it in nemo_gym/models/chat_completions_converter.py as "
         f"either _RESPONSE_OUTPUT_BOUNDARY_TYPES (the model generated it) or "
         f"_RESPONSE_NON_BOUNDARY_TYPES (a client-supplied result or bookkeeping).\n"
         f"If Gym should not represent it, add it to GYM_UNREPRESENTABLE_TYPES with the reason."
@@ -1856,7 +1856,7 @@ def test_every_sdk_item_type_is_classified(tag: str) -> None:
     assert is_boundary or is_not_boundary, (
         f"openai {openai.__version__} has an output item type {tag!r} that is in neither "
         f"_RESPONSE_OUTPUT_BOUNDARY_TYPES nor _RESPONSE_NON_BOUNDARY_TYPES "
-        f"(nemo_gym/responses_converter.py).\n"
+        f"(nemo_gym/models/chat_completions_converter.py).\n"
         f"Decide: did the model generate this item (boundary), or did the client supply it as a "
         f"tool result / approval / bookkeeping (not a boundary)? Defaulting is not safe."
     )
@@ -1911,7 +1911,7 @@ def _classes_the_converter_can_emit() -> List[str]:
     import ast
     import inspect
 
-    from nemo_gym import responses_converter
+    from nemo_gym.models import chat_completions_converter as responses_converter
 
     tree = ast.parse(inspect.getsource(responses_converter))
     func = next(

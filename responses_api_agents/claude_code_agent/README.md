@@ -200,8 +200,8 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 
 - With `model_server`, model calls go through Gym and can be captured. Direct Anthropic or
   `anthropic_base_url` runs bypass Gym capture.
-- Enable training-token capture with run-level `token_id_capture.enabled: true` and either the
-  agent's `token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
+- Enable training-token capture with run-level `token_capture.enabled: true` and either the
+  agent's `token_capture: true` or run-level `token_capture.all_agents: true`.
 - With training-token capture on, thinking is returned as separate `reasoning` items instead of
   `<think>` text. The response `id` is the last non-empty served model response id from the main
   conversation; subagent frames are excluded from this transcript. Pending tool calls remain as

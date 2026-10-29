@@ -160,11 +160,11 @@ def _environment_server(
                         "host": "agent",
                         "port": 8001,
                         "entrypoint": "app.py",
-                        "token_id_capture": token_capture,
+                        "token_capture": token_capture,
                     }
                 }
             },
-            "token_id_capture": {"enabled": token_capture},
+            "token_capture": {"enabled": token_capture},
         }
     )
     response = _agent_response()

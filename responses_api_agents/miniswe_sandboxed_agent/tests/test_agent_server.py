@@ -139,7 +139,7 @@ async def test_run_uses_sandbox_reachable_model_url_with_rollout_capture(fixture
     f.agent.config = module.MiniSWESandboxedConfig.model_validate(
         f.agent.config.model_dump() | {"sandbox_model_base_url": "https://sandbox-model:8443/gym/v1/"}
     )
-    monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_id_capture_enabled", lambda self: True)
+    monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_capture_enabled", lambda self: True)
     body = f.body.model_copy(update={"capture_rollout_id": "rollout", "capture_token_ids": True})
     await f.agent.run(f.request, body)
     assert (

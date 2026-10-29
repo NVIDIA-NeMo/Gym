@@ -1551,7 +1551,7 @@ def test_contributed_yaml_loads_actual_server_schemas(operator_yaml, monkeypatch
     agent = loaded[AGENT_NAME]
     assert agent.resources_server.model_dump() == {"type": "resources_servers", "name": GRADER_NAME}
     assert agent.model_server.model_dump() == {"type": "responses_api_models", "name": "policy_model"}
-    assert agent.max_steps == 1 and agent.skip_verification is False and agent.token_id_capture is False
+    assert agent.max_steps == 1 and agent.skip_verification is False and agent.token_capture is False
 
 
 def assert_fixture_wire_structure(wire):

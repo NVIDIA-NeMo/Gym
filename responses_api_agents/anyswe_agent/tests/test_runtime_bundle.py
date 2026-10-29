@@ -13,8 +13,8 @@ from responses_api_agents.anyswe_agent.tests.test_app import _config
 
 class TestRuntimeBundle:
     def test_recipe_changes_when_nemo_gym_changes(self, tmp_path: Path) -> None:
-        (tmp_path / "nemo_gym" / "token_id_capture").mkdir(parents=True)
-        library_file = tmp_path / "nemo_gym" / "token_id_capture" / "lineage.py"
+        (tmp_path / "nemo_gym" / "token_capture").mkdir(parents=True)
+        library_file = tmp_path / "nemo_gym" / "token_capture" / "lineage.py"
         library_file.write_text("VERSION = 1\n")
         (tmp_path / "pyproject.toml").write_text("[project]\n")
         processor = GymAgentHarnessProcessor(config=_config(agent_server_module="responses_api_agents.x_agent.app"))
