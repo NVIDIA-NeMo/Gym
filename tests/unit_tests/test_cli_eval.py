@@ -134,7 +134,7 @@ def test_aggregate_cli_exits_nonzero_after_saving_failed_agent_entry(tmp_path: P
         from aiohttp import ClientResponseError
         from omegaconf import OmegaConf
         from nemo_gym.cli.main import main
-        from nemo_gym.rollout_collection import RolloutCollectionHelper
+        from nemo_gym.rollouts import RolloutCollectionHelper
 
         error = ClientResponseError(
             request_info=SimpleNamespace(real_url="http://agent/aggregate_metrics"),

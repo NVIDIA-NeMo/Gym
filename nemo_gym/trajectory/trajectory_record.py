@@ -26,7 +26,7 @@ from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseIn
 
 
 if TYPE_CHECKING:
-    from nemo_gym.observability.model_calls import ModelCallRecord
+    from nemo_gym.trajectory.model_call_record import ModelCallRecord
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"

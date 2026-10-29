@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Standalone command: python -m nemo_gym.harness_capabilities inspect --bundle FILE."""
+"""Standalone command: python -m nemo_gym.rollouts.harness_capabilities inspect --bundle FILE."""
 
 import argparse
 import hashlib

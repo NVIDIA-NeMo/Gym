@@ -10,7 +10,7 @@ from typing import ClassVar, Literal
 
 from jsonschema import Draft202012Validator
 
-from nemo_gym.health.types import Verdict
+from nemo_gym.rollouts.health.types import Verdict
 
 
 PriorityTier = Literal["P0", "P1", "P2"]

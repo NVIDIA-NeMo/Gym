@@ -30,33 +30,33 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.health.timeouts import (
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
+from nemo_gym.models.model_call_capture import CaptureStore
+from nemo_gym.rollouts.health.timeouts import (
     ELAPSED_S_KEY,
     LEGACY_TIMEOUT_SIGNALS,
     export_keys,
     read_rollout_timing,
     summarize_timeouts,
 )
-from nemo_gym.health.types import RunHealthLimits
-from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
-from nemo_gym.models.model_call_capture import CaptureStore
-from nemo_gym.rollout_collection import (
+from nemo_gym.rollouts.health.types import RunHealthLimits
+from nemo_gym.rollouts.rollout_collection import (
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
     RolloutCollectionHelper,
     _attach_trajectory_record,
 )
-from nemo_gym.rollout_health import health_check_run_dir
+from nemo_gym.rollouts.rollout_health import health_check_run_dir
 from nemo_gym.utils.path_utils import failures_path_for
-from tests.unit_tests.test_rollout_collection import (  # noqa: F401 - fixture
+from tests.unit_tests.rollouts.test_rollout_collection import (  # noqa: F401 - fixture
     FakeResponse,
     empty_global_config,
     install_fake_server_client,
 )
 
 
-REPO_ROOT = Path(__file__).parents[2]
+REPO_ROOT = Path(__file__).parents[3]
 T0 = 1_000_000.0  # Unix time at which a rollout's first call starts.
 
 

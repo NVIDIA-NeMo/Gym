@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from nemo_gym.health.types import (
+from nemo_gym.rollouts.health.types import (
     ROLLOUT_INDEX_KEY,
     TASK_INDEX_KEY,
     CheckInput,

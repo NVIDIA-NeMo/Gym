@@ -19,7 +19,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.health.timeouts import RolloutTiming
+from nemo_gym.rollouts.health.timeouts import RolloutTiming
 
 
 TASK_INDEX_KEY = TASK_INDEX_KEY_NAME

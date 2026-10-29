@@ -42,7 +42,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 if TYPE_CHECKING:
-    from nemo_gym.health.types import HealthCheckResult
+    from nemo_gym.rollouts.health.types import HealthCheckResult
 
 logger = logging.getLogger(__name__)
 

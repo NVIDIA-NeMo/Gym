@@ -5,7 +5,7 @@
 
 from dataclasses import asdict, dataclass, field
 
-from nemo_gym.health.types import Verdict
+from nemo_gym.rollouts import Verdict
 
 
 SUITE = "harness-p0-probes/v1"

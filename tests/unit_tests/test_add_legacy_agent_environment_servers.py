@@ -27,7 +27,7 @@ from nemo_gym.config.global_config import (
     environment_server_agent_refs,
     legacy_environment_server_name,
 )
-from nemo_gym.rollout_collection import _environment_servers_by_agent
+from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "add_legacy_agent_environment_servers.py"

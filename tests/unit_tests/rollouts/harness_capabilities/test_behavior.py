@@ -8,8 +8,8 @@ import json
 
 import pytest
 
-from nemo_gym.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
-from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
+from nemo_gym.rollouts.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
 
 def fingerprint(request: dict, status: int, response: dict) -> str:
@@ -161,8 +161,8 @@ def test_judge_scenario_requires_witnessed_grade_and_verifier_ownership(missing)
 
     from scripts.harness_conformance.runner import _fingerprint
 
-    from nemo_gym.harness_capabilities.behavior import inspect_behavior
-    from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
+    from nemo_gym.rollouts.harness_capabilities.behavior import inspect_behavior
+    from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
     record, witness = evidence_and_witness()
     call = deepcopy(record["ng_trajectory"]["model_calls"][0])

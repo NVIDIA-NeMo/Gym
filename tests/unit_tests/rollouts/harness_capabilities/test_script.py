@@ -11,11 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.harness_capabilities import cli
-from tests.unit_tests.harness_capabilities.synthetic import evidence_record
+from nemo_gym.rollouts.harness_capabilities import cli
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_record
 
 
-SCRIPT = Path(__file__).resolve().parents[3] / "scripts/inspect_harness_conformance.py"
+SCRIPT = Path(__file__).resolve().parents[4] / "scripts/inspect_harness_conformance.py"
 
 
 @pytest.fixture
