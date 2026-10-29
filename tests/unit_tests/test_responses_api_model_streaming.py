@@ -46,6 +46,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputItem,
+    NeMoGymResponseReasoningInputItemForTraining,
+    NeMoGymResponseReasoningItemForTraining,
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.responses_streaming import (
@@ -407,11 +409,10 @@ class TestSanitizeStreamingBody:
         body = {"stream": True, "input": [{"role": "user", "content": "fix multiply"}, reasoning, call, result]}
         original = json.loads(json.dumps(body))
         cleaned, _ = sanitize_streaming_responses_body(body)
-        item_id = cleaned["input"][1]["id"]
-        assert item_id == provided_id if provided_id is not None else item_id.startswith("rs_")
-        assert cleaned["input"][1] == {**reasoning, "id": item_id}
+        assert cleaned["input"][1] == reasoning
         assert body == original
         params = validate_streaming_responses_params(cleaned)
+        assert params.input[1].id == provided_id
         assert params.input[1].summary[0].text == summary
         converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
             params
@@ -434,8 +435,29 @@ class TestSanitizeStreamingBody:
         }
         cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
         params = validate_streaming_responses_params(cleaned)
-        actual = params.input[0].model_dump(mode="json")
-        assert actual == {**reasoning, "id": actual["id"]}
+        # The encrypted content verifies only under the id it was issued for, so none is sent.
+        assert params.model_dump(mode="json", exclude_unset=True)["input"][0] == reasoning
+
+    @pytest.mark.parametrize("provided_id", [None, "rs_original"])
+    def test_token_bearing_reasoning_replay_keeps_its_tokens_and_id(self, provided_id: str | None) -> None:
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "think"}],
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+        }
+        if provided_id is not None:
+            reasoning["id"] = provided_id
+        cleaned, _ = sanitize_streaming_responses_body({"stream": True, "input": [reasoning]})
+        params = validate_streaming_responses_params(cleaned)
+        expected_type = (
+            NeMoGymResponseReasoningInputItemForTraining
+            if provided_id is None
+            else NeMoGymResponseReasoningItemForTraining
+        )
+        assert type(params.input[0]) is expected_type
+        assert params.model_dump(mode="json", exclude_unset=True)["input"][0] == reasoning
 
     def test_drops_unknown_top_level_fields(self) -> None:
         cleaned, _ = sanitize_streaming_responses_body(
@@ -1019,7 +1041,21 @@ class TestResponsesDispatchRoute:
         assert response.status_code == 200
         assert len(server.last_params.input) == 1
         assert server.last_params.input[0].summary[0].text == "Inspect multiply"
-        assert server.last_params.input[0].id.startswith("rs_")
+        assert server.last_params.input[0].id is None
+        assert "id" not in server.last_params.model_dump(exclude_unset=True)["input"][0]
+
+    def test_streaming_token_bearing_reasoning_replay_without_id_is_accepted(self) -> None:
+        client, server = _client(_EchoModel)
+        reasoning = {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "think"}],
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+        }
+        response = client.post("/v1/responses", json={"stream": True, "input": [reasoning]})
+        assert response.status_code == 200
+        assert server.last_params.model_dump(mode="json", exclude_unset=True)["input"] == [reasoning]
 
     @pytest.mark.parametrize(
         "reasoning",

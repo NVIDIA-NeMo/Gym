@@ -291,6 +291,24 @@ class NeMoGymResponseReasoningItem(BaseModel):
     # status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymResponseReasoningInputItem(NeMoGymResponseReasoningItem):
+    """A reasoning item replayed as request input without its id, as the Codex CLI sends it.
+
+    Providers bind ``encrypted_content`` to the id of the item that produced it and reject a replay
+    under any other id, so a missing id must stay missing rather than be filled in.
+    """
+
+    id: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_inventing_id(self, handler: Any) -> dict[str, Any]:
+        # A full dump must not write ``"id": null``: that dict selects the id-requiring reasoning model.
+        payload = handler(self)
+        if "id" not in self.model_fields_set:
+            payload.pop("id", None)
+        return payload
+
+
 class NeMoGymLogprobTopLogprob(TypedDict, total=False):
     """Copy of openai.types.responses.response_output_text_param.LogprobTopLogprob with List in place of Iterable."""
 
@@ -630,6 +648,10 @@ class NeMoGymResponseReasoningItemForTraining(NeMoGymResponseReasoningItem, Toke
     pass
 
 
+class NeMoGymResponseReasoningInputItemForTraining(NeMoGymResponseReasoningInputItem, TokenIDLogProbMixin):
+    pass
+
+
 class NeMoGymResponseCustomToolCallForTraining(NeMoGymResponseCustomToolCall, TokenIDLogProbMixin):
     pass
 
@@ -640,6 +662,7 @@ RESPONSES_TO_TRAIN = {
     NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
+    NeMoGymResponseReasoningInputItem: NeMoGymResponseReasoningInputItemForTraining,
     NeMoGymResponseCustomToolCall: NeMoGymResponseCustomToolCallForTraining,
 }
 
@@ -692,7 +715,15 @@ _OUTPUT_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _TRAINING_TAG_SUFFIX = "__training"
 # Tags whose models have a ForTraining variant registered in RESPONSES_TO_TRAIN.
 _TRAINABLE_ITEM_TAGS = frozenset(
-    {"easy_message", "input_message", "output_message", "function_call", "custom_tool_call", "reasoning"}
+    {
+        "easy_message",
+        "input_message",
+        "output_message",
+        "function_call",
+        "custom_tool_call",
+        "reasoning",
+        "reasoning_input",
+    }
 )
 
 # Exact member class -> union tag, populated from the annotated unions defined below.
@@ -793,6 +824,8 @@ def _discriminate_response_input_item(value: Any) -> Optional[str]:
         tag = _discriminate_untyped_input_item(value)
     else:
         return None
+    if tag == "reasoning" and "id" not in value:
+        tag = "reasoning_input"
     return _training_variant_tag(tag, value)
 
 
@@ -827,6 +860,7 @@ NeMoGymResponseInputItem = Annotated[
         Annotated[NeMoGymResponseFunctionToolCall, Tag("function_call")],
         Annotated[NeMoGymFunctionCallOutput, Tag("function_call_output")],
         Annotated[NeMoGymResponseReasoningItem, Tag("reasoning")],
+        Annotated[NeMoGymResponseReasoningInputItem, Tag("reasoning_input")],
         Annotated[NeMoGymResponseMcpCall, Tag("mcp_call")],
         Annotated[NeMoGymResponseMcpListTools, Tag("mcp_list_tools")],
         Annotated[NeMoGymResponseMcpApprovalRequest, Tag("mcp_approval_request")],
@@ -860,6 +894,7 @@ NeMoGymResponseInputItem = Annotated[
         Annotated[NeMoGymResponseFunctionToolCallForTraining, Tag("function_call__training")],
         Annotated[NeMoGymResponseCustomToolCallForTraining, Tag("custom_tool_call__training")],
         Annotated[NeMoGymResponseReasoningItemForTraining, Tag("reasoning__training")],
+        Annotated[NeMoGymResponseReasoningInputItemForTraining, Tag("reasoning_input__training")],
     ],
     Discriminator(_discriminate_response_input_item),
     BeforeValidator(_validate_atomic_token_metadata),

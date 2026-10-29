@@ -208,3 +208,16 @@ its launch settings in `episode._config`, and make its advertised shell-tool
 schema consumable by `provider.Probe._tool` and, if it ends episodes on a finish tool, that
 tool's schema consumable by `provider.Probe._finish`. Keep expectations and witnesses out
 of the task input and preserve the normal Gym collection path.
+
+Registration also means adding the harness name to hard-coded tuples. `episode._config`
+passes the probe's `--timeout` as the agent's `timeout` only to the harnesses in its
+`("opencode", "pi")` tuple; add a harness whose adapter has a `timeout` field, so that
+the harness uses the probe timeout instead of the adapter's default. `ci.install_runtime`
+installs the adapter's `requirements.txt` and then returns early only for the harnesses
+in its `("hermes", "stirrup", "simple")` tuple: Hermes comes from those requirements,
+Stirrup installs in the task sandbox during session setup, and Simple Agent is built in.
+For any other harness it installs a
+pinned npm package through `responses_api_agents/<harness>_agent/setup_<harness>.py`,
+so add a harness that installs its runtime in the task sandbox to that tuple. A
+data-driven registry entry could carry these per-harness settings and remove the
+tuples; the runner does not have one yet.
