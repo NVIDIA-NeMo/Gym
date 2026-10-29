@@ -34,6 +34,7 @@ from nemo_gym.global_config import (
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    rollout_run_key,
 )
 from nemo_gym.path_utils import aggregation_sources_path_for
 from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
@@ -797,6 +798,23 @@ class TestYieldInputsAndRolloutsPaired:
 
 
 class TestBuildVerifyPayload:
+    def test_keeps_the_environment_server_that_ran_the_rollout(self) -> None:
+        """A flat materialized row names no Environment Server; the re-verified row keeps the one the run stamped."""
+        pair = InputRolloutPair(
+            input={"task": "q1", AGENT_REF_KEY_NAME: {"name": "agent_a"}},
+            rollout={
+                "response": {"output": "x"},
+                "_ng_environment_server": "env_a",
+                "_ng_result_type": "legacy_agent",
+                NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS,
+            },
+        )
+
+        result = _build_verify_payload(pair)
+
+        assert (result["_ng_environment_server"], result["_ng_result_type"]) == ("env_a", "legacy_agent")
+        assert NG_FAILURE_CLASS_KEY not in result
+
     def test_merges_input_row_with_response(self) -> None:
         pair = InputRolloutPair(
             input={"task": "q1", "verifier_metadata": {"answer": 42}},
@@ -1510,6 +1528,21 @@ class TestRunVerificationPayloads:
         for fut in futures:
             results.append(await fut)
         return results
+
+    async def test_identity_stamps_stay_on_the_row_and_out_of_the_verify_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        row = self._make_row("agent_a") | {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+        mock_client = MagicMock()
+        mock_client.global_config_dict = {}
+        mock_client.post = AsyncMock(return_value=MagicMock())
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(returned, _)] = await self._collect(_run_verification_payloads([row]))
+
+        sent = mock_client.post.await_args.kwargs["json"]
+        assert "_ng_environment_server" not in sent and "_ng_result_type" not in sent
+        assert returned["_ng_environment_server"] == "env_a"
 
     async def test_returns_row_and_response_json_for_each_payload(self, monkeypatch: pytest.MonkeyPatch) -> None:
         rows = [self._make_row("agent_a", i) for i in range(3)]
@@ -3125,6 +3158,27 @@ class TestRunFromConfigJudgeFailedOnly:
         if not path.exists():
             return []
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
+
+    async def test_recovered_and_carried_rows_group_under_the_environment_server_of_the_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Aggregation groups by the Environment Server stamp, so a recovered row must keep it as a carried one does."""
+        stamp = {"_ng_environment_server": "env_a", "_ng_result_type": "legacy_agent"}
+        self._setup_fixture(
+            tmp_path,
+            materialized=[self._mat(t) for t in range(3)],
+            successes=[self._success(0) | stamp],
+            failures=[self._failure(1) | stamp, self._failure(2) | stamp],
+        )
+        dispatched: list = []
+        self._patch(monkeypatch, dispatched)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path))
+
+        rows = self._read_jsonl(tmp_path / "recovered.jsonl")
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in rows) == [0, 1, 2]
+        assert {(r["_ng_environment_server"], r["_ng_result_type"]) for r in rows} == {("env_a", "legacy_agent")}
+        assert {rollout_run_key(r) for r in rows} == {"env_a"}
 
     async def test_recovers_only_judge_failed_rows_and_merges_with_successes(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
