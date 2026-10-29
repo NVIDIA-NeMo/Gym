@@ -63,11 +63,6 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
-    AgentEpisode,
-    AgentObservationBundle,
-    ObservationGap,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -76,6 +71,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
 )
 from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, ObservationGap
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
     OpenClawSessionTree,

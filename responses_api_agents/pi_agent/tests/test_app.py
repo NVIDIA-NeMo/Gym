@@ -34,7 +34,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation, ToolCallObservation
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation, ToolCallObservation
 from responses_api_agents.pi_agent.app import (
     PiAgent,
     PiAgentConfig,

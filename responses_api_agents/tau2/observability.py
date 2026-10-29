@@ -7,12 +7,7 @@ import json
 from collections import defaultdict
 
 from nemo_gym.core import NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
-from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    AgentObservationBundle,
-    ObservationGap,
-    ToolCallObservation,
-)
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from tau2.data_model.message import AssistantMessage, MultiToolMessage, ToolCall, ToolMessage, UserMessage
 from tau2.data_model.simulation import SimulationRun
 

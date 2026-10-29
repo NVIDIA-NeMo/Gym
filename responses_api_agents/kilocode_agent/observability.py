@@ -8,7 +8,7 @@ from contextlib import closing
 from pathlib import Path
 
 from nemo_gym.core import NeMoGymResponseInputTokensDetails, NeMoGymResponseOutputTokensDetails, NeMoGymResponseUsage
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap
 
 # opencode_agent's parser also maps bash outcomes from exit codes; opencode_sandboxed_agent is being retired.
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations

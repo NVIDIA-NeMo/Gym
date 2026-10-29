@@ -44,14 +44,6 @@ from nemo_gym.config import (
     get_first_server_config_dict,
 )
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.rollout_observability import (
-    NG_AGENT_OBSERVATIONS_KEY,
-    NG_TRAJECTORY_KEY,
-    NG_VERIFIER_INVOCATIONS_KEY,
-    AgentObservationBundle,
-    TrajectoryRecord,
-    VerifierInvocation,
-)
 from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
@@ -63,6 +55,14 @@ from nemo_gym.tool_access import (
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     ToolAccess,
+)
+from nemo_gym.trajectory import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
+    AgentObservationBundle,
+    TrajectoryRecord,
+    VerifierInvocation,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 

@@ -64,7 +64,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -76,6 +75,7 @@ from nemo_gym.sandbox import (
 from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.skills import stage_skills
 from nemo_gym.tool_access import MCPToolAccess
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     parse_codex_observations,

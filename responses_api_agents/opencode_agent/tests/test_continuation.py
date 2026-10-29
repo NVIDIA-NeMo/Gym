@@ -631,12 +631,8 @@ def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tm
     from nemo_gym.base_responses_api_model import ModelCallRecord
     from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
     from nemo_gym.rollout_collection import _build_trajectory_record
-    from nemo_gym.rollout_observability import (
-        AgentObservationBundle,
-        TrajectoryRecord,
-        join_agent_model_calls,
-        join_assistant_message_calls,
-    )
+    from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
+    from nemo_gym.trajectory.trajectory_record import join_agent_model_calls, join_assistant_message_calls
 
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)

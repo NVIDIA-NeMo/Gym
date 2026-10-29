@@ -57,14 +57,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
-    AgentEpisode,
-    AgentObservationBundle,
-    ObservationGap,
-    SandboxObservation,
-)
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
 from nemo_gym.skills import stage_skills
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, ObservationGap, SandboxObservation
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime

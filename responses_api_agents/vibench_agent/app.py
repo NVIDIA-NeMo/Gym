@@ -45,12 +45,6 @@ from fastapi import Body, Request
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, get_global_config_dict
-from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    AgentObservationBundle,
-    ObservationGap,
-    SandboxObservation,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -59,6 +53,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,

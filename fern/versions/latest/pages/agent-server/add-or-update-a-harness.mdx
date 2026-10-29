@@ -63,7 +63,7 @@ An adapter supplies the knowledge that is specific to the harness or framework:
 | Model Server | Provider normalization, rollout-prefixed routing, [model-call capture](/main/model-server/model-call-capture), and [training-token capture](/main/tutorials/training-tutorials/external-agent-harnesses). |
 | `nemo_gym.sandbox` | Sandbox providers, `AsyncSandbox`, and text file transfer. |
 | `nemo_gym.agent_utils` | Supervised harness execution in a task sandbox: launch, termination, artifact capture, and release. See the `agent_utils` section below. |
-| `nemo_gym.rollout_observability` | The observation schemas. Rollout collection joins agent observations with captured model calls. |
+| `nemo_gym.trajectory.trajectory_record` | The observation schemas. Rollout collection joins agent observations with captured model calls. |
 | Harness Conformance | Scripted probes and an evidence checker for trajectory evidence. |
 
 Gym does not provide adapter scaffolding or default conversion and usage accounting; each adapter implements them.

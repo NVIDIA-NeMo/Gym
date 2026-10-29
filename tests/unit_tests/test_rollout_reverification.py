@@ -23,7 +23,6 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.atif_reverification import AtifProjectionError
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
@@ -72,6 +71,7 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils import aggregation_sources_path_for
 
 
@@ -1352,7 +1352,7 @@ class TestPrepareAtifPayloads:
         return OutputPaths(output=tmp_path / "out.jsonl", failures=tmp_path / "out_failures.jsonl")
 
     def _write_inputs_and_manifest(self, tmp_path: Path) -> tuple[Path, Path]:
-        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
+        fixture = Path(__file__).parent / "trajectory" / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
         trajectory = tmp_path / "trajectory.json"
         trajectory.write_bytes(fixture.read_bytes())
         materialized = tmp_path / "materialized.jsonl"
@@ -2251,7 +2251,7 @@ class TestRolloutReverificationRunFromConfig:
     ) -> None:
         """Exercise public ATIF mode while an unrelated configured verifier is unsupported."""
 
-        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
+        fixture = Path(__file__).parent / "trajectory" / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
         materialized = tmp_path / "inputs.jsonl"
         materialized.write_bytes(
             orjson.dumps(

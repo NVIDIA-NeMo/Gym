@@ -14,7 +14,7 @@ from nemo_gym.episode_types import (
     BaseEpisodeResponse,
     EpisodeFailure,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
 
 
 class SingleAgentTurnTaskInput(BaseModel):

@@ -8,11 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    ContextCompactionObservation,
-    ToolCallObservation,
-)
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation, ToolCallObservation
 from responses_api_agents.hermes_agent.observability import (
     HermesAgentObserver,
     normalize_hermes_messages,

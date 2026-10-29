@@ -34,10 +34,10 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.terminal import resolve_terminal
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
     ClaudeCodeAgentConfig,

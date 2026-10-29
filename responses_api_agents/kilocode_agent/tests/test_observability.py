@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations, read_kilo_snapshot
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent

@@ -4334,7 +4334,7 @@ class TestGeneralization:
         assert "sk-from-the-process" not in str(sandbox.execs)
 
     async def test_failed_trajectory_export_masks_the_turn_before_test_sh(self, tmp_path, monkeypatch):
-        from nemo_gym.atif_export import AtifExportError
+        from nemo_gym.trajectory import AtifExportError
 
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
 

@@ -36,7 +36,6 @@ from nemo_gym.core import (
     current_rollout_id,
     rollout_context,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -45,6 +44,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
 )
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.trajectory import AgentObservationBundle
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,

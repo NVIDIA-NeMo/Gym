@@ -10211,7 +10211,7 @@ class TestTurnsFromModelCalls:
 
     @staticmethod
     def _call(call_id: str, response: dict, *, started_at: float, response_id: str | None = None):
-        from nemo_gym.rollout_observability import TrajectoryModelCall
+        from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 
         return TrajectoryModelCall.model_validate(
             {
@@ -10228,7 +10228,7 @@ class TestTurnsFromModelCalls:
 
     @staticmethod
     def _invocation(invocation_id: str, call_ids: list[str]):
-        from nemo_gym.rollout_observability import AgentInvocation
+        from nemo_gym.trajectory import AgentInvocation
 
         return AgentInvocation.model_validate(
             {"invocation_id": invocation_id, "model_calls": [{"model_call_id": call_id} for call_id in call_ids]}
@@ -10269,7 +10269,7 @@ class TestTurnsFromModelCalls:
         assert turn.answer == {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]}
 
     def test_a_call_that_returned_nothing_is_not_a_turn(self) -> None:
-        from nemo_gym.rollout_observability import TrajectoryModelCall
+        from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 
         failed = TrajectoryModelCall.model_validate({"model_call_id": "failed", "started_at": 1.0})
         answered = self._call("answered", {"output": []}, started_at=2.0)

@@ -19,7 +19,7 @@ import nemo_gym.rollout_health as health
 from nemo_gym.observability.model_calls import build_model_call_record
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.trajectory import TrajectoryRecord
 
 
 MODEL_CALL_CHECKS = {

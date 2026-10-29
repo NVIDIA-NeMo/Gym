@@ -597,7 +597,7 @@ async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, mo
     """A policy cut off at max_output_tokens inside <think> leaves a reasoning-only output in the
     trajectory (the harness compacts and goes on); the harbor environment server's ATIF export must
     accept that shape and grade the episode, not mask it (review fix)."""
-    from nemo_gym.atif_export import transcript_to_atif
+    from nemo_gym.trajectory import transcript_to_atif
 
     inner = openai_utils.request
     seen = {"calls": 0}

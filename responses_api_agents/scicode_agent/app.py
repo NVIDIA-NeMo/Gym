@@ -59,13 +59,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.metrics_config import Stat
 from nemo_gym.prompt import PromptConfig, load_prompt_config
-from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    ModelCallRef,
-    ObservationGap,
-    TrajectoryRecord,
-    TrajectoryTurn,
-)
+from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
 
 
 LOG = logging.getLogger(__name__)

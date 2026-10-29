@@ -164,7 +164,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         SimpleResponsesAPIAgent,
     )
     from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     calls = []
     response = NeMoGymResponse(

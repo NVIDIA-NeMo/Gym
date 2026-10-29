@@ -158,6 +158,17 @@ redirects:
   # Library reference pages of modules moved into nemo_gym/telemetry (#5166).
   - source: "/nemo/gym/nemo-gym/nemo_gym/profiling"
     destination: "/nemo/gym/nemo-gym/nemo_gym/telemetry/profiling"
+  # Library reference pages of modules moved into nemo_gym/trajectory (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/rollout_observability"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/trajectory/trajectory_record"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/atif_export"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/trajectory/atif_export"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/atif_reverification"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/trajectory/atif_reverification"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/atif_json"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/trajectory/atif_json"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/atif_v1_7"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/trajectory/atif_v1_7"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

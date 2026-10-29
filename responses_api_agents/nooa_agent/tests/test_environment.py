@@ -21,8 +21,8 @@ from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSee
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
 from nemo_gym.rollout_collection import _episode_record
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
 from responses_api_agents.nooa_agent import resource_tools
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.result import finalize_run_result

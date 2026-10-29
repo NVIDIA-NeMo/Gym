@@ -886,7 +886,7 @@ layers = [
     # verification/
     "nemo_gym.judge : nemo_gym.verifier_fixture : nemo_gym.verifier_utils",
     # trajectory/
-    "nemo_gym.atif_export : nemo_gym.atif_json : nemo_gym.atif_reverification : nemo_gym.atif_v1_7 : nemo_gym.rollout_observability",
+    "nemo_gym.trajectory",
     # sandbox/
     "nemo_gym.sandbox.access : nemo_gym.sandbox.adapters : nemo_gym.sandbox.api : nemo_gym.sandbox.attribution : nemo_gym.sandbox.compose_config : nemo_gym.sandbox.compose_fields : nemo_gym.sandbox.compose_volumes : nemo_gym.sandbox.config : nemo_gym.sandbox.observability : nemo_gym.sandbox.providers : nemo_gym.sandbox.shell : nemo_gym.sandbox.transfer : nemo_gym.sandbox.utils",
     # client/
@@ -912,7 +912,7 @@ ignore_imports = [
     "nemo_gym.exporters.base -> nemo_gym.batch_status",
     "nemo_gym.exporters.base -> nemo_gym.rollout_collection",
     "nemo_gym.exporters.mlflow -> nemo_gym.rollout_collection",
-    "nemo_gym.rollout_observability -> nemo_gym.observability.model_calls",
+    "nemo_gym.trajectory.trajectory_record -> nemo_gym.observability.model_calls",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.tasks.harbor.digest",
     "nemo_gym.sandbox.compose_config -> nemo_gym.tasks.harbor.digest",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.main",

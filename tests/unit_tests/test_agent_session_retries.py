@@ -20,7 +20,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import current_rollout_id, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.trajectory import AgentObservationBundle
 
 
 class _Agent(SimpleResponsesAPIAgent):

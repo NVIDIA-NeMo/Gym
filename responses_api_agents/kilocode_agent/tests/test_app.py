@@ -36,7 +36,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
 from responses_api_agents.kilocode_agent.app import (
     KiloCodeAgent,
     KiloCodeAgentConfig,

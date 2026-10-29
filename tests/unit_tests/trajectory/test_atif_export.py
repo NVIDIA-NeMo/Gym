@@ -13,21 +13,14 @@ from typing import Any
 import pytest
 
 from nemo_gym import __version__
-from nemo_gym.atif_export import (
-    AtifExportError,
-    ExportAtifConfig,
-    encode_atif_trajectory,
-    export_rollouts_to_atif,
-    gym_rollout_to_atif,
-    transcript_to_atif,
-)
-from nemo_gym.atif_reverification import (
+from nemo_gym.trajectory import AtifExportError, TrajectoryRecord, encode_atif_trajectory, transcript_to_atif
+from nemo_gym.trajectory.atif_export import ExportAtifConfig, export_rollouts_to_atif, gym_rollout_to_atif
+from nemo_gym.trajectory.atif_reverification import (
     index_materialized_inputs,
     load_atif_manifest,
     project_atif_manifest_entries,
 )
-from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.trajectory.atif_v1_7 import AtifTrajectoryV1_7
 
 
 def _reasoning(item_id: str, text: str) -> dict[str, Any]:

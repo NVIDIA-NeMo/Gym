@@ -48,13 +48,6 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    AgentObservationBundle,
-    ModelCallRef,
-    ObservationGap,
-    ToolCallObservation,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -64,6 +57,13 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+)
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 

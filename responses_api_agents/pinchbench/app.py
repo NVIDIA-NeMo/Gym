@@ -53,8 +53,8 @@ from nemo_gym.core import (
     NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
