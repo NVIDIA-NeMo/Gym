@@ -653,7 +653,7 @@ async def request(
             _read_body=_read_body,
             **kwargs,
         )
-    # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
+    # With metrics exporting, count calls until this helper returns or raises, including eligible body reads.
     counts.outbound_in_flight += 1
     try:
         return await send(
