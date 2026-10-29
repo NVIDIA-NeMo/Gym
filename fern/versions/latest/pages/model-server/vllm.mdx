@@ -253,6 +253,7 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `drop_custom_tools` | `bool` | `false` | Streaming requests only; available on every model server. When `true`, `custom` (free-form) tools are dropped instead of being converted to Chat Completions custom tools, which a backend that expresses function tools only rejects with 422. Leave `false` for a backend with free-form tool support, or set `custom_tool_strategy: function_bridge` to keep the capability on a function-only backend instead of dropping it. |
 | `custom_tool_strategy` | `str` | `"passthrough"` | How a Responses `custom` (free-form) tool reaches a backend whose chat schema admits function tools only. `passthrough` sends the converted request unchanged and the backend decides: vLLM's chat route refuses a request carrying a Chat custom tool, and `drop_custom_tools` remains the kill switch. `function_bridge` lowers each custom tool to a function tool with one required plain-string `input` parameter, replays `custom_tool_call`/`custom_tool_call_output` history in the lowered form, lifts a returned call whose name the request declared as custom back into a `custom_tool_call` item, and hoists custom entries from a streaming harness's `additional_tools` carrier instead of dropping them. A grammar `format` on the tool is dropped at the lowering (warned once per tool name): no vLLM tool parser enforces a grammar through function calling. Honored by the servers that run the Responses-to-Chat conversion — `vllm_model` and its subclasses (the compaction and GenRM servers included), `inference_provider`, and `azure_openai_model`; rejected together with `is_responses_native: true`, whose native route renders function tools only. Parser caveat: with a JSON-format tool parser (`hermes`, `llama3_json`, `mistral`) the model must JSON-escape the free-form payload inside the bridged arguments object, and an escaping mistake surfaces as plain text with no tool call; XML-style parsers (`qwen3_coder`, `nemotron_v3`) carry the payload as raw text. |
 | `drop_unrepresentable_request_fields` | `bool` | `false` | How the Responses-to-Chat-Completions conversion treats a request field with no Chat Completions representation. When `false`, the conversion refuses the request with `NotImplementedError`, so the caller can route it to a server that serves Responses natively. When `true`, the reporting-only fields are dropped and the request proceeds: a non-empty `include` (every value; an empty `include` is already treated as absent), `reasoning.summary` and `reasoning.generate_summary`, and a message `phase`. An image part in a tool's output is replaced with the text placeholder `[image omitted from tool output]`, so the model does not see that image. Every other unrepresentable field, `reasoning.context` included, is still refused. The setting also applies to the compaction model server (`vllm_model_with_compaction`) and has no effect when `is_responses_native` is `true`, because that path skips the conversion. |
+| `endpoint_connection_retry_timeout_s` | `float` | `null` | Wall-clock seconds one model call may spend retrying connection errors before the last one is raised. See [Bound retries to a dead model server](#bound-retries-to-a-dead-model-server). |
 
 ### Advanced: `chat_template_kwargs`
 
@@ -280,6 +281,16 @@ extra_body:
   min_tokens: 10
   repetition_penalty: 1.1
 ```
+
+### Bound retries to a dead model server
+
+By default a model call retries a refused or dropped connection without a time limit, so a training run can ride out an engine restart. For evaluation, where a dead engine should fail the run, set a cap:
+
+```yaml
+endpoint_connection_retry_timeout_s: 300
+```
+
+The value must be positive. The window starts at the call's first connection error, and HTTP-status retries of the same call (for example a 503 with `Retry-After`) share it and never wait past it. It bounds only connection setup: a call that has connected and is generating is not cut short. `null` adds no time cap, but does not lift the attempt cap that `endpoint_connection_retries` sets when `endpoint_file` or `route_around_failing_endpoints` is used.
 
 ## Use VLLMModel with multiple replicas of a model endpoint
 
