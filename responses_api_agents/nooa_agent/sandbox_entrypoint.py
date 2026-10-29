@@ -60,6 +60,7 @@ class SandboxInput(BaseModel):
     trace_dir: str | None = Field(
         default=None, description="Sandbox directory for NOOA's OTLP JSONL trace files; None disables tracing."
     )
+    media_inputs: tuple[Literal["image", "audio", "video", "pdf"], ...] = ()
 
 
 class RunnerError(BaseModel):
@@ -233,6 +234,7 @@ async def execute(
             max_policy_calls=payload.max_policy_calls,
             on_progress=on_progress,
             context_window=payload.context_window,
+            media_inputs=payload.media_inputs,
         )
         with rollout_context(payload.request.rollout_id):
             result = await runner.run(payload.request)

@@ -108,6 +108,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
                 context_window=self.config.context_window,
+                media_inputs=self.config.media_inputs,
             )
         else:
             if body.sandbox_access is None:
@@ -135,6 +136,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 context_window=self.config.context_window,
                 trace_jsonl=self.config.trace_jsonl,
                 artifacts_dir=self.config.artifacts_dir,
+                media_inputs=self.config.media_inputs,
             )
             state.runner = runner
             try:

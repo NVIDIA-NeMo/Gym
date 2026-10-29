@@ -44,6 +44,7 @@ class SandboxNOOARunner:
         close_timeout: float = 30,
         trace_jsonl: bool = False,
         artifacts_dir: Path | None = None,
+        media_inputs: tuple[str, ...] = (),
     ) -> None:
         self.sandbox = sandbox
         self.python = python
@@ -52,6 +53,7 @@ class SandboxNOOARunner:
         self.model_server_name = model_server_name
         self.max_policy_calls = max_policy_calls
         self.context_window = context_window
+        self.media_inputs = media_inputs
         self.timeout = timeout
         self.close_timeout = close_timeout
         self.trace_jsonl = trace_jsonl
@@ -92,6 +94,7 @@ class SandboxNOOARunner:
             max_policy_calls=self.max_policy_calls,
             context_window=self.context_window,
             trace_dir=f"{self.directory}/traces" if self.trace_jsonl else None,
+            media_inputs=self.media_inputs,
         )
         await upload_text(self.sandbox, path=f"{self.directory}/input.json", text=payload.model_dump_json())
         return SandboxCommand(

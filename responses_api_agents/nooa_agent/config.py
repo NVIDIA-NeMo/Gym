@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -80,6 +81,11 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     artifacts_dir: Path = Field(
         default=Path("nooa-artifacts"),
         description="Host directory for per-rollout NOOA artifacts such as the trace file; relative to the server's cwd.",
+    )
+    media_inputs: tuple[Literal["image", "audio", "video", "pdf"], ...] = Field(
+        default=(),
+        description="Media the policy model accepts, as NOOA's media_inputs. Empty is text-only: "
+        "NOOA replaces other media with a short note.",
     )
 
     sandbox_runner_timeout_seconds: float = Field(
