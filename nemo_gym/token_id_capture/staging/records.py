@@ -37,6 +37,8 @@ from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for 
     LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
     UNCOMMITTED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
+    ModelRef,
+    OmitsAbsentIdentity,
 )
 from nemo_gym.token_id_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
@@ -464,7 +466,7 @@ class OutputItemEvidence(_WireModel):
     fingerprint: DigestHex
 
 
-class CallRecord(_DigestWireModel):
+class CallRecord(_DigestWireModel, OmitsAbsentIdentity):
     """One token-free call manifest row in a rollout's capture ledger."""
 
     model_call_id: Identifier
@@ -512,6 +514,11 @@ class CallRecord(_DigestWireModel):
     # version: the manifest route serializes it on every row, and a framework whose Gym predates the
     # column rejects each row (``extra="forbid"``) as ``invalid_manifest_row``, as with ``source_capture_key``.
     finish_reason: StrictStr | None = None
+    # The agent instance the request URL named and its agent kind, omitted for an unnamed agent,
+    # and the model server that served the call. None of them is part of the staging digest.
+    agent_instance: Identifier | None = None
+    agent_kind: Identifier | None = None
+    model_ref: ModelRef | None = None
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:
@@ -542,11 +549,18 @@ class CaptureLedgerCommit(_WireModel):
     response_items: list[dict]
 
 
-class ManifestFailure(_WireModel):
-    """A call whose token capture did not complete."""
+class ManifestFailure(_WireModel, OmitsAbsentIdentity):
+    """A call whose token capture did not complete.
+
+    The identity fields name the agent instance and model server of the failed call. A failure with no
+    model call, or one whose call's identity is unknown, carries none and applies to the whole episode.
+    """
 
     model_call_id: Identifier
     reason: Identifier
+    agent_instance: Identifier | None = None
+    agent_kind: Identifier | None = None
+    model_ref: ModelRef | None = None
 
 
 class RolloutManifest(_WireModel):
@@ -571,10 +585,13 @@ class RolloutRemoval(_WireModel):
     absent: list[Identifier] = Field(default_factory=list)
 
 
-class RolloutReceipt(_DigestWireModel):
+class RolloutReceipt(_DigestWireModel, OmitsAbsentIdentity):
     """Token-free immutable manifest the framework assembles at rollout end."""
 
     capture_key: Identifier
+    # The agent instance this receipt covers; ``None`` means the whole episode. A trainer that builds one
+    # receipt per selected agent instance sets it.
+    agent_instance: Identifier | None = None
     reward: float | None = None
     terminal_model_call_id: Identifier | None = None
     manifest: list[CallRecord] = Field(default_factory=list)

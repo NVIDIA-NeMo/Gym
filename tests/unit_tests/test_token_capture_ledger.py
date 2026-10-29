@@ -20,7 +20,7 @@ import pytest
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, _custody_columns
 from nemo_gym.token_id_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, compute_digest
+from nemo_gym.token_id_capture.records import CallIdentity, ModelRef, ParentResolutionStatus, compute_digest
 from nemo_gym.token_id_capture.sink import (
     UNRESOLVED_PARENT_REASON,
     CaptureContext,
@@ -943,3 +943,72 @@ async def test_checkpoint_restores_delivered_calls_without_dead_attempt_intents(
     assert live.pending_call_ids == ["undelivered"]
     await restored.begin_call(target, "retry")
     assert (await restored.close_admissions(target))["pending_call_ids"] == ["retry"]
+
+
+# --- agent instance identity on every ledger row ---
+
+POLICY = ModelRef(name="policy")
+ASSISTANT = CallIdentity(agent_instance="assistant", model_ref=POLICY)
+JUDGE = CallIdentity(agent_instance="judge.1", model_ref=POLICY)
+
+
+async def test_unnamed_rows_carry_only_the_model_server(store):
+    unnamed = CallIdentity(model_ref=POLICY)
+    await store.begin_call("r1", "c1", identity=unnamed)
+    await store.record(_commit(_call_record("c1").model_copy(update={"model_ref": POLICY}), [USER_1], [ASSISTANT_1]))
+    await store.begin_call("r1", "c2", identity=unnamed)
+    await store.record_failure("r1", "c2", "worker_capture_failed", identity=unnamed)
+
+    manifest = await store.manifest("r1")
+
+    assert manifest["records"][0]["model_ref"] == {"type": "responses_api_models", "name": "policy"}
+    assert "agent_instance" not in manifest["records"][0] and "agent_kind" not in manifest["records"][0]
+    assert manifest["failures"] == [
+        {
+            "schema_version": manifest["failures"][0]["schema_version"],
+            "model_call_id": "c2",
+            "reason": "worker_capture_failed",
+            "model_ref": {"type": "responses_api_models", "name": "policy"},
+        }
+    ]
+
+
+async def test_every_row_of_two_agent_instances_names_its_agent_instance(store):
+    await store.begin_call("r1", "a1", identity=ASSISTANT)
+    named = _call_record("a1").model_copy(update={"agent_instance": "assistant", "agent_kind": "assistant"})
+    await store.record(_commit(named.model_copy(update={"model_ref": POLICY}), [USER_1], [ASSISTANT_1]))
+    await store.begin_call("r1", "j1", identity=JUDGE)
+    await store.record_failure("r1", "j1", "worker_capture_failed", identity=JUDGE)
+    await store.begin_call("r1", "j2", identity=JUDGE)
+    await store.refuse_call("r1", "j2", identity=JUDGE)
+
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+
+    [record] = manifest.records
+    assert (record.agent_instance, record.agent_kind, record.model_ref) == ("assistant", "assistant", POLICY)
+    [failure] = manifest.failures
+    assert (failure.agent_instance, failure.agent_kind, failure.model_ref) == ("judge.1", "judge", POLICY)
+    rows = store.export_rows("r1") if isinstance(store, FileLineageStore) else store._ledgers["r1"]
+    for row in rows:
+        expected = "assistant" if row["model_call_id"].startswith("a") else "judge.1"
+        assert row["agent_instance"] == expected
+        assert row["agent_kind"] == expected.partition(".")[0]
+        assert row["model_ref"] == {"type": "responses_api_models", "name": "policy"}
+    assert any(row.get("refused_before_generation") for row in rows)
+
+
+async def test_a_failure_written_without_a_name_inherits_its_intent_s_identity(store):
+    await store.begin_call("r1", "j1", identity=JUDGE)
+    await store.record_failure("r1", "j1", "request_finished_without_staged_coordinates")
+
+    [failure] = RolloutManifest.model_validate(await store.manifest("r1")).failures
+
+    assert (failure.agent_instance, failure.agent_kind, failure.model_ref) == ("judge.1", "judge", POLICY)
+
+
+async def test_a_failure_without_an_intent_or_a_name_stays_episode_wide(store):
+    await store.record_failure("r1", "lost", "worker_capture_failed")
+
+    [failure] = RolloutManifest.model_validate(await store.manifest("r1")).failures
+
+    assert failure.agent_instance is None and failure.model_ref is None

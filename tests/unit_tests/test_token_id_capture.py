@@ -353,7 +353,7 @@ def test_register_call_intent_uses_optional_sink_extension():
     calls: list[tuple[str, str]] = []
 
     class Sink:
-        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        async def begin_call(self, rollout_id: str, model_call_id: str, *, identity=None) -> None:
             calls.append((rollout_id, model_call_id))
 
     token = set_token_sink(CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink()))
@@ -496,7 +496,7 @@ def test_record_refusal_without_a_lineage_decision_records_no_parent():
 
 def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_dangling(caplog):
     class Sink:
-        async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        async def begin_call(self, rollout_id: str, model_call_id: str, *, identity=None) -> None:
             pass
 
     context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
@@ -1331,6 +1331,51 @@ def test_responses_call_captures_tokens_joined_to_eval_record(tmp_path):
     assert tokens[0].model_call_id == records[0].model_call_id
 
 
+def test_two_agent_instances_on_one_model_server_name_every_record(tmp_path):
+    from nemo_gym.token_id_capture.records import ModelRef
+
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    for name in ("assistant", "judge.2"):
+        response = client.post(
+            f"/ng-rollout/two-agents/ng-agent-instance/{name}/training-token-capture/v1/responses",
+            json={"input": name},
+        )
+        assert response.status_code == 200
+
+    entries = TokenCaptureStore(tmp_path).read_entries("two-agents")
+    records = read_model_call_records(CaptureStore(tmp_path), "two-agents")
+    assert sorted((entry.agent_instance, entry.agent_kind) for entry in entries) == [
+        ("assistant", "assistant"),
+        ("judge.2", "judge"),
+    ]
+    assert {entry.model_ref for entry in entries} == {ModelRef(name="srv")}
+    by_call = {record.model_call_id: record for record in records}
+    for entry in entries:
+        assert (by_call[entry.model_call_id].agent_instance, by_call[entry.model_call_id].agent_kind) == (
+            entry.agent_instance,
+            entry.agent_kind,
+        )
+        assert by_call[entry.model_call_id].model_ref.name == "srv"
+    intents = TokenCaptureStore(tmp_path).intents_path_for("two-agents").read_text().splitlines()
+    assert sorted(json.loads(line)["agent_instance"] for line in intents) == ["assistant", "judge.2"]
+
+
+def test_an_unnamed_call_records_only_the_model_server(tmp_path):
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    client.post("/ng-rollout/one-agent/training-token-capture/v1/responses", json={"input": "hi"})
+
+    [entry] = TokenCaptureStore(tmp_path).read_entries("one-agent")
+    payload = entry.model_dump(mode="json")
+    assert "agent_instance" not in payload and "agent_kind" not in payload
+    assert payload["model_ref"] == {"type": "responses_api_models", "name": "srv"}
+    [record] = read_model_call_records(CaptureStore(tmp_path), "one-agent")
+    assert record.agent_instance is None and record.agent_kind is None
+    [exchange] = CaptureStore(tmp_path).read("one-agent")
+    assert "agent_instance" not in exchange and "agent_kind" not in exchange
+    [intent] = TokenCaptureStore(tmp_path).intents_path_for("one-agent").read_text().splitlines()
+    assert json.loads(intent) == {"model_call_id": entry.model_call_id, "model_ref": payload["model_ref"]}
+
+
 def test_captured_entry_carries_content(tmp_path):
     client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
     client.post("/ng-rollout/task0-rollC/training-token-capture/v1/responses", json={"input": "hi"})
@@ -1861,7 +1906,7 @@ class _RecordingSink:
     async def put(self, entry: TokenEntry) -> None:
         self.entries.append(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         self.incomplete.append((rollout_id, model_call_id))
 
     async def close(self) -> None:
@@ -2782,7 +2827,7 @@ class _ConfiguredSink:
     async def put(self, entry) -> None:
         type(self).entries.append(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         pass
 
     async def close(self) -> None:
@@ -2814,7 +2859,7 @@ class _NotASink:
 class _NotCallableSink:
     put = "not a method"
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         pass
 
     async def close(self) -> None:
@@ -2828,7 +2873,7 @@ class _KwargSink:
     async def put(self, entry) -> None:
         pass
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         pass
 
     async def close(self) -> None:
