@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Trusted runtime cache and private, read-only workload mounts.
+"""Trusted runtime cache and read-only workload mounts.
 
 The execution manifest contains local paths and hashes. Only this helper sees
-the shared storage root; workload sandboxes receive their own role directory.
+the shared storage root. Workload sandboxes mount the immutable cached runtime
+files read-only and receive their own per-session submission directory.
 """
 
 import asyncio
@@ -21,6 +22,7 @@ from nemo_gym.sandbox.providers.base import SupportsSandboxSharedStorage
 RUNTIME_ROOT = "/opt/gym-runtime"
 PYTHON = RUNTIME_ROOT + "/python/bin/python3"
 STORAGE_ROOT = "/mnt/gym-runtime-storage"
+CACHE = "gym-swet-runtime-cache"
 SUBMISSION_ROOT = "/opt/gym-submission"
 ROLES = {"candidate": ("python", "opencode", "rg"), "judge": ("python",)}
 
@@ -46,7 +48,7 @@ def load_runtime_manifest(path: Path) -> dict:
 
 
 class RuntimeProvisioner:
-    """Reuse a verified cache while isolating each session's mounted binaries."""
+    """Mount one verified cache read-only while isolating each session's submission directories."""
 
     def __init__(self, *, provider_config: dict, manifest_path: Path, helper_image: str):
         self.manifest = load_runtime_manifest(manifest_path)
@@ -66,7 +68,13 @@ class RuntimeProvisioner:
         command = " ".join(quote(value) for value in ["python3", self._worker, action, *args])
         result = await self.helper.exec(command, timeout_s=600)
         if result.return_code or result.error_type:
-            raise RuntimeError("Trusted runtime preparation failed: " + (result.stderr or result.stdout or ""))
+            # Background OpenSandbox commands return the worker's traceback in stdout and
+            # only the exit status in stderr, so keep both to retain the errno.
+            details = "\n".join(part for part in (result.stderr, result.stdout) if part)
+            raise RuntimeError(
+                f"Trusted runtime preparation failed: {action} exited {result.return_code}"
+                f" ({result.error_type or 'process'}): {details[-4000:]}"
+            )
         return result
 
     async def _start(self):
@@ -83,12 +91,13 @@ class RuntimeProvisioner:
             )
         )
         await self.helper.upload(Path(__file__).with_name("runtime_worker.py"), self._worker)
-        await self._exec("init", STORAGE_ROOT + "/gym-swet-runtime-cache")
+        await self._exec("init", STORAGE_ROOT + "/" + CACHE)
         for name, artifact in self.manifest["artifacts"].items():
             await self._cache(name, artifact)
+        await self._exec("install", STORAGE_ROOT + "/" + CACHE + "/" + self.manifest["artifacts"]["python"]["sha256"])
 
     async def _cache(self, name: str, artifact: dict):
-        target = STORAGE_ROOT + "/gym-swet-runtime-cache/" + artifact["sha256"]
+        target = STORAGE_ROOT + "/" + CACHE + "/" + artifact["sha256"]
         checked = await self._exec("verify", target, artifact["sha256"])
         if (checked.stdout or "").strip() == "1":
             return
@@ -126,22 +135,22 @@ class RuntimeProvisioner:
             relative = "gym-swet-runtime-" + self._owner + "/" + uuid4().hex
             # Record ownership before preparation so failed setup can remove it.
             self._bundles[session_id] = relative
-            cache = STORAGE_ROOT + "/gym-swet-runtime-cache/"
-            roles = {
-                role: {name: cache + self.manifest["artifacts"][name]["sha256"] for name in names}
-                for role, names in ROLES.items()
-            }
-            await self._exec("prepare", STORAGE_ROOT + "/" + relative, json.dumps(roles), self._owner)
+            await self._exec("prepare", STORAGE_ROOT + "/" + relative, json.dumps(list(ROLES)))
             return relative
 
     def mount_options(self, session_id: str, role: str) -> dict:
-        runtime = self.provider.shared_volume_options(
-            self._bundles[session_id] + "/" + role, RUNTIME_ROOT, read_only=True
-        )
+        volumes = []
+        for name in ROLES[role]:
+            source = CACHE + "/" + self.manifest["artifacts"][name]["sha256"]
+            if name == "python":
+                source += ".python/python"
+            volumes += self.provider.shared_volume_options(source, RUNTIME_ROOT + "/" + name, read_only=True)[
+                "volumes"
+            ]
         submission = self.provider.shared_volume_options(
             self._bundles[session_id] + "/submission-" + role, SUBMISSION_ROOT, read_only=role == "judge"
         )
-        return {"volumes": runtime["volumes"] + submission["volumes"]}
+        return {"volumes": volumes + submission["volumes"]}
 
     async def seal_submission(self, session_id: str, manifest: dict) -> None:
         """Copy the candidate archive into a separate read-only judge mount and verify its digest."""

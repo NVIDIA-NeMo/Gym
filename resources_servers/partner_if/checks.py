@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 
 from resources_servers.partner_if import fixed_checks, tool_checks
 from resources_servers.partner_if.evidence import EvidenceBundle
@@ -44,6 +44,16 @@ class TextParams(StrictModel):
     def valid_source(self):
         if self.source != "answer" and not (self.source.startswith("artifact:") and len(self.source) > 9):
             raise ValueError("Source must be answer or artifact:<captured-name>")
+        return self
+
+
+class FileBlocksParams(StrictModel):
+    expected_paths: list[Text] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_paths(self):
+        if len(set(self.expected_paths)) != len(self.expected_paths):
+            raise ValueError("Expected file paths must be unique")
         return self
 
 
@@ -81,6 +91,7 @@ REGISTRY = {
     "text_contains_v1": Checker(TextParams, text_contains),
     "text_no_uuid_v1": fixed(text_no_uuid),
     "single_advertised_tool_call_v1": fixed(tool_checks.single_advertised_tool_call),
+    "file_blocks_v1": Checker(FileBlocksParams, fixed_checks.file_blocks),
     "scratchpad_comments_v1": fixed(fixed_checks.scratchpad_comments),
     "review_sections_v1": fixed(fixed_checks.review_sections),
     "max_100_words_v1": fixed(fixed_checks.max_100_words),
