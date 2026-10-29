@@ -16,7 +16,7 @@ import nemo_gym.server_utils as server_utils
 from nemo_gym.episode_types import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
-from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON, NeMoGymAsyncOpenAI
+from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON, NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.typed_exceptions import failure_report_for
 
 
@@ -190,3 +190,181 @@ async def test_only_a_timeout_after_the_request_was_sent_is_a_response_timeout(
     [attempt] = report.events.values()
     assert report.failure_id == attempt.event_id
     assert (attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON) is waited_for_response
+
+
+def _reply(status: int, *, headers: dict | None = None, body: bytes = b"") -> SimpleNamespace:
+    return SimpleNamespace(
+        status=status, headers=headers or {}, content=SimpleNamespace(read=AsyncMock(return_value=body))
+    )
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_a_final_non_retryable_status_is_the_calls_observed_attempt(monkeypatch, status):
+    reply = _reply(status, body=b'{"error": {"code": "budget_exceeded"}}')
+    wire = SimpleNamespace(request=AsyncMock(return_value=reply))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        returned = await model._request(method="POST", url="http://model.test/responses")
+
+    # Not retried, and handed back for the caller to raise or handle.
+    assert returned is reply and wire.request.await_count == 1
+    [event] = log.report.events.values()
+    assert (event.boundary, event.failure_kind, event.operation, event.http_status) == (
+        FailureBoundary.MODEL,
+        MODEL_REQUEST_ERROR,
+        "model_request",
+        status,
+    )
+    assert event.attempt_id == f"{event.operation_id}-1" and log.report.failure_id is None
+
+
+async def test_a_failure_a_gym_server_forwarded_is_not_recorded_twice(monkeypatch):
+    forwarded = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="upstream")
+    report = FailureReport(failure_id=forwarded.event_id, events={forwarded.event_id: forwarded})
+    wire = SimpleNamespace(request=AsyncMock(return_value=_reply(422, headers=FailureHeader.encode(report))))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        await model._request(method="POST", url="http://model.test/responses")
+
+    assert list(log.report.events) == [forwarded.event_id]
+
+
+async def test_a_successful_call_records_nothing(monkeypatch):
+    wire = SimpleNamespace(request=AsyncMock(return_value=_reply(200)))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        await model._request(method="POST", url="http://model.test/responses")
+
+    assert not log.report.events
+
+
+async def _scripted_model(monkeypatch, replies: list[tuple[int, bytes, dict]]):
+    """A real local model endpoint that answers each POST /v1/responses with the next scripted reply."""
+    script = list(replies)
+
+    async def endpoint(request):
+        status, body, headers = script.pop(0)
+        return web.Response(status=status, body=body, headers=headers, content_type="application/json")
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", endpoint)
+    server = TestServer(app)
+    await server.start_server()
+    session = aiohttp.ClientSession()
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(server_utils.asyncio, "sleep", AsyncMock())
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url=str(server.make_url("/v1")), max_rate_limit_wait_seconds=0)
+    return model, script, server, session
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        pytest.param(400, b'{"error": {"message": "bad request"}}', id="400"),
+        pytest.param(401, b'{"error": {"message": "denied for this request"}}', id="401-not-permanent"),
+        pytest.param(403, b'{"error": {"message": "forbidden"}}', id="403-not-permanent"),
+        pytest.param(
+            422, b'{"error": {"type": "budget_exceeded", "message": "Budget has been exceeded"}}', id="422-budget-body"
+        ),
+    ],
+)
+async def test_the_error_raised_for_a_final_non_retryable_status_names_that_attempt(monkeypatch, status, body):
+    model, script, server, session = await _scripted_model(monkeypatch, [(status, body, {})])
+    try:
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(aiohttp.ClientResponseError) as caught:
+                await model.create_response(model="m", input="x")
+            report = log.reply_report(caught.value)
+    finally:
+        await session.close()
+        await server.close()
+
+    [attempt] = report.events.values()
+    assert not script and caught.value.status == status
+    assert report.failure_id == attempt.event_id and attempt.http_status == status
+    assert attempt.attempt_id == f"{attempt.operation_id}-1" and attempt.cause_id is None
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        pytest.param(401, b'{"error": {"code": "invalid_api_key"}}', id="401-permanent-auth"),
+        pytest.param(429, b'{"error": {"code": "insufficient_quota"}}', id="429-permanent-quota"),
+    ],
+)
+async def test_a_permanent_trip_names_the_attempt_that_tripped_it_and_later_calls_name_none(monkeypatch, status, body):
+    model, script, server, session = await _scripted_model(monkeypatch, [(status, body, {})])
+    try:
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(PermanentEndpointError) as tripped:
+                await model.create_response(model="m", input="x")
+            report = log.reply_report(tripped.value)
+        with RequestFailureLog.capture() as later_log:
+            with pytest.raises(PermanentEndpointError) as later:
+                await model.create_response(model="m", input="x")
+            later_report = later_log.reply_report(later.value)
+    finally:
+        await session.close()
+        await server.close()
+
+    [attempt] = report.events.values()
+    assert report.failure_id == attempt.event_id and attempt.http_status == status
+    # No request was sent for the later call, so it has no attempt and no cause.
+    assert not script and later_report.failure_id is None and not later_report.events
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        pytest.param([(429, b'{"error": {"code": "rate_limit_exceeded"}}', {"Retry-After": "0"})], id="recovered-429"),
+        pytest.param([], id="handled-400"),
+    ],
+)
+async def test_an_earlier_operations_attempt_never_becomes_a_later_operations_cause(monkeypatch, earlier):
+    replies = [*earlier, (200, b"{}", {})] if earlier else [(400, b"{}", {})]
+    model, script, server, session = await _scripted_model(monkeypatch, [*replies, (422, b"{}", {})])
+    try:
+        with RequestFailureLog.capture() as log:
+            if earlier:
+                assert await model.create_response(model="m", input="x") == {}
+            else:
+                handled = await model._request(method="POST", url=f"{model.base_url}/responses", json={})
+                assert handled.status == 400
+            [before] = log.report.events.values()
+            assert log.reply_report(None).failure_id is None
+            with pytest.raises(aiohttp.ClientResponseError) as caught:
+                await model.create_response(model="m", input="x")
+            report = log.reply_report(caught.value)
+    finally:
+        await session.close()
+        await server.close()
+
+    current = report.events[report.failure_id]
+    assert not script and current.http_status == 422 and current.operation_id != before.operation_id
+    assert current.cause_id is None and report.events[before.event_id] == before
+
+
+async def test_a_forwarded_gym_failure_stays_the_cause_and_no_attempt_is_added(monkeypatch):
+    forwarded = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="upstream")
+    header = FailureHeader.encode(FailureReport(failure_id=forwarded.event_id, events={forwarded.event_id: forwarded}))
+    model, script, server, session = await _scripted_model(monkeypatch, [(422, b"{}", header)])
+    try:
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(aiohttp.ClientResponseError) as caught:
+                await model.create_response(model="m", input="x")
+            report = log.reply_report(caught.value)
+    finally:
+        await session.close()
+        await server.close()
+
+    assert not script and report.failure_id == forwarded.event_id and list(report.events) == [forwarded.event_id]
