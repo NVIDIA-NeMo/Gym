@@ -301,7 +301,21 @@ class RolloutLineage:
         """
         fingerprint = assistant_fingerprint(messages)
         if not fingerprint:
-            return ParentResolutionStatus.ROOT, None, ""
+            if not any(item.get("type") == "reasoning" for item in messages):
+                return ParentResolutionStatus.ROOT, None, ""
+            # Initial reasoning has no assistant fingerprint. Require the exact
+            # served output and preserved context before reusing its tokens.
+            witnessed = select_witness(
+                messages,
+                [
+                    node.reasoning_witness
+                    for node in self.by_call_id.values()
+                    if node.reasoning_witness is not None and node.reasoning_witness.call_id == node.call_id
+                ],
+            )
+            if witnessed is None:
+                return ParentResolutionStatus.UNRESOLVED, None, "no_match"
+            return ParentResolutionStatus.RESOLVED, self.by_call_id[witnessed], "reasoning_output_witness"
         # dict.fromkeys: a call id indexed twice (e.g. by racing refreshes) is one candidate.
         call_ids = list(dict.fromkeys(self.by_fingerprint.get(fingerprint) or []))
         candidates = [
@@ -1064,7 +1078,8 @@ class FileLineageStore(IncrementalLineageStore):
             records = {
                 str(record["model_call_id"]): record
                 for record in self._read(rollout_id)
-                if record.get("fingerprint") and record.get("fingerprint_version") == FINGERPRINT_VERSION
+                if (record.get("fingerprint") or record.get("reasoning_witness"))
+                and record.get("fingerprint_version") == FINGERPRINT_VERSION
             }
         lineage = RolloutLineage()
         for call_id, record in records.items():

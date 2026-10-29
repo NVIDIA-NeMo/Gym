@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Disambiguate reasoning-only continuations using exact served output witnesses.
 
-The caller supplies only otherwise ambiguous, committed lineage candidates.
+Resolve initial reasoning-only histories or disambiguate committed candidates.
 The echoed output must immediately follow an unchanged request context, retain
 all server-issued reasoning IDs and content, and contain no additional model
 turn. Missing, altered or duplicate witnesses abstain. Persist the witness in
@@ -70,7 +70,7 @@ def make_witness(
 
 
 def select_witness(request: Sequence[Mapping[str, object]], candidates: Sequence[ReasoningWitness]) -> str | None:
-    """Select one exact, contiguous output witness among ambiguous candidates.
+    """Select one exact, contiguous output witness among committed candidates.
 
     After that output, only newly appended user messages and tool results are
     allowed. No user/tool item may precede or interrupt the witnessed output.

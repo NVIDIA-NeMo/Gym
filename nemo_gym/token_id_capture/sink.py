@@ -232,7 +232,9 @@ async def resolve_parent(request_messages: list | None) -> None:
         return
     context.request_items = list(request_messages)
     try:
-        if not assistant_fingerprint(request_messages):
+        if not assistant_fingerprint(request_messages) and not any(
+            item.get("type") == "reasoning" for item in request_messages
+        ):
             context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
         elif context.lineage_store is None:
             context.parent_resolution = LineageResolution(
