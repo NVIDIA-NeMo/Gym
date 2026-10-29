@@ -14,6 +14,7 @@
 # limitations under the License.
 import difflib
 import json
+import re
 import sys
 from typing import Dict, Iterable, Optional
 
@@ -27,6 +28,19 @@ def did_you_mean(value: str, candidates: Iterable[str]) -> str:
         n=1,
     )
     return f" Did you mean `{matches[0]}`?" if matches else ""
+
+
+def hydra_quote(value: str) -> str:
+    """Single-quote `value` as a literal for Hydra's override grammar, so it parses back to the same string.
+
+    `json.dumps` is not that encoder: Hydra keeps `\\uXXXX`, `\\t` and a doubled backslash literally, so a Unicode
+    or backslash-containing filename would reach the command under another name. Hydra un-escapes a backslash
+    only when its run ends at a quote character, so only those runs (and the quote itself) are escaped here.
+    Everything else, Unicode included, is passed through unchanged.
+    """
+    escaped = re.sub(r"(\\*)(')", lambda m: m.group(1) * 2 + "\\'", value)
+    escaped = re.sub(r"(\\+)$", lambda m: m.group(1) * 2, escaped)
+    return f"'{escaped}'"
 
 
 def exit_unknown_component(name: str, candidates: Iterable[str], type_label: str) -> None:
