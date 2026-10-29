@@ -32,7 +32,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -173,7 +173,6 @@ def _sandbox_prepare_command(directory: str) -> str:
     # Keep the bootstrap POSIX sh: Bash must exist before its installer can run.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "Pi in the task sandbox requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -268,6 +267,29 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             )
 
     return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+
+
+def _parse_recorded_events(raw: str) -> list[tuple[float, dict[str, Any]]]:
+    """Read the runner's ``[seen_at, event]`` lines, skipping any it kept that are not valid records."""
+    events = []
+    # JSONL: split on "\n" only; str.splitlines() would also split inside strings on U+2028/U+0085.
+    for line in raw.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            record = None
+        if (
+            isinstance(record, list)
+            and len(record) == 2
+            and type(record[0]) in (int, float)
+            and isinstance(record[1], dict)
+        ):
+            events.append((float(record[0]), record[1]))
+        else:
+            LOG.warning("Skipping malformed Pi event record")
+    return events
 
 
 async def _read_pi_stdout(stream: asyncio.StreamReader) -> tuple[str, list[tuple[float, dict[str, Any]]]]:
@@ -733,7 +755,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"Pi sandbox installation failed (exit {installed.return_code}, "
                     f"error_type={installed.error_type}): {details[-16000:]}"
                 )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -890,34 +912,28 @@ class PiAgent(SimpleResponsesAPIAgent):
             command += ["--thinking", self.config.thinking]
         if system:
             command += ["--append-system-prompt", system]
-        payload = {
-            "directory": state.session.session_dir,
-            "command": command,
-            "prompt": prompt,
-            "cwd": state.session.workdir,
-            "env": {
-                "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
-                "PI_SKIP_VERSION_CHECK": "1",
-                "PI_TELEMETRY": "0",
-                "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
-                **mcp_env,
-            },
+        env = {
+            "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
+            "PI_SKIP_VERSION_CHECK": "1",
+            "PI_TELEMETRY": "0",
+            "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
+            **mcp_env,
         }
         try:
             async with self.sem:
                 raw = await state.execute(
-                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                    command=command,
+                    env=env,
+                    prompt=prompt,
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
                 )
         except BaseException as failure:
             # Common finalization captures before close removes the session directory.
             raw = state.session.artifacts if state.session.artifacts is not None else ""
-            events, output = [], []
-            for line in (part for part in raw.split("\n") if part.strip()):
+            events, output = _parse_recorded_events(raw), []
+            for _, event in events:
                 try:
-                    observed_at, event = json.loads(line)
-                    if not isinstance(event, dict):
-                        continue
-                    events.append((float(observed_at), event))
                     parsed, _ = parse_pi_events(json.dumps(event))
                     output.extend(parsed)
                 except (ValueError, TypeError, AttributeError):
@@ -948,13 +964,14 @@ class PiAgent(SimpleResponsesAPIAgent):
                 if isinstance(record, AgentInvocation):
                     record.status = "incomplete"
             raise
-        # JSONL: split on "\n" only; str.splitlines() would also split inside strings on U+2028/U+0085.
-        events = [tuple(json.loads(line)) for line in raw.split("\n") if line.strip()]
+        events = _parse_recorded_events(raw)
         output = []
         usage = {"input_tokens": 0, "output_tokens": 0}
         cached_tokens: int | None = 0
         terminal_error = None
         context_overflow = False
+        compaction_started = False
+        recovery_error = None
         stop_reasons = []
         mcp_setup_failure = None
         messages = []
@@ -963,6 +980,16 @@ class PiAgent(SimpleResponsesAPIAgent):
                 context_overflow = event.get("context_overflow") is True
             elif event.get("type") == "ng_gym_mcp_setup_failed":
                 mcp_setup_failure = str(event.get("error") or "")
+            elif event.get("type") == "compaction_start":
+                compaction_started = True
+            elif event.get("type") == "compaction_end":
+                # Pi recovers from an overflow by compacting, then retrying. A compaction that started and failed (a 503,
+                # a dropped connection) ends the run with no retry. Pi's verdict that the retry overflowed again comes
+                # with no start.
+                failure = event.get("errorMessage")
+                if compaction_started and event.get("reason") == "overflow" and isinstance(failure, str):
+                    recovery_error = failure
+                compaction_started = False
             message = event.get("message") or {}
             if event.get("type") == "message_end":
                 messages.append(message)
@@ -999,6 +1026,13 @@ class PiAgent(SimpleResponsesAPIAgent):
         runtime = state.runtime_info
         assert cleanup is not None
         model_limit = bool(stop_reasons and stop_reasons[-1] == "error" and context_overflow)
+        compaction_failure = None
+        if recovery_error and stop_reasons and stop_reasons[-1] == "error":
+            # Pi's overflow recovery failed on its compaction call, so the failed call was never retried, even when
+            # Gym does not count its error as an overflow. Pi wraps the compaction call's error in its own message,
+            # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
+            model_limit, terminal_error = False, recovery_error
+            compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
         if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
             # Expected model limits/interruptions do not invalidate partial work.
             # They must not erase an independently confirmed worker or cleanup failure.
@@ -1097,7 +1131,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             if not execution_error and _reported_model_error(
                 assistant, cleanup, will_retry=terminal.get("willRetry") is True
             ):
-                return self.report_outcome(response, assistant)
+                # Classify a failed compaction call, not the overflow it was recovering from.
+                return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")
         return response
 

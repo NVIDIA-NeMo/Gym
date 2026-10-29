@@ -41,7 +41,7 @@ class PlanBenchmark(BaseModel):
 
 
 class PlanTask(BaseModel):
-    """One task: its identity and a digest of the exact input a run receives."""
+    """One task: its identity and a digest of its prepared input."""
 
     model_config = ConfigDict(extra="forbid")
 

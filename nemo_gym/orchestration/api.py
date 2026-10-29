@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import os
 import re
 import warnings
@@ -26,6 +27,7 @@ from pydantic import (
     PrivateAttr,
     SerializationInfo,
     Tag,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_validator,
@@ -49,6 +51,9 @@ RUNTIME_ENV_PREFIX = "runtime:"
 # `model_dump` context flag: write each `host:` env value as its `host:VAR` reference, so a
 # record meant for other readers never holds the submitter's resolved secrets.
 HOST_ENV_REFS = "host_env_refs"
+# `model_validate` context flag for reading a config that `persist()` saved. Records written before
+# `lit:` was kept on the dump hold literals without a prefix; this reads such a value as `lit:`.
+SAVED_CONFIG = "saved_config"
 
 
 class _HostEnvRefs(BaseModel):
@@ -68,13 +73,19 @@ class _HostEnvRefs(BaseModel):
     @field_serializer("env", check_fields=False)
     def _serialize_env(self, env: dict[str, str], info: SerializationInfo) -> dict[str, str]:
         if info.context and info.context.get(HOST_ENV_REFS):
-            return {k: self._host_env_refs.get(k, v) for k, v in env.items()}
+            # Every value keeps a prefix so the record validates again. A resolved `runtime:` value already
+            # carries its own; anything else that did not come from `host:` is a literal.
+            return {
+                k: self._host_env_refs.get(k) or (v if v.startswith(RUNTIME_ENV_PREFIX) else f"lit:{v}")
+                for k, v in env.items()
+            }
         return env
 
 
-def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
+def resolve_env_dict(env: dict[str, str], *, saved_config: bool = False) -> dict[str, str]:
     """Resolve `lit:`/`host:`/`runtime:` prefixes on `env` values. Every value must use one
     of these prefixes; a missing or misspelled prefix raises rather than being guessed at.
+    `saved_config` reads a value without a prefix as `lit:` (see SAVED_CONFIG).
 
     - `lit:VALUE` -> literal VALUE.
     - `host:VAR` -> read from os.environ[VAR] on the machine running `gym eval submit`;
@@ -101,6 +112,8 @@ def resolve_env_dict(env: dict[str, str]) -> dict[str, str]:
             if not _ENV_VAR_NAME_RE.match(var):
                 raise ValueError(f"env[{key!r}]: {var!r} is not a valid environment variable name for runtime:{var}")
             resolved[key] = f"{RUNTIME_ENV_PREFIX}{var}"
+        elif saved_config:
+            resolved[key] = raw
         else:
             raise ValueError(
                 f"env[{key!r}]: {raw!r} must start with one of the prefixes 'lit:', 'host:', or 'runtime:'"
@@ -144,8 +157,8 @@ class BaseServiceConfig(_HostEnvRefs, _StrictModel):
 
     @field_validator("env")
     @classmethod
-    def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
-        return resolve_env_dict(v)
+    def _resolve_env_prefixes(cls, v: dict[str, str], info: ValidationInfo) -> dict[str, str]:
+        return resolve_env_dict(v, saved_config=bool(info.context and info.context.get(SAVED_CONFIG)))
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -417,6 +430,12 @@ class ResumeConfig(_StrictModel):
     max_walltime: str | None = None
 
 
+_COMMAND_AND_RUN = (
+    "sets both `command` and `run`, but `run` only configures `gym eval run`, which `command` replaces. "
+    "Fold those settings into the command, or drop it."
+)
+
+
 class BenchmarkRunConfig(_StrictModel):
     # Hydra overrides forwarded to `gym eval prepare`. Flattened to +key=value tokens.
     prepare: dict[str, Any] = {}
@@ -432,12 +451,11 @@ class BenchmarkRunConfig(_StrictModel):
     command: str | None = None
 
     @model_validator(mode="after")
-    def _validate_command(self) -> "BenchmarkRunConfig":
-        if self.command is not None and self.run:
-            raise ValueError(
-                "A benchmark sets both `command` and `run`, but `run` only configures `gym eval run`, which "
-                "`command` replaces. Fold those settings into the command, or drop it."
-            )
+    def _validate_command(self, info: ValidationInfo) -> "BenchmarkRunConfig":
+        # A saved config holds the policy keys driver.policy_model wrote into a command's run at submit, which
+        # the command reads as NEMO_GYM_POLICY_*. SubmitConfig checks a saved command, where the policy is known.
+        if self.command is not None and self.run and not (info.context and info.context.get(SAVED_CONFIG)):
+            raise ValueError(f"A benchmark {_COMMAND_AND_RUN}")
         if self.command is not None and self.resume_config is not None:
             raise ValueError(
                 "A benchmark sets both `command` and `resumable`, but a resumed job only passes "
@@ -494,8 +512,8 @@ class DriverConfig(_HostEnvRefs, _StrictModel):
 
     @field_validator("env")
     @classmethod
-    def _resolve_env_prefixes(cls, v: dict[str, str]) -> dict[str, str]:
-        return resolve_env_dict(v)
+    def _resolve_env_prefixes(cls, v: dict[str, str], info: ValidationInfo) -> dict[str, str]:
+        return resolve_env_dict(v, saved_config=bool(info.context and info.context.get(SAVED_CONFIG)))
 
 
 class JobConfig(_StrictModel):
@@ -507,10 +525,12 @@ class OtelConfig(_StrictModel):
     """An OpenTelemetry collector beside every benchmark job: scrapes each model service's
     Prometheus `/metrics`, receives OTLP from the job's own processes on :4317/:4318, and ships
     both to an OTLP/HTTP backend while keeping a copy under `<job dir>/otel/`. On by default, so
-    a run is observable unless it opts out; `endpoint` and `service_name` come from the
-    deployment's own config (a cluster fragment, typically) and are required while enabled."""
+    a run is observable unless it opts out. Remote export needs `endpoint`, `service_name` and
+    a token from the submitting shell; without the token, only the local copies are written."""
 
     enabled: bool = True
+    # Keep local JSONL collection when remote export is off. A missing token forces this false.
+    remote_export: bool = True
     # Collector binary: a path on the compute nodes (the release tarball's static `otelcol-contrib`
     # on shared storage) when `container` is unset, else a path inside `container`.
     binary: str = "otelcol-contrib"
@@ -576,7 +596,7 @@ class SubmitConfig(_StrictModel):
         return deployed
 
     @model_validator(mode="after")
-    def _resolve_and_validate_placements(self) -> "SubmitConfig":
+    def _resolve_and_validate_placements(self, info: ValidationInfo) -> "SubmitConfig":
         compute_names = set(self.compute)
 
         if len(compute_names) > 1:
@@ -693,6 +713,18 @@ class SubmitConfig(_StrictModel):
 
         self._validate_pd_services(compute)
 
+        # A saved command may keep only the keys the policy block below derived at submit, from a model service.
+        saved_config = bool(info.context and info.context.get(SAVED_CONFIG))
+        policy_service = self.services.get(self.driver.policy_model or "")
+        derived_policy_keys = (
+            {"policy_base_url", "policy_model_name", "policy_api_key"}
+            if saved_config and isinstance(policy_service, BaseModelServiceConfig)
+            else set()
+        )
+        for bench_name, benchmark in self.driver.benchmarks.items():
+            if benchmark.command is not None and benchmark.run.keys() - derived_policy_keys:
+                raise ValueError(f"Benchmark '{bench_name}' {_COMMAND_AND_RUN}")
+
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
                 raise ValueError(
@@ -701,24 +733,29 @@ class SubmitConfig(_StrictModel):
                 )
             service = self.services[self.driver.policy_model]
             if isinstance(service, BaseModelServiceConfig):
+                if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
+                    policy_base_url = service.node_urls(compute.node_pools[service.node_pool].nodes)
+                else:
+                    policy_base_url = f"http://{self.driver.policy_host}:{service.port}/v1"
+                policy_run = {
+                    "policy_base_url": policy_base_url,
+                    "policy_model_name": service.served_model_name or service.model,
+                    # vLLM doesn't require auth; dummy key satisfies clients that require the header.
+                    "policy_api_key": "dummy",  # pragma: allowlist secret
+                }
+                # A saved config holds the keys this block wrote at submit; only a value that differs conflicts.
                 for bench_name, benchmark in self.driver.benchmarks.items():
                     conflicts = [
-                        k for k in ("policy_base_url", "policy_model_name", "policy_api_key") if k in benchmark.run
+                        k
+                        for k, v in policy_run.items()
+                        if k in benchmark.run and not (saved_config and benchmark.run[k] == v)
                     ]
                     if conflicts:
                         raise ValueError(
                             f"Benchmark '{bench_name}' run config already sets {conflicts} "
                             f"but driver.policy_model is also set. Remove one."
                         )
-                    if isinstance(service, VllmNodeServiceConfig) and service.server_per_node:
-                        benchmark.run["policy_base_url"] = service.node_urls(
-                            compute.node_pools[service.node_pool].nodes
-                        )
-                    else:
-                        benchmark.run["policy_base_url"] = f"http://{self.driver.policy_host}:{service.port}/v1"
-                    benchmark.run["policy_model_name"] = service.served_model_name or service.model
-                    # vLLM doesn't require auth; dummy key satisfies clients that require the header.
-                    benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
+                    benchmark.run.update(copy.deepcopy(policy_run))
 
         return self
 

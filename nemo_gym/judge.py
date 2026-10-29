@@ -24,7 +24,12 @@ aggregate``), and retryable on resume.
 
 Boundary: a failed *call* (transport/timeout/auth/HTTP) → JudgeError → sidecar; a
 *received-but-unparseable* response is a legitimate wrong answer (let the parser
-score it, don't raise). Empty output is a per-benchmark call, so servers differ.
+score it, don't raise), unless the benchmark explicitly treats an invalid judge
+verdict as an unusable grade. FrontierScience Research uses that exception for
+missing/invalid final numeric rubric verdicts: retry through the judge-failure
+sidecar rather than assign zero points to the model answer. Completion checks
+must still reject a partial evaluation. Empty output is a per-benchmark call,
+so servers differ.
 
 Wrap the call, not the scoring around it: ``reraise_judge_errors`` relabels every
 exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
@@ -40,6 +45,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
@@ -88,13 +94,26 @@ async def call_judge(
     ``timeout_seconds`` bounds a single attempt. Gym's shared aiohttp client is built with no
     timeout, so without this one unanswered judge call hangs its rollout until the job's wall
     clock, and a caller's retry loop never gets to run.
+
+    The enclosing verify execution supplies the invocation identity; all its judge
+    calls and retries share that identity. Standalone calls do not invent a verifier execution.
     """
 
     async def _call() -> ResponseT:
+        # Two independent concerns, both expressed as kwargs on the same POST: the deadline that
+        # bounds this attempt, and the verifier-invocation header that ties it to its execution.
         kwargs: dict[str, Any] = {}
         if timeout_seconds is not None:
             kwargs["timeout"] = ClientTimeout(total=timeout_seconds)
-        http_response = await server_client.post(server_name=server_name, url_path=url_path, json=json, **kwargs)
+        invocation_id = current_verifier_invocation_id()
+        if invocation_id:
+            kwargs["headers"] = {VERIFIER_INVOCATION_HEADER: invocation_id}
+        http_response = await server_client.post(
+            server_name=server_name,
+            url_path=url_path,
+            json=json,
+            **kwargs,
+        )
         await raise_for_status(http_response)
         return response_model.model_validate(await get_response_json(http_response))
 

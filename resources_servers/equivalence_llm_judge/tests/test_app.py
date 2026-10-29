@@ -18,7 +18,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.encoders import jsonable_encoder
-from pytest import approx, fixture, mark
+from pydantic import ValidationError
+from pytest import approx, fixture, mark, raises
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
@@ -709,6 +710,56 @@ class TestJudgeParsing:
     )
     def test_literal_and_empty_labels(self, text, equal_label, not_equal_label, expected) -> None:
         assert _match_verdict_labels(text, equal_label, not_equal_label) == expected
+
+    @mark.parametrize(
+        "case_insensitive,is_equal,verdict,issues",
+        [(True, True, "Judgement: yes", []), (False, False, None, ["no_verdict"])],
+    )
+    async def test_capitalised_verdict_scores_only_with_case_insensitive_labels(
+        self, server, case_insensitive, is_equal, verdict, issues
+    ) -> None:
+        """Upstream HLE reads a structured `correct: yes|no` field whose case cannot vary; the free-text
+        parser needs the opt-in to accept "Judgement: Yes". Off, the byte-exact behaviour is unchanged."""
+        server.config.judge_labels_case_insensitive = case_insensitive
+        text = "Reasoning: identical.\nJudgement: Yes\nConfidence: 100"
+
+        got_equal, record = await self._judge(server, text)
+
+        assert (got_equal, record.verdict_label, record.judgement_parsing_issues) == (is_equal, verdict, issues)
+        # Legacy rollouts (saved judge response, no diagnostics) are re-parsed with the same setting.
+        legacy = jsonable_encoder(record)
+        legacy.pop("judgement_parsing_issues", None)
+        rate = server.compute_metrics([[{"judge_evaluations": [legacy]}]])["judgement_parsing_issue_rate"]
+        assert rate == float(bool(issues))
+
+    async def test_case_insensitive_labels_keep_the_last_verdict_rule(self, server) -> None:
+        server.config.judge_labels_case_insensitive = True
+
+        is_equal, record = await self._judge(server, "Judgement: yes\nOn reflection, JUDGEMENT: No")
+
+        assert is_equal is False
+        assert record.verdict_label == "Judgement: no"  # the configured label, not the text's spelling
+        assert record.judgement_parsing_issues == ["conflicting_verdicts"]
+
+    @mark.parametrize(
+        "text,equal_label,not_equal_label,expected",
+        [
+            ("JUDGEMENT: YES", "Judgement: yes", "Judgement: no", ["Judgement: yes"]),
+            ("incorrect", "CORRECT", "INCORRECT", ["INCORRECT"]),  # the consumption rule survives folding
+            ("Correct, then incorrect", "CORRECT", "INCORRECT", ["CORRECT", "INCORRECT"]),
+        ],
+    )
+    def test_case_insensitive_matches_return_the_configured_labels(
+        self, text, equal_label, not_equal_label, expected
+    ) -> None:
+        assert _match_verdict_labels(text, equal_label, not_equal_label, case_insensitive=True) == expected
+        assert _match_verdict_labels(text, equal_label, not_equal_label) == []
+
+    def test_labels_differing_only_in_case_are_rejected_when_case_is_ignored(self, server) -> None:
+        fields = server.config.model_dump() | {"judge_equal_label": "YES", "judge_not_equal_label": "yes"}
+        LLMJudgeResourcesServerConfig.model_validate(fields)  # byte-exact matching tells them apart
+        with raises(ValidationError, match="differ only in case"):
+            LLMJudgeResourcesServerConfig.model_validate(fields | {"judge_labels_case_insensitive": True})
 
     @staticmethod
     def _rollout(*issues: list[str]) -> dict:

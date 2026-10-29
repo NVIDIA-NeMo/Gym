@@ -10,6 +10,7 @@ import shlex
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import threading
 from contextlib import asynccontextmanager, contextmanager
@@ -24,6 +25,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -31,7 +33,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
-from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest
+from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
 
 
 def seed(*, session_id: str = "pi-session") -> AgentSeedSessionRequest:
@@ -94,6 +96,22 @@ def events(*, stop_reason="stop") -> str:
     )
 
 
+def staged(sandbox) -> dict:
+    """The activation as the runner sees it: params.sh sourced by bash, plus the staged prompt."""
+    script = 'source /dev/stdin; printf "%s\\0" "$cwd" "${#command[@]}" "${command[@]}" "${env[@]}"'
+    params = sandbox.files[f"{sandbox.directory}/params.sh"]
+    values = subprocess.run(
+        ["bash", "-c", script], input=params, capture_output=True, text=True, check=True
+    ).stdout.split("\0")[:-1]
+    count = int(values[1])
+    return {
+        "cwd": values[0],
+        "command": values[2 : 2 + count],
+        "env": dict(item.split("=", 1) for item in values[2 + count :]),
+        "prompt": sandbox.files[f"{sandbox.directory}/prompt.txt"],
+    }
+
+
 class Sandbox:
     def __init__(self):
         self.files = {}
@@ -117,7 +135,7 @@ class Sandbox:
         self.cleanup_available = True
 
     async def execute(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor.sh" in command:
             return await self.launch(command, **kwargs)
         if "ln -s stop " in command:
             await self.signal()
@@ -139,13 +157,11 @@ class Sandbox:
         self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def run(self, command, **kwargs):
-        payload_path = next(path for path in self.files if path.endswith("/input.json"))
-        payload = json.loads(self.files[payload_path])
-        assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
+        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh"))
+        assert staged(self)["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "sandbox_runner.py" in command
-        assert "process_supervisor.py" in command
-        self.directory = payload["directory"]
+        assert f"bash {self.directory}/{HARNESS_RUNNER_FILE} {self.directory}/params.sh" in command
+        assert "process_supervisor.sh" in command
         self.started.set()
         if not self.blocked:
             self.exited.set()
@@ -154,7 +170,7 @@ class Sandbox:
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def stop_runner(self):
-        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/input.json"))
+        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh"))
         self.result["timed_out"] = True
         self.save_result()
         self.exited.set()
@@ -216,7 +232,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
             directory = agent._session_records[session_id].state.session.session_dir
-            assert f"{directory}/process_supervisor.py" not in sandbox.files
+            assert f"{directory}/process_supervisor.sh" not in sandbox.files
             installer = f"{directory}/install_pi_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -227,7 +243,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
             result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
             assert result.status_code == 200, result.text
-            assert f"{directory}/process_supervisor.py" in sandbox.files
+            assert f"{directory}/process_supervisor.sh" in sandbox.files
             body = result.json()
             assert body["status"] == "completed"
             assert [item["type"] for item in body["output"]] == [
@@ -240,7 +256,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert body["usage"]["input_tokens_details"]["cached_tokens"] is None
             assert body["metadata"]["harness_execution"] == "sandbox"
             assert "_ng_agent_observations" not in body
-            payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+            payload = staged(sandbox)
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
             assert "PATH" not in payload["env"]
@@ -536,7 +552,7 @@ async def test_sandbox_runtime_guards_reach_the_pi_invocation(setup):
     request, session_id, task = await activate(agent, sandbox)
     response = await task
     assert response.status == "completed"
-    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    payload = staged(sandbox)
     assert payload["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == "123"
     assert f"{sandbox.directory}/runtime-guards.mjs" in payload["command"]
     assert "tool_call" in sandbox.files[f"{sandbox.directory}/runtime-guards.mjs"]
@@ -561,7 +577,7 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup):
     request, session_id, task = await activate(agent, sandbox, body)
     response = await task
     assert response.status == "completed"
-    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    payload = staged(sandbox)
     extension = f"{sandbox.directory}/gym_mcp.mjs"
     assert sandbox.files[extension] == Path(__file__).parents[1].joinpath("gym_mcp.mjs").read_text()
     assert payload["command"][payload["command"].index(extension) - 1] == "--extension"
@@ -603,7 +619,7 @@ async def test_no_mcp_grant_stages_no_tool_extension(setup):
     agent, sandbox = setup
     request, session_id, task = await activate(agent, sandbox)
     await task
-    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    payload = staged(sandbox)
     assert not any(path.endswith("gym_mcp.mjs") for path in [*payload["command"], *sandbox.files])
     assert "NEMO_GYM_PI_MCP_CONFIG" not in payload["env"]
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -891,7 +907,7 @@ def test_instructions_and_text_parts_reach_pi_without_other_provider_credentials
             },
         )
         assert response.status_code == 200, response.text
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = staged(sandbox)
         assert payload["command"][-2:] == [
             "--append-system-prompt",
             "config instruction\n\nrequest instruction\n\ninput instruction",
@@ -1478,10 +1494,8 @@ async def _run_locally(command, *, limit=8, **kwargs):
 
 def _run_session_locally(sandbox, state, directory: Path, *, limit: float = 8) -> None:
     """Point a seeded session's files and commands at local paths and processes."""
-    from responses_api_agents.pi_agent import sandbox_runner
-
     state.session.session_dir = str(directory)
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
     sandbox.exec.side_effect = functools.partial(_run_locally, limit=limit)
@@ -1509,7 +1523,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
     commands = []
 
     async def queued_exec(command, **kwargs):
-        if "--receipt" in command and "process_supervisor.py" in command:
+        if "--receipt" in command and "process_supervisor.sh" in command:
             commands.append(command)
             waiting.set()
             if failure == "cancel":
@@ -1518,7 +1532,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
         return await execute(command, **kwargs)
 
     state.session.sandbox.exec.side_effect = queued_exec
-    state.task = asyncio.create_task(state.execute({}, timeout=5, close_timeout=2))
+    state.task = asyncio.create_task(state.execute(command=["true"], env={}, prompt="", timeout=5, close_timeout=2))
     await asyncio.wait_for(waiting.wait(), 2)
     if failure == "cancel":
         state.task.cancel()
@@ -1551,21 +1565,11 @@ async def test_launch_claim_without_receipt_blocks_close(local_session):
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_session):
     state, _ = local_session
-    payload = {
-        "directory": state.session.session_dir,
-        "cwd": state.request.sandbox_access.workdir,
-        # This stdlib-only event producer must not load the host's editable installs or site hooks.
-        "command": [
-            sys.executable,
-            "-I",
-            "-S",
-            "-c",
-            "import json,sys; print(json.dumps({'prompt':sys.stdin.read()}))",
-        ],
-        "env": {},
-        "prompt": "real invocation",
-    }
-    raw = await state.execute(payload, timeout=3, close_timeout=2)
+    # Diagnostics and malformed lines reach stdout too; only [seen_at, object] records reach the transcript.
+    script = 'echo starting; echo "{\\"prompt\\": \\"$(cat)\\", \\"cwd\\": \\"$PWD\\"}"; echo "{broken"'
+    raw = await state.execute(
+        command=["bash", "-c", script], env={}, prompt="real invocation", timeout=3, close_timeout=2
+    )
     diagnostics = {
         name: path.read_text(errors="replace")
         for name in ("cleanup.json", "runtime.json", "output.log", "stderr.log", "events.jsonl")
@@ -1573,8 +1577,9 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     }
     assert state.session.cleanup["cleanup_confirmed"] and state.session.cleanup["return_code"] == 0, diagnostics
     assert raw.strip(), diagnostics
-    _, event = json.loads(raw)
-    assert event == {"prompt": "real invocation"}
+    assert "{broken" in raw
+    events = _parse_recorded_events(raw)
+    assert [event for _, event in events] == [{"prompt": "real invocation", "cwd": state.session.workdir}]
     assert state.runtime_info.hostname
     await state.close(2)
     assert not Path(state.session.session_dir).exists()
@@ -1590,14 +1595,9 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
         f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),child.pid])); time.sleep(60)"
     )
-    payload = {
-        "directory": state.session.session_dir,
-        "cwd": state.request.sandbox_access.workdir,
-        "command": [sys.executable, "-c", code],
-        "env": {},
-        "prompt": "",
-    }
-    state.task = asyncio.create_task(state.execute(payload, timeout=30, close_timeout=3))
+    state.task = asyncio.create_task(
+        state.execute(command=[sys.executable, "-c", code], env={}, prompt="", timeout=30, close_timeout=3)
+    )
     processes = []
     try:
         async with asyncio.timeout(5):
@@ -1610,8 +1610,9 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
         cli_pid, task_pid, wrapper_pid = processes
         assert not Path(f"/proc/{cli_pid}").exists()
         assert not Path(f"/proc/{wrapper_pid}").exists()
-        # The in-flight detached tool is drained before borrowed-session release.
-        assert not Path(f"/proc/{task_pid}").exists()
+        # The in-flight detached tool is stopped before borrowed-session release; init may still hold it as a zombie.
+        stat = Path(f"/proc/{task_pid}/stat")
+        assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] in "ZX"
         state.session.sandbox.disconnect.assert_awaited_once()
         state.session.sandbox.stop.assert_not_awaited()
     finally:
@@ -1751,11 +1752,40 @@ def _finishing_model(requests, replies):
     return handle
 
 
+def _long_turn_then_overflow(requests, summary_status=200):
+    """A streaming chat model whose first reply reasons for 100 KB and calls `bash`.
+
+    Every later request fails with a context-length 400, except Pi's compaction requests, which carry no tools: they
+    get a summary, or `summary_status` with no body.
+    """
+
+    def handle(body):
+        requests.append(body)
+        if "tools" not in body:
+            if summary_status != 200:
+                return summary_status, "application/json", b""
+            delta, finish = {"role": "assistant", "content": "Summary."}, "stop"
+        elif len(requests) > 1:
+            error = {"error": {"message": "This model's maximum context length is 262144 tokens."}}
+            return 400, "application/json", json.dumps(error).encode()
+        else:
+            call = {"index": 0, "id": "call-1", "type": "function"}
+            call["function"] = {"name": "bash", "arguments": json.dumps({"command": "true"})}
+            delta = {"role": "assistant", "reasoning_content": "r" * 100_000, "tool_calls": [call]}
+            finish = "tool_calls"
+        chunk = {"id": "chat-1", "object": "chat.completion.chunk", "created": 0, "model": body.get("model")}
+        chunk["choices"] = [{"index": 0, "delta": delta, "finish_reason": finish}]
+        return 200, "text/event-stream", f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode()
+
+    return handle
+
+
 @asynccontextmanager
-async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies):
+async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies=(), model=None):
     """One activation of the pinned Pi through the real runner and supervisor, with local MCP and model servers.
 
     `grants(up, down)` builds the episode's grants from a working MCP URL and one that refuses connections.
+    The model server runs the handler `model(run.requests)` if given, or else `_finishing_model` with `replies`.
     Yields the activation to await; close runs on exit, and its response is left on the yielded namespace.
     """
     agent, sandbox = setup
@@ -1775,11 +1805,11 @@ async def _pinned_pi_activation(setup, tmp_path, monkeypatch, *, grants, replies
     with (
         socket.socket() as refused,
         _http_server(_finish_tool_server(run.calls)) as up,
-        _http_server(_finishing_model(run.requests, replies)) as model,
+        _http_server(model(run.requests) if model else _finishing_model(run.requests, replies)) as model_url,
     ):
         refused.bind(("127.0.0.1", 0))  # Bound but not listening, so connections to it are refused.
         run.down = f"http://127.0.0.1:{refused.getsockname()[1]}"
-        agent.server_client._build_server_base_url.return_value = model
+        agent.server_client._build_server_base_url.return_value = model_url
         body = seed_with_tools(*grants(f"{up}/mcp", f"{run.down}/mcp"))
         body.sandbox_access.workdir = str(workdir)
         request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "pi-smoke-a2"}})
@@ -1851,6 +1881,32 @@ async def test_pinned_pi_stops_before_inference_when_a_required_grant_is_down(se
     assert ("mcp_setup_failed", cause) in [(gap.code, gap.detail) for gap in run.close.agent_observations.gaps]
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
+@pytest.mark.parametrize(
+    ("summary_status", "requests_with_tools"), [(200, [True, True, False, True]), (503, [True, True, False])]
+)
+async def test_pinned_pi_reports_a_context_overflow_after_a_long_turn(
+    setup, tmp_path, monkeypatch, summary_status, requests_with_tools
+):
+    # Pi is still writing the long turn's lines when the 400 arrives, so outcome.mjs's event must not
+    # split one of them or be lost. Gym grades the final 400 as a model limit only when that event reaches it.
+    # With compaction on, Pi first compacts and retries; a failed compaction call is reported as the run's failure.
+    model = functools.partial(_long_turn_then_overflow, summary_status=summary_status)
+    async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=lambda up, down: [], model=model) as run:
+        response = await run.activation
+    # Pi's compaction request is the one without tools; Pi retries the overflowed call only after it worked.
+    assert ["tools" in request for request in run.requests] == requests_with_tools
+    # The long turn ran and reached Gym whole; without it the pipe never fills.
+    assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output"]
+    if summary_status == 200:
+        assert (response.status, response.error) == ("incomplete", None)
+    else:
+        assert response.status == "failed"
+        assert re.match(r"Context overflow recovery failed: .*\b503\b", response.error.message)
+        # Not the overflow's 400, which the default policy would grade.
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+
+
 @pytest.mark.parametrize("field", ["timeout", "sandbox_install_timeout_seconds", "session_close_timeout_seconds"])
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
 def test_pi_rejects_invalid_execution_deadlines(field, value):
@@ -1858,27 +1914,85 @@ def test_pi_rejects_invalid_execution_deadlines(field, value):
         PiAgentConfig(name="pi", host="localhost", port=1, entrypoint="app.py", **{field: value})
 
 
-@pytest.mark.parametrize("context_overflow", [False, True])
-async def test_provider_failure_is_reported_but_context_limit_preserves_patch(setup, context_overflow):
+_COMPACTION_CALL_FAILED = "Context overflow recovery failed: Summarization failed: 503 status code (no body)"
+
+
+@pytest.mark.parametrize(
+    ("context_overflow", "compaction", "error"),
+    [
+        (False, [], "model error"),
+        (True, [], None),
+        # Pi 0.80.2's events after the overflow: it compacted, its retry overflowed again, and it gave up.
+        (
+            True,
+            [
+                {"type": "compaction_start", "reason": "overflow"},
+                {"type": "compaction_end", "reason": "overflow", "result": {"summary": "Summary"}, "willRetry": True},
+                {
+                    "type": "compaction_end",
+                    "reason": "overflow",
+                    "errorMessage": "Context overflow recovery failed after one compact-and-retry attempt.",
+                },
+            ],
+            None,
+        ),
+        # Its compaction call failed, so the overflowed call was never retried.
+        (
+            True,
+            [
+                {"type": "compaction_start", "reason": "overflow"},
+                {"type": "compaction_end", "reason": "overflow", "errorMessage": _COMPACTION_CALL_FAILED},
+            ],
+            _COMPACTION_CALL_FAILED,
+        ),
+        # Pi also compacts after a no-body 400, which Gym does not count as an overflow.
+        (
+            False,
+            [
+                {"type": "compaction_start", "reason": "overflow"},
+                {"type": "compaction_end", "reason": "overflow", "errorMessage": _COMPACTION_CALL_FAILED},
+            ],
+            _COMPACTION_CALL_FAILED,
+        ),
+        # A threshold compaction that fails after a non-overflow error must not replace that error.
+        (
+            False,
+            [
+                {"type": "compaction_start", "reason": "threshold"},
+                {
+                    "type": "compaction_end",
+                    "reason": "threshold",
+                    "errorMessage": "Auto-compaction failed: Summarization failed: 503 status code (no body)",
+                },
+            ],
+            "model error",
+        ),
+    ],
+)
+async def test_provider_failure_is_reported_but_context_limit_preserves_patch(
+    setup, context_overflow, compaction, error
+):
     agent, sandbox = setup
     recorded = [json.loads(line)[1] for line in events(stop_reason="error").splitlines()]
     recorded.insert(-2, {"type": "ng_pi_outcome", "context_overflow": context_overflow})
-    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
-    request, session_id, task = await activate(agent, sandbox)
     if context_overflow:
-        response = await task
+        # Pi's overflow error on the agent_end that Gym classifies. The default policy grades this 400.
+        recorded[-1]["messages"][0]["errorMessage"] = "400 This model's maximum context length is 262144 tokens."
+    sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate([*recorded, *compaction]))
+    request, session_id, task = await activate(agent, sandbox)
+    response = await task
+    if error is None:
         assert response.status == "incomplete"
         assert response.error is None
         assert response.output[-1].content[0].text == "Fixed"
     else:
-        response = await task
-        assert response.status == "failed"
+        assert (response.status, response.error.message) == ("failed", error)
         assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
         # Replay the report without running the harness again; the environment owns policy.
         assert await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")) == response
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert len(close.agent_observations.records[0].model_calls) == 2
-    assert close.agent_observations.records[0].status == ("incomplete" if context_overflow else "failed")
+    assert close.agent_observations.records[0].status == ("failed" if error else "incomplete")
     sandbox.launch.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
 
@@ -1911,7 +2025,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
         from nemo_gym.observability.model_calls import ModelCallRecord
-        from nemo_gym.rollout_observability import join_model_call_observations
+        from nemo_gym.rollout_observability import join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"
@@ -1920,7 +2034,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
             ModelCallRecord(model_call_id=f"attempt-{i}", client_session_id=root.invocation_id, call_index=i)
             for i in range(2)
         ]
-        joined = join_model_call_observations(close.agent_observations, captured)
+        joined = join_agent_model_calls(close.agent_observations, captured)
         assert [ref.model_call_id for ref in joined.records[0].model_calls] == ["attempt-0", "attempt-1"]
         assert all(ref.response_id is None for ref in joined.records[0].model_calls)
         assert "model_call_ownership_unavailable" not in [gap.code for gap in joined.gaps]
@@ -2343,7 +2457,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
     [("Request timed out.", "model_transport_error"), ("Unrecognized failure", "unknown")],
 )
 def test_terminal_provider_failure_uses_default_episode_policy(setup, message, failure_kind):
-    from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
     from nemo_gym.openai_utils import NeMoGymResponse
 
     agent, sandbox = setup

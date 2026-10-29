@@ -190,15 +190,17 @@ def main() -> None:
         **sampling,
     )
     request = Request({"type": "http", "path_params": {}})
-    response = asyncio.run(agent.responses(request=request, body=body))
-    Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
-    print(f"agent finished: {len(response.output)} output items", flush=True)
-
-    patch = _extract_patch(repo, index_path, baseline_tree) if repo and baseline_tree else b""
-    index_path.unlink(missing_ok=True)
-    if repo:
-        print(f"patch: {len(patch)} bytes from {repo}", flush=True)
-    Path("/trajectories_mount/patch.diff").write_bytes(patch)
+    try:
+        response = asyncio.run(agent.responses(request=request, body=body))
+        Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
+        print(f"agent finished: {len(response.output)} output items", flush=True)
+    finally:
+        # A harness that stops on an error (a turn limit, say) still left edits, so they are graded too.
+        patch = _extract_patch(repo, index_path, baseline_tree) if repo and baseline_tree else b""
+        index_path.unlink(missing_ok=True)
+        if repo:
+            print(f"patch: {len(patch)} bytes from {repo}", flush=True)
+        Path("/trajectories_mount/patch.diff").write_bytes(patch)
 
 
 if __name__ == "__main__":
