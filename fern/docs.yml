@@ -331,6 +331,13 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/rollouts/omitted_rollouts"
   - source: "/nemo/gym/nemo-gym/nemo_gym/harness_capabilities"
     destination: "/nemo/gym/nemo-gym/nemo_gym/rollouts/harness_capabilities"
+  # Library reference pages of the session conformance helpers (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/testing"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/server_runtime/testing"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/testing/session_conformance"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/server_runtime/testing/session_conformance"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/testing/agent_session_conformance"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/agents/testing/agent_session_conformance"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

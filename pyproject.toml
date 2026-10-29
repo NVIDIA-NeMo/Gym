@@ -861,8 +861,6 @@ type = "layers"
 layers = [
     # cli/
     "nemo_gym.cli.agents : nemo_gym.cli.dataset : nemo_gym.cli.dev : nemo_gym.cli.env : nemo_gym.cli.eval : nemo_gym.cli.general : nemo_gym.cli.legacy : nemo_gym.cli.main : nemo_gym.cli.models : nemo_gym.cli.resources_servers : nemo_gym.cli.utils : nemo_gym.cli_setup_command",
-    # testing/
-    "nemo_gym.testing",
     # environment/
     "nemo_gym.agent_registry : nemo_gym.benchmarks : nemo_gym.deliverables : nemo_gym.discovery : nemo_gym.environment : nemo_gym.model_registry : nemo_gym.registry : nemo_gym.resources_server_registry",
     # eval/

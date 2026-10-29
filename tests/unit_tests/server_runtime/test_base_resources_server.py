@@ -52,7 +52,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.server_runtime.request_handling.session_routing import ResourcesSessionLifetimes
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 
 
 def _resources_server() -> SimpleResourcesServer:
