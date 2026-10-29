@@ -28,8 +28,11 @@ import json, sys
 prepared, roster, out = sys.argv[1:4]
 wanted = {line.strip() for line in open(roster) if line.strip()}
 rows = [json.loads(line) for line in open(prepared) if line.strip()]
-selected = [r for r in rows if (r.get("verifier_metadata") or {}).get("instance_id") in wanted]
-missing = wanted - {(r.get("verifier_metadata") or {}).get("instance_id") for r in selected}
+# Prepared SWE-bench Pro rows keep the source schema (instance_id at the top level); the resources server adapts them.
+def instance(row):
+    return row.get("instance_id") or (row.get("verifier_metadata") or {}).get("instance_id")
+selected = [r for r in rows if instance(r) in wanted]
+missing = wanted - {instance(r) for r in selected}
 if missing:
     print(f"swebench-pro: {len(missing)} roster instances are not in the prepared benchmark, e.g. {sorted(missing)[:3]}", file=sys.stderr)
     sys.exit(1)
