@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from omegaconf import DictConfig
+from pydantic import TypeAdapter
 
 from nemo_gym.config_types import RunExportConfig
 from nemo_gym.exporters import load_run_exporter_class
@@ -60,14 +61,16 @@ def run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
     skipped is not repeated; a failed or interrupted one is retried. A configuration error is recorded as a
     failed result too, and still raised.
     """
-    settings = RunExportConfig.model_validate(global_config_dict)
-    result_fpath = settings.result_json_fpath
+    # Only the result file is read here; the rest of the shared settings are validated inside the recording
+    # boundary below, so an error in them is written to the result file too.
+    result_fpath = TypeAdapter(Optional[Path]).validate_python(global_config_dict.get("result_json_fpath"))
     if result_fpath is not None:
         previous = _read_state(result_fpath)
         if previous in _FINAL_STATES:
             return ExportResult.skipped(reason="a previous attempt already exported this run", previous_state=previous)
         _write_json_atomically(result_fpath, {"state": RUNNING_STATE})
     try:
+        settings = RunExportConfig.model_validate(global_config_dict)
         exporter = load_run_exporter_class(name).from_global_config(global_config_dict)
         result = exporter.export(RunArtifacts(settings.rollouts_jsonl_fpath))
     except Exception as exc:

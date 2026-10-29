@@ -213,6 +213,19 @@ class TestValidation:
         with pytest.raises(ValidationError, match="already enable the live wandb exporter"):
             _submit(benchmarks={"gpqa": {"run": run}}, job_exports={"wandb": {"wandb_project": "p"}})
 
+    @pytest.mark.parametrize("meta", [None, [], 1, "x"])
+    def test_malformed_evalrdl_metadata_is_a_configuration_error_not_a_traceback(self, meta: Any) -> None:
+        with pytest.raises(ValidationError, match=r"export 'evalrdl': invalid settings \(meta"):
+            _submit(job_exports={"evalrdl": {"meta": meta}})
+
+    def test_evalrdl_metadata_is_tagged_with_the_benchmark_unless_it_names_one(self) -> None:
+        for meta, expected in (({}, "gpqa"), ({"team": "t"}, "gpqa"), ({"benchmark": "mine"}, "mine")):
+            settings = export_run_settings(
+                "evalrdl", {"meta": meta}, benchmark_name="gpqa", gym_job_id=JOB_ID, bench_dir=BENCH_DIR
+            )
+
+            assert settings["meta"]["benchmark"] == expected
+
     def test_exports_on_a_command_benchmark_are_rejected(self) -> None:
         with pytest.raises(ValidationError, match="sets both `command` and `export`"):
             _submit(benchmarks={"custom": {"command": "echo hi", "export": {"evalrdl": {}}}})
@@ -359,6 +372,35 @@ class TestExportTail:
         assert completed.returncode == 3
         assert _calls(tail_env) == ["run"]
         assert (tail_env["bench"] / "eval.exit").read_text().strip() == "3"
+
+    def test_bookkeeping_that_fails_after_a_failed_run_does_not_replace_its_exit_code(
+        self, tail_env: dict[str, Any]
+    ) -> None:
+        (tail_env["bench"] / "exports").write_text("a file where the results directory belongs")
+
+        completed = _run_tail(tail_env, [("evalrdl", [])], FAKE_RUN_RC="3")
+
+        assert completed.returncode == 3
+        assert _calls(tail_env) == ["run"]
+
+    def test_bookkeeping_that_fails_after_a_successful_run_does_not_fail_the_job_or_skip_the_exports(
+        self, tail_env: dict[str, Any]
+    ) -> None:
+        (tail_env["bench"] / "eval.exit").mkdir()
+
+        completed = _run_tail(tail_env, [("atif", []), ("evalrdl", [])])
+
+        assert completed.returncode == 0
+        assert _calls(tail_env) == ["run", "eval export atif", "eval export evalrdl"]
+
+    def test_an_unwritable_exit_file_does_not_replace_the_exit_code_of_a_failed_run(
+        self, tail_env: dict[str, Any]
+    ) -> None:
+        (tail_env["bench"] / "eval.exit").mkdir()
+
+        completed = _run_tail(tail_env, [("evalrdl", [])], FAKE_RUN_RC="3")
+
+        assert completed.returncode == 3
 
     def test_a_failing_export_neither_changes_the_exit_code_nor_stops_the_others(
         self, tail_env: dict[str, Any]

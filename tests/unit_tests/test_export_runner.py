@@ -158,6 +158,31 @@ def test_the_rollouts_path_is_required(tmp_path: Path) -> None:
         runner.run_export("fake", OmegaConf.create({"result_json_fpath": str(tmp_path / "r.json")}))
 
 
+def test_a_missing_rollouts_path_is_recorded_as_a_failed_result_and_still_raised(tmp_path: Path) -> None:
+    result_fpath = tmp_path / "exports" / "fake.result.json"
+
+    with pytest.raises(Exception, match="rollouts_jsonl_fpath"):
+        runner.run_export("fake", OmegaConf.create({"result_json_fpath": str(result_fpath)}))
+
+    recorded = json.loads(result_fpath.read_text())
+    assert recorded["state"] == "failed"
+    assert recorded["exit_code"] != 0
+    assert "rollouts_jsonl_fpath" in recorded["error"]
+    assert FakeExporter.instances == []
+
+
+def test_a_succeeded_result_is_kept_even_when_the_settings_are_incomplete(tmp_path: Path) -> None:
+    result_fpath = tmp_path / "exports" / "fake.result.json"
+    result_fpath.parent.mkdir()
+    result_fpath.write_text(json.dumps({"state": "succeeded"}))
+
+    result = runner.run_export("fake", OmegaConf.create({"result_json_fpath": str(result_fpath)}))
+
+    assert result.state is ExportState.SKIPPED
+    assert json.loads(result_fpath.read_text()) == {"state": "succeeded"}
+    assert FakeExporter.instances == []
+
+
 @pytest.mark.parametrize("model", [RunExportConfig, MLflowExportConfig, WandbExportConfig])
 def test_every_exporters_settings_accept_a_result_file(model: type[RunExportConfig]) -> None:
     assert "result_json_fpath" in model.model_fields
