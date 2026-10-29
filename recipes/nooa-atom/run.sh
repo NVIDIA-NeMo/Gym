@@ -63,6 +63,10 @@ OUT="${OUT:-./results/$BENCH}"
 mkdir -p "$OUT"
 # Hydra writes under the run directory, never into the checkout.
 HYDRA=(hydra.run.dir="$OUT/hydra" hydra.output_subdir=null)
+# REUSE_VENVS=1 (set by slurm/run.sbatch after preflight): reuse the per-server venvs preflight just built on this
+# checkout instead of rebuilding their editable installs, whose setuptools file finder runs `git ls-files` against
+# the whole repository and times out (40 s) on a busy Lustre .git.
+[ "${REUSE_VENVS:-0}" = 1 ] && HYDRA+=(skip_venv_if_present=true)
 # Per-rollout NOOA artifacts (trace files) live beside the rollouts unless the caller chose a directory.
 export NOOA_ARTIFACTS_DIR="${NOOA_ARTIFACTS_DIR:-$OUT/nooa-artifacts}"
 

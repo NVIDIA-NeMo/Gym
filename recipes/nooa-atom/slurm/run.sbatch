@@ -47,5 +47,5 @@ export NOOA_ARTIFACTS_DIR="$ATTEMPT/nooa-artifacts"
 
 # Preflight writes its own one-row result; the full run only starts if it passes.
 OUT="$ATTEMPT/preflight" recipes/nooa-atom/preflight.sh "$BENCH"
-OUT="$ATTEMPT/run" recipes/nooa-atom/run.sh "$BENCH"
+REUSE_VENVS=1 OUT="$ATTEMPT/run" recipes/nooa-atom/run.sh "$BENCH"   # venvs were just built by preflight
 echo "done: $ATTEMPT/run/evaluator_rollouts.jsonl"
