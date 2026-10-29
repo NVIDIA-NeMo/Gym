@@ -1,0 +1,10 @@
+# The VIALS judge: upstream grades with gpt-5-mini. Any OpenAI-compatible Responses
+# endpoint works; set judge_base_url, judge_api_key and judge_model_name in env.yaml or on the
+# CLI. The defaults point at the OpenAI API.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,https://api.openai.com/v1}
+      openai_api_key: ${oc.select:judge_api_key,unset}
+      openai_model: ${oc.select:judge_model_name,gpt-5-mini}
