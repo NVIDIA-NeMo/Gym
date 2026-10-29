@@ -25,7 +25,7 @@ from benchmarks.skill_trigger.prepare import digest, prepare_release
 from benchmarks.skill_trigger.scoring import EvidenceError
 from benchmarks.skill_trigger.tests.test_prepare import release  # noqa: F401
 from benchmarks.skill_trigger.tests.test_scoring import trajectory
-from benchmarks.skill_trigger.verifier import SkillOpeningVerifier
+from benchmarks.skill_trigger.verifier import SkillOpeningVerifier, has_uncollected_delegation
 
 
 @pytest.fixture
@@ -75,8 +75,11 @@ async def test_verifier_uses_host_trajectory_and_rejects_missing_evidence(packag
     verifier.harness = "codex"
     value.agent.extra = {"uncollected_subagents": True}
     (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
-    with pytest.raises(EvidenceError, match="Delegated Codex"):
+    with pytest.raises(EvidenceError, match="Delegated outcome"):
         await verifier.verify()
+    value.steps[1].observation.results[0].content = "Read these instructions."
+    (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
+    assert (await verifier.verify()).rewards == {"reward": 1}
 
 
 def test_release_changes_and_blockers_fail_before_packaging(packaged, tmp_path):
@@ -105,3 +108,38 @@ def test_changed_skill_cannot_be_scored(packaged, tmp_path):
             manifest_sha256=checksum,
             harness="pi",
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool,status,unscored",
+    [("delegate_task", "completed", True), ("delegate_task", "failed", False), ("exec_command", "completed", False)],
+)
+async def test_completed_delegation_without_child_logs_is_unscored(packaged, tmp_path, tool, status, unscored):
+    manifest, checksum, _, task = packaged
+    paths = TrialPaths(tmp_path / "trial")
+    paths.mkdir()
+    verifier = SkillOpeningVerifier(
+        task=task,
+        trial_paths=paths,
+        environment=None,
+        release=str(manifest.parent),
+        manifest_sha256=checksum,
+        harness="hermes",
+    )
+    value = trajectory(
+        tool=tool, content=json.dumps({"results": [{"task_index": 0, "status": status, "summary": "Task finished."}]})
+    )
+    if status is None:
+        value.steps[1].observation.results[0].content = json.dumps({"results": None})
+    (paths.agent_dir / "trajectory.json").write_text(value.model_dump_json())
+    if unscored:
+        with pytest.raises(EvidenceError, match="Delegated outcome"):
+            await verifier.verify()
+    else:
+        assert (await verifier.verify()).rewards == {"reward": 0}
+
+
+def test_missing_delegation_results_list_is_not_completed():
+    value = trajectory(tool="delegate_task", content='{"results": null}')
+    assert not has_uncollected_delegation(value)

@@ -22,7 +22,7 @@ from harbor.models.verifier.result import VerifierResult
 from harbor.verifier.base import BaseVerifier
 
 from benchmarks.skill_trigger.prepare import digest, source_path
-from benchmarks.skill_trigger.scoring import EvidenceError, score_trajectory
+from benchmarks.skill_trigger.scoring import EvidenceError, score_trajectory, text_content
 
 
 def load_case(release: Path, manifest_sha256: str, task_name: str) -> tuple[dict, dict[str, str]]:
@@ -50,6 +50,27 @@ def load_case(release: Path, manifest_sha256: str, task_name: str) -> tuple[dict
     return case, sources
 
 
+def has_uncollected_delegation(trajectory: Trajectory) -> bool:
+    """Recognize completed delegation when child traces were not collected."""
+    if (trajectory.agent.extra or {}).get("uncollected_subagents"):
+        return True
+    calls = {c.tool_call_id: c.function_name.rsplit(".", 1)[-1] for s in trajectory.steps for c in s.tool_calls or []}
+    for step in trajectory.steps:
+        for result in step.observation.results if step.observation else []:
+            if calls.get(result.source_call_id) != "delegate_task":
+                continue
+            try:
+                payload = json.loads(text_content(result.content))
+            except ValueError:
+                continue
+            results = payload.get("results") if isinstance(payload, dict) else None
+            if isinstance(results, list) and any(
+                isinstance(item, dict) and item.get("status") == "completed" for item in results
+            ):
+                return True
+    return False
+
+
 class SkillOpeningVerifier(BaseVerifier):
     def __init__(self, *, release: str, manifest_sha256: str, harness: str, **kwargs: object) -> None:
         super().__init__(**kwargs)
@@ -64,10 +85,6 @@ class SkillOpeningVerifier(BaseVerifier):
         # Harbor collects the agent's trajectory before invoking the host verifier.
         trajectory = Trajectory.model_validate_json((self.trial_paths.agent_dir / "trajectory.json").read_bytes())
         reward = score_trajectory(trajectory, sources=self.sources, target=self.case["skill"], harness=self.harness)
-        if (
-            self.harness.startswith("codex")
-            and reward == 0
-            and (trajectory.agent.extra or {}).get("uncollected_subagents")
-        ):
-            raise EvidenceError("Delegated Codex outcome has no main-session opening evidence")
+        if reward == 0 and has_uncollected_delegation(trajectory):
+            raise EvidenceError("Delegated outcome has no main-session opening evidence")
         return VerifierResult(rewards={"reward": reward})
