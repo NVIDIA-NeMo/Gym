@@ -54,6 +54,10 @@ responses_create_params:
   max_output_tokens: 32768
   stream: false
 
+# Judge outages go to the failures sidecar, not the score; above this share of expected rollouts the run's
+# health check reports it unhealthy (the score is still published).
+health_check_max_not_final_failure_fraction: 0.01
+
 lmarena_v3_benchmark_environment_server:
   _inherit_from: lmarena_v3_environment_server
   environment_servers:

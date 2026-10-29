@@ -82,10 +82,10 @@ task working directory. Without access, configure agent-owned creation as noted 
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
 only for its compatibility `/run`, not agent sessions.
 
-Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
-bash, tar/gzip, and SHA-256 utilities. Session setup uses POSIX sh to install missing Python/Bash
+Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with
+bash, tar/gzip, and SHA-256 utilities; no Python is needed. Session setup uses POSIX sh to install missing Bash
 with apt-get or apk when running as root, before launching the Bash runtime installer;
-otherwise preinstall them in the image. Setup fails on either a nonzero exit or a provider error.
+otherwise preinstall it in the image. Pi runs under Gym's shared Bash harness runner and process supervisor. Setup fails on either a nonzero exit or a provider error.
 Older Alpine images
 also need patchelf so Pi's Node can use a private, checksum-verified C++ library without
 replacing the task's system library. The pinned Node version has no arm64 musl build.
@@ -168,14 +168,18 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 Services must use task-owned files rather than the temporary agent session directory.
+The supervisor and the runner above Pi are bash scripts, so a task agent's
+`pkill -f python3`, `pkill python3` or `killall python3` does not end Pi.
 
 Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session
@@ -183,7 +187,7 @@ uploads the supervisor at activation and owns its control files and log access; 
 confirms process cleanup, captures artifacts, then releases the provider connection or
 owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
 and interrupted activations keep captured observations after session files are removed.
-`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.sh`
 runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
 Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 `worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains

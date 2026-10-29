@@ -1,0 +1,7 @@
+.abcmidi/
+data/*train*.jsonl
+data/*validation*.jsonl
+data/*prepare*.jsonl
+data/*_rollouts_*.json*
+data/quality_summary.json
+data/rollout_verdicts.jsonl
