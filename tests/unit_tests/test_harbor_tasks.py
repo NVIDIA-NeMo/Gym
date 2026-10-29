@@ -2068,9 +2068,10 @@ def fake_registry(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_real_registry(monkeypatch):
-    """No test here, or in a module that imports ``write_task``, reaches a registry. Its default Dockerfile is
-    ``FROM ubuntu:24.04`` and prepare records base images, so a test that did not ask for ``fake_registry`` went
-    to Docker Hub and failed on its rate limit (HTTP 429) whatever the code under test did."""
+    """No test here reaches a registry (``no_real_container_registry`` in ``conftest.py`` does the same for every
+    ``test_harbor_*`` module). Its default Dockerfile is ``FROM ubuntu:24.04`` and prepare records base images,
+    so a test that did not ask for ``fake_registry`` went to Docker Hub and failed on its rate limit (HTTP 429)
+    whatever the code under test did."""
     from nemo_gym.tasks.harbor import image_configs as image_configs_module
 
     monkeypatch.setattr(image_configs_module, "RegistryClient", FakeRegistryClient)
