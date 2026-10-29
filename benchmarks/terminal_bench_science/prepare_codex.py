@@ -43,8 +43,8 @@ def _needs_server_environment() -> bool:
 
 def _prepare_in_server_environment(arguments: list[str]) -> Path:
     """Run this module with the terminal_bench_4 server's Python, setting up its environment first."""
-    from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
     from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.orchestration import get_venv_path, run_command, setup_env_command
 
     setup_config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(

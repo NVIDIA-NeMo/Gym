@@ -12,8 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Run the h2-ping-sidecar from ``gym env start`` so NVCF calls survive the 340s idle limit.
-
-See ``nemo_gym/tools/sidecar`` for the proxy and ``h2_ping_sidecar:`` in the configuration
-reference for the settings.
-"""
