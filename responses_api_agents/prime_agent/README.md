@@ -72,20 +72,3 @@ are saved. Function-calling shell probes do not apply: the only exposed tool is
 IPython. Terminal-Bench support is not claimed. The first pairing is Partner IF's
 repository/report task. A second pairing and runtime reproducibility checks remain
 required before this experimental entrypoint is ready to merge.
-
-### Child-session smoke validation
-
-On October 29, 2026, a single repository/report episode completed on local Docker
-Desktop with `openai/openai/gpt-6-astra` and judge `nvidia/zai-org/glm-5.3`.
-The child completed 10 assistant turns and 10 successful model calls, delivered
-one substantive report to the recording parent, and passed the delivery prerequisite
-and shared IF rubric (reward 1.0, evaluation completed, not masked). Agent cleanup
-was confirmed and the task container was removed. Private task data and raw rollouts
-are retained internally rather than included in this repository.
-
-This smoke used Linux ARM64, 4 CPUs and 4 GiB memory, with
-`node:22-bookworm@sha256:18a6d90fd60542269850c80ca03b29b1d9b14d6b221ac7ee8e35b0d33ef904bd`.
-It does not validate the default OpenSandbox network path or the configured 16 GiB
-resource profile. Gym health remained unobserved because normalized turn observations
-and model-call ownership are unavailable. The full retained-evidence inspector did
-not pass; this evaluation result does not establish full harness conformance.
