@@ -1709,6 +1709,16 @@ COMMANDS = {
                 "confidence_level",
                 "Confidence level as a fraction between 0 and 1 (default: 0.90).",
             ),
+            _bool_flag(
+                "check-health",
+                "check_health",
+                "Check source rollout files and add health warnings to the comparison (off by default).",
+            ),
+            _value_flag(
+                "health-check-workers",
+                "health_check_workers",
+                "Worker processes for --check-health (default: up to 8 available CPUs).",
+            ),
             _value_flag(
                 "output-dir",
                 "output_dirpath",

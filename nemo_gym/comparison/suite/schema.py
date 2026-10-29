@@ -34,6 +34,8 @@ class SuiteComparisonConfig(BaseNeMoGymCLIConfig):
     confidence_level: float = Field(default=0.90, gt=0, lt=1, allow_inf_nan=False)
     output_dirpath: str | None = None
     report_format: ReportFormat = "both"
+    check_health: bool = False
+    health_check_workers: int | None = Field(default=None, ge=1)
 
 
 class SuiteMetricDefinition(_SuiteModel):
@@ -112,6 +114,19 @@ class SuiteCoverage(_SuiteModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class SuiteHealthSummary(_SuiteModel):
+    """Fresh health findings for the entire rollout file, including all agents."""
+
+    record_count: int | None = Field(default=None, ge=0)
+    healthy: int = Field(default=0, ge=0)
+    unhealthy: int = Field(default=0, ge=0)
+    unobserved: int = Field(default=0, ge=0)
+    issues: dict[str, int] = Field(default_factory=dict)
+    run_healthy: bool | None = None
+    run_unhealthy_reasons: list[str] = Field(default_factory=list)
+    unavailable_reason: str | None = None
+
+
 class SuiteRunSummary(_SuiteModel):
     rollouts: Path
     aggregate_metrics: Path
@@ -122,6 +137,7 @@ class SuiteRunSummary(_SuiteModel):
     repeat_scores: list[float] = Field(default_factory=list)
     summary: SuiteSampleSummary | None = None
     coverage: SuiteCoverage
+    health: SuiteHealthSummary | None = None
 
 
 class SuiteMetricResult(_SuiteModel):
@@ -188,6 +204,7 @@ class SuiteComparisonResult(_SuiteModel):
     command: str
     suite_fpath: Path
     confidence_level: float
+    health_check_enabled: bool = False
     cells: list[SuiteCellResult]
     per_model: list[SuiteAggregateResult]
     overall: SuiteAggregateResult

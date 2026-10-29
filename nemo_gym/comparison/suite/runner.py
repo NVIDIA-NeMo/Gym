@@ -21,7 +21,7 @@ from pathlib import Path
 
 from nemo_gym.comparison.suite.loading import load_suite_manifest, load_suite_run, resolve_metric_definitions
 from nemo_gym.comparison.suite.processing import aggregate_suite_cells, compare_suite_cell
-from nemo_gym.comparison.suite.schema import SuiteComparisonConfig, SuiteComparisonResult
+from nemo_gym.comparison.suite.schema import SuiteComparisonConfig, SuiteComparisonResult, SuiteHealthSummary
 from nemo_gym.config_types import ConfigError
 from nemo_gym.package_info import __version__
 from nemo_gym.secret_utils import hide_secrets_in_overrides
@@ -44,6 +44,7 @@ def build_suite_comparison(config: SuiteComparisonConfig, command: str) -> Suite
     warnings = []
     per_model = []
     observed_sources: dict[tuple[str, Path, str], str] = {}
+    health_by_path: dict[Path, SuiteHealthSummary] = {}
     for model, benchmarks in manifest.models.items():
         model_cells = []
         for benchmark, sources in benchmarks.items():
@@ -72,6 +73,17 @@ def build_suite_comparison(config: SuiteComparisonConfig, command: str) -> Suite
                 warnings.append(f"{model}/{benchmark}: {cell.exclusion_reason}")
             for role, run in (("baseline", cell.baseline), ("candidate", cell.candidate)):
                 warnings.extend(f"{model}/{benchmark} {role}: {note}" for note in run.coverage.notes)
+                if config.check_health:
+                    from nemo_gym.comparison.suite.health import check_rollout_file_health, rollout_health_warning
+
+                    if run.rollouts not in health_by_path:
+                        health_by_path[run.rollouts] = check_rollout_file_health(
+                            run.rollouts, workers=config.health_check_workers
+                        )
+                    run.health = health_by_path[run.rollouts]
+                    warning = rollout_health_warning(run.health)
+                    if warning is not None:
+                        warnings.append(f"{model}/{benchmark} {role}: {warning}")
         eligible = [cell for cell in model_cells if cell.eligible]
         for cell in eligible:
             cell.model_weight = 1 / len(eligible)
@@ -88,6 +100,7 @@ def build_suite_comparison(config: SuiteComparisonConfig, command: str) -> Suite
         command=command,
         suite_fpath=path,
         confidence_level=config.confidence_level,
+        health_check_enabled=config.check_health,
         cells=cells,
         per_model=per_model,
         overall=aggregate_suite_cells("overall", cells, confidence_level=config.confidence_level),

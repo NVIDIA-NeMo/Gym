@@ -179,6 +179,26 @@ Every selected metric must be present in every included repeat. Gym does not sil
 
 Recorded task sets must agree across repeats and sides. When materialized inputs are available, Gym also verifies planned coverage. Without those inputs, planned coverage remains unverified; recorded coverage checks cannot prove that a task absent from every completed result was collected. Known incomplete or inconsistent coverage suppresses affected confidence intervals while retaining descriptive results.
 
+## Optionally check rollout health
+
+Health checking is **off by default**. Add `--check-health` to include trajectory-integrity warnings in the suite report:
+
+```bash
+gym eval compare-suite \
+    --suite suite.yaml \
+    --check-health \
+    --health-check-workers 8 \
+    --output-dir results/suite-with-health
+```
+
+Gym checks each rollout JSONL referenced by the suite, together with its own failure and materialized-input siblings. The check covers **all agents in each file**, even when the comparison selects one agent. It scans the saved records afresh rather than reading an existing `quality_summary.json`. `--health-check-workers` must be a positive integer; by default Gym uses up to eight available CPUs.
+
+The report's **Warnings** section and terminal output show one summary line per affected source. A source with detected findings is **unhealthy**; missing evidence is **unobserved**, which does not establish that the trajectories are unhealthy. If a source cannot be checked, for example because its rollout file is missing or unreadable, the warning reports health as unavailable. The comparison JSON retains health counts and issue summaries.
+
+Health findings are advisory: they do not change comparison scores, weights, or confidence intervals. Without `--check-health`, comparison continues to read aggregate metrics without opening the rollout JSONL. The separate `gym eval compare` command is unchanged.
+
+For full per-rollout health reports, run [`gym eval health-check`](/main/evaluation/rollout-health#when-health-checks-run) separately; suite comparison keeps only the summary and uses temporary files for the detailed health reports.
+
 ## Read the reports
 
 `gym eval compare-suite` writes these files to `--output-dir`, defaulting to the YAML file's directory:
