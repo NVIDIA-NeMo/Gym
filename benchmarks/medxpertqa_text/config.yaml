@@ -1,0 +1,29 @@
+# MedXpertQA Text, test split (2,450 questions), with the paper's two-round zero-shot CoT
+# protocol and answer cleansing. Sampling comes from the caller; the paper decoded
+# greedily.
+config_paths:
+  - resources_servers/medxpertqa/configs/medxpertqa.yaml
+
+medxpertqa_text_medxpertqa_resources_server:
+  _inherit_from: medxpertqa
+
+medxpertqa_text_medxpertqa_gymnasium_agent:
+  _inherit_from: medxpertqa_gymnasium_agent
+  responses_api_agents:
+    gymnasium_agent:
+      resources_server:
+        name: medxpertqa_text_medxpertqa_resources_server
+      datasets:
+      - name: medxpertqa_text
+        type: benchmark
+        jsonl_fpath: benchmarks/medxpertqa_text/data/medxpertqa_text_benchmark.jsonl
+        prompt_config: benchmarks/prompts/eval/medxpertqa/zero_shot_cot.yaml
+        prepare_script: benchmarks/medxpertqa_text/prepare.py
+        num_repeats: 1
+
+medxpertqa_text_medxpertqa_environment_server:
+  _inherit_from: medxpertqa_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: medxpertqa_text_medxpertqa_gymnasium_agent
