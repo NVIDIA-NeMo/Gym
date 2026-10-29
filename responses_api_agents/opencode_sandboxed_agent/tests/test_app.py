@@ -876,6 +876,122 @@ async def test_export_failure_propagates_instead_of_scoring_zero(tmp_path, monke
     assert server._sandbox_id_to_run_result == {}
 
 
+OOM_ENDED = "Failed to run command failed: Sandbox sb-1 has ended (OOMKilled): 1/1 observed pods failed"
+
+
+def test_sandbox_ended_reason_reads_the_exception_chain():
+    try:
+        try:
+            raise RuntimeError(OOM_ENDED)
+        except RuntimeError as inner:
+            raise ValueError("wrapped") from inner
+    except ValueError as outer:
+        assert app_module._sandbox_ended_reason(outer) == "OOMKilled"
+    assert app_module._sandbox_ended_reason(RuntimeError("Sandbox sb-1 has ended")) == "ended"
+    assert app_module._sandbox_ended_reason(RuntimeError("connection reset")) is None
+    assert app_module._sandbox_ended_reason(None) is None
+
+
+@mark.parametrize("dies_during", ["run", "session_list"])
+async def test_ended_sandbox_finishes_as_failed_run(tmp_path, dies_during):
+    # A task that OOM-kills its sandbox on every attempt must not turn each retry into an HTTP 500.
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    calls = [RuntimeError(OOM_ENDED)]
+    if dies_during == "session_list":
+        calls.insert(0, TimeoutError("Timed out during OpenSandbox command status after 10s"))
+    sandbox = MagicMock(exec=AsyncMock(side_effect=calls), download=AsyncMock())
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    response = await server.responses(request, body)
+    assert response.output == []
+    run_result = server._sandbox_id_to_run_result["session"]
+    assert run_result["agent_sandbox_ended"] == "OOMKilled"
+    assert run_result["opencode_failed"] and not run_result["opencode_export_found"]
+    # Nothing else is sent to the dead sandbox.
+    assert sandbox.exec.await_count == len(calls)
+    sandbox.download.assert_not_awaited()
+    receipt = json.loads((tmp_path / "session" / "generation.json").read_text())
+    assert receipt["execution"]["agent_sandbox_ended"] == "OOMKilled"
+
+
+async def test_export_failure_of_a_live_sandbox_still_propagates(tmp_path):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    stdout="Shell: bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
+                ConnectionResetError("connection reset by peer"),
+            ]
+        )
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(RuntimeError, match="Failed to export OpenCode results"):
+        await server.responses(request, body)
+    assert server._sandbox_id_to_run_result == {}
+
+
+async def test_ended_sandbox_is_verified_and_recorded_for_offline_analysis(tmp_path, monkeypatch):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    seed = MagicMock(cookies={})
+    seed.json = AsyncMock(return_value={"sandbox_handle": "sb-1"})
+    client = MagicMock(spec=ServerClient)
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/seed_session":
+            return seed
+        payload = kwargs["json"] | {"reward": 0.0}
+        return SimpleNamespace(
+            ok=True, read=AsyncMock(return_value=json.dumps(payload).encode()), raise_for_status=lambda: None
+        )
+
+    client.post = AsyncMock(side_effect=post)
+    server = OpenCodeSandboxedAgent(config=config, server_client=client)
+    sandbox = MagicMock(stop=AsyncMock())
+    server._start_sandbox = AsyncMock(return_value=sandbox)
+
+    async def ended_response(self, request, body):
+        return self._sandbox_ended_response(request, body, sandbox, "OOMKilled", "TimeoutError")
+
+    monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", ended_response)
+    monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+
+    class FakeRequest(SimpleNamespace):
+        @property
+        def cookies(self):
+            return self._cookies
+
+    request = FakeRequest(_cookies={}, session={SESSION_ID_KEY: "trial"}, state=SimpleNamespace())
+    body = OpenCodeSandboxedAgentRunRequest(
+        responses_create_params={"input": [{"role": "user", "content": "Solve"}]}, instance_id="pkg__pkg-1"
+    )
+    result = await server.run(request, body)
+    assert result.reward == 0.0
+    assert result.opencode_failed and result.opencode_error_type == "TimeoutError"
+    assert result.model_dump()["agent_sandbox_ended"] == "OOMKilled"
+    assert client.post.await_args.kwargs["url_path"] == "/verify"
+    assert client.post.await_args.kwargs["json"]["response"]["output"] == []
+    sandbox.stop.assert_awaited_once()
+    (record,) = [json.loads(line) for line in (tmp_path / "sandbox_ended.jsonl").read_text().splitlines()]
+    assert record["reason"] == "OOMKilled"
+    assert record["instance_id"] == "pkg__pkg-1" and record["sandbox_id"] == "sb-1"
+
+
 async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]

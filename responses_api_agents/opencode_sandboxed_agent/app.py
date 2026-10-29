@@ -15,6 +15,7 @@
 
 import json
 import os
+import re
 import sqlite3
 import sys
 from asyncio import Semaphore
@@ -494,6 +495,22 @@ def _extract_opencode_session_id(session_list_stdout: str) -> str:
     return session_id
 
 
+# OpenSandbox reports a dead sandbox as "Sandbox <id> has ended (<reason>): ...", e.g. OOMKilled.
+_SANDBOX_ENDED_PATTERN = re.compile(r"\bsandbox \S+ has ended(?: \(([^)]*)\))?", re.IGNORECASE)
+
+
+def _sandbox_ended_reason(error: Optional[BaseException]) -> Optional[str]:
+    """Return why the sandbox ended (e.g. ``OOMKilled``) when an exception chain says it did, else ``None``."""
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        match = _SANDBOX_ENDED_PATTERN.search(str(error))
+        if match:
+            return match.group(1) or "ended"
+        error = error.__cause__ or error.__context__
+    return None
+
+
 class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
@@ -902,13 +919,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_error_type = type(exc).__name__
             _trace_rollout_stage(request, trace_rollout_id, "exec_error", error_type=run_error_type)
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+            if (ended := _sandbox_ended_reason(exc)) is not None:
+                return self._sandbox_ended_response(request, body, sandbox, ended, run_error_type)
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
         if self.config.tool_servers:
-            mcp_check = await sandbox.exec(command="test ! -f /tmp/nemo-gym-mcp-setup-error", timeout_s=30)
+            try:
+                mcp_check = await sandbox.exec(command="test ! -f /tmp/nemo-gym-mcp-setup-error", timeout_s=30)
+            except Exception as exc:
+                if (ended := _sandbox_ended_reason(exc)) is None:
+                    raise
+                return self._sandbox_ended_response(request, body, sandbox, ended, run_error_type)
             if mcp_check.return_code != 0 or mcp_check.error_type:
                 raise RuntimeError("Required Gym MCP tools could not be initialized")
 
@@ -937,9 +961,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
                 timeout_s=self.config.sandbox_timeout,
             )
-        except Exception:
+        except Exception as exc:
             _trace_rollout_stage(request, trace_rollout_id, "export_attempt_done")
-            raise RuntimeError("Failed to export OpenCode results") from None
+            if (ended := _sandbox_ended_reason(exc)) is None:
+                raise RuntimeError("Failed to export OpenCode results") from None
+            return self._sandbox_ended_response(request, body, sandbox, ended, run_error_type)
         _trace_rollout_stage(request, trace_rollout_id, "export_attempt_done")
         if export_result.return_code != 0 or export_result.error_type:
             raise RuntimeError("OpenCode export command failed")
@@ -947,10 +973,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        results_root = (
-            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
-        )
-        results_dir = results_root / request.session[SESSION_ID_KEY]
+        results_dir = self._results_root() / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
         results_local_fpath.unlink(missing_ok=True)
@@ -1106,6 +1129,102 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         pending.replace(results_dir / "generation.json")
         return response
 
+    def _results_root(self) -> Path:
+        return Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
+
+    def _sandbox_ended_response(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        sandbox: AsyncSandbox,
+        reason: str,
+        run_error_type: Optional[str],
+    ) -> NeMoGymResponse:
+        """Finish a run whose sandbox ended under it (e.g. ``OOMKilled``) as a failed run.
+
+        Raising instead surfaces as an HTTP 500 that trainers retry as an infrastructure failure, and a
+        task that reliably exhausts its sandbox fails every retry. Nothing can be read back from the dead
+        sandbox, so the response has no output and the verifier scores what it can still observe.
+        """
+        invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
+        _trace_rollout_stage(request, invocation_id, "sandbox_ended", error_type=reason)
+        run_result: Dict[str, Any] = {
+            "opencode_failed": True,
+            "opencode_exit_code": None,
+            "opencode_error_type": run_error_type or "SandboxEnded",
+            "opencode_results_fpath": "",
+            "opencode_run_stdout": "",
+            "opencode_run_stderr": "",
+            "opencode_export_found": False,
+            "opencode_finished": False,
+            "agent_sandbox_ended": reason,
+        }
+        if isinstance(invocation_id, str):
+            trajectory = TrajectoryRecord(task_id="", rollout_id=invocation_id)
+            trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
+            run_result["_ng_trajectory"] = trajectory
+            run_result["_ng_agent_observations"] = AgentObservationBundle(
+                source="opencode",
+                records=[
+                    AgentInvocation(invocation_id=invocation_id, status="failed", error_type="SandboxEnded"),
+                    self._agent_sandbox_observation(
+                        sandbox=sandbox, return_code=None, error_type="SandboxEnded", finished=False
+                    ),
+                ],
+                gaps=[
+                    ObservationGap(code="agent_artifact_unavailable"),
+                    ObservationGap(code="agent_transcript_unavailable"),
+                    ObservationGap(code="model_call_ownership_unavailable"),
+                    ObservationGap(code="observation_capture_failed"),
+                    ObservationGap(code="sandbox_lifecycle_timing_unavailable"),
+                ],
+            )
+        self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
+
+        response = NeMoGymResponse(
+            id=f"resp_{uuid4().hex}",
+            created_at=int(time()),
+            model=body.model or self.config.model_server.name,
+            object="response",
+            output=[],
+            tool_choice=body.tool_choice,
+            tools=body.tools,
+            parallel_tool_calls=body.parallel_tool_calls,
+        )
+        results_dir = self._results_root() / request.session[SESSION_ID_KEY]
+        results_dir.mkdir(parents=True, exist_ok=True)
+        receipt = {
+            "response": response.model_dump(mode="json"),
+            "execution": {key: value for key, value in run_result.items() if not key.startswith("_ng_")},
+        }
+        pending = results_dir / "generation.json.partial"
+        pending.write_text(json.dumps(receipt))
+        pending.replace(results_dir / "generation.json")
+        return response
+
+    def _record_sandbox_ended(
+        self, body: OpenCodeSandboxedAgentRunRequest, rollout_id: Optional[str], sandbox_handle: Any, reason: str
+    ) -> None:
+        """Append the task to ``<artifacts>/sandbox_ended.jsonl`` so tasks that kill their sandbox can be studied offline."""
+        extra = body.model_extra or {}
+        record = {
+            "time_unix_s": time(),
+            "agent": self.config.name,
+            "rollout_id": rollout_id,
+            "sandbox_id": sandbox_handle,
+            "reason": reason,
+            **{key: extra[key] for key in ("instance_id", "task_name", "repo", "docker_image") if key in extra},
+        }
+        line = json.dumps(record, default=str)
+        print(f"[sandbox-ended] {line}", file=sys.stderr, flush=True)
+        try:
+            root = self._results_root()
+            root.mkdir(parents=True, exist_ok=True)
+            with open(root / "sandbox_ended.jsonl", "a") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            print("Failed to record the ended sandbox", format_exc(), file=sys.stderr)
+
     async def _responses_with_capture_guard(self, request, body, sandbox, rollout_id):
         if not self._token_id_capture_enabled():
             return await self.responses(request, body.responses_create_params)
@@ -1199,6 +1318,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 _trace_rollout_stage(request, rollout_id, "release_done", resource_sandbox_id)
                 return OpenCodeCaptureAbortResponse(rollout_id=response.rollout_id, reason=response.reason)
             run_result = self._sandbox_id_to_run_result.get(session_key, {}).copy()
+            if run_result.get("agent_sandbox_ended"):
+                self._record_sandbox_ended(
+                    body, rollout_id, seed_session_result.get("sandbox_handle"), run_result["agent_sandbox_ended"]
+                )
             observations = run_result.pop("_ng_agent_observations", None)
             trajectory = run_result.pop("_ng_trajectory", None)
             _trace_rollout_stage(request, rollout_id, "verify_start")
