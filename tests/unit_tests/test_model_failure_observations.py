@@ -190,3 +190,58 @@ async def test_only_a_timeout_after_the_request_was_sent_is_a_response_timeout(
     [attempt] = report.events.values()
     assert report.failure_id == attempt.event_id
     assert (attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON) is waited_for_response
+
+
+def _reply(status: int, *, headers: dict | None = None, body: bytes = b"") -> SimpleNamespace:
+    return SimpleNamespace(
+        status=status, headers=headers or {}, content=SimpleNamespace(read=AsyncMock(return_value=body))
+    )
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_a_final_non_retryable_status_is_the_calls_observed_attempt(monkeypatch, status):
+    reply = _reply(status, body=b'{"error": {"code": "budget_exceeded"}}')
+    wire = SimpleNamespace(request=AsyncMock(return_value=reply))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        returned = await model._request(method="POST", url="http://model.test/responses")
+
+    # Not retried, and handed back for the caller to raise or handle.
+    assert returned is reply and wire.request.await_count == 1
+    [event] = log.report.events.values()
+    assert (event.boundary, event.failure_kind, event.operation, event.http_status) == (
+        FailureBoundary.MODEL,
+        MODEL_REQUEST_ERROR,
+        "model_request",
+        status,
+    )
+    assert event.attempt_id == f"{event.operation_id}-1" and log.report.failure_id is None
+
+
+async def test_a_failure_a_gym_server_forwarded_is_not_recorded_twice(monkeypatch):
+    forwarded = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="upstream")
+    report = FailureReport(failure_id=forwarded.event_id, events={forwarded.event_id: forwarded})
+    wire = SimpleNamespace(request=AsyncMock(return_value=_reply(422, headers=FailureHeader.encode(report))))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        await model._request(method="POST", url="http://model.test/responses")
+
+    assert list(log.report.events) == [forwarded.event_id]
+
+
+async def test_a_successful_call_records_nothing(monkeypatch):
+    wire = SimpleNamespace(request=AsyncMock(return_value=_reply(200)))
+    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
+
+    with RequestFailureLog.capture() as log:
+        await model._request(method="POST", url="http://model.test/responses")
+
+    assert not log.report.events

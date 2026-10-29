@@ -1860,6 +1860,20 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             last_transport_failure = (error, failure)
             observe_failure(failure)
 
+        def observe_http_failure(response: ClientResponse) -> Optional[NgFailureEvent]:
+            # A Gym server's reply already forwards its own record; it is not recorded twice.
+            forwarded = FailureHeader.decode(getattr(response, "headers", None))
+            if forwarded is not None and forwarded.failure_id is not None:
+                return None
+            failure = _model_attempt_failure(
+                f"HTTP {response.status} from the model server",
+                operation_id=operation_id,
+                attempt_id=f"{operation_id}-{tries}",
+                http_status=response.status,
+            )
+            observe_failure(failure)
+            return failure
+
         while tries < max_num_tries:
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
@@ -1873,26 +1887,21 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 raise
 
             if response.status in (401, 403):
+                observe_http_failure(response)
                 content = await response.content.read()
                 if _error_body_is_permanent_auth(content):
                     self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
                 return response
 
             if response.status not in RETRY_ERROR_CODES:
+                if response.status >= 400:
+                    # The caller raises or handles it; the status is still this call's last observed attempt.
+                    observe_http_failure(response)
                 return response
 
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
             # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
-            last_failure = None
-            forwarded = FailureHeader.decode(getattr(response, "headers", None))
-            if forwarded is None or forwarded.failure_id is None:
-                last_failure = _model_attempt_failure(
-                    f"HTTP {response.status} from the model server",
-                    operation_id=operation_id,
-                    attempt_id=f"{operation_id}-{tries}",
-                    http_status=response.status,
-                )
-                observe_failure(last_failure)
+            last_failure = observe_http_failure(response)
             content = await response.content.read()
             if response.status == 429 and _error_body_is_permanent_quota(content):
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
