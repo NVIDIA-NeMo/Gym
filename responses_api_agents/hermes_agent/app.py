@@ -664,6 +664,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             "agent_session_id": agent_session_id,
             "chat_template_kwargs_enabled": self.config.chat_template_kwargs_enabled,
             "config_yaml": self._build_config(mcp_accesses),
+            "preserve_training_history": not self.config.compression_enabled,
             "disabled_toolsets": self.config.disabled_toolsets,
             "enabled_toolsets": enabled_toolsets,
             "mcp_servers": [access.name for access in mcp_accesses],
@@ -952,6 +953,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         install_summary_compat(
             agent,
             preserve_reasoning_history=self.config.chat_template_kwargs_enabled,
+            preserve_training_history=not self.config.compression_enabled,
             sampling_overrides={
                 key: params[key] for key in ("temperature", "top_p", "max_tokens") if params[key] is not None
             },
