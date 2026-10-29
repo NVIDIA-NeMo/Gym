@@ -9,11 +9,15 @@ config_paths:
   - resources_servers/scale_swe/configs/scale_swe.yaml
   - resources_servers/swe_rebench/configs/swe_rebench.yaml
   - resources_servers/swemer_v1/configs/swemer_v1.yaml
+  - resources_servers/swemer_v2/configs/swemer_v2.yaml
+  - resources_servers/swe_next/configs/swe_next.yaml
 
 environment_server_routes:
   scale_swe: scale_swe_environment
   swe_rebench: swe_rebench_environment
   swemer_v1: swemer_v1_environment
+  swemer_v2: swemer_v2_environment
+  swe_next: swe_next_environment
 
 # The typed session adapters support the shared harness as well as the flat one.
 scale_swe_resources_server:
@@ -79,6 +83,42 @@ swemer_v1_environment:
       resources_server:
         type: resources_servers
         name: swemer_v1_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: claude_code_agent
+      default_episode_timeout_seconds: 10800
+      cleanup_timeout_seconds: 180
+
+swemer_v2_resources_server:
+  resources_servers:
+    swemer_v2:
+      allowed_agents: [claude_code_agent]
+
+swemer_v2_environment:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swemer_v2_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: claude_code_agent
+      default_episode_timeout_seconds: 10800
+      cleanup_timeout_seconds: 180
+
+swe_next_resources_server:
+  resources_servers:
+    swe_next:
+      allowed_agents: [claude_code_agent]
+
+swe_next_environment:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: swe_next_resources_server
       agent_server:
         type: responses_api_agents
         name: claude_code_agent

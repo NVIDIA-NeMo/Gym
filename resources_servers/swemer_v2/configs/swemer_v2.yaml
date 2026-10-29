@@ -10,8 +10,9 @@
 swemer_v2_resources_server:
   resources_servers:
     swemer_v2:
-      allowed_agents: [opencode_sandboxed_agent]
+      allowed_agents: [opencode_sandboxed_agent, opencode_agent, claude_code_agent, pi_agent, hermes_agent, nooa_agent]
       entrypoint: app.py
+      num_workers: 1
       domain: coding
       verified: false
 
@@ -44,6 +45,7 @@ swemer_v2_golden_patch_resources_server:
   resources_servers:
     swemer_v2:
       entrypoint: app.py
+      num_workers: 1
       domain: coding
       verified: false
 
