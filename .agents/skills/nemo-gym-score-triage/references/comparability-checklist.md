@@ -62,7 +62,19 @@ python - results/rollouts.jsonl <<'EOF'
 import collections, json, sys
 from pathlib import Path
 out = Path(sys.argv[1])
-rows = lambda p: [json.loads(l) for l in p.open() if l.strip()] if p.exists() else []
+def rows(p):
+    if not p.exists():
+        return []
+    result = []
+    with p.open("rb") as f:
+        for line in f:
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue  # Blank lines, and the truncated last line a killed writer can leave.
+            if isinstance(row, dict):
+                result.append(row)
+    return result
 key = lambda r: (r.get("_ng_task_index"), r.get("_ng_rollout_index"))
 done = rows(out); scored = {key(r) for r in done}
 # A drained rollout never started; an interrupted one counts as missing, not failed.
