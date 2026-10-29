@@ -21,7 +21,7 @@ from nemo_gym.comparison.statistics.unpaired_welch_fixed_suite import (
     MetricScale,
     SampleSummary,
     aggregate_welch,
-    composite_repeat_scores,
+    normalize_and_average_metrics_per_repeat,
     normalize_score,
     summarize_sample,
 )
@@ -252,8 +252,8 @@ def compare_suite_cell(
     baseline_values = _metric_values(baseline, metrics)
     candidate_values = _metric_values(candidate, metrics)
     try:
-        baseline_scores = composite_repeat_scores(baseline_values, scales)
-        candidate_scores = composite_repeat_scores(candidate_values, scales)
+        baseline_scores = normalize_and_average_metrics_per_repeat(baseline_values, scales)
+        candidate_scores = normalize_and_average_metrics_per_repeat(candidate_values, scales)
         for index, (metric, scale) in enumerate(zip(metrics, scales, strict=True)):
             metric.baseline_raw = [row[index] for row in baseline_values]
             metric.candidate_raw = [row[index] for row in candidate_values]

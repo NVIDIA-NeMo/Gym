@@ -114,7 +114,7 @@ def normalize_score(value: float, scale: MetricScale) -> float:
     return normalized
 
 
-def composite_repeat_scores(
+def normalize_and_average_metrics_per_repeat(
     repeat_values: Sequence[Sequence[float]], scales: Sequence[MetricScale]
 ) -> tuple[float, ...]:
     """Average equally weighted normalized metrics within each repeat.
