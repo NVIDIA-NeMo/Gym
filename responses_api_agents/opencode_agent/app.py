@@ -430,6 +430,7 @@ def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
 
 
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
+    history_delta_enabled: bool = False
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 8
@@ -1836,6 +1837,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if state.harness_session_id:
             command.extend(["--session", state.harness_session_id])
         payload = {
+            **(
+                {"history_transport": {"base_url": base_url, "timeout": self.config.timeout}}
+                if self.config.history_delta_enabled
+                else {}
+            ),
             "instructions": system if self.config.system_prompt_mode == "append" else "",
             "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,

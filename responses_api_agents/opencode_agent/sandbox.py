@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
+from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
 from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
@@ -369,6 +370,14 @@ class OpenCodeSandboxSession(AgentSessionState):
         if media:
             for path in await stage_media(self.session.sandbox, media):
                 command.extend(["--file", path])
+        command = await stage_cli_transport(
+            self.session.sandbox, {
+                **payload, 
+                "directory": directory, 
+                "command": command
+                }, 
+                harness="opencode"
+        )
         env = payload["env"]
         params = {
             "cwd": payload["cwd"],
