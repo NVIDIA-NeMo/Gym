@@ -207,7 +207,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "--exclude=*.pyc",
                 "--exclude=.*",
                 "--exclude=node_modules",
-                "--exclude=data",
+                # The agent's own datasets; nemo_gym/data is library code and ships.
+                f"--exclude={agent_pkg}/data",
                 "--exclude=tests",
                 "--exclude=outputs",
                 "--exclude=workspaces",

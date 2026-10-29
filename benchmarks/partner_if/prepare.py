@@ -12,7 +12,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
-from nemo_gym.gitlab_utils import download_jsonl_dataset
+from nemo_gym.data import download_jsonl_dataset
 
 
 BENCHMARK_DIR = Path(__file__).parent

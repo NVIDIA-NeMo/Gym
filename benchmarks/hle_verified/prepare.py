@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from nemo_gym.vision_input import build_image_input
+from nemo_gym.data import build_image_input
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -141,7 +141,7 @@ def prepare(
 
     prompt_config = None
     if include_vision:
-        from nemo_gym.prompt import load_prompt_config
+        from nemo_gym.data import load_prompt_config
 
         prompt_config = load_prompt_config(str(PROMPT_CONFIG_FPATH))
 

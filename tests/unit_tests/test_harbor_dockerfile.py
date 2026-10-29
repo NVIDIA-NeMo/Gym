@@ -9,7 +9,7 @@ Terminal Bench shapes seen in the hub.
 
 import pytest
 
-from nemo_gym.tasks.harbor.dockerfile import (
+from nemo_gym.data.tasks.harbor.dockerfile import (
     RECORD_VERSION,
     BaseImageConfig,
     DockerfileNeedsBuild,

@@ -30,6 +30,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
     translate_interpolation_error,
 )
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.environment.manifest import (
     DatasetKind,
     EnvironmentKind,
@@ -39,7 +40,6 @@ from nemo_gym.environment.manifest import (
     load_manifest,
     resolve_manifest_config_path,
 )
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 
 

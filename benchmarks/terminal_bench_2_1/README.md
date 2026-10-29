@@ -126,7 +126,7 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.data.task_materialization import materialize_task
 
 rows = [json.loads(line) for line in Path("benchmarks/terminal_bench_2_1/data/benchmark.jsonl").read_text().splitlines()]
 rows = [row for row in rows if row["task_name"] == "terminal-bench/regex-log"]

@@ -40,8 +40,8 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.verifier import _verifier_image, _verifier_runs_task_image, _verifier_start
 from nemo_gym.core import failure_kinds
+from nemo_gym.data import load_task
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.tasks.harbor import load_task
 
 
 BUILT_IMAGE = "registry.example/ds-hello:abc"
@@ -204,8 +204,8 @@ def build_mode(task, *, record: dict | None = ENTRYPOINT_CONFIG, image: str = BU
     ``record`` is the built image's recorded configuration (``None``: nothing recorded, as for an image
     prepare did not inspect).
     """
-    from nemo_gym.tasks.harbor.digest import context_digest
-    from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+    from nemo_gym.data import BUILT_IMAGES_FILE
+    from nemo_gym.data.tasks.harbor.digest import context_digest
 
     (task.path / "environment" / "Dockerfile").write_text(
         'FROM ubuntu:24.04\nCOPY . /app\nENTRYPOINT ["/entrypoint.sh"]\n'
