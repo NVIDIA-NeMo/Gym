@@ -25,8 +25,8 @@ budget, after a submission, or in phase 2), `agent_finished` (a-Interact), and t
 
 ## Harnesses
 
-What each harness's Gym adapter accepts today, read from its session seed checks. These rows are not results from
-runs: no harness has run BIRD with a model yet.
+What each harness's Gym adapter accepts today, read from its session seed checks. Only `simple_agent` has run BIRD
+with a model; the other rows are not results from runs.
 
 | Harness | c-Interact | a-Interact |
 |---|---|---|
