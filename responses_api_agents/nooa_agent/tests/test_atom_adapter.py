@@ -198,33 +198,49 @@ async def test_atom_root_and_child_sessions_route_through_gym(tmp_path: Path, mo
     assert all(call["cookies"]["session"] == "fixture" for call in calls)
 
 
-def test_terminal_bench_atom_recipe_routes_the_benchmark_to_atom() -> None:
-    """Follow the recipe the way Gym does: taskset -> environment -> its agent server must be the Atom harness.
+@pytest.mark.parametrize(
+    "config_path", ["benchmarks/terminal_bench_2_1/atom.yaml", "benchmarks/swebench/pro/atom.yaml"]
+)
+def test_atom_benchmark_configs_route_every_benchmark_dataset_to_atom(
+    config_path: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Resolve each benchmark dataset's agent the way Gym does (``resolve_dataset_agent``: taskset route or the
+    declaring resources server) and require the Atom harness with the Atom adapter.
 
     Guards against overriding an agent block that nothing references, which silently runs the default agent."""
-    from omegaconf import OmegaConf
+    from omegaconf import DictConfig, OmegaConf
 
-    from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.global_config import GlobalConfigDictParser, resolve_dataset_agent
 
+    # The SWE config requires a prepared offline runtime; the path only has to be absolute here.
+    monkeypatch.setenv("NOOA_SWE_RUNTIME_WHEELHOUSE", str(tmp_path / "wheelhouse"))
     parser = GlobalConfigDictParser()
-    _, configs = parser.load_extra_config_paths([str(ROOT / "benchmarks/terminal_bench_2_1/atom.yaml")])
+    _, configs = parser.load_extra_config_paths([str(ROOT / config_path)])
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
-    routes = OmegaConf.to_container(config.environment_server_routes, resolve=True)
-    assert routes, "the Terminal-Bench NOOA config must route its taskset to an environment"
-    for taskset, env_name in routes.items():
-        environment = next(iter(config[env_name].environment_servers.values()))
-        agent_name = environment.agent_server.name
-        agent = NOOAAgentConfig(
-            name=agent_name,
-            host="localhost",
-            port=8001,
-            **OmegaConf.to_container(config[agent_name].responses_api_agents.nooa_agent, resolve=True),
-        )
-        agent_class, adapter = validate_invocation(agent.nooa)
-        assert agent_class is atom_gym.AtomHarness, (
-            f"{taskset} -> {env_name} -> {agent_name} runs {agent.nooa.agent_class}"
-        )
-        assert adapter is invoke_atom
-        assert agent.nooa.execution_mode == "sandboxed"
-        assert agent.nooa.init_kwargs == {"turn_method": "handle_batch"}
+    resolved = []
+    for instance_name, block in config.items():
+        servers = block.get("resources_servers") if isinstance(block, DictConfig) else None
+        if not isinstance(servers, DictConfig) or not servers:
+            continue
+        for dataset in next(iter(servers.values())).get("datasets") or []:
+            if dataset.get("type") != "benchmark":
+                continue
+            agent_name = resolve_dataset_agent(
+                config, str(instance_name), pin=dataset.get("agent"), taskset=dataset.get("taskset")
+            )
+            agent = NOOAAgentConfig(
+                name=agent_name,
+                host="localhost",
+                port=8001,
+                **OmegaConf.to_container(config[agent_name].responses_api_agents.nooa_agent, resolve=True),
+            )
+            agent_class, adapter = validate_invocation(agent.nooa)
+            assert agent_class is atom_gym.AtomHarness, (
+                f"{dataset.get('name')} -> {agent_name} runs {agent.nooa.agent_class}"
+            )
+            assert adapter is invoke_atom
+            assert agent.nooa.execution_mode == "sandboxed"
+            assert agent.nooa.init_kwargs == {"turn_method": "handle_batch"}
+            resolved.append((str(dataset.get("name")), agent_name))
+    assert resolved, f"{config_path} declares no benchmark dataset"
