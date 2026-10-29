@@ -1131,6 +1131,34 @@ def test_stream_without_terminal_event_is_truncated(tmp_path, path, payload):
     assert exchange["error_category"] == "stream_truncated"
 
 
+def test_responses_lifecycle_events_do_not_count_toward_time_to_first_token(tmp_path):
+    """Keepalive events (``stream_keepalive_s``) open a Responses stream long before its first item."""
+    import asyncio
+
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+    response = {"id": "resp_1", "object": "response", "status": "completed", "output": []}
+
+    @app.post("/v1/responses")
+    async def _stream(body: dict = Body()) -> StreamingResponse:
+        async def gen():
+            yield _sse("response.created", {"type": "response.created", "response": response})
+            yield _sse("response.in_progress", {"type": "response.in_progress", "response": response})
+            await asyncio.sleep(0.2)
+            yield _sse("response.completed", {"type": "response.completed", "response": response})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    _install_capture(app, tmp_path)
+
+    assert TestClient(app).post("/ng-rollout/keepalive/v1/responses", json={"stream": True}).status_code == 200
+
+    [call] = read_model_call_records(CaptureStore(tmp_path), "keepalive")
+    assert call.error_category is None
+    assert call.latency_ttft_ms >= 200
+
+
 def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     """Streamed (SSE) /v1/messages calls are forwarded unchanged AND reassembled into the final
     response, so token stats / tool calls / reasoning are captured like a non-streamed call."""

@@ -8,6 +8,7 @@ import json
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import time
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -17,11 +18,16 @@ from starlette.middleware.sessions import SessionMiddleware
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.chat_streaming import synthesize_chat_completion_sse
+from nemo_gym.judge import call_judge
+from nemo_gym.observability.verifiers import observe_verifier
+from nemo_gym.openai_utils import NeMoGymChatCompletion
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
     restore_namespace_tool_calls,
     synthesize_responses_sse,
 )
+from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.server_utils import ServerClient
 
 from .scenarios import Scenario
 
@@ -41,6 +47,7 @@ class Probe:
     violations: list[str] = field(default_factory=list)
     verifications: list[dict] = field(default_factory=list)
     agent_responses: list[dict] = field(default_factory=list)
+    judge_calls: list[dict] = field(default_factory=list)
     seeded: int = 0
     closed: int = 0
     finished: bool = False
@@ -54,6 +61,7 @@ class Probe:
             "violations": self.violations,
             "verifications": self.verifications,
             "agent_responses": self.agent_responses,
+            "judge_calls": self.judge_calls,
             "seeded": self.seeded,
             "closed": self.closed,
             "finished": self.finished,
@@ -295,8 +303,35 @@ class Probe:
         app.post("/v1/responses", response_model=None)(self.model)
         return app
 
-    def resources_app(self) -> FastAPI:
+    def judge_app(self) -> FastAPI:
+        """A separate captured Model Server used only by the verifier."""
         app = FastAPI()
+        install_model_call_capture(
+            app,
+            ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=self.directory / "capture"),
+            model_server_name="judge_model",
+        )
+
+        @app.post("/v1/chat/completions")
+        async def judge(request: Request) -> dict:
+            body = await request.json()
+            payload = {
+                "id": f"judge_{uuid4().hex}",
+                "object": "chat.completion",
+                "created": int(time()),
+                "model": "conformance-judge",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "1.0"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 13, "completion_tokens": 2, "total_tokens": 15},
+            }
+            self.judge_calls.append({"request": body, "status_code": 200, "response": payload})
+            self.save()
+            return payload
+
+        return app
+
+    def resources_app(self, *, server_client: ServerClient | None = None) -> FastAPI:
+        app = FastAPI()
+        app.add_middleware(RolloutContextMiddleware)
         app.add_middleware(SessionMiddleware, secret_key=uuid4().hex, session_cookie="probe_resources_session")
 
         async def seed(request: Request) -> dict:
@@ -352,13 +387,30 @@ class Probe:
             )
             complete = answered or finished_by_tool
             reward = float(complete and self.scenario.expected_reward == 1.0)
+            grade = {}
+            if self.scenario.judge_verifier:
+                if server_client is None:
+                    raise RuntimeError("judge_verifier requires a ServerClient")
+                judgement = await call_judge(
+                    server_client,
+                    server_name="judge_model",
+                    url_path="/v1/chat/completions",
+                    json={
+                        "model": "conformance-judge",
+                        "messages": [{"role": "user", "content": json.dumps(output)}],
+                        "max_tokens": 16,
+                    },
+                    response_model=NeMoGymChatCompletion,
+                )
+                reward = float(judgement.choices[0].message.content)
+                grade = {"judgement_id": judgement.id}
             self.verifications.append({"reward": reward, "answer_seen": complete})
             self.save()
-            return {**body, "reward": reward, "evaluation_completed": True, "mask_sample": False}
+            return {**body, **grade, "reward": reward, "evaluation_completed": True, "mask_sample": False}
 
         for prefix in ("", "/ng-rollout/{rollout_id}"):
             app.post(prefix + "/seed_session")(seed)
             app.post(prefix + "/close_session")(close)
-            app.post(prefix + "/verify")(verify)
+            app.post(prefix + "/verify")(observe_verifier(verify, enabled=True))
             app.post(prefix + "/bash")(bash)
         return app
