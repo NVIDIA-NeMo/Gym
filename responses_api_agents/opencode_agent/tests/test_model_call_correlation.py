@@ -9,7 +9,7 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import merge_model_call_capture_into_record
 from nemo_gym.rollouts.model_calls import read_model_call_records
-from nemo_gym.rollouts.rollout_collection import _build_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.trajectory import AgentObservationBundle, ContextCompactionObservation, TrajectoryRecord
 from nemo_gym.trajectory.trajectory_record import join_agent_model_calls, join_assistant_message_calls
 from responses_api_agents.opencode_agent.app import _parse_opencode_session

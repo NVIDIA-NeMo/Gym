@@ -30,7 +30,6 @@ if TYPE_CHECKING:
         NG_RESULT_TYPE_KEY,
         NG_TERMINAL_KEY,
         NG_TRAJECTORY_KEY,
-        DispatchLatencyTracker,
         RolloutCollectionConfig,
         RolloutCollectionHelper,
         get_max_rollout_attempts,
@@ -40,12 +39,13 @@ if TYPE_CHECKING:
         record_resubmit_offset,
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
+    from nemo_gym.rollouts.rollout_perf import DispatchLatencyTracker
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
-    "DispatchLatencyTracker": "rollout_collection",
+    "DispatchLatencyTracker": "rollout_perf",
     "ENVIRONMENT_SERVER_FAILURE_CLASS": "rollout_collection",
     "EvidenceScope": "harness_capabilities.checker",
     "NAMES": "harness_capabilities.checker",

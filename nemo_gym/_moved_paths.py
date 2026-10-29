@@ -489,6 +489,28 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "0.8.0",
             "NG_DISPATCH_DRAINED_KEY NG_FAILURE_CLASS_KEY NG_NO_PERSIST_KEY _rollout_for_export _strip_capture_payloads",
         ),
+        # Split out of rollout_collection.
+        **_names("nemo_gym.rollouts.rollout_perf", "0.8.0", "_build_ng_perf"),
+        **_names(
+            "nemo_gym.rollouts.trajectory_builder",
+            "0.8.0",
+            """
+            _build_trajectory_record _nonnegative_int _trajectory_identity _turn_content _turns_from_model_calls
+            """,
+        ),
+        # Moved, and still imported by rollout_collection for its own use.
+        **_names("nemo_gym.rollouts.rollout_perf", "0.8.0", "DispatchLatencyTracker NG_PERF_KEY _attach_ng_perf"),
+        **_names("nemo_gym.rollouts.trajectory_builder", "0.8.0", "_attach_trajectory_record _has_observation_gap"),
+        # rollout_collection imported these for code that moved out of it.
+        **_names(
+            "nemo_gym.trajectory.trajectory_record",
+            "0.8.0",
+            """
+            AgentInvocation AgentObservationBundle ModelCallRef ObservationGap ToolCallObservation
+            TrajectoryModelCall TrajectoryRecord TrajectoryTokenStats TrajectoryToolCall TrajectoryTurn
+            VerifierInvocation
+            """,
+        ),
     },
     "nemo_gym.health.types": {
         **_names(
