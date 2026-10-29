@@ -933,3 +933,57 @@ def test_final_root_outcome_preserves_child_and_checkpoint_outcomes(invalid_outp
     # Projection never revisits the shared, now mutated exception or its frames.
     _, unchanged = trace.project(**projection)
     assert [invocation.status for invocation in unchanged.invocations] == ["incomplete", "incomplete", "completed"]
+
+
+def test_projection_declares_the_root_agents_last_response_as_the_terminal() -> None:
+    """Token-id capture attributes the scored chain to this id. A child's later call and the
+    synthetic final message the result projection appends must not displace it."""
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=None)
+    params = NeMoGymResponseCreateParamsNonStreaming(input="delegate, then finish")
+    root = trace.before_agent_call(call_id="root-call", parent_call_id=None)
+
+    def served(response_id: str) -> GymModelCall:
+        call = GymModelCall(
+            model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+            request=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "go"}]),
+        )
+        trace.on_model_call(call)
+        state.calls.append(call)
+        call.response = NeMoGymResponse.model_validate(
+            model_response(
+                NeMoGymResponseFunctionToolCall(
+                    id=f"fc-{response_id}", call_id=f"c-{response_id}", name="x", arguments="{}"
+                ),
+                response_id=response_id,
+            )
+        )
+        return call
+
+    served("resp-root-1")
+    child = trace.before_agent_call(call_id="child-call", parent_call_id="root-call")
+    served("resp-child-1")
+    trace.after_agent_call(context=child, exception=None)
+    served("resp-root-2")
+    child2 = trace.before_agent_call(call_id="child-call-2", parent_call_id="root-call")
+    served("resp-child-2")  # the rollout's last call belongs to a child
+    trace.after_agent_call(context=child2, exception=None)
+    trace.after_agent_call(context=root, exception=None)
+
+    episode, _ = trace.project(create_params=params, state=state, task_id="task", rollout_id="0-0")
+    assert episode.response.metadata == {"terminal_response_id": "resp-root-2"}
+    # The verifier-facing final message is additive; the declaration survives it.
+    response, _ = ensure_verifier_final_message(episode.response, "structured return value")
+    assert response.output[-1].id == "nooa_fallback"
+    assert response.metadata["terminal_response_id"] == "resp-root-2"
+
+
+def test_projection_declares_no_terminal_without_a_served_response() -> None:
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=None)
+    context = trace.before_agent_call(call_id="root", parent_call_id=None)
+    trace.after_agent_call(context=context, exception=None)
+    episode, _ = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="x"), state=state, task_id="t", rollout_id="0-0"
+    )
+    assert episode.response.metadata is None

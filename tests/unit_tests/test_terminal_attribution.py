@@ -1202,6 +1202,44 @@ def test_finalize_honors_a_declared_terminal_response_id(tmp_path):
     assert attribution["call_id"] == "call2"
 
 
+def test_finalize_honors_a_terminal_response_id_declared_in_response_metadata(tmp_path):
+    """A harness behind an agent-session environment cannot add fields to the rollout record; its
+    response metadata is the only channel it has, so the declaration is read from there too."""
+    result = {
+        "_ng_rollout_id": "t0-r0",
+        "response": {
+            "id": "",
+            "model": "m",
+            "object": "response",
+            "output": [],
+            "metadata": {TERMINAL_RESPONSE_ID_KEY: "resp_2"},
+        },
+        "reward": 1.0,
+    }
+    built = _delivery_case(tmp_path, result)
+    assert built[MASK_SAMPLE_KEY] is False
+    attribution = result[TOKEN_CAPTURE_KEY]["terminal_attribution"]
+    assert attribution["method"] == "declared" and attribution["call_id"] == "call2"
+
+
+def test_a_terminal_declared_on_the_record_wins_over_response_metadata(tmp_path):
+    result = {
+        "_ng_rollout_id": "t0-r0",
+        "response": {
+            "id": "",
+            "model": "m",
+            "object": "response",
+            "output": [],
+            "metadata": {TERMINAL_RESPONSE_ID_KEY: "resp_unknown"},
+        },
+        TERMINAL_RESPONSE_ID_KEY: "resp_2",
+        "reward": 1.0,
+    }
+    built = _delivery_case(tmp_path, result)
+    assert built[MASK_SAMPLE_KEY] is False
+    assert result[TOKEN_CAPTURE_KEY]["terminal_attribution"]["call_id"] == "call2"
+
+
 @pytest.mark.parametrize("with_aux", [False, True])
 @pytest.mark.parametrize(
     ("declared_response_id", "reason"),
