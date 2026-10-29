@@ -63,6 +63,8 @@ sandbox:
       secure: true
       allow_internet_access: true
       strict_resources: false
+      idle_policy: never
+      idle_timeout_s: 1.0
     exec:
       default_timeout_s: 180.0
       user: null
@@ -194,6 +196,32 @@ retry failed pause/resume calls; a timeout or transport failure can leave the
 remote state unknown. Check status before retrying. Closing a paused sandbox
 still deletes it. This capability requires a service that implements E2B's public
 pause/connect endpoints.
+
+### Idle Sandboxes
+
+An agent's sandbox sits idle while the agent waits on its model. With `create.idle_policy: pause`,
+the provider pauses a sandbox that no request has touched for `create.idle_timeout_s` seconds since
+its creation or its last request, and resumes it before the next request:
+
+```yaml
+sandbox:
+  e2b:
+    create:
+      idle_policy: pause
+      idle_timeout_s: 1.0
+```
+
+- A paused sandbox holds no CPU or memory on the backend. Each idle period costs one pause and one
+  resume, which the agent sees as added latency on its next command.
+- The sandbox resumes on the node that paused it, with the lifetime it was created with.
+- A request in flight is never cut off. The idle timer restarts with every request, and an explicit
+  `pause()` waits for requests in flight to finish.
+- If a resume fails, `exec` returns `return_code` 125 with `error_type="sandbox"`, and the next
+  request tries again.
+- Traffic that bypasses the provider would find the sandbox paused, so opening an `endpoint()` or
+  calling `serialize()` keeps that sandbox running from then on.
+
+The default, `never`, leaves sandboxes running until they are closed.
 
 ## Security and Isolation
 

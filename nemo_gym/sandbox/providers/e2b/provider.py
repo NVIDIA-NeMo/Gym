@@ -33,14 +33,20 @@ arguments to the template *build*, so a per-sandbox
 ``SandboxSpec.resources`` cannot be honoured at create time. Requests are
 reported once per provider instance (or raise, with ``create.strict_resources``)
 instead of being dropped quietly.
+
+**Idle sandboxes.** An agent's sandbox sits idle while the agent waits on its
+model. With ``create.idle_policy`` the provider parks a sandbox that no request
+has touched for ``create.idle_timeout_s`` and brings it back before the next
+request, so an idle sandbox holds no CPU or memory on the backend.
 """
 
 import asyncio
+import contextlib
 import logging
 import math
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from time import monotonic
@@ -69,6 +75,14 @@ _DIRECT_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # How a deployment publishes sandbox ports. See ``E2BProvider.endpoint``.
 _PORT_ROUTING_MODES = ("auto", "hostname", "gateway")
 
+# Return code for "no process exit status", shared with the other providers.
+SANDBOX_RUNTIME_RETURN_CODE = 125
+
+# What happens to an idle sandbox. See ``E2BCreateConfig.idle_policy``.
+_IDLE_POLICIES = ("never", "pause")
+# How long an explicit pause() waits for in-flight requests before giving up.
+_PAUSE_DRAIN_TIMEOUT_S = 120.0
+
 # Passed straight through to the SDK (``ApiParams``) on every call.
 _API_PARAM_KEYS = (
     "api_key",
@@ -85,6 +99,10 @@ _API_PARAM_KEYS = (
 
 class E2BCreateError(SandboxCreateError):
     """Raised when a sandbox cannot be created."""
+
+
+class E2BResumeError(RuntimeError):
+    """Raised when a parked sandbox cannot be brought back for a request."""
 
 
 def _require_e2b_sdk() -> Any:
@@ -189,6 +207,14 @@ class E2BCreateConfig:
     # Raise instead of warning when a spec requests resources E2B cannot apply
     # per sandbox (they are fixed when the template is built).
     strict_resources: bool = False
+    # What happens to a sandbox that no request has touched for
+    # ``idle_timeout_s`` since its create or its last request. ``pause`` pauses
+    # it and resumes it before the next request: it holds no CPU or memory while
+    # its agent waits on a model, each idle period costs one pause and one
+    # resume, and it resumes on the node that paused it. ``never`` leaves
+    # sandboxes running until they are closed.
+    idle_policy: str = "never"
+    idle_timeout_s: float = 1.0
 
     def __post_init__(self) -> None:
         if self.template is not None and (not isinstance(self.template, str) or not self.template.strip()):
@@ -201,6 +227,9 @@ class E2BCreateConfig:
             if not isinstance(template, str) or not template.strip():
                 raise ValueError("create.template_map values must be non-empty template strings")
         _validate_optional_number("create.timeout_s", self.timeout_s, positive=True)
+        if self.idle_policy not in _IDLE_POLICIES:
+            raise ValueError(f"create.idle_policy must be one of {', '.join(_IDLE_POLICIES)}")
+        _validate_nonnegative_number("create.idle_timeout_s", self.idle_timeout_s)
 
 
 @dataclass(frozen=True)
@@ -245,6 +274,46 @@ class E2BOperationConfig:
         _validate_nonnegative_number("operations.retry_max_delay_s", self.retry_max_delay_s)
 
 
+@dataclass(eq=False)
+class _E2BSandboxState:
+    """Idle-policy bookkeeping for a sandbox this provider created.
+
+    Kept by sandbox ID because :meth:`E2BProvider.resume` replaces
+    ``handle.raw``. Every field is touched only on the sandbox's own event loop.
+    """
+
+    # Lifetime sent at create; reapplied on every resume, because E2B's
+    # connect otherwise resets it to the SDK default.
+    ttl_s: int | None
+    # Held across a pause, a resume or a kill, never across a command, so a
+    # request waits out a transition already sent instead of hitting a sandbox
+    # that the backend reports as mid-transition.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Requests currently running; the sandbox is never parked while nonzero.
+    inflight: int = 0
+    # True after a park was attempted and nothing has brought the sandbox back:
+    # the next request does that first. A pause whose outcome is unknown sets
+    # it too; connecting to a sandbox that is still running only extends its
+    # lifetime.
+    parked: bool = False
+    # Bumped by every request and explicit pause/resume. An idle park applies
+    # only to the idle period it was scheduled for.
+    epoch: int = 0
+    park_task: asyncio.Task | None = None
+    # Idle parks past their idle wait; those are no longer cancelled.
+    parking: int = 0
+    closed: bool = False
+    # Set once traffic that bypasses this provider may reach the sandbox (an
+    # endpoint, or a handle serialized to another process). The provider can
+    # then no longer tell when the sandbox is idle, so it stops parking it.
+    pinned: bool = False
+    parked_at: float | None = None
+    pauses: int = 0
+    pause_s: float = 0.0
+    resumes: int = 0
+    resume_s: float = 0.0
+
+
 class E2BProvider:
     """Provider backed by the E2B Python SDK."""
 
@@ -263,6 +332,9 @@ class E2BProvider:
         self._exec = _config_from_mapping(E2BExecConfig, exec)
         self._operations = _config_from_mapping(E2BOperationConfig, operations)
         self._warned_resource_specs: set[str] = set()
+        # Sandboxes this provider created under an idle policy other than never.
+        self._states: dict[str, _E2BSandboxState] = {}
+        self._park_tasks: set[asyncio.Task] = set()
 
     # ---------------------------------------------------------------- helpers
 
@@ -448,10 +520,21 @@ class E2BProvider:
         except Exception as exc:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
-        return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+        handle = SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+        if self._create.idle_policy != "never":
+            self._states[handle.sandbox_id] = _E2BSandboxState(ttl_s=kwargs["timeout"])
+            # The first command comes after the agent's first model call; until
+            # then the sandbox would hold its resources for nothing.
+            await self._after_request(handle, wait=True)
+        return handle
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
-        """Return a descriptor for attaching to this sandbox from another process."""
+        """Return a descriptor for attaching to this sandbox from another process.
+
+        Under an idle policy the sandbox stays running from then on: this
+        provider cannot see the other process's requests.
+        """
+        await self._keep_running(handle)
         return {"sandbox_id": handle.sandbox_id}
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
@@ -491,12 +574,16 @@ class E2BProvider:
 
         The returned headers are the caller's to send verbatim. ``X-Access-Token``
         is minted per sandbox and is not the deployment's API key.
+
+        Under an idle policy the sandbox stays running from then on: traffic to
+        the endpoint bypasses this provider.
         """
         if isinstance(port, bool) or not isinstance(port, int):
             raise ValueError(f"Invalid sandbox TCP port: {port!r}")
         if port < 1 or port > 65535:
             raise ValueError(f"Sandbox TCP port must be between 1 and 65535, got {port}")
 
+        await self._keep_running(handle)
         sandbox = self._sandbox(handle)
         connection_config = getattr(sandbox, "connection_config", None)
         if connection_config is None:
@@ -526,14 +613,44 @@ class E2BProvider:
         return SandboxEndpoint(endpoint=base_url, headers=headers)
 
     async def pause(self, handle: SandboxHandle) -> None:
-        """Pause the sandbox through the E2B SDK without replaying failed requests."""
-        await self._sandbox(handle).pause(**self._request_params())
+        """Pause the sandbox through the E2B SDK without replaying failed requests.
+
+        Under an idle policy, requests in flight finish first (pausing would
+        cut them off), and the next request resumes the sandbox.
+        """
+        sandbox = self._sandbox(handle)
+        state = self._states.get(handle.sandbox_id)
+        if state is None:
+            await sandbox.pause(**self._request_params())
+            return
+        self._cancel_pending_park(state)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _PAUSE_DRAIN_TIMEOUT_S
+        while True:
+            async with state.lock:
+                self._sandbox(handle)
+                if not state.inflight:
+                    state.epoch += 1
+                    if not await self._park_locked(handle, state, reason="pause()"):
+                        raise RuntimeError(f"e2b sandbox {handle.sandbox_id!r} was not paused in its current state")
+                    return
+            if loop.time() >= deadline:
+                raise RuntimeError(f"e2b sandbox {handle.sandbox_id!r} still has requests in flight; not pausing")
+            await asyncio.sleep(0.1)
 
     async def resume(self, handle: SandboxHandle) -> None:
         """Resume the sandbox and replace its SDK handle only after success."""
         self._sandbox(handle)
-        e2b = _require_e2b_sdk()
-        handle.raw = await e2b.AsyncSandbox.connect(handle.sandbox_id, **self._api_params())
+        state = self._states.get(handle.sandbox_id)
+        if state is None:
+            e2b = _require_e2b_sdk()
+            handle.raw = await e2b.AsyncSandbox.connect(handle.sandbox_id, **self._api_params())
+            return
+        self._cancel_pending_park(state)
+        async with state.lock:
+            self._sandbox(handle)
+            state.epoch += 1
+            await self._unpark_locked(handle, state, reason="resume()")
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()
@@ -555,6 +672,34 @@ class E2BProvider:
         )
 
     async def close(self, handle: SandboxHandle) -> None:
+        if handle.raw is None:
+            return
+        state = self._states.get(handle.sandbox_id)
+        if state is None:
+            await self._kill(handle)
+            return
+        state.closed = True
+        self._cancel_pending_park(state)
+        try:
+            # A pause or resume already sent finishes first; killing under it
+            # would only collide with the transition.
+            async with state.lock:
+                await self._kill(handle)
+        except BaseException:
+            state.closed = False
+            raise
+        self._states.pop(handle.sandbox_id, None)
+        LOGGER.debug(
+            "e2b: closed %s after %d pauses (%.1fs) and %d resumes (%.1fs)",
+            handle.sandbox_id,
+            state.pauses,
+            state.pause_s,
+            state.resumes,
+            state.resume_s,
+        )
+
+    async def _kill(self, handle: SandboxHandle) -> None:
+        """Kill the sandbox in any state; clear the handle only after confirmed cleanup."""
         e2b = _require_e2b_sdk()
         sandbox = handle.raw
         if sandbox is None:
@@ -579,8 +724,156 @@ class E2BProvider:
         handle.raw = None
 
     async def aclose(self) -> None:
-        """No provider-scoped client to close; sandboxes own their connections."""
-        return None
+        """Wait out idle parks already sent; sandboxes own their connections."""
+        for state in self._states.values():
+            self._cancel_pending_park(state)
+        loop = asyncio.get_running_loop()
+        pending = [task for task in self._park_tasks if task.get_loop() is loop]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    # ------------------------------------------------------------ idle policy
+
+    @contextlib.asynccontextmanager
+    async def _in_flight(self, handle: SandboxHandle) -> AsyncIterator[Any]:
+        """Hold a request on the sandbox, bringing it back first if it was parked.
+
+        Yields the SDK sandbox to use. An idle park still waiting out its delay
+        is dropped; one already sent is waited out on the lock. While a request
+        is held the sandbox is never parked.
+        """
+        state = self._states.get(handle.sandbox_id)
+        if state is None:
+            yield self._sandbox(handle)
+            return
+        self._cancel_pending_park(state)
+        async with state.lock:
+            self._sandbox(handle)
+            state.epoch += 1
+            if state.parked:
+                try:
+                    await self._unpark_locked(handle, state, reason="request")
+                except Exception as exc:
+                    raise E2BResumeError(f"e2b sandbox {handle.sandbox_id} could not be resumed: {exc}") from exc
+            state.inflight += 1
+        try:
+            yield self._sandbox(handle)
+        finally:
+            state.inflight -= 1
+
+    async def _keep_running(self, handle: SandboxHandle) -> None:
+        """Bring a parked sandbox back and stop parking it for good."""
+        state = self._states.get(handle.sandbox_id)
+        if state is None:
+            return
+        state.pinned = True
+        async with self._in_flight(handle):
+            pass
+
+    def _cancel_pending_park(self, state: _E2BSandboxState) -> None:
+        """Cancel an idle park that is still waiting out its delay."""
+        task = state.park_task
+        if task is not None and not task.done() and state.parking == 0:
+            task.cancel()
+            state.park_task = None
+
+    async def _after_request(self, handle: SandboxHandle, *, wait: bool) -> None:
+        """Schedule the idle park that follows create or a request.
+
+        The park always runs in its own task, shielded from the caller: a pause
+        cancelled client-side can leave the sandbox mid-transition with nothing
+        to finish it. With no idle delay and ``wait`` set, the caller waits for
+        it.
+        """
+        state = self._states.get(handle.sandbox_id)
+        if state is None or state.closed or state.pinned:
+            return
+        self._cancel_pending_park(state)
+        task = asyncio.get_running_loop().create_task(self._park_after(handle, state, state.epoch))
+        state.park_task = task
+        self._park_tasks.add(task)
+        task.add_done_callback(self._park_tasks.discard)
+        if wait and self._create.idle_timeout_s <= 0:
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
+                # A newer request superseded the park.
+
+    async def _park_after(self, handle: SandboxHandle, state: _E2BSandboxState, epoch: int) -> None:
+        delay = self._create.idle_timeout_s
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        state.parking += 1
+        try:
+            async with state.lock:
+                if (
+                    state.closed
+                    or state.pinned
+                    or state.inflight
+                    or state.parked
+                    or state.epoch != epoch
+                    or handle.raw is None
+                ):
+                    return
+                await self._park_locked(handle, state, reason="idle")
+        except Exception as exc:  # noqa: BLE001 - a background task must not die silently
+            # A failed park costs capacity, not correctness.
+            LOGGER.warning("e2b: idle park of %s failed: %s", handle.sandbox_id, exc)
+        finally:
+            state.parking -= 1
+
+    async def _park_locked(self, handle: SandboxHandle, state: _E2BSandboxState, *, reason: str) -> bool:
+        """Pause the sandbox; the caller holds ``state.lock`` with nothing in flight.
+
+        Returns whether the sandbox is now paused. An exception leaves the
+        outcome unknown, so the next request reconnects first.
+        """
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        sandbox = self._sandbox(handle)
+        try:
+            paused = await sandbox.pause(**self._request_params())
+            if paused is False:
+                # The SDK reports a 409 as "already paused", but gateways such
+                # as AgentENV also answer 409 mid-transition.
+                info = await sandbox.get_info(**self._request_params())
+                if getattr(info, "state", None) != "paused":
+                    LOGGER.warning("e2b: pause of %s (%s) was refused; it keeps running", handle.sandbox_id, reason)
+                    return False
+        except BaseException:
+            state.parked = True
+            raise
+        elapsed = loop.time() - started
+        state.parked = True
+        state.parked_at = loop.time()
+        state.pauses += 1
+        state.pause_s += elapsed
+        LOGGER.debug("e2b: paused %s (%s) in %.2fs", handle.sandbox_id, reason, elapsed)
+        return True
+
+    async def _unpark_locked(self, handle: SandboxHandle, state: _E2BSandboxState, *, reason: str) -> None:
+        """Reconnect to a paused sandbox with its own lifetime; the caller holds ``state.lock``."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        e2b = _require_e2b_sdk()
+        kwargs = self._api_params()
+        if state.ttl_s is not None:
+            kwargs["timeout"] = state.ttl_s
+        handle.raw = await e2b.AsyncSandbox.connect(handle.sandbox_id, **kwargs)
+        elapsed = loop.time() - started
+        parked_for = loop.time() - state.parked_at if state.parked_at is not None else 0.0
+        state.parked = False
+        state.parked_at = None
+        state.resumes += 1
+        state.resume_s += elapsed
+        LOGGER.debug(
+            "e2b: resumed %s (%s) in %.2fs after %.1fs paused", handle.sandbox_id, reason, elapsed, parked_for
+        )
 
     # -------------------------------------------------------------- commands
 
@@ -685,8 +978,7 @@ class E2BProvider:
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        e2b = _require_e2b_sdk()
-        sandbox = self._sandbox(handle)
+        self._sandbox(handle)
 
         effective_timeout = timeout_s if timeout_s is not None else self._exec.default_timeout_s
         if effective_timeout is not None and (not _is_finite_number(effective_timeout) or effective_timeout < 0):
@@ -703,13 +995,32 @@ class E2BProvider:
         kwargs["timeout"] = float(effective_timeout) if effective_timeout is not None else None
         kwargs["request_timeout"] = self._exec_request_timeout()
 
+        completed = False
+        try:
+            result = await self._run_command(handle, kwargs, effective_timeout)
+            completed = True
+        except E2BResumeError as exc:
+            return SandboxExecResult(
+                stdout=None, stderr=str(exc), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
+            )
+        finally:
+            await self._after_request(handle, wait=completed)
+        return result
+
+    async def _run_command(
+        self, handle: SandboxHandle, kwargs: dict[str, Any], effective_timeout: float | None
+    ) -> SandboxExecResult:
+        e2b = _require_e2b_sdk()
         timeout_exc = getattr(e2b, "TimeoutException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
         try:
-            if self._exec.background:
-                result = await self._run_background(sandbox, kwargs)
-            else:
-                result = await sandbox.commands.run(**kwargs)
+            async with self._in_flight(handle) as sandbox:
+                if self._exec.background:
+                    result = await self._run_background(sandbox, kwargs)
+                else:
+                    result = await sandbox.commands.run(**kwargs)
+        except E2BResumeError:
+            raise
         except Exception as exc:
             # A non-zero exit is a normal outcome, not a provider failure.
             if isinstance(exit_exc, type) and isinstance(exc, exit_exc):
@@ -737,18 +1048,30 @@ class E2BProvider:
     # ----------------------------------------------------------------- files
 
     async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
-        sandbox = self._sandbox(handle)
-        await self._with_retries(
-            lambda: sandbox.files.write(target_path, data, **self._request_params()),
-            operation="write_file",
-        )
+        self._sandbox(handle)
+        completed = False
+        try:
+            async with self._in_flight(handle) as sandbox:
+                await self._with_retries(
+                    lambda: sandbox.files.write(target_path, data, **self._request_params()),
+                    operation="write_file",
+                )
+            completed = True
+        finally:
+            await self._after_request(handle, wait=completed)
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
-        sandbox = self._sandbox(handle)
-        data = await self._with_retries(
-            lambda: sandbox.files.read(source_path, format="bytes", **self._request_params()),
-            operation="read_file",
-        )
+        self._sandbox(handle)
+        completed = False
+        try:
+            async with self._in_flight(handle) as sandbox:
+                data = await self._with_retries(
+                    lambda: sandbox.files.read(source_path, format="bytes", **self._request_params()),
+                    operation="read_file",
+                )
+            completed = True
+        finally:
+            await self._after_request(handle, wait=completed)
         return data if isinstance(data, bytes) else bytes(data)
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:

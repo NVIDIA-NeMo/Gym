@@ -71,6 +71,12 @@ sandbox:
       # Resource limits are fixed when a template is built. False warns when a
       # SandboxSpec requests resources; true rejects the request.
       strict_resources: false
+      # Park sandboxes while their agents wait on the model. `pause` pauses a
+      # sandbox that no request has touched for idle_timeout_s seconds and
+      # resumes it before the next request, on the node that paused it. `never`
+      # leaves sandboxes running until they are closed.
+      idle_policy: never
+      idle_timeout_s: 1.0
 
     exec:
       # Fallback only when timeout_s=None. AsyncSandbox.exec() normally supplies
