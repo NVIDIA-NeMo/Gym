@@ -142,16 +142,69 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     assert markdown.startswith("# gym eval compare-suite\n")
     assert "sk-suite-example" not in markdown
     assert "| Aggregate | Cells | Candidate | Baseline | Delta | 90% CI for delta |" in markdown
-    assert "| model-a | 2 | 65.0000 | 50.0000 | 15.0000 |" in markdown
+    assert "| model-a | 2 | 65.00 | 50.00 | 15.00 |" in markdown
     assert "| Model | Benchmark | Status | Candidate repeats | Baseline repeats | Delta |" in markdown
-    assert "| model-a | first | included | 4 | 3 | 20.0000 |" in markdown
+    assert "| model-a | first | included | 4 | 3 | 20.00 |" in markdown
     assert "Delta = candidate − baseline; positive deltas favor the candidate." in markdown
     assert "gap" not in markdown.lower()
     assert "95% CI for delta" not in markdown
     assert "Planned coverage is unverified" in markdown
     assert existing.read_text() == "existing run report"
     stdout = capsys.readouterr().out
-    assert "model-a: candidate=65.0000 baseline=50.0000 delta=15.0000" in stdout
+    assert "model-a: candidate=65.00 baseline=50.00 delta=15.00" in stdout
+
+
+def test_markdown_uses_four_significant_digits_without_rounding_json(tmp_path: Path, monkeypatch) -> None:
+    samples = {
+        "tiny": ([0.1234567, 0.1234568, 0.1234569], [0.12345672, 0.12345682, 0.12345692]),
+        "ordinary": ([0.123456, 0.234567, 0.345678], [0.111111, 0.222222, 0.333333]),
+        "constant": ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+    }
+    manifest = {
+        "benchmarks": {
+            name: {
+                "metrics": [
+                    {
+                        "name": "mean/reward",
+                        "low": -123456.789 if name == "constant" else 0,
+                        "high": 987654.321 if name == "constant" else 1,
+                        "higher_is_better": True,
+                    }
+                ]
+            }
+            for name in samples
+        },
+        "models": {
+            "model": {
+                name: {
+                    "baseline": {"rollouts": _saved_run(tmp_path / f"{name}-baseline", baseline)},
+                    "candidate": {"rollouts": _saved_run(tmp_path / f"{name}-candidate", candidate)},
+                }
+                for name, (baseline, candidate) in samples.items()
+            }
+        },
+    }
+    suite = tmp_path / "suite.yaml"
+    suite.write_text(yaml.safe_dump(manifest, sort_keys=False))
+    output = tmp_path / "reports"
+    monkeypatch.setattr(
+        "sys.argv", ["gym", "eval", "compare-suite", "--suite", str(suite), "--output-dir", str(output)]
+    )
+    main()
+
+    markdown = (output / "suite_compare_report.md").read_text()
+    assert "| model | 3 | 15.23 | 15.64 | -0.4115 | [-6.858, 6.035] | 3.024 | 4.000 |" in markdown
+    assert "| model | tiny | included | 3 | 3 | 2.000e-06 | [-1.541e-05, 1.941e-05] | 0.3333 | 0.3333 |" in markdown
+    assert "| model | constant | included | 3 | 3 | 0.000 | unavailable | 0.3333 | 0.3333 |" in markdown
+    assert "| model | constant | mean/reward | -1.235e+05 | 9.877e+05 | True |" in markdown
+
+    payload = json.loads((output / "suite_compare_report.json").read_bytes())
+    assert payload["overall"]["statistics"]["candidate_mean"] == pytest.approx(15.226346007037051)
+    assert payload["overall"]["statistics"]["candidate_mean"] != 15.23
+    assert payload["cells"][0]["statistics"]["delta"] == pytest.approx(2e-6)
+    assert payload["cells"][0]["statistics"]["ci_low"] == pytest.approx(-1.5406456118259828e-5)
+    assert payload["cells"][0]["model_weight"] == 1 / 3
+    assert payload["cells"][2]["metrics"][0]["high"] == 987654.321
 
 
 def test_adjustable_confidence_and_json_only_output(suite_path: Path, monkeypatch) -> None:
