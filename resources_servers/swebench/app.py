@@ -21,27 +21,35 @@ from shlex import quote
 from shutil import rmtree
 from time import monotonic, time
 from traceback import format_exc
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, ClassVar, Dict, Optional, Tuple
+from uuid import uuid4
 
+from anyio import CancelScope
 from fastapi import Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
 from docker.models.containers import ExecResult
+from nemo_gym._checkpoint.control import CheckpointMode
+from nemo_gym._checkpoint.steps import StepType
 from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
 )
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.rollout_correlation import current_episode_id
 from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.config import resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.sandbox_owner import SandboxOwnerConfig, SandboxOwnerResourcesServer, SessionSetup
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
@@ -52,7 +60,7 @@ from resources_servers.swebench.swebench_patches import (
 )
 
 
-class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
+class SwebenchResourcesServerConfig(SandboxOwnerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
     # Write the Maven Central mirror to ~/.m2/settings.xml in the eval sandbox. Turn off for providers
@@ -61,8 +69,7 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
 
     evaluation_timeout: Optional[int] = None
 
-    # Sandbox config
-    sandbox_provider: str
+    # Sandbox config; sandbox_provider names the top-level provider block (SandboxOwnerConfig).
     sandbox_config: Dict[str, Any]
 
     clear_swebench_debug_logs: bool = True
@@ -205,7 +212,9 @@ class DockerContainer(BaseModel):
 
     async def cleanup(self) -> None:
         try:
-            await self._inner_container.stop()
+            # A cancelled verification still stops its sandbox.
+            with CancelScope(shield=True):
+                await self._inner_container.stop()
         except Exception as exc:
             self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
             print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
@@ -268,19 +277,27 @@ def strip_binary_diffs(patch: str) -> str:
     return "".join(sec for sec in sections if not re.search(r"(?m)^Binary files .* differ$", sec))
 
 
-class SwebenchResourcesServer(SimpleResourcesServer):
+class SwebenchResourcesServer(SandboxOwnerResourcesServer):
+    """Each session owns the sandbox the agent works in, from its seed until ``/verify`` captures the patch.
+
+    An Environment Server seeds a typed session (``ResourcesSeedSessionRequest`` whose ``task_data`` is the
+    SWE-bench instance) and borrows its sandbox through the seed reply; an agent's own ``/run`` seeds with the
+    flat instance. ``/verify`` captures the agent's patch once, against the commit the session started from,
+    stops the agent's sandbox, and grades the patch in a fresh sandbox. A ``/verify`` repeated after a restore,
+    or replayed by a checkpoint, grades the same captured patch, so it is declared replayable.
+    """
+
     config: SwebenchResourcesServerConfig
+    checkpoint_verify: ClassVar[StepType] = "replay"
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        # A golden-patch instance grades the dataset's own patch and never seeds: it holds no session state.
+        if self.config.is_verifying_golden_patch:
+            return "restart_only"
+        return super().checkpoint_mode_in_effect()
 
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
-        self._session_id_to_seed_head: Dict[str, str] = dict()
-
-    async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
-        # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
+    def _sandbox_spec(self, test_spec: TestSpec) -> SandboxSpec:
         global_config_dict = get_global_config_dict()
-        resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         resources = dict(self.config.sandbox_config.get("resources", {}))
 
@@ -293,7 +310,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         patch_swebench_verified_env_vars(test_spec.repo, env)
 
-        eval_sandbox_spec = SandboxSpec(
+        return SandboxSpec(
             image=test_spec.instance_image_key,
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
@@ -310,21 +327,28 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
+
+    async def _prepare_instance_sandbox(self, sandbox: AsyncSandbox, test_spec: TestSpec) -> None:
+        await patch_swebench_multilingual_sandbox(
+            test_spec.repo,
+            test_spec.instance_id,
+            sandbox,
+            overwrite_maven_settings=self.config.overwrite_maven_settings,
+        )
+
+    async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
+        """A fresh grading sandbox for the instance, on the provider the sessions share."""
+        eval_sandbox_spec = self._sandbox_spec(test_spec)
+        eval_sandbox = AsyncSandbox(self.shared_provider(), eval_sandbox_spec, owns_provider=False)
 
         async def _run_setup(sandbox: AsyncSandbox) -> None:
-            await patch_swebench_multilingual_sandbox(
-                test_spec.repo,
-                test_spec.instance_id,
-                sandbox,
-                overwrite_maven_settings=self.config.overwrite_maven_settings,
-            )
+            await self._prepare_instance_sandbox(sandbox, test_spec)
 
         await eval_sandbox.start_with_setup(eval_sandbox_spec, _run_setup)
 
         return eval_sandbox
 
-    def _make_test_spec(self, body: SWEBenchVerifyRequest) -> TestSpec:
+    def _make_test_spec(self, body: SWEBenchInstanceRequest) -> TestSpec:
         return make_test_spec(
             # This accepts a SWEbenchInstance which is identically our body.
             body.model_dump(),
@@ -333,34 +357,70 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             env_image_tag=LATEST,
         )
 
-    async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
-        test_spec = self._make_test_spec(body)
-        eval_sandbox = await self._create_sandbox(test_spec)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+    async def _set_up_session(self, session_id: str, instance: SWEBenchInstanceRequest) -> None:
+        """Start the session's sandbox and set the task up in it: multilingual patches, anti-cheating, seed commit."""
+        test_spec = self._make_test_spec(instance)
 
-        if self.config.apply_anti_cheating:
-            # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
-            wd = (await eval_sandbox.exec("pwd")).stdout.strip()
-            anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
-            await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
-            result = await eval_sandbox.exec(
-                f"""git reset --hard && WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
-            )
-            if result.return_code != 0:
-                print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
+        async def setup(sandbox: AsyncSandbox) -> SessionSetup:
+            await self._prepare_instance_sandbox(sandbox, test_spec)
+            wd = (await sandbox.exec("pwd")).stdout.strip()
+            if self.config.apply_anti_cheating:
+                # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
+                anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
+                await sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
+                result = await sandbox.exec(
+                    f"""git reset --hard && WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+                )
+                if result.return_code != 0:
+                    print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
 Stdout:
 {result.stdout}
 Stderr:
 {result.stderr}""")
 
-        # The commit to diff against at verify time: HEAD once the sandbox is
-        # ready (anti-cheating rewrites refs but not the tree), falling back to
-        # the task's base commit if git is unavailable.
-        head_result = await eval_sandbox.exec("git rev-parse HEAD")
-        seed_head = (head_result.stdout or "").strip() if head_result.return_code == 0 else ""
-        self._session_id_to_seed_head[request.session[SESSION_ID_KEY]] = seed_head or test_spec.base_commit
+            # The commit to diff against at verify time: HEAD once the sandbox is
+            # ready (anti-cheating rewrites refs but not the tree), falling back to
+            # the task's base commit if git is unavailable. Kept in the session's data,
+            # so a checkpoint restores it with the sandbox.
+            head_result = await sandbox.exec("git rev-parse HEAD")
+            seed_head = (head_result.stdout or "").strip() if head_result.return_code == 0 else ""
+            return SessionSetup(workdir=wd, data={"seed_head": seed_head or test_spec.base_commit})
 
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        await self.start_session_sandbox(session_id, self._sandbox_spec(test_spec), setup)
+
+    async def _set_up_typed_session(self, session_id: str, body: ResourcesSeedSessionRequest) -> None:
+        try:
+            instance = SWEBenchInstanceRequest.model_validate(body.task_data)
+        except ValidationError as error:
+            raise ResourcesSeedRejectedError(f"task_data is not a SWE-bench instance: {error}") from error
+        if body.task_id.task_id != instance.instance_id:
+            raise ResourcesSeedRejectedError("TaskId does not match the SWE-bench instance_id")
+        await self._set_up_session(session_id, instance)
+
+    async def seed_session(
+        self, request: Request, body: SWEBenchSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> SWEBenchSeedSessionResponse | ResourcesSeedSessionResponse:
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, self._set_up_typed_session)
+        # An agent's own /run seeds with the flat instance and keeps the session cookie the middleware gave it.
+        session_id = request.session[SESSION_ID_KEY]
+        await self.seed_sandbox_session(
+            session_id,
+            episode_id=current_episode_id() or EpisodeId(rollout_id=session_id),
+            task_id=TaskId(taskset=self.config.name or "swebench", task_id=body.instance_id),
+            setup=lambda: self._set_up_session(session_id, body),
+        )
+        return SWEBenchSeedSessionResponse(sandbox_handle=self.require_session_sandbox(session_id).sandbox_id)
+
+    async def _capture_patch(self, session_id: str) -> str:
+        """The agent's changes against the commit the session started from, staged and committed ones included."""
+        sandbox = self.require_session_sandbox(session_id)
+        workdir = self.session_workdir(session_id) or (await sandbox.exec("pwd")).stdout.strip()
+        seed_head = self.session_data(session_id).get("seed_head")
+        result = await sandbox.exec(patch_extraction_command(workdir, str(seed_head)))
+        if result.error_type is not None:
+            raise RuntimeError(f"patch extraction did not run: {result.error_type}: {result.stderr}")
+        return strip_binary_diffs(result.stdout or "")
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -382,52 +442,55 @@ Stderr:
                 1. For seeing what the harness is doing, use model call capture
                 2. For forcing, we can add it in the Responses API model proxy i.e. save all the past requests/responses and populate as necessary.
         5. Restrict number of turns - same as interleaved thinking, we could add in Responses API model proxy
+
+        The patch is captured once per session (``capture_once``) and the agent's sandbox stopped after it, so a
+        repeated or replayed verify grades the same patch; grading itself is not cached.
         """
 
         test_spec = self._make_test_spec(body)
-
-        verifier_sandbox_lifecycle_started_at = monotonic()
-        eval_sandbox = await self._create_sandbox(test_spec)
-        eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
+        session_id = request.session[SESSION_ID_KEY]
 
         model_patch = ""
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             try:
-                original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
-                seed_head = (
-                    self._session_id_to_seed_head.pop(request.session[SESSION_ID_KEY], None) or test_spec.base_commit
+                model_patch = await self.capture_once(
+                    session_id, "patch", lambda: self._capture_patch(session_id), release_sandbox_after=True
                 )
-                model_patch_result = await original_sandbox.exec(patch_extraction_command(original_workdir, seed_head))
-                model_patch = strip_binary_diffs(model_patch_result.stdout or "")
-            except:
+            except Exception:
+                # A failed capture leaves the agent's sandbox running for a retry, and grades an empty patch.
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
-            try:
-                await original_sandbox.stop()
-            except:
-                print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
 
-        run_id = request.session[SESSION_ID_KEY]
+        verifier_sandbox_lifecycle_started_at = monotonic()
+        eval_sandbox = await self._create_sandbox(test_spec)
+        eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
+
+        # A verify replayed after a restore may grade while the original still runs: they must not share log files.
+        run_id = f"{session_id}-{uuid4().hex[:8]}"
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
         mock_container._inner_container = eval_sandbox
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         start_time = time()
-        res = await run_instance(
-            test_spec=test_spec,
-            pred={
-                "instance_id": test_spec.instance_id,
-                "model_patch": model_patch,
-            },
-            rm_image=False,
-            force_rebuild=False,
-            client=mock_container,
-            run_id=run_id,
-            timeout=self.config.evaluation_timeout,
-            rewrite_reports=False,
-        )
+        try:
+            res = await run_instance(
+                test_spec=test_spec,
+                pred={
+                    "instance_id": test_spec.instance_id,
+                    "model_patch": model_patch,
+                },
+                rm_image=False,
+                force_rebuild=False,
+                client=mock_container,
+                run_id=run_id,
+                timeout=self.config.evaluation_timeout,
+                rewrite_reports=False,
+            )
+        finally:
+            # run_instance normally stops the grading sandbox; a failure or cancellation before its cleanup must too.
+            if eval_sandbox.handle is not None:
+                await mock_container.cleanup()
         patch_verification_time_taken = time() - start_time
         verifier_sandbox_wall_time_s = monotonic() - verifier_sandbox_lifecycle_started_at
 

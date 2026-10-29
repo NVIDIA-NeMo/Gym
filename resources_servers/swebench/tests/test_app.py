@@ -127,7 +127,9 @@ class TestApp:
         sandbox = MagicMock()
         sandbox.start_with_setup = AsyncMock(side_effect=lambda spec, setup: sandbox)
         monkeypatch.setattr("resources_servers.swebench.app.get_global_config_dict", lambda: {})
-        monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_config", lambda *_: MagicMock())
+        # The grading sandbox runs on the provider the server's sessions share.
+        monkeypatch.setattr("nemo_gym.sandbox_owner.get_global_config_dict", lambda: {})
+        monkeypatch.setattr("nemo_gym.sandbox_owner.resolve_provider_config", lambda *_: MagicMock())
         monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_metadata", lambda *_: {})
         monkeypatch.setattr("resources_servers.swebench.app.AsyncSandbox", MagicMock(return_value=sandbox))
         monkeypatch.setattr("resources_servers.swebench.app.patch_swebench_multilingual_sandbox", AsyncMock())
