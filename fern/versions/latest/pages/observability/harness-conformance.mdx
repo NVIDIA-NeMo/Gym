@@ -11,7 +11,8 @@ position: 3
 These results are updated automatically from scripted model, tool, and verifier
 scenarios at the linked Gym revision. Each P0, P1, or P2 cell shows
 **passing scenarios / measured scenarios**; a dash means no applicable measurements
-are available.
+are available. Green counts mean all measured scenarios pass; red counts mean at
+least one does not pass.
 
 {/* BEGIN GENERATED TE TABLE */}
 
@@ -22,8 +23,9 @@ are available.
 A scenario counts in a tier when it has applicable checks at that priority, and
 passes when all of those checks pass. A scenario can contribute to more than one
 tier; failures in one tier do not change another tier's count. Completed check
-results remain visible when a probe reports execution errors. Expand the detailed
-checks or follow the linked CI results to inspect individual failures.
+results remain visible when a probe reports execution errors. Expand the details
+to see each harness's passing and not-passing scenarios by tier, followed by the
+full check matrix. Follow the linked CI results to investigate individual failures.
 
 These measurements cover local execution, independently of benchmark accuracy.
 Remote sandboxes, agent sessions, multimodal inputs, compaction, and parallel
