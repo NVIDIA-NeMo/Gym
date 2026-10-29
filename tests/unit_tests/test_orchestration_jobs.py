@@ -27,7 +27,8 @@ import yaml
 from pytest import MonkeyPatch
 
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
+from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     SCHEMA_VERSION,
@@ -512,3 +513,56 @@ def test_observed_statuses_do_not_share_their_state_files():
     first.files[".gym_chain_incomplete"] = "stopped"
 
     assert ObservedStatus(state=JobState.RUNNING).files == {}
+
+
+# --- Executor primitives -------------------------------------------------------------------------------------
+
+
+def _log_source() -> LogSource:
+    return LogSource(name="driver", kind="driver", location="logs/driver-{job_id}.log")
+
+
+@pytest.mark.parametrize(
+    ("operation", "call"),
+    [
+        ("connection_key", lambda executor, record: executor.connection_key(record)),
+        ("query_states", lambda executor, record: executor.query_states([JobRef(record, record.benchmarks[0])])),
+        ("terminate", lambda executor, record: executor.terminate(record, record.benchmarks[0])),
+        (
+            "stream_logs",
+            lambda executor, record: list(
+                executor.stream_logs(record, record.benchmarks[0], source=_log_source(), tail=None, follow=False)
+            ),
+        ),
+    ],
+)
+def test_an_executor_that_does_not_implement_a_primitive_names_it(operation, call):
+    with pytest.raises(UnsupportedOperationError, match=f"kubernetes executor does not support {operation}"):
+        call(KubernetesExecutor(), _record())
+
+
+def test_an_executor_reads_no_run_files_and_reports_no_progress_unless_it_says_otherwise():
+    executor, record = KubernetesExecutor(), _record()
+
+    assert executor.read_run_files(record, [Path("a"), Path("b")]) == {Path("a"): None, Path("b"): None}
+    assert executor.read_progress(record, record.benchmarks[0]) is None
+
+
+def test_log_sources_come_from_the_record_and_are_a_copy():
+    record = _with_log_sources(_record())
+    executor = KubernetesExecutor()
+
+    sources = executor.log_sources(record, "gsm8k")
+
+    assert [(s.name, s.kind) for s in sources] == [("driver", "driver"), ("vllm", "service")]
+    sources.clear()
+    assert len(record.benchmarks[0].log_sources) == 2
+
+
+def test_a_record_without_log_sources_has_none_to_list():
+    assert KubernetesExecutor().log_sources(_record(), "gsm8k") == []
+
+
+def test_log_sources_of_an_unknown_benchmark_name_the_known_ones():
+    with pytest.raises(ValueError, match="has no benchmark 'nope'; it has: gsm8k"):
+        KubernetesExecutor().log_sources(_record(), "nope")
