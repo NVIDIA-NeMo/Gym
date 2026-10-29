@@ -12378,3 +12378,285 @@ def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(with_
     # Do not repair conflicting ownership silently: the checker must still see both claims.
     assert [ref.model_call_id for ref in trajectory.invocations[0].model_calls] == call_ids
     assert trajectory.verifier_invocations[0].model_calls[0].model_dump(exclude_none=True) == judge_ref
+
+
+class TestEnrichRunResult:
+    """``enrich_run_result`` records what ``ng_collect_rollouts`` records, for ``run_examples`` callers."""
+
+    @staticmethod
+    def _row(rollout_id: str = "g1_g0_a0") -> dict:
+        return {
+            "responses_create_params": {"input": []},
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            TASK_INDEX_KEY_NAME: 3,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+            ROLLOUT_ID_KEY_NAME: rollout_id,
+        }
+
+    @staticmethod
+    def _store_call(capture_dir: Path, rollout_id: str, call_id: str, text: str) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        message = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
+        CaptureStore(capture_dir).record(
+            rollout_id,
+            {
+                "model_call_id": call_id,
+                "dialect": "responses",
+                "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+                "request": {"input": [{"role": "user", "content": "hi"}]},
+                "response": {"id": f"resp-{call_id}", "output": [message], "usage": {"input_tokens": 5}},
+                "status_code": 200,
+            },
+        )
+
+    async def test_merges_every_captured_call_without_touching_reward_or_response(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        self._store_call(tmp_path, "g1_g0_a0", "c2", "second")
+        result = {"response": {"output": [{"type": "message"}]}, "reward": 1.0}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert result["reward"] == 1.0 and result["response"] == {"output": [{"type": "message"}]}
+        assert result[ROLLOUT_ID_KEY_NAME] == "g1_g0_a0"
+        assert [call["model_call_id"] for call in result["ng_model_call_capture"]["calls"]] == ["c1", "c2"]
+        texts = [
+            call["response"]["output"][0]["content"][0]["text"] for call in result["ng_trajectory"]["model_calls"]
+        ]
+        assert texts == ["first", "second"]
+
+    async def test_metadata_only_keeps_the_capture_file(self, tmp_path: Path) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await enrich_run_result(
+            self._row(), result, capture_dirs=[tmp_path], observability_enabled=True, include_payloads=False
+        )
+
+        [call] = result["ng_trajectory"]["model_calls"]
+        assert call["model_call_id"] == "c1" and call["request"] is None and call["response"] is None
+        assert CaptureStore(tmp_path).path_for("g1_g0_a0").exists(), "the bodies stay in the store"
+
+    async def test_deleting_the_capture_keeps_the_payloads_on_the_record(self, tmp_path: Path) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await enrich_run_result(
+            self._row(), result, capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True
+        )
+
+        [call] = result["ng_trajectory"]["model_calls"]
+        assert call["response"]["output"][0]["content"][0]["text"] == "first"
+        assert not CaptureStore(tmp_path).path_for("g1_g0_a0").exists()
+
+    async def test_deleting_the_capture_without_payloads_is_refused(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        with pytest.raises(ValueError, match="delete_capture"):
+            await enrich_run_result(
+                self._row(),
+                {"reward": 0.0},
+                capture_dirs=[tmp_path],
+                observability_enabled=True,
+                include_payloads=False,
+                delete_capture=True,
+            )
+
+    async def test_without_capture_only_identity_is_added(self) -> None:
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        result = {"response": {"output": []}, "reward": 0.5}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[], observability_enabled=False)
+
+        assert result == {
+            "response": {"output": []},
+            "reward": 0.5,
+            ROLLOUT_ID_KEY_NAME: "g1_g0_a0",
+            TASK_INDEX_KEY_NAME: 3,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+        }
+
+    async def test_a_row_that_names_no_task_gets_its_calls_but_no_guessed_trajectory(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        row = {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_ID_KEY_NAME: "g1_g0_a0"}
+        result = {"response": {"output": []}, "reward": 1.0}
+
+        await enrich_run_result(row, result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert [call["model_call_id"] for call in result["ng_model_call_capture"]["calls"]] == ["c1"]
+        assert "ng_trajectory" not in result
+
+    async def test_an_interrupted_try_keeps_the_calls_it_made(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "before the kill")
+        result = {NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert [call["model_call_id"] for call in result["ng_model_call_capture"]["calls"]] == ["c1"]
+        assert result[NG_FAILURE_CLASS_KEY] == "kill_shaped" and result[NG_NO_PERSIST_KEY] is True
+
+    async def test_a_row_that_never_started_is_not_joined_to_calls(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "an earlier attempt")
+        result = {NG_FAILURE_CLASS_KEY: "cancelled", NG_DISPATCH_DRAINED_KEY: True}
+
+        await enrich_run_result(self._row(), result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert "ng_model_call_capture" not in result and "ng_trajectory" not in result
+
+    async def test_run_examples_enriches_only_when_asked(self, tmp_path: Path) -> None:
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=example, result={"response": {"output": []}}, rollout_latency_ms=7.0)
+                )
+                return iter([future])
+
+        [plain] = list(Helper().run_examples([self._row()]))
+        _, plain_result = await plain
+        assert plain_result == {"response": {"output": []}}
+
+        [enriched] = list(Helper().run_examples([self._row()], enrich_results=True))
+        _, enriched_result = await enriched
+        assert [call["model_call_id"] for call in enriched_result["ng_model_call_capture"]["calls"]] == ["c1"]
+        assert enriched_result[ROLLOUT_ID_KEY_NAME] == "g1_g0_a0"
+
+        with pytest.raises(ValueError, match="delete_model_call_capture"):
+            Helper().run_examples(
+                [self._row()],
+                enrich_results=True,
+                include_model_call_payloads=False,
+                delete_model_call_capture=True,
+            )
+
+    async def test_the_capture_is_kept_when_its_writes_did_not_drain(self, tmp_path: Path, monkeypatch) -> None:
+        import nemo_gym.rollout_collection as rollout_collection
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+
+        async def not_quiesced(*args, **kwargs) -> bool:
+            return False
+
+        monkeypatch.setattr(rollout_collection, "await_model_call_capture_quiescence", not_quiesced)
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await rollout_collection.enrich_run_result(
+            self._row(), result, capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True
+        )
+
+        assert CaptureStore(tmp_path).path_for("g1_g0_a0").exists(), "a pending write may still land"
+
+    async def test_the_capture_is_kept_when_a_record_could_not_be_read(self, tmp_path: Path) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        path = CaptureStore(tmp_path).path_for("g1_g0_a0")
+        path.write_text(path.read_text() + "not json\n")
+        result = {"response": {"output": []}, "reward": 0.0}
+
+        await enrich_run_result(
+            self._row(), result, capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True
+        )
+
+        assert result["ng_model_call_capture"].get("gaps")
+        assert path.exists(), "an unreadable record stays in the store"
+
+    async def test_an_explicit_task_id_names_the_trajectory_without_a_task_index(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import enrich_run_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        row = {AGENT_REF_KEY_NAME: {"name": "agent"}, ROLLOUT_ID_KEY_NAME: "g1_g0_a0", "task_id": "swe-123"}
+        result = {"response": {"output": []}, "reward": 1.0}
+
+        await enrich_run_result(row, result, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert result["ng_trajectory"]["task_id"] == "swe-123"
+
+    async def test_an_episode_reply_is_enriched_through_its_record_and_keeps_its_shape(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import _enrich_returned_result
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        row = {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": {"responses_create_params": {"input": "fix it"}},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            ROLLOUT_ID_KEY_NAME: "g1_g0_a0",
+        }
+        reply = {
+            "episode_id": {"rollout_id": "g1_g0_a0", "attempt": 0},
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "result": {"reward": 1.0},
+        }
+
+        await _enrich_returned_result(row, reply, None, capture_dirs=[tmp_path], observability_enabled=True)
+
+        assert reply["result"] == {"reward": 1.0} and reply["episode_id"]["rollout_id"] == "g1_g0_a0"
+        assert [call["model_call_id"] for call in reply["ng_model_call_capture"]["calls"]] == ["c1"]
+
+    async def test_drained_results_are_enriched_too(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import _RowResultIterator
+
+        self._store_call(tmp_path, "g1_g0_a0", "c1", "first")
+        done = Future()
+        done.set_result(
+            _CompletedRollout(row=self._row(), result={"response": {"output": []}}, rollout_latency_ms=1.0)
+        )
+
+        class Completions:
+            async def aclose_and_drain(self):
+                return [done]
+
+        seen = []
+
+        async def enrich(row: dict, result: dict, rollout_latency_ms) -> None:
+            seen.append(row[ROLLOUT_ID_KEY_NAME])
+            result["enriched"] = True
+
+        [outcome] = await _RowResultIterator(Completions(), enrich=enrich).aclose_and_drain()
+        _, result = await outcome
+        assert seen == ["g1_g0_a0"] and result["enriched"] is True
+
+    async def test_a_retried_episode_reply_keeps_its_attempt(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import _enrich_returned_result
+
+        row = {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": {"responses_create_params": {"input": "fix it"}},
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            ATTEMPT_INDEX_KEY_NAME: 2,
+        }
+        reply = {
+            "episode_id": {"rollout_id": "0-0", "attempt": 2},
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "result": {"reward": 1.0},
+        }
+
+        await _enrich_returned_result(row, reply, None, capture_dirs=[], observability_enabled=False)
+
+        assert reply[ATTEMPT_INDEX_KEY_NAME] == 2
