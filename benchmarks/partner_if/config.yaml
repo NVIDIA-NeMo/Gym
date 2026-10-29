@@ -184,7 +184,76 @@ partner_if_swe_environment_server:
       resources_tool_transports: []
       agent_server: {type: responses_api_agents, name: partner_if_swe_agent}
 
-# The dispatcher routes each task to its environment, so all four share one dataset and one score.
+# Prime child: the resource server owns the repository; the SDK uses native IPython
+# and a recording parent. Only confirmed delivered reports reach the shared IF grader.
+partner_if_prime:
+  resources_servers:
+    partner_if:
+      entrypoint: prime_app.py
+      domain: instruction_following
+      verified: false
+      num_workers: 1
+      sandbox_provider: sandbox
+      image: node:22-bookworm
+      sandbox_config:
+        ttl_s: 7200
+        ready_timeout_s: 600
+        env: {SHELL: /bin/bash, EXECD_API_GRACE_SHUTDOWN: 50ms}
+        resources: {cpu: 4, memory_mib: 16384, disk_gib: 20}
+        provider_options:
+          resource_requests: {cpu: 1, memory_mib: 4096, disk_gib: 20}
+        metadata: {environment: partner-if-prime}
+      repository_url: https://github.com/django/django.git
+      repository_commit: 93e892bb645b16ebaf287beb5fe7f3ffe8d10408
+      workdir: /workspace/django
+      capture_directory: /tmp/partner-if-prime-capture
+      judge_model_server: {type: responses_api_models, name: partner_if_judge}
+      allow_provisional_rubrics: true
+      judge_responses_create_params: {input: [], max_output_tokens: 32768, temperature: 0.0}
+      judge_max_concurrency: 2
+
+# Preserve Prime's dynamic per-call output reservation instead of removing it.
+partner_if_prime_model:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      sampling_overrides: null
+
+partner_if_prime_agent:
+  responses_api_agents:
+    prime_agent:
+      entrypoint: child_app.py
+      resources_server: null
+      num_workers: 1
+      model_server: {type: responses_api_models, name: partner_if_prime_model}
+      model: ${policy_model_name}
+      prime_agent_version: 0.7.0
+      max_turns: 48
+      context_window: 131072
+      max_output_tokens: 65536
+      temperature: 0
+      timeout: 900
+      kernel_packages: ["setuptools<81", pytz, sqlparse]
+      capture_directory: /tmp/partner-if-prime-capture
+      session_close_timeout_seconds: 60
+
+partner_if_prime_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      default_episode_timeout_seconds: 5400
+      cleanup_timeout_seconds: 360
+      max_concurrent_episodes: 1
+      queue_timeout_seconds: 600
+      # The resource adapter can mask a failed model call, or retain a report
+      # whose delivery was proved before a later model failure.
+      agent_outcome_policy:
+        by_failure_kind: {unknown: verify}
+      resources_server: {type: resources_servers, name: partner_if_prime}
+      resources_tool_transports: []
+      agent_server: {type: responses_api_agents, name: partner_if_prime_agent}
+
+# The dispatcher routes each task to its environment, so all five share one dataset and one score.
 partner_if_dispatcher:
   responses_api_agents:
     partner_if_dispatcher:
@@ -216,6 +285,7 @@ partner_if_dispatcher:
         pif_024: {type: environment_servers, name: partner_if_swe_environment_server}
         pif_025: {type: environment_servers, name: partner_if_swe_environment_server}
         pif_026: {type: environment_servers, name: partner_if_swe_environment_server}
+        pif_027: {type: environment_servers, name: partner_if_prime_environment_server}
         pif_028: {type: environment_servers, name: partner_if_environment_server}
       datasets:
         - name: partner_if

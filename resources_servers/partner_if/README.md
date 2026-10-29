@@ -217,3 +217,20 @@ Data: Apache 2.0
 
 Dependencies
 - nemo_gym: Apache 2.0
+
+## Prime child repository episodes
+
+`prime_app.py` owns a sandbox containing a pinned repository and supplies it to
+Prime's SDK child entrypoint. The agent closes and the supervisor confirms termination
+before verification reads its capture. A successful native IPython tool result must
+contain a parent-send receipt whose ID also appears in the receiving controller's
+delivery log. Only those delivered messages become `artifact:parent_reports`; the
+unscored delivery prerequisite reads `artifact:parent_send`. Drafts and final chat
+text do not count as delivery. The shared verifier registry, rubric judge, receipt
+format, and IF aggregation then apply unchanged.
+
+A complete run or exhausted turn budget without delivery is a scored failure.
+Missing captures, provider errors without delivery evidence, and judge errors are
+unscorable. This server reports reverify unsupported because its sandbox capture
+is not in the registry row. Its resource sessions are process-local and restart on
+checkpoint recovery; they cannot resume a partially executed child.

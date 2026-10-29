@@ -26,17 +26,19 @@ task checks whether the model follows its instructions, graded against versioned
   simulated tools' code, fixture and pinned requirements. A SWE task's row also holds its Scale-SWE instance:
   the image, working directory, setup commands and tests.
 
-The published artifact includes a native Prime row whose harness integration is maintained separately.
-The current config covers 26 of the 27 rows: the native Prime route remains pending. The
-full-release route-coverage test stays enabled as a readiness gate.
+The config routes all 27 published rows. The Prime route uses the experimental SDK child
+entrypoint of `prime_agent`; its runtime packaging and harness merge checks are documented in
+[the adapter README](../../responses_api_agents/prime_agent/README.md#sdk-child-sessions).
+The full-release route-coverage test stays enabled as a readiness gate.
 
 ## Task contract
 
 - **Harness:** the policy model runs in Gym's `simple_agent`, and in OpenCode (`opencode_agent`) on the SWE
-  tasks. The SWE scores depend on OpenCode 1.17.11: the harness and its version are part of what they measure.
+  tasks, and Prime Agent 0.7.0's depth-one child session on the repository/report task.
+  The SWE scores depend on OpenCode 1.17.11: the harness and its version are part of what they measure.
 - **Routing:** `partner_if_dispatcher` routes each task to its environment, so supported tasks share one
-  dataset and one score. Gym aggregates metrics per environment server, so without it the four task
-  families would be four benchmarks with separate scores.
+  dataset and one score. Gym aggregates metrics per environment server, so without it the five task
+  families would be five benchmarks with separate scores.
 - **Text tasks:** one reply from the policy model. Some rows include recorded tool calls and results, or ask
   for the next tool call. No tools run, and the grader sees any tool call only as part of the reply.
 - **Search-tool tasks:** up to 30 steps with the row's simulated search and document tools.
@@ -54,7 +56,13 @@ full-release route-coverage test stays enabled as a readiness gate.
     the arguments in full, and the tool outputs. An output longer than 500 characters keeps its first and last 250,
     with a `[… N characters omitted …]` marker between them. The SWE rubrics grade the agent's messages and tool
     calls, and with whole outputs a long agent run would not fit the judge's input.
-- **Sandbox:** the tool and SWE tasks need OpenSandbox as configured: a provider with service endpoints and
+- **Prime task:** a pinned source checkout, native IPython, and a recording parent controller.
+  The actor has 48 complete assistant turns and a 900-second safety timeout. Its output
+  reservation is 65,536 tokens per call, shrinking as context fills; temperature is 0.
+  Compaction and retries are disabled. Only corroborated parent deliveries reach the shared
+  rubric judge; unsent drafts and final chat text do not count. These limits are part of
+  the task contract. The dedicated `partner_if_prime_model` preserves the runtime's cap.
+- **Sandbox:** the tool, SWE, and Prime tasks need OpenSandbox as configured: a provider with service endpoints and
   network policies.
   - Each tool rollout gets a fresh sandbox that holds only the row's tool backend: `python:3.13-slim`, one CPU
     and 1 GiB. By default the sandbox can reach only the package index, to install the backend's pinned
