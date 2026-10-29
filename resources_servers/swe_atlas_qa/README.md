@@ -12,7 +12,9 @@ sandbox, and agent network access is limited to the policy-model host.
 
 `reward` is the upstream strict pass. `agg_score` is the fraction of scored rubrics passed. As upstream, unscored
 rubrics are excluded from strict pass. They are reported in `num_unscored` and `all_rubrics_scored`. Missing answers
-score zero. Infrastructure and verifier failures set `mask_sample=true` and `evaluation_completed=false`.
+score zero. Infrastructure and verifier failures set `mask_sample=true` and `evaluation_completed=false`, with
+`failure_kind` `session_lost` when the task session is missing, `judge_failed` when the evaluator scores no rubric
+because every judge attempt failed, and `verifier_error` otherwise.
 
 ## Tests
 

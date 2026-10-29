@@ -60,6 +60,8 @@ PROBE_SCORERS = {
     "tool_calling": "tool_use",
 }
 ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
+# A failed simulation whose outcome names no failure_class.
+SIMULATION_FAILED = "usersim:simulation_failed"
 logger = logging.getLogger(__name__)
 
 
@@ -364,8 +366,12 @@ class UserSimResourcesServer(SimpleResourcesServer):
         mask_sample = (simulation_failed and failure_attribution != "assistant_model") or bool(
             scorer_error or evaluator_error or quality_missing or scorer_inconclusive
         )
-        failure_kind = _usersim_failure_kind(outcome.get("failure_class")) if simulation_failed else None
-        failure_reason = outcome.get("failure_detail") if simulation_failed else None
+        failure_kind = (
+            (_usersim_failure_kind(outcome.get("failure_class")) or SIMULATION_FAILED) if simulation_failed else None
+        )
+        failure_reason = (
+            (outcome.get("failure_detail") or outcome.get("failure_reason")) if simulation_failed else None
+        )
         if scorer_error:
             failure_kind = VERIFIER_ERROR
             failure_reason = str(scorer_error)

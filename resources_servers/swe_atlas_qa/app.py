@@ -27,8 +27,10 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import JUDGE_FAILED, VERIFIER_ERROR
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxHandle, SandboxSpec
@@ -38,6 +40,10 @@ from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validat
 
 
 LOG = logging.getLogger(__name__)
+
+
+class RubricsUnscoredError(RuntimeError):
+    """The upstream evaluator finished without scoring any rubric, because every judge attempt failed."""
 
 
 class SWEAtlasQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -274,7 +280,7 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                 ):
                     raise ValueError("The upstream verifier returned inconsistent rubric counts")
                 if results["num_scored"] == 0:
-                    raise RuntimeError("The upstream verifier did not score any rubrics")
+                    raise RubricsUnscoredError("The upstream verifier did not score any rubrics")
                 scores = {
                     key: results[key]
                     for key in ("reward", "agg_score", "num_rubrics", "num_scored", "num_unscored", "num_passed")
@@ -291,9 +297,7 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
             self._closed_sessions.add(session_id)
         result: dict[str, Any] = {"reward": 0.0, "evaluation_completed": True}
         if session is None:
-            result.update(
-                mask_sample=True, evaluation_completed=False, failure_reason="Task sandbox session is missing"
-            )
+            result.update(evaluation_completed=False, **lost_session_verification("Task sandbox session is missing"))
         else:
             task_id, handle = session
             try:
@@ -335,6 +339,7 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                     reward=0.0,
                     evaluation_completed=False,
                     mask_sample=True,
+                    failure_kind=JUDGE_FAILED if isinstance(error, RubricsUnscoredError) else VERIFIER_ERROR,
                     failure_reason=f"SWE Atlas Q&A verification failed: {type(error).__name__}",
                 )
         return SWEAtlasQAVerifyResponse.model_validate(body.model_dump() | result)

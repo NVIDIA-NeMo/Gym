@@ -191,6 +191,8 @@ def test_unjudged_deliverables_are_persisted_and_masked(server, root, tmp_path, 
     verified = _verify(client, rubric_json=[{"criterion": "clarity", "score": 1}])
 
     assert (verified["reward"], verified["mask_sample"]) == (0.0, True)
+    assert verified["failure_kind"] == "gdpval:judging_disabled"
+    assert verified["failure_reason"] == "judge_deliverables is false, so the deliverables were saved without judging"
     assert verified["judge_response"] is None
     assert (Path(verified["deliverables_dir"]) / "report.md").read_text() == "the report"
 

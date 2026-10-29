@@ -423,7 +423,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
-    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked.
+    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked
+    # with failure_kind gdpval:judging_disabled.
     judge_deliverables: bool = True
     # Names a top-level sandbox provider block.
     sandbox_provider: str
@@ -561,6 +562,9 @@ def _permanent_judge_failure(
 
 # The agent ran out of wall time. The row is retried like any other timeout and left out of the fit if it is waived.
 _AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
+
+# judge_deliverables=false saves the deliverables without judging them, so the row is masked under this kind.
+JUDGING_DISABLED = "gdpval:judging_disabled"
 
 
 # Recovered by `gym eval reverify --judge-failed-only`, which judges the persisted deliverable again.
@@ -1052,7 +1056,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
         if not self.config.judge_deliverables:
             return GDPValVerifyResponse(
-                **body.model_dump(), reward=0.0, mask_sample=True, verify_mode=self.config.reward_mode
+                **body.model_dump(),
+                reward=0.0,
+                mask_sample=True,
+                failure_kind=JUDGING_DISABLED,
+                failure_reason="judge_deliverables is false, so the deliverables were saved without judging",
+                verify_mode=self.config.reward_mode,
             )
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)

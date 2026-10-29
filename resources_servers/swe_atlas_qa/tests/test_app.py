@@ -12,6 +12,7 @@ from fastapi import Request
 from omegaconf import OmegaConf
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest
+from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.swe_atlas_qa import app as module
@@ -163,6 +164,7 @@ async def test_verify_preserves_upstream_scores_and_stages_only_after_agent_clos
     assert result.num_unscored == 4 - scored
     assert result.all_rubrics_scored is (scored == 4)
     assert result.evaluation_completed and not result.mask_sample
+    assert result.failure_kind is None
     assert result.answer == "answer-placeholder"
     verifier = provider.close.await_args.args[0]
     assert verifier != agent
@@ -196,7 +198,8 @@ async def test_verify_masks_zero_scored_rubrics(server, body) -> None:
     await server.seed_session(_request(), body)
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
-    assert result.failure_reason
+    assert result.failure_kind == JUDGE_FAILED
+    assert result.failure_reason == "SWE Atlas Q&A verification failed: RubricsUnscoredError"
     assert provider.close.await_count == 2
     assert not server._sessions and not server._sandboxes
 
@@ -212,6 +215,7 @@ async def test_missing_or_empty_answer_scores_zero_without_judge(server, body, a
         provider.answers[agent.sandbox_id] = answer
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.evaluation_completed and not result.mask_sample
+    assert result.failure_kind is None
     assert provider.create.await_count == 1
     provider.upload_file.assert_not_awaited()
     provider.close.assert_awaited_once_with(agent)
@@ -230,11 +234,20 @@ async def test_answer_probe_failure_masks_sample(server, body, return_code, erro
     provider.exec.return_value = SandboxExecResult(None, "runtime failed", return_code, error_type=error_type)
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == VERIFIER_ERROR
     assert provider.create.await_count == 1
     provider.download_file.assert_not_awaited()
     provider.upload_file.assert_not_awaited()
     provider.close.assert_awaited_once_with(agent)
     assert not server._sessions
+
+
+async def test_verify_without_a_seeded_session_is_masked_as_lost(server, body) -> None:
+    result = await server.verify(_request(), body)
+    assert (result.reward, result.mask_sample, result.evaluation_completed) == (0.0, True, False)
+    assert (result.failure_kind, result.failure_reason) == (SESSION_LOST, "Task sandbox session is missing")
+    server._provider.exec.assert_not_awaited()
+    server._provider.create.assert_not_awaited()
 
 
 async def test_task_mismatch_closes_without_collecting_or_grading(server, body) -> None:
@@ -257,7 +270,10 @@ async def test_grader_failure_masks_sample_and_closes_both_sandboxes(server, bod
     ]
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
-    assert result.failure_reason
+    assert (result.failure_kind, result.failure_reason) == (
+        VERIFIER_ERROR,
+        "SWE Atlas Q&A verification failed: RuntimeError",
+    )
     assert server._provider.close.await_count == 2
     assert not server._sessions
 
@@ -509,9 +525,11 @@ async def test_verify_delete_failure_allows_explicit_close_retry(server, body) -
     provider.close.side_effect = [RuntimeError("close unavailable"), None]
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == VERIFIER_ERROR
     calls = list(provider.mock_calls)
     duplicate = await server.verify(_request(), body)
     assert duplicate.mask_sample and not duplicate.evaluation_completed
+    assert (duplicate.failure_kind, duplicate.failure_reason) == (SESSION_LOST, "Task sandbox session is missing")
     assert provider.mock_calls == calls
     assert provider.create.await_count == 1
     provider.upload_file.assert_not_awaited()
