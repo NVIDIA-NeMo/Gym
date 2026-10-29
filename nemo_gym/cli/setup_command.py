@@ -124,8 +124,12 @@ def _get_nemo_gym_install_flags() -> str:
 # A requirements line that installs Gym in any form: `-e nemo-gym[dev,sandbox] @ ../../` in a server of a Gym checkout,
 # `-e nemo-gym[dev] @ ../../../Gym` in an external repository developed against one, or a pin such as `nemo-gym==0.7.0`.
 # A server outside a Gym checkout gets Gym from its parent installation instead. The ERE is the same pattern for grep.
-_NEMO_GYM_REQUIREMENT_ERE = r"^[[:space:]]*(-e[[:space:]]+)?nemo[-_]gym([^A-Za-z0-9_.-]|$)"
-_NEMO_GYM_REQUIREMENT_RE = re.compile(r"^\s*(?:-e\s+)?nemo[-_]gym(?![A-Za-z0-9_.-])\s*(?:\[(?P<extras>[^\]]*)\])?")
+# Package names compare case-insensitively with runs of `-`, `_` and `.` equal (`NeMo-Gym`, `nemo.gym`), so grep runs
+# with `-i`.
+_NEMO_GYM_REQUIREMENT_ERE = r"^[[:space:]]*(-e[[:space:]]+)?nemo[-_.]+gym([^A-Za-z0-9_.-]|$)"
+_NEMO_GYM_REQUIREMENT_RE = re.compile(
+    r"^\s*(?:-e\s+)?nemo[-_.]+gym(?![A-Za-z0-9_.-])\s*(?:\[(?P<extras>[^\]]*)\])?", re.IGNORECASE
+)
 
 
 def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
@@ -297,6 +301,10 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # A server outside a Gym checkout, such as one in an external repository, while Gym itself is an editable
     # checkout: the server venv gets that checkout, so local Gym edits reach it and no unpublished version is pinned.
     parent_gym_checkout = not server_in_gym_checkout and nemo_gym._is_editable_install
+    # A built-in server shipped in a wheel install: its `../..` paths point into site-packages, at files a wheel does
+    # not ship. Anything else here, including an external repository nested inside an editable Gym checkout, is a
+    # repository of its own whose `../..` is itself.
+    bundled_in_wheel = not nemo_gym._is_editable_install and dir_path.resolve().is_relative_to(PARENT_DIR.resolve())
 
     try:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
@@ -315,9 +323,11 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                     # install nemo-gym from pypi instead of relative path in pyproject.toml
                     # with support for pre-releases, custom indexes, and version pinning
                     gym_install = f"{_get_nemo_gym_install_flags()}nemo-gym{_get_nemo_gym_version_spec()}"
+                # Only Gym's own source is replaced; the server's other sources, such as a local helper, still apply.
+                no_sources = "--no-sources " if bundled_in_wheel else "--no-sources-package nemo-gym "
                 install_cmd = (
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{gym_install} && """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources '-e .' {head_server_dep_args}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{no_sources}'-e .' {head_server_dep_args}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
@@ -326,13 +336,12 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{override_flag}-r requirements.txt {head_server_dep_args}"""
             else:
                 extras = _local_nemo_gym_extras(dir_path / "requirements.txt")
-                # Outside the install root, `../..` is the server's own repository (for example `-e ../..` installing
-                # it), so only the server's Gym requirements are replaced. A built-in server in a wheel install keeps
-                # dropping every `../..` line: there it points into site-packages, at files a wheel does not ship.
-                if dir_path.resolve().is_relative_to(PARENT_DIR.resolve()):
+                # Only the server's Gym requirements are replaced; other lines, such as `-e ../..` installing the
+                # server's own repository, stay. A built-in server in a wheel install drops every `../..` line.
+                if bundled_in_wheel:
                     other_requirements = "grep -v -F '../..' requirements.txt"
                 else:
-                    other_requirements = f"grep -v -E {shlex.quote(_NEMO_GYM_REQUIREMENT_ERE)} requirements.txt"
+                    other_requirements = f"grep -v -i -E {shlex.quote(_NEMO_GYM_REQUIREMENT_ERE)} requirements.txt"
                 if parent_gym_checkout:
                     gym_requirement = shlex.quote(f"-e {PARENT_DIR}{extras}")
                     install_flags = ""
