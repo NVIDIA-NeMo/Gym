@@ -31,25 +31,26 @@ the dataset-health check: a row whose golden patch does not resolve is a broken 
 
 import shlex
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from time import time
 from traceback import format_exc
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    SimpleResourcesServer,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.config import resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_next.verification import (
@@ -60,12 +61,8 @@ from resources_servers.swe_next.verification import (
     verification_files,
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
-from resources_servers.swebench.patch_capture import (
-    PatchCapture,
-    PatchCaptureMode,
-    capture_model_patch,
-    prepare_git_for_commits,
-)
+from resources_servers.swebench.patch_capture import prepare_git_for_commits
+from resources_servers.swebench.repo_task_owner import RepoTaskOwnerConfig, RepoTaskOwnerResourcesServer
 
 
 GRADING_ARTIFACTS = (
@@ -110,18 +107,13 @@ async def hide_grading_artifacts(sandbox: AsyncSandbox, workdir: str) -> None:
         print(f"Failed to hide grading artifacts in {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
 
 
-class SWENextResourcesServerConfig(BaseResourcesServerConfig):
-    is_verifying_golden_patch: bool = False
-    # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
-    patch_capture_mode: PatchCaptureMode = "worktree"
+class SWENextResourcesServerConfig(RepoTaskOwnerConfig):
     include_model_patch_in_response: bool = True
     evaluation_timeout: int | None = 1200
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
     apply_anti_cheating: bool = True
-    sandbox_provider: str
-    sandbox_config: dict[str, Any]
 
 
 class SWENextInstanceRequest(BaseModel):
@@ -178,14 +170,11 @@ class SWENextVerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
 
 
-class SWENextResourcesServer(SimpleResourcesServer):
-    config: SWENextResourcesServerConfig
+class SWENextResourcesServer(RepoTaskOwnerResourcesServer):
+    """Each session owns the sandbox its agent works in; see ``resources_servers/swebench/repo_task_owner.py``."""
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
-        self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
-        self._session_id_to_base_commit: dict[str, str] = {}
+    config: SWENextResourcesServerConfig
+    instance_model: ClassVar[type[BaseModel]] = SWENextInstanceRequest
 
     def _inputs(self, body: SWENextInstanceRequest, patch: str) -> VerificationInputs:
         return VerificationInputs(
@@ -196,9 +185,8 @@ class SWENextResourcesServer(SimpleResourcesServer):
             expected_output_json=body.expected_output_json,
         )
 
-    async def _create_sandbox(self, body: SWENextInstanceRequest, files: dict[str, str] | None = None) -> AsyncSandbox:
+    def _sandbox_spec(self, body: SWENextInstanceRequest, files: dict[str, str] | None = None) -> SandboxSpec:
         global_config_dict = get_global_config_dict()
-        provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
         sandbox_resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
@@ -206,7 +194,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
 
-        spec = SandboxSpec(
+        return SandboxSpec(
             # The row names its own image; there is no repository template to apply.
             image=body.image_ref,
             ttl_s=self.config.sandbox_config.get("ttl_s"),
@@ -228,10 +216,6 @@ class SWENextResourcesServer(SimpleResourcesServer):
             resources=sandbox_resources,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        sandbox = AsyncSandbox(provider_config)
-        await sandbox.start(spec)
-        await sandbox.exec(f"ln -sfn /workspace {shlex.quote(body.workdir)}")
-        return sandbox
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox | None) -> None:
         if sandbox is None:
@@ -254,42 +238,17 @@ class SWENextResourcesServer(SimpleResourcesServer):
         if result.return_code != 0:
             print(f"Failed to init git repo at {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
 
-    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
-        """List of files ``workdir`` holds untracked before the agent touches it."""
-        try:
-            result = await sandbox.exec(f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard")
-            if result.return_code != 0:
-                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
-                return frozenset()
-            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
-        except Exception:
-            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
-            return frozenset()
+    def _task_workdir(self, body: SWENextInstanceRequest) -> str:
+        return body.workdir
 
-    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
-        """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
-        original_sandbox = self._session_id_to_sandbox.pop(session_id)
-        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
-        try:
-            return await capture_model_patch(
-                original_sandbox,
-                workdir,
-                base_commit,
-                mode=self.config.patch_capture_mode,
-                pristine_untracked=pristine_untracked,
-                drop_sections=drop_patch_sections,
-            )
-        finally:
-            await self._stop_sandbox(original_sandbox)
+    def _drop_patch_sections(self, patch: str, paths: Iterable[str]) -> str:
+        return drop_patch_sections(patch, paths)
 
-    async def seed_session(self, request: Request, body: SWENextSeedSessionRequest) -> SWENextSeedSessionResponse:
-        """Start the instance's image so an agent can work in it."""
-        session_id = request.session[SESSION_ID_KEY]
-        await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
-        self._session_id_to_pristine_untracked.pop(session_id, None)
-        self._session_id_to_base_commit.pop(session_id, None)
+    async def _after_start(self, sandbox: AsyncSandbox, body: SWENextInstanceRequest) -> None:
+        # Recreate the `/testbed` -> `/workspace` symlink the image's entrypoint would have made (see _sandbox_spec).
+        await sandbox.exec(f"ln -sfn /workspace {shlex.quote(body.workdir)}")
 
-        sandbox = await self._create_sandbox(body)
+    async def _prepare_repository(self, sandbox: AsyncSandbox, body: SWENextInstanceRequest) -> None:
         await hide_grading_artifacts(sandbox, body.workdir)
         await self._init_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
@@ -297,31 +256,17 @@ class SWENextResourcesServer(SimpleResourcesServer):
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "swe_next")
 
-        head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
-        self._session_id_to_base_commit[session_id] = (head_result.stdout or "").strip()
-        self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
-            sandbox, body.workdir
-        )
-        self._session_id_to_sandbox[session_id] = sandbox
-        return SWENextSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
+    async def seed_session(
+        self, request: Request, body: SWENextSeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> SWENextSeedSessionResponse | ResourcesSeedSessionResponse:
+        """Start the instance's image so an agent can work in it: typed for an Environment Server, flat for
+        an agent's own ``/run``."""
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_typed_session(request, body)
+        return SWENextSeedSessionResponse(sandbox_handle=await self.seed_flat_session(request, body))
 
     async def verify(self, request: Request, body: SWENextVerifyRequest) -> SWENextVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        extraction_error = None
-        mode = self.config.patch_capture_mode
-        if self.config.is_verifying_golden_patch:
-            capture = PatchCapture.static(body.patch, mode, "golden")
-        else:
-            base_commit = self._session_id_to_base_commit.pop(session_id, "")
-            if not base_commit:
-                capture = PatchCapture.static("", mode, "none")
-                extraction_error = "Failed to extract model patch: no base commit recorded (seed_session did not run for this session)"
-            else:
-                try:
-                    capture = await self._extract_model_patch(session_id, body.workdir, base_commit)
-                except Exception as exc:
-                    capture = PatchCapture.static("", mode, "none")
-                    extraction_error = f"Failed to extract model patch: {exc}"
+        capture, extraction_error = await self.captured_patch(request.session[SESSION_ID_KEY], body)
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
@@ -343,7 +288,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
             sandbox: AsyncSandbox | None = None
             started = time()
             try:
-                sandbox = await self._create_sandbox(body, files=files)
+                sandbox = await self.start_grading_sandbox(body, files)
                 start_time_taken = time() - started
                 verification_started = time()
                 result = await run_verification(
