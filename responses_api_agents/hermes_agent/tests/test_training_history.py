@@ -128,3 +128,26 @@ def test_training_adapter_reaches_upstream_delegated_children(monkeypatch, tmp_p
     child.valid_tool_names = {"terminal"}
     assert child._repair_tool_call("termnal") is None
     assert child._gym_summary_compat_installed
+
+
+@pytest.mark.parametrize("training", [False, True])
+def test_iteration_summary_retains_training_tool_context_without_enabling_calls(tmp_path, runtime, training):
+    first = _completion({"content": "work", "tool_calls": [tool("terminal")]})
+    first["choices"][0]["finish_reason"] = "tool_calls"
+    with _ModelServer([first, _completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, max_turns=1, preserve_training_history=training), tmp_path)
+    initial, summary = server.requests
+    assert initial["tools"]
+    if training:
+        assert summary["tools"] == initial["tools"]
+        assert summary["tool_choice"] == "none"
+    else:
+        assert not summary.get("tools")
+        assert "tool_choice" not in summary
+
+
+def test_training_adapter_rejects_missing_summary_hooks():
+    from types import SimpleNamespace
+
+    with pytest.raises(RuntimeError, match="lacks the hooks"):
+        install_summary_compat(SimpleNamespace(), preserve_reasoning_history=True, preserve_training_history=True)

@@ -119,7 +119,7 @@ def install_summary_compat(
     original_ensure_client = getattr(agent, "_ensure_primary_openai_client", None)
     original_handle_max_iterations = getattr(agent, "_handle_max_iterations", None)
     if not callable(original_ensure_client) or not callable(original_handle_max_iterations):
-        if sampling_overrides:
+        if sampling_overrides or preserve_training_history:
             raise RuntimeError("Hermes runtime lacks the hooks required to enforce model-call controls")
         return
 
@@ -127,8 +127,12 @@ def install_summary_compat(
         _install_training_history(agent)
     original_call = agent._interruptible_api_call
     controls = dict(sampling_overrides or {})
+    training_tools = None
 
     def controlled_call(kwargs: dict[str, Any]) -> Any:
+        nonlocal training_tools
+        if preserve_training_history and kwargs.get("tools"):
+            training_tools = deepcopy(kwargs["tools"])
         request = _model_api_kwargs(kwargs, preserve_reasoning_history=preserve_reasoning_history)
         for name, value in controls.items():
             if name == "max_tokens":
@@ -156,6 +160,10 @@ def install_summary_compat(
                 if key not in {"codex_reasoning_items", "reasoning", "finish_reason"}
             }
             api_messages.append(agent._sanitize_tool_calls_for_strict_api(api_message))
+        if preserve_training_history and training_tools:
+            # Keep the tool-bearing context envelope while forbidding further calls.
+            # Dropping tools would change the context of the captured continuation.
+            kwargs = {**kwargs, "tools": training_tools, "tool_choice": "none"}
         request = _model_api_kwargs(
             {**kwargs, "messages": api_messages},
             preserve_reasoning_history=preserve_reasoning_history,
