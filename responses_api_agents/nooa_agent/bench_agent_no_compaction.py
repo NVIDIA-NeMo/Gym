@@ -17,6 +17,8 @@ class BenchAgentWithoutCompaction(BenchAgent):
     these same controls. Tool-output rendering limits remain upstream-owned.
     """
 
+    _gym_preserve_training_history = True
+
     def __init__(self, *args: Any, summarization: SummarizationConfig | None = None, **kwargs: Any) -> None:
         if summarization is not None and summarization.policy != "none":
             raise ValueError("Training BenchAgent requires summarization.policy='none'")

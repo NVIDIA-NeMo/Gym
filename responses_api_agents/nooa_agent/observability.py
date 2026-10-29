@@ -94,6 +94,13 @@ class GymTraceHooks:
     def on_model_call(self, call: GymModelCall) -> None:
         call.invocation_id = self._current.get()
         self._invocation(call.invocation_id)
+        call.bootstrap_call_ids = frozenset(
+            event.observation.tool_call_id
+            for event in self._events
+            if isinstance(event, _ToolCall)
+            and event.observation.invocation_id == call.invocation_id
+            and event.observation.tool_call_id.startswith("prefill_")
+        )
         self._events.append(call)
 
     def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:

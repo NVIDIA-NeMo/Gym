@@ -46,7 +46,7 @@ def finalize_run_result(run_result: NOOARunResult) -> tuple[NeMoGymResponse, Age
     roots = [
         record
         for record in run_result.episode.observations.records
-        if isinstance(record, AgentInvocation) and record.parent_invocation_id is None
+        if isinstance(record, AgentInvocation) and record.parent_invocation_id is None and record.model_calls
     ]
     terminal_response_id = None
     if len(roots) == 1:

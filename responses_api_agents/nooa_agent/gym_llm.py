@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -70,6 +71,8 @@ class GymModelCall:
     request: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse | None = None
     invocation_id: str | None = None
+    bootstrap_call_ids: frozenset[str] = frozenset()
+    source_input: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
@@ -238,6 +241,7 @@ class GymResponsesLLM(UnifiedLLM):
         on_call: Callable[[GymModelCall], None] | None = None,
         on_response: Callable[[], None] | None = None,
         sampling_overrides: dict[str, Any] | None = None,
+        preserve_training_history: bool = False,
     ) -> None:
         super().__init__(model=model)
         self._server_client = server_client
@@ -247,6 +251,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._on_call = on_call
         self._on_response = on_response
         self._sampling_overrides = dict(sampling_overrides or {})
+        self._preserve_training_history = preserve_training_history
         self._cookies = cookies
         self._calls = 0
         self._lock = asyncio.Lock()
@@ -273,6 +278,52 @@ class GymResponsesLLM(UnifiedLLM):
     ) -> LLMResponse:
         async with self._lock:
             return await self._acall(messages, tools, output_model, **kwargs)
+
+    def _training_input(self, call: GymModelCall, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # NOOA executes prefills itself before generation. They are prompt context,
+        # not assistant tokens emitted by the policy. Require observed execution
+        # provenance from the trace hook before changing their representation.
+        normalized = []
+        index = 0
+        while index < len(items):
+            item = items[index]
+            if item.get("type") == "function_call" and item.get("call_id") in call.bootstrap_call_ids:
+                if (
+                    index + 1 >= len(items)
+                    or items[index + 1].get("type") != "function_call_output"
+                    or items[index + 1].get("call_id") != item["call_id"]
+                ):
+                    raise ValueError("NOOA bootstrap execution is missing its paired result")
+                normalized.append(
+                    {"role": "user", "content": "Harness bootstrap execution: " + json.dumps(items[index : index + 2])}
+                )
+                index += 2
+            else:
+                normalized.append(item)
+                index += 1
+        call.source_input = copy.deepcopy(normalized)
+
+        # The pinned runtime rebuilds history and drops its previous trailing
+        # user reminder. Retain the exact dispatched prefix so earlier policy
+        # tokens remain on their verified context. Never repair arbitrary edits.
+        parents = []
+        for prior in self._state.calls:
+            if prior is call or prior.response is None or prior.source_input is None:
+                continue
+            output = [_dump(item) for item in prior.response.output]
+            if not output:
+                continue
+            for offset in range(len(normalized) - len(output) + 1):
+                if normalized[offset : offset + len(output)] == output:
+                    parents.append((offset, prior))
+        if not parents:
+            return normalized
+        offset, parent = max(parents, key=lambda candidate: candidate[0])
+        prefix = normalized[:offset]
+        previous = parent.source_input
+        if prefix != previous and not (previous and previous[-1].get("role") == "user" and prefix == previous[:-1]):
+            raise ValueError("NOOA changed previously dispatched context; training lineage cannot be preserved")
+        return [_dump(item) for item in parent.request.input] + normalized[offset:]
 
     async def _acall(
         self,
@@ -325,6 +376,10 @@ class GymResponsesLLM(UnifiedLLM):
         if self._on_call is not None:
             self._on_call(call)
         try:
+            if self._preserve_training_history:
+                request["input"] = self._training_input(call, input_items)
+            body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
+            call.request = body.model_copy(deep=True)
             http_response = await self._server_client.post(
                 server_name=self._model_server_name,
                 url_path=self._model_url_path,

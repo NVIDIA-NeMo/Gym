@@ -205,6 +205,7 @@ class InProcessNOOARunner:
             on_call=trace.on_model_call,
             on_response=checkpoint,
             sampling_overrides=sampling_overrides,
+            preserve_training_history=getattr(self._agent_class, "_gym_preserve_training_history", False),
         )
         dispatcher = ResourceToolDispatcher(
             tool_access=request.tool_access,
