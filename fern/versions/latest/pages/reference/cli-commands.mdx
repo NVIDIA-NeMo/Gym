@@ -1139,7 +1139,9 @@ See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) f
 
 Compare a baseline eval run against a candidate run and write a report.
 
-The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. Confidence intervals are read from what each run recorded; this command does not yet perform statistical tests or issue a pass/fail verdict.
+The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. Each run's confidence intervals are read from its recorded metrics. For eligible metrics with at least two finite repeat-level values on each side and recorded cross-repeat means, the command also computes a two-sided 95% unpaired Welch confidence interval for candidate minus baseline. It does not issue a pass/fail verdict.
+
+See [Compare Results](/main/evaluation/compare-results) for the evaluation workflow and interpretation of the confidence interval.
 
 | Option | Description |
 | --- | --- |
