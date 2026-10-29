@@ -30,8 +30,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
+from nemo_gym.episode_types import AGENT_INSTANCES_KEY
 from nemo_gym.token_id_capture.builder import (
     assert_prefix_contiguity,
     project_main_chain_response,
@@ -244,7 +246,7 @@ def _copy_engine_refusals(built: dict, snapshot: TokenCaptureSnapshot) -> None:
 
 
 # The build key holding one build per named agent instance, when the episode names agent instances.
-AGENT_INSTANCE_BUILDS_KEY = "agent_instances"
+AGENT_INSTANCE_BUILDS_KEY = AGENT_INSTANCES_KEY
 
 
 def _assemble_agent_instance(
@@ -301,14 +303,16 @@ def _build_snapshot(
     explicit_terminal_call_id: str | None,
     declared_response_id: str | None,
     mask_incomplete_when_attributed: bool,
+    agent_instance_terminals: Mapping[str, str] | None = None,
 ) -> dict:
     """Build every captured agent instance of a frozen snapshot.
 
     Lineage, retry grouping and terminal selection run within one group (an agent instance on one
     model server). The returned build is the primary agent instance's (``groups.primary_agent_instance``):
     the scored response and the declared terminal belong to it. When the episode names agent instances,
-    ``AGENT_INSTANCE_BUILDS_KEY`` maps every named agent instance to its own build, attributed without
-    a scored response.
+    ``AGENT_INSTANCE_BUILDS_KEY`` maps every named agent instance to its own build, attributed by the
+    terminal response id ``agent_instance_terminals`` declares for it, without a scored response. A declared
+    terminal that names another agent instance's call is a conflict: the build is masked, never matched to it.
 
     An agent instance's build is masked by its own lost calls or by an episode-wide mark, never by
     another agent instance's.
@@ -323,9 +327,18 @@ def _build_snapshot(
         has_primary = True
     except LookupError:
         primary, has_primary = None, False
+    terminals = dict(agent_instance_terminals or {})
+    owners = {entry.response_id: entry.agent_instance for entry in snapshot.entries if entry.response_id}
     builds: dict[str | None, dict] = {}
     for agent_instance, groups in agents.items():
         is_primary = has_primary and agent_instance == primary
+        declared = terminals.get(agent_instance) if agent_instance is not None else None
+        if declared is not None and declared not in owners:
+            # The environment records the response each agent instance last answered with; an agent that
+            # minted its own response id names no captured call, so attribution falls back to the chain.
+            declared = None
+        if is_primary and declared_response_id:
+            declared = declared_response_id
         built = _assemble_agent_instance(
             rollout_id,
             [entries for _, entries in groups],
@@ -333,9 +346,13 @@ def _build_snapshot(
             model,
             verified_response=verified_response if is_primary else None,
             explicit_terminal_call_id=explicit_terminal_call_id if is_primary else None,
-            declared_response_id=declared_response_id if is_primary else None,
+            declared_response_id=declared,
             engine_refusals=snapshot.engine_refusals,
         )
+        if declared is not None and declared in owners and owners[declared] != agent_instance:
+            # The declared terminal is another agent instance's call: a conflict, not a match.
+            built.setdefault("metrics", {})["terminal_conflict"] = owners[declared]
+            built["mask_sample"] = True
         _apply_snapshot_outcome(built, snapshot, agent_instance, always=mask_incomplete_when_attributed)
         builds[agent_instance] = built
     if has_primary:
@@ -426,11 +443,13 @@ async def trajectories_from_source(
     explicit_terminal_call_id: str | None = None,
     mask_incomplete_when_attributed: bool = True,
     declared_response_id: str | None = None,
+    agent_instance_terminals: Mapping[str, str] | None = None,
 ) -> dict | None:
     """Build trajectories from a frozen ``TokenSource`` snapshot.
 
     ``declared_response_id`` is the served response id the harness reports;
     a declared id that matches no entry masks the rollout.
+    ``agent_instance_terminals`` declares the terminal response id of each named agent instance.
 
     Missing records are unsafe and return a masked result.
     An incomplete snapshot masks the result. With
@@ -454,6 +473,7 @@ async def trajectories_from_source(
             explicit_terminal_call_id=explicit_terminal_call_id,
             declared_response_id=declared_response_id,
             mask_incomplete_when_attributed=mask_incomplete_when_attributed,
+            agent_instance_terminals=agent_instance_terminals,
         )
     )
     built["_capture_snapshot"] = {

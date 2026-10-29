@@ -18,6 +18,7 @@ from pydantic import (
 )
 from typing_extensions import Self
 
+from nemo_gym.correlation import validate_agent_instance
 from nemo_gym.failure_kinds import FailureStage, validate_failure_kind
 
 
@@ -130,8 +131,34 @@ class BaseEpisodeRequest(BaseModel, Generic[TaskInputT]):
     task: MaterializedTask[TaskInputT]
 
 
+# The episode-response field and result-row key mapping each named agent instance to its own result.
+AGENT_INSTANCES_KEY = "agent_instances"
+
+
+class AgentInstanceResult(BaseModel):
+    """One agent instance's part of an episode result.
+
+    ``terminal_response_id`` is the served response the agent instance ended on: the reply to its last
+    activation, filled by the environment server. ``reward`` is optional and set by the environment; without it
+    the trainer chooses a fallback, such as the episode reward.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    terminal_response_id: str | None = None
+    reward: float | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset(self, handler: SerializerFunctionWrapHandler):
+        return {key: value for key, value in handler(self).items() if value is not None}
+
+
 class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):
-    """Return either a typed result or a handled failure."""
+    """Return either a typed result or a handled failure.
+
+    ``agent_instances`` reports each named agent instance of a multi-agent episode; it is omitted for a
+    single-agent episode, whose result keeps its flat fields.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -139,9 +166,19 @@ class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):
     task_id: TaskId
     result: EpisodeResultT | None = None
     failure: EpisodeFailure | None = None
+    agent_instances: dict[str, AgentInstanceResult] | None = None
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
         if (self.result is None) == (self.failure is None):
             raise ValueError("exactly one of result or failure is required")
+        for agent_instance in self.agent_instances or {}:
+            validate_agent_instance(agent_instance)
         return self
+
+    @model_serializer(mode="wrap")
+    def _omit_agent_instances(self, handler: SerializerFunctionWrapHandler):
+        result = handler(self)
+        if self.agent_instances is None:
+            result.pop("agent_instances", None)
+        return result
