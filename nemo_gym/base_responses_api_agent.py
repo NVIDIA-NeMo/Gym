@@ -88,6 +88,7 @@ from nemo_gym.server_utils import (
 from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.token_id_capture.config import agent_instance_carries_training_tag
 from nemo_gym.tool_access import ToolAccess
 
 
@@ -993,17 +994,38 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             f"{url_path}"
         )
 
-    def base_url_for_run(self, base_url: str, body: Any) -> str:
+    def base_url_for_run(
+        self,
+        base_url: str,
+        body: Any,
+        *,
+        agent_instance: Optional[str] = None,
+        token_capture: Optional[bool] = None,
+    ) -> str:
         """Apply this run's capture path to a model-server root URL.
 
         Append the API-version suffix after this method returns. While traces export, the URL also
         names this run's current span, so the model server parents calls that arrive without a
         ``traceparent`` header (a harness in a sandbox) to it.
+
+        ``agent_instance`` names the agent instance whose calls use the URL. ``token_capture`` sets the
+        training tag for this one URL; ``None`` keeps the agent's own setting.
         """
         return apply_rollout_prefix(
             base_url,
             self.rollout_id_from_run(body),
-            token_capture=self._token_id_capture_enabled(),
+            token_capture=self._token_id_capture_enabled() if token_capture is None else token_capture,
+            agent_instance=agent_instance,
+        )
+
+    def training_tag_for(self, agent_instance: Optional[str]) -> bool:
+        """Whether this agent's URLs for ``agent_instance`` carry the training tag.
+
+        The agent must capture at all, and the agent instance must be selected by
+        ``token_id_capture.training_agent_instances`` (``assistant`` by default).
+        """
+        return self._token_id_capture_enabled() and agent_instance_carries_training_tag(
+            self.server_client.global_config_dict, agent_instance
         )
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
@@ -1020,16 +1042,27 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
 
     def resolve_model_base_url(
-        self, model_server_name: str, rollout_id: Optional[str] = None, *, trace_context: bool = True
+        self,
+        model_server_name: str,
+        rollout_id: Optional[str] = None,
+        *,
+        trace_context: bool = True,
+        agent_instance: Optional[str] = None,
+        token_capture: Optional[bool] = None,
     ) -> str:
         """Resolve a model-server URL with an optional rollout prefix (and trace context, as ``base_url_for_run``).
 
         Pass ``trace_context=False`` for a URL that a client cached across rollouts will keep using.
+        ``agent_instance`` and ``token_capture`` are as for ``base_url_for_run``.
         """
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
         prefixed = apply_rollout_prefix(
-            base_url, rollout_id, token_capture=self._token_id_capture_enabled(), trace_context=trace_context
+            base_url,
+            rollout_id,
+            token_capture=self._token_id_capture_enabled() if token_capture is None else token_capture,
+            trace_context=trace_context,
+            agent_instance=agent_instance,
         )
         return f"{prefixed}/v1"
 

@@ -19,7 +19,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, normalize_math_judge_verdict, reraise_judge_errors
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER
+from nemo_gym.rollout_correlation import agent_instance_context, current_agent_instance
 
 
 @pytest.mark.parametrize(
@@ -153,23 +153,48 @@ class TestJudgeFailsafe:
         assert request.model_dump() == original
 
 
-@pytest.mark.asyncio
-async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
-    from nemo_gym.rollout_correlation import verifier_invocation_context
+def _recording_client(status: int, body: bytes):
+    """A judge client that records the agent instance each call was made as."""
+    client = _client(status=status, body=body)
+    names = []
+    post = client.post
 
-    client = _client(status=200, body=b'{"verdict":"CORRECT"}')
+    async def recording_post(**kwargs):
+        names.append(current_agent_instance())
+        return await post(**kwargs)
+
+    client.post = recording_post
+    return client, names
+
+
+@pytest.mark.asyncio
+async def test_judge_calls_use_the_enclosing_agent_instance_even_on_failure():
+    client, names = _recording_client(status=200, body=b'{"verdict":"CORRECT"}')
     await _call(client)
-    assert "headers" not in client.post.call_args.kwargs
-    with verifier_invocation_context("verify-one"):
+    with agent_instance_context("verify.one"):
         await _call(client)
         await _call(client)
-        assert all(
-            call.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
-            for call in client.post.call_args_list[1:]
-        )
-        failed = _client(status=400, body=b'{"error":"rejected"}')
+        failed, failed_names = _recording_client(status=400, body=b'{"error":"rejected"}')
         with pytest.raises(JudgeError):
             await _call(failed)
-        assert failed.post.call_args.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
     await _call(client)
-    assert "headers" not in client.post.call_args.kwargs
+
+    assert names == ["judge", "verify.one", "verify.one", "judge"]
+    assert failed_names == ["verify.one"]
+    assert current_agent_instance() is None
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_judge_name_wins_over_the_context():
+    client, names = _recording_client(status=200, body=b'{"verdict":"CORRECT"}')
+    with agent_instance_context("verify.one"):
+        await call_judge(
+            client,
+            server_name="judge",
+            url_path="/v1/responses",
+            json={},
+            response_model=_Verdict,
+            agent_instance="judge.2",
+        )
+
+    assert names == ["judge.2"]

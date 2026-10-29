@@ -406,6 +406,39 @@ class TestApp:
         assert response.result.max_agent_steps == 3
         assert response.result.termination_reason == TerminationReason.MAX_AGENT_STEPS
 
+    @pytest.mark.parametrize(
+        "training_agent_instances, user_segment",
+        [(None, ""), (["assistant", "user"], "/training-token-capture")],
+    )
+    async def test_run_names_the_assistant_and_the_user_simulator(
+        self, training_agent_instances, user_segment
+    ) -> None:
+        _, server = self._dummy_server()
+        capture = {"enabled": True, "all_agents": True, "dir": "/capture"}
+        if training_agent_instances is not None:
+            capture["training_agent_instances"] = training_agent_instances
+        server.server_client.global_config_dict = {"token_id_capture": capture}
+        body = self._example_run_request().model_copy(update={"capture_rollout_id": "7-2"})
+        captured_kwargs = {}
+
+        async def fake_run_single_task(**kwargs):
+            captured_kwargs.update(kwargs)
+            return self._fake_simulation_run()
+
+        with (
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://model"),
+            patch("responses_api_agents.tau2.app.run_single_task", side_effect=fake_run_single_task),
+        ):
+            await server.run(body)
+
+        config = captured_kwargs["config"]
+        assert config.llm_args_agent["api_base"] == (
+            "http://model/ng-rollout/7-2/ng-agent-instance/assistant/training-token-capture/v1"
+        )
+        assert (
+            config.llm_args_user["api_base"] == f"http://model/ng-rollout/7-2/ng-agent-instance/user{user_segment}/v1"
+        )
+
     async def test_run_uses_agent_visible_messages_for_responses_conversion(self) -> None:
         _, server = self._dummy_server(max_agent_steps=3)
         body = self._example_run_request()

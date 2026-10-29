@@ -44,6 +44,7 @@ from nemo_gym.observability.model_calls import merge_model_call_capture_into_rec
 from nemo_gym.rollout_correlation import (
     current_rollout_id,
     maybe_rollout_id_from_run_body,
+    rollout_context,
 )
 from nemo_gym.server_utils import ServerClient, get_response_json
 
@@ -374,3 +375,88 @@ def test_an_explicit_rollout_id_with_an_attempt_suffix_cannot_also_take_an_attem
     # Both at once would build "job-a2-a1", which decodes to no rollout and attempt.
     with pytest.raises(ValueError, match="already ends with the attempt suffix"):
         maybe_rollout_id_from_run_body({"_ng_rollout_id": "job-a2", "_ng_attempt_index": 1})
+
+
+def _naming_client(*, observability: bool) -> ServerClient:
+    return ServerClient(
+        head_server_config=BaseServerConfig(host="head.test", port=80),
+        global_config_dict=OmegaConf.create(
+            {
+                "observability_enabled": observability,
+                "judge": {"responses_api_models": {"model": {"host": "judge.test", "port": 80}}},
+                "resources": {"resources_servers": {"judge": {"host": "resources.test", "port": 80}}},
+            }
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_server_client_names_the_context_agent_instance_only_on_the_prefix_it_adds(monkeypatch) -> None:
+    from nemo_gym.rollout_correlation import agent_instance_context
+
+    sent = []
+
+    async def transport(method: str, url: str, **kwargs):
+        sent.append(url)
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", transport)
+    client = _naming_client(observability=True)
+
+    with rollout_context("4-2"), agent_instance_context("judge.1"):
+        await client.post(server_name="judge", url_path="/v1/responses", json={})
+        await client.post(server_name="resources", url_path="/verify", json={})
+        await client.post(server_name="judge", url_path="/ng-rollout/4-2/v1/responses", json={})
+    with rollout_context("4-2"):
+        await client.post(server_name="judge", url_path="/v1/responses", json={})
+
+    assert sent == [
+        "http://judge.test:80/ng-rollout/4-2/ng-agent-instance/judge.1/v1/responses",
+        "http://resources.test:80/ng-rollout/4-2/verify",
+        "http://judge.test:80/ng-rollout/4-2/v1/responses",
+        "http://judge.test:80/ng-rollout/4-2/v1/responses",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_server_client_adds_no_prefix_and_no_name_without_observability(monkeypatch) -> None:
+    from nemo_gym.rollout_correlation import agent_instance_context
+
+    sent = []
+
+    async def transport(method: str, url: str, **kwargs):
+        sent.append(url)
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", transport)
+    with rollout_context("4-2"), agent_instance_context("judge"):
+        await _naming_client(observability=False).post(server_name="judge", url_path="/v1/responses", json={})
+
+    assert sent == ["http://judge.test:80/v1/responses"]
+
+
+def test_url_helpers_carry_an_agent_instance_name() -> None:
+    from nemo_gym.server_utils import apply_rollout_prefix, rollout_path_prefix
+
+    assert rollout_path_prefix("r", agent_instance="user") == "/ng-rollout/r/ng-agent-instance/user"
+    assert (
+        rollout_path_prefix("r", token_capture=True, agent_instance="debater.1")
+        == "/ng-rollout/r/ng-agent-instance/debater.1/training-token-capture"
+    )
+    assert rollout_path_prefix(None, agent_instance="user") == ""
+    assert (
+        apply_rollout_prefix("http://m/", "r", agent_instance="judge")
+        == "http://m/ng-rollout/r/ng-agent-instance/judge"
+    )
+    assert apply_rollout_prefix("http://m", "r") == "http://m/ng-rollout/r"
+
+
+def test_agent_instance_context_refuses_an_invalid_name_and_restores_the_outer_one() -> None:
+    from nemo_gym.rollout_correlation import agent_instance_context, current_agent_instance
+
+    with agent_instance_context("assistant"):
+        with pytest.raises(ValueError, match="invalid agent instance name"):
+            with agent_instance_context("Not Valid"):
+                pass
+        with agent_instance_context(None):
+            assert current_agent_instance() is None
+        assert current_agent_instance() == "assistant"
+    assert current_agent_instance() is None

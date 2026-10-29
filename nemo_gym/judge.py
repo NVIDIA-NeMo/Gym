@@ -44,7 +44,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
+from nemo_gym.rollout_correlation import agent_instance_context, current_agent_instance
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
@@ -81,6 +81,7 @@ async def call_judge(
     url_path: str,
     json: Any,
     response_model: Type[ResponseT],
+    agent_instance: str | None = None,
 ) -> ResponseT:
     """POST to a judge model server and parse the reply; raise JudgeError on failure.
 
@@ -88,18 +89,14 @@ async def call_judge(
     ``/v1/chat/completions``), paired with the matching ``response_model``. The
     status check comes before parsing so an auth or server error reports the HTTP
     failure itself, not a validation error against the error body.
-    The enclosing verify execution supplies the invocation identity; all its judge
-    calls and retries share that identity. Standalone calls do not invent a verifier execution.
+    The call is made as an agent instance: ``agent_instance`` when given, else the name already set in context
+    (inside ``verify()`` that is the verifier run ``verify.<id>``, so all its judge calls and retries share
+    it), else ``judge``. Several judges in one episode pass ``judge.<n>``.
     """
 
     async def _call() -> ResponseT:
-        invocation_id = current_verifier_invocation_id()
-        http_response = await server_client.post(
-            server_name=server_name,
-            url_path=url_path,
-            json=json,
-            **({"headers": {VERIFIER_INVOCATION_HEADER: invocation_id}} if invocation_id else {}),
-        )
+        with agent_instance_context(agent_instance or current_agent_instance() or "judge"):
+            http_response = await server_client.post(server_name=server_name, url_path=url_path, json=json)
         await raise_for_status(http_response)
         return response_model.model_validate(await get_response_json(http_response))
 

@@ -1086,3 +1086,43 @@ def test_invalid_assistant_url_is_terminal_and_not_scorable(error_type: type[Inv
 
     assert _is_retryable_dependency_error(error) is False
     assert _is_scorable_assistant_activation_error(error) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "alias, agent_instance",
+    [("judge_model", "judge"), ("summary_model", "summary"), ("api_response_model", "tool_simulation")],
+)
+async def test_support_calls_are_named_by_their_invocation_role(
+    alias: str, agent_instance: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nemo_gym.rollout_correlation import current_agent_instance
+
+    server, client = _lifecycle_server()
+    names = []
+    post = client.post
+
+    async def naming_post(server_name: str, url_path: str, **kwargs: Any) -> _Response:
+        names.append(current_agent_instance())
+        return await post(server_name, url_path, **kwargs)
+
+    object.__setattr__(client, "post", naming_post)
+    text = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}
+    client.responses = [_Response(_responses_body([{**text, "id": "msg-1", "status": "completed"}]))]
+    request = _request()
+    bridge = _ConversationBridge(
+        server, request, UserSimTaskInput.model_validate({"resolved_row": _resolved_row()}), {}, {}
+    )
+    activation = SimpleNamespace(
+        activation_id="support",
+        model_alias=alias,
+        messages=[{"role": "user", "content": "x"}],
+        parameters={},
+        tools=[],
+    )
+
+    await bridge.invoke_activation(activation)
+
+    assert names == [agent_instance]
+    assert current_agent_instance() is None
+    assert bridge.invocations[0].role == agent_instance

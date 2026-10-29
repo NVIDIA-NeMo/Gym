@@ -69,7 +69,7 @@ from nemo_gym._checkpoint.model_workers import (
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
-from nemo_gym.correlation import CorrelationPathError, client_session_id, resolve
+from nemo_gym.correlation import CorrelationPathError, client_session_id, resolve, verifier_invocation_id_of
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -87,7 +87,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, rollout_context, scope_with_routed_path
+from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -1753,9 +1753,8 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
-        verifier_invocation_id = _unique_request_header(
-            scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
-        )
+        # A verifier run names itself ``verify.<id>`` in the path; the id joins its calls to the run.
+        verifier_invocation_id = verifier_invocation_id_of(agent_instance)
         session_id = client_session_id(scope)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)

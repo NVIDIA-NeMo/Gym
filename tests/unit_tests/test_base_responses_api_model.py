@@ -43,7 +43,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER
 from nemo_gym.server_utils import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.token_id_capture.replay import replay_context
 
@@ -1803,8 +1802,8 @@ async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observ
         await middleware(
             {
                 "type": "http",
-                "path": "/ng-rollout/judge-retry/v1/responses",
-                "headers": [(VERIFIER_INVOCATION_HEADER.encode("ascii"), b"verification-1")],
+                "path": "/ng-rollout/judge-retry/ng-agent-instance/verify.verification-1/v1/responses",
+                "headers": [],
             },
             receive,
             send,

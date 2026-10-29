@@ -96,13 +96,40 @@ def test_task_env_prefixes_configured_gym_model_servers():
     with patch.object(
         PinchBenchAgent,
         "resolve_model_base_url",
-        side_effect=lambda _self, name, rollout_id: f"http://{name}/ng-rollout/{rollout_id}/v1",
+        side_effect=lambda _self, name, rollout_id, **_: f"http://{name}/ng-rollout/{rollout_id}/v1",
         autospec=True,
     ):
         env = agent._task_env("task_x", "7-2")
 
     assert env["MODEL_BASE_URL"] == "http://policy/ng-rollout/7-2/v1"
     assert env["JUDGE_BASE_URL"] == "http://judge/ng-rollout/7-2/v1"
+
+
+@pytest.mark.parametrize(
+    "training_agent_instances, judge_segment",
+    [(None, ""), (["assistant", "judge"], "/training-token-capture")],
+)
+def test_task_env_names_the_assistant_and_the_judge(monkeypatch, training_agent_instances, judge_segment):
+    import nemo_gym.base_responses_api_agent as base_agent
+
+    agent = make_agent(
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        token_id_capture=True,
+    )
+    capture = {"enabled": True, "dir": "/capture"}
+    if training_agent_instances is not None:
+        capture["training_agent_instances"] = training_agent_instances
+    agent.server_client.global_config_dict = {"token_id_capture": capture}
+    monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, name: {"name": name})
+    agent.server_client._build_server_base_url = lambda config: f"http://{config['name']}"
+
+    env = agent._task_env("task_x", "7-2")
+
+    assert (
+        env["MODEL_BASE_URL"] == "http://policy/ng-rollout/7-2/ng-agent-instance/assistant/training-token-capture/v1"
+    )
+    assert env["JUDGE_BASE_URL"] == f"http://judge/ng-rollout/7-2/ng-agent-instance/judge{judge_segment}/v1"
 
 
 def test_build_spec_from_config(tmp_path):

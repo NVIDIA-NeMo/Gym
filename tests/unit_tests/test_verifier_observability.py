@@ -17,12 +17,13 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.correlation import verifier_invocation_id_of
 from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
+from nemo_gym.rollout_correlation import current_agent_instance, current_verifier_invocation_id, rollout_context
 from nemo_gym.server_utils import ServerClient
 
 
@@ -45,8 +46,10 @@ async def test_one_verify_owns_parallel_judge_calls_and_retry_attempts(tmp_path)
     store = CaptureStore(tmp_path)
     observed_ids = []
 
-    async def post(*, server_name, headers, **kwargs):
-        invocation_id = headers[VERIFIER_INVOCATION_HEADER]
+    async def post(*, server_name, **kwargs):
+        # The run's identity travels as the agent instance in the path, never as a header.
+        assert "headers" not in kwargs
+        invocation_id = verifier_invocation_id_of(current_agent_instance())
         observed_ids.append(invocation_id)
         for attempt in range(2):
             call_id = f"{server_name}-{attempt}"
@@ -243,19 +246,19 @@ async def test_direct_model_requests_inside_verify_inherit_owner(tmp_path, monke
     async def verify():
         owner = current_verifier_invocation_id()
         await client.post(server_name="judge", url_path="/v1/responses", json={}, headers={"x-custom": "kept"})
-        assert transport.call_args.kwargs["headers"] == {
-            "x-custom": "kept",
-            VERIFIER_INVOCATION_HEADER: owner,
-        }
+        assert transport.call_args.kwargs["headers"] == {"x-custom": "kept"}
+        assert transport.call_args.kwargs["url"] == (
+            f"http://localhost:9999/ng-rollout/direct/ng-agent-instance/verify.{owner}/v1/responses"
+        )
         return {"reward": 1.0}
 
     with rollout_context("direct"):
         await observe_verifier(verify, enabled=True)()
-    assert current_verifier_invocation_id() is None
+    assert current_verifier_invocation_id() is None and current_agent_instance() is None
     transport.reset_mock()
     with rollout_context("policy"):
         await client.post(server_name="judge", url_path="/v1/responses", json={})
-    assert VERIFIER_INVOCATION_HEADER not in transport.call_args.kwargs.get("headers", {})
+    assert transport.call_args.kwargs["url"] == "http://localhost:9999/ng-rollout/policy/v1/responses"
 
 
 @pytest.mark.asyncio
