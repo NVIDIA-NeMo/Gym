@@ -91,6 +91,8 @@ async def test_three_completed_non_tool_turns_reach_verifier_with_authoritative_
     assert len(calls) == 3 and len(verified) == 1
     response = result.result.response
     assert response.status == "failed" and response.error is not None
+    assert response.metadata["terminal_response_id"] == "response-3"
+    assert verified[0]["response"]["metadata"]["terminal_response_id"] == "response-3"
     assert len([item for item in response.output if item.type == "reasoning"]) == 3
     row = _episode_record(result.model_dump(mode="json"))
     assert "_ng_failure_class" not in row
