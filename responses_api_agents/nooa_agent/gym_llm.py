@@ -35,6 +35,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.nooa_agent.context_diagnostic import context_difference
 
 
 class GymModelClient(Protocol):
@@ -322,7 +323,16 @@ class GymResponsesLLM(UnifiedLLM):
         prefix = normalized[:offset]
         previous = parent.source_input
         if prefix != previous and not (previous and previous[-1].get("role") == "user" and prefix == previous[:-1]):
-            raise ValueError("NOOA changed previously dispatched context; training lineage cannot be preserved")
+            diagnostic = context_difference(previous, prefix)
+            diagnostic.update(
+                invocation_id=call.invocation_id,
+                parent_invocation_id=parent.invocation_id,
+                matched_output_offset=offset,
+            )
+            raise ValueError(
+                "NOOA changed previously dispatched context; training lineage cannot be preserved; context_difference="
+                + json.dumps(diagnostic, sort_keys=True)
+            )
         return [_dump(item) for item in parent.request.input] + normalized[offset:]
 
     async def _acall(
