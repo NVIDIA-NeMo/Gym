@@ -155,3 +155,16 @@ The neutral `user` argument to `exec()` maps onto `--user`:
 By default `exec_shell` is unset, so the provider auto-detects `bash` once the container is ready (conda and SWE-bench setup commands use `source`, which POSIX `sh`/dash lack) and falls back to `sh`. Pin `exec_shell` to `/bin/sh` or `/bin/bash` to skip the per-create probe.
 
 Command failures return `SandboxExecResult` with the command's exit code. A command timeout returns code `125` with `error_type="timeout"`, and a docker runtime failure — daemon down or container gone, detected via stderr markers — returns code `125` with `error_type="sandbox"`. A timed-out command's in-container process is reaped when the sandbox is closed, since `docker rm -f` stops the whole process tree.
+
+## Task folders
+
+When the `harbor` Environment Server runs [task folders](/main/data/harbor-tasks) on Docker:
+
+- A task whose Dockerfile needs a build is built with `docker` into the local daemon, so no registry is needed (see
+  [Harbor image builds](/main/reference/configuration#harbor-image-builds)).
+- Compose tasks do not start on Docker, which cannot network a group of sandboxes. A task with a Compose file in
+  `environment/`, or any task when the server's `compose_overlay` names Compose `files`, fails at seed with
+  `Sandbox provider does not support networking between sandboxes`. Run these tasks on OpenSandbox (see
+  [Multi-Container Tasks](/main/data/compose-tasks)).
+- `exec.default_timeout_s` also bounds how long Gym tracks a running image entrypoint; past it, the entrypoint is no
+  longer tracked.

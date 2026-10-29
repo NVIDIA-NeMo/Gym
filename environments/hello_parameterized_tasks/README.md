@@ -44,7 +44,7 @@ The generated task directories can be inspected, exported, and run as an ordinar
 export OPENAI_API_KEY="<api-key>"
 
 gym eval run environments/hello_parameterized_tasks \
-  --agent opencode \
+  --agent opencode_agent \
   --model openai/gpt-5 \
   --sandbox docker
 ```

@@ -430,6 +430,53 @@ Exporting is best-effort. Errors that happen during export (e.g., unavailable se
 
 ---
 
+## Harbor image builds
+
+A task folder whose Dockerfile needs a build (see [Dockerfile modes](/main/data/task-folder-format#dockerfile-modes))
+is built once at prepare, inside `gym eval run` and `gym dataset validate`. The top-level `builds:` block configures
+those builds. Set it in `env.yaml`, a `--config` file or with `++builds.<key>=<value>`:
+
+```yaml
+builds:
+  tool: buildah
+  repository: registry.example.com:5005/my-team/harbor-builds
+  platform: linux/amd64
+  enabled: true
+  force: false
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `tool` | detected | `buildah`, `podman` or `docker`. With a repository, the first of the three on `PATH`; without one, `docker` only. |
+| `repository` | `$NEMO_GYM_BUILD_REPOSITORY` | Registry path that built images are pushed under, as `<repository>/hb__<hash>`. Unset, images stay in the local Docker daemon, which only the Docker sandbox provider can start. OpenSandbox needs pushed images. |
+| `platform` | `linux/amd64` | Platform asked of the tool. An image that comes out for another platform is refused, and so is an amd64 level above the baseline, such as `linux/amd64/v3`. |
+| `enabled` | `true` | `false` never builds; tasks that need a build are left out with a message. |
+| `force` | `false` | Also build the Dockerfile of a task that declares `docker_image`, and run the built image, as Harbor's `--force-build` does. |
+
+Images are named `hb__<hash>`, where the hash is Harbor's hash of the task's `environment/` folder, so identical
+build contexts share one image. The tool pulls base images and pushes built ones with its own login
+(`buildah login`, `podman login` or `docker login`).
+
+- **buildah** runs rootless with the `vfs` storage driver, under `/raid/scratch/<user>/nemo-gym-buildah` when
+  `/raid/scratch` exists, else in the system temp folder. Keep build contexts on local disk for Dockerfiles with
+  heredocs, which fail on Lustre.
+- **buildah and podman** run with Gym's own `containers.conf` and `registries.conf`, and build Docker-format
+  images. Dockerfile heredocs need a tool built with openshift/imagebuilder 1.2.6 or later (upstream buildah 1.33.0
+  or later); prepare checks once and stops with the remedy.
+- **docker** builds through `docker compose build`, so it needs the Compose v2 plugin (`docker-compose-plugin`).
+- **Proxies.** A proxy that answers 403 to the registry fails the push. Add the registry host to `no_proxy`.
+
+## Harbor environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `NEMO_GYM_DATASETS_DIR` | Where pulled task-folder datasets live. Default: `environments/harbor/` in the Gym checkout, or under the working directory for a package install. See [Task Folder Files and Storage](/main/reference/task-folder-storage#pulled-datasets). |
+| `NEMO_GYM_BUILD_REPOSITORY` | Default for `builds.repository`. |
+| `NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING` | Run a harness that a dataset's `[gym] allowed_agents` does not list, like `--allow-unsupported-pairing`. |
+| `CONTAINERS_CONF_OVERRIDE`, `CONTAINERS_REGISTRIES_CONF` | Your own buildah and podman configuration. When set, Gym leaves them alone instead of supplying its own. |
+
+---
+
 ## Command Line Usage
 
 To run servers, use `gym env start`. NeMo Gym uses [Hydra](https://hydra.cc/) for configuration management.

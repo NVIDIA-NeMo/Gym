@@ -1,9 +1,24 @@
 ---
-title: "Prepare Data"
-description: ""
+title: "Prepare Tasks"
+description: "Define the tasks NeMo Gym runs, as JSONL rows served by a Resources Server or as task folders."
 position: 1
 ---
-NeMo Gym datasets use JSONL format for reinforcement learning (RL) training. Each dataset connects to an **agent server** (orchestrates agent-environment interactions) which routes requests to a **resources server** (provides tools and computes rewards).
+
+# Prepare Tasks
+
+A task is one unit of work that an agent attempts and a verifier scores. NeMo Gym reads tasks in two forms.
+
+## Two kinds of tasks
+
+| | JSONL rows plus a Resources Server | Task folders |
+|---|---|---|
+| What you write | One JSONL line per task (`responses_create_params` plus the fields your verifier reads), a Resources Server that holds the tools and `verify()`, and a YAML config that wires them to an Agent Server. | One folder per task in the Harbor format: `task.toml`, `instruction.md`, `environment/`, `tests/` and an optional `solution/`. |
+| Where verification runs | In the Resources Server's `verify()`. | Inside the task's sandbox, where the task's own `tests/` writes the reward. |
+| Best fit | Many tasks that share one verifier and toolset, such as math, instruction following or tool calling. | Agent tasks that need their own software environment, such as terminal and coding tasks, and datasets from the Harbor hub. |
+
+Task folders run on the `harbor` Environment Server, which starts a sandbox from each folder, runs the agent session in it, then runs the task's verifier there, with no Resources Server. Start with [Author Task Folders](/main/data/harbor-tasks), and see [Harbor Environment Server](/main/agent-interactions/harbor) for how an episode runs. To build a Resources Server end to end, see [Build Environments](/main/environment-tutorials).
+
+The rest of this page covers JSONL rows. A JSONL dataset for reinforcement learning (RL) training connects to an **Agent Server** (orchestrates agent-environment interactions), which routes requests to a **Resources Server** (provides tools and computes rewards).
 
 ## Prerequisites
 
@@ -208,6 +223,42 @@ Fetch datasets from HuggingFace Hub.
 YAML-based prompt templates applied at rollout time.
 
 <Badge minimal outlined>prompts</Badge>
+</Card>
+
+<Card title="Author Task Folders" href="/main/data/harbor-tasks">
+Write a task folder, validate it with the oracle and run an agent on it.
+
+<Badge minimal outlined>task-folders</Badge>
+</Card>
+
+<Card title="Task Folder Format" href="/main/data/task-folder-format">
+Every `task.toml` and `dataset.toml` setting Gym reads.
+
+<Badge minimal outlined>task-folders</Badge>
+</Card>
+
+<Card title="Task Folder Verifiers" href="/main/data/task-folder-verifiers">
+Reward files, Python verifiers and reference answers.
+
+<Badge minimal outlined>task-folders</Badge>
+</Card>
+
+<Card title="Multi-Step Task Folders" href="/main/data/multi-step-tasks">
+Tasks with several instructions, each checked in turn.
+
+<Badge minimal outlined>task-folders</Badge>
+</Card>
+
+<Card title="Multi-Container Tasks" href="/main/data/compose-tasks">
+Tasks whose environment is a Compose group with sidecars.
+
+<Badge minimal outlined>task-folders</Badge>
+</Card>
+
+<Card title="Task Folder Patterns" href="/main/data/task-folder-patterns">
+Parameterized tasks, typed fields, task MCP tools and shared verifier code.
+
+<Badge minimal outlined>task-folders</Badge>
 </Card>
 
 </Cards>

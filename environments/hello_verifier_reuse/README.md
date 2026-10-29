@@ -43,7 +43,7 @@ Both files expose the same `verify()` entry point. The difference is how much sc
 export OPENAI_API_KEY="<api-key>"
 
 gym eval run environments/hello_verifier_reuse \
-  --agent opencode \
+  --agent opencode_agent \
   --model openai/gpt-5 \
   --sandbox docker
 ```

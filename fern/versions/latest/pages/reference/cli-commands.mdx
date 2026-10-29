@@ -344,13 +344,14 @@ HuggingFace commands require an `HF_TOKEN` environment variable (or `huggingface
 ### `gym dataset init`
 
 Scaffold a dataset in the Harbor task format: `dataset.toml` with a `[gym]` table and one task with an
-instruction, a verifier and a reference solution. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+instruction, a verifier and a reference solution. Refer to [Author Task Folders](/main/data/harbor-tasks).
 
 | Option | Description |
 | --- | --- |
 | `NAME` | Dataset name as `org/name`; a bare name is written as `local/<name>`. The folder is the name without the org and must not exist yet. |
 | `--root DIR` | Where to create the folder (default: current directory). |
 | `--image IMAGE` | The task's prebuilt image (default: `python:3.12-slim`). |
+| `--parameterized` | Write a template folder instead: `task.toml`, `instruction.template.md`, `tasks.jsonl`, `task_data.py`, a Python verifier and `solution/answer.template.md`. Prepare renders one task per row. |
 
 ```bash
 gym dataset init my-dataset --image ubuntu:24.04   # dataset.toml names it local/my-dataset
@@ -364,7 +365,7 @@ dataset digest. Nothing is prepared, built or run. The fetch is the
 one `gym eval run` and `gym dataset validate` make for a `harbor:` target, so a folder that was edited by hand,
 left by an interrupted fetch of another version, or written for another package is refused in the same words;
 a second pull of an unchanged dataset downloads nothing and says so. Refer to
-[Harbor Tasks](/main/data/harbor-tasks#gym-dataset-pull-and-committed-entries).
+[Pulled datasets](/main/reference/task-folder-storage#pulled-datasets).
 
 | Option | Description |
 | --- | --- |
@@ -384,7 +385,7 @@ is the same run. Results go under `results/harbor/validation/<taskset>/` (`rollo
 names another file, the generated run config and `skipped.json`), apart from any evaluation of the same target,
 so an evaluation never resumes from the oracle's rewards. The exit code is 0 when every selected solution scored
 1, and 1 when a solution scored below 1, was masked or failed, when a task folder did not load, or when no
-selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-tasks).
+selected task had a solution to run. Refer to [Author Task Folders](/main/data/harbor-tasks).
 
 | Option | Description |
 | --- | --- |
@@ -401,6 +402,24 @@ selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-t
 gym dataset validate my-dataset --sandbox opensandbox
 gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
 gym dataset validate terminal_bench_4 --sandbox opensandbox      # the committed entry, after `gym dataset pull terminal_bench_4`
+```
+
+### `gym dataset publish`
+
+Write a Gym-authored dataset as plain Harbor task folders that run under Harbor as they are. Template rows are
+expanded into task folders, each Python verifier is wrapped in a `tests/test.sh`, each `solution/answer.md` becomes a
+`solution/solve.sh`, and `dataset.toml` is written without its `[gym]` table. `tasks.jsonl`, `task_data.py` and a
+dataset-level `verifier.py` stay behind. When the `harbor` package is installed, Harbor's own format check runs over
+every folder first; a refused publish leaves nothing under `--output`.
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A dataset folder, a task folder, or a parameterized template folder. |
+| `--harbor` | Required: publish in Harbor's task format. |
+| `--output DIR` | A new or empty folder for the task folders. Required. |
+
+```bash
+gym dataset publish --harbor my-qa --output ./published/my-qa
 ```
 
 ### `gym dataset upload`
@@ -824,10 +843,14 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
-In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Such a run needs `--agent`, starts its own servers (`--no-serve` is refused) and writes under `results/harbor/<taskset>/`. Refer to [Author Task Folders](/main/data/harbor-tasks) for the layout and to [Task Folder Files and Storage](/main/reference/task-folder-storage) for what it writes.
 
 | Option | Description |
 | --- | --- |
+| `TARGET` | A task folder, folder of task folders, `harbor:` reference or committed entry name, as above. |
+| `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). Task targets only. |
+| `--only-tasks PATTERNS`, `--exclude-tasks PATTERNS` | Comma-separated task names or globs to run or to leave out. Task targets only. |
+| `--skip-unloadable` | Run the tasks that load and record the rest in `skipped.json`. Without it, a task that does not load stops the run before any server starts. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
 | `--environment NAME` | Load the named environment config. Repeatable. |

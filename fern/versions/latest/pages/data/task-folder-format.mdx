@@ -1,0 +1,196 @@
+---
+title: "Task Folder Format"
+description: "The files of a task folder and a dataset of task folders, the task.toml and dataset.toml fields Gym reads, Dockerfile modes, Harbor compatibility and what the loader refuses."
+position: 6
+---
+
+# Task Folder Format
+
+Field names and defaults are Harbor's (`task.toml` schema 1.4). To write your first task, start with
+[Author Task Folders](/main/data/harbor-tasks). The contract for `tests/` is on
+[Task Folder Verifiers](/main/data/task-folder-verifiers).
+
+## Task folder layout
+
+| Path | Required | What it holds |
+| --- | --- | --- |
+| `task.toml` | Yes | The task's settings. |
+| `instruction.md` | Single-step tasks | The agent's prompt. Leading canary lines (an HTML comment or `#` line containing `canary`) are dropped. |
+| `environment/` | No | A `Dockerfile` or `docker-compose.yaml`, plus their files. With a prebuilt `docker_image` and neither file, its files go to the working directory. |
+| `tests/` | Unless the dataset has `verifier.py` | `test.sh` or `verifier.py`, plus fixtures. |
+| `solution/` | No | `solve.sh` or `answer.md`. Only the oracle of `gym dataset validate` sees it. |
+| `task_data.json` | No | The task's own fields. See [Typed task fields](/main/data/task-folder-patterns#typed-task-fields). |
+| `steps/` | Multi-step tasks | One folder per step. |
+
+The dataset root holds `dataset.toml`, and optionally `task_data.py` (the model that types task fields) and
+`verifier.py` (a verifier for every task without `tests/`). Do not edit the records Gym writes there at prepare.
+
+The folder name is the task ID, unique across the dataset. Task folders may sit up to six levels down. Hidden
+folders are skipped, and a task folder must not be a symbolic link.
+
+`gym eval run` and `gym dataset validate` prepare the dataset, stamping each row with a digest of its task folder and
+dataset settings. The `harbor` Environment Server refuses a row whose folder changed, so prepare again after an
+edit. See [Digests](/main/reference/task-folder-storage#digests).
+
+## Task settings
+
+### Top level
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `[task]` | none | Harbor keys a dataset on its `name` (`org/name`); Gym uses the folder name. |
+| `artifacts` | `[]` | Paths copied out of the agent's sandbox for the verifier. See [Shared and separate verification](/main/data/task-folder-verifiers#shared-and-separate-verification). |
+| `[[steps]]` | none | Makes the task multi-step. See [Multi-Step Task Folders](/main/data/multi-step-tasks). |
+| `multi_step_reward_strategy` | `"mean"` | `mean` or `final`. |
+
+Like Harbor, Gym ignores unknown keys (logging each one) and reads the legacy spellings `version`, `memory`,
+`storage` and `allow_internet`, which it never writes back.
+
+### [environment]
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `docker_image` | none | A prebuilt image. Without it, Gym uses `environment/Dockerfile` or `docker-compose.yaml`. |
+| `build_timeout_sec` | `600` | The budget all overlay-mode `RUN` lines share. |
+| `cpus`, `memory_mb`, `storage_mb` | none | Resource limits. |
+| `gpus`, `gpu_types` | none | GPU count and type. GPU tasks run on the server's `gpu_sandbox_provider` block when set. |
+| `env` | `{}` | Variables for the agent's sandbox. |
+| `workdir` | none | The working directory. Unset, the Dockerfile's final `WORKDIR`, else the image's. |
+| `healthcheck` | none | A `command` polled at seed. After `start_period_sec` (`0`), `retries` (`3`) consecutive failures `interval_sec` (`5`) apart fail the seed (retryable). `timeout_sec` (`30`) bounds each attempt; `start_interval_sec` (`5`) paces the start period. |
+| `mcp_servers` | `[]` | Tool servers for the task. See [A task with its own MCP tool](/main/data/task-folder-patterns#a-task-with-its-own-mcp-tool). |
+| `skills_dir` | none | A skills folder for harnesses that read one. |
+
+A task whose `environment/` holds `docker-compose.yaml` runs as a group of sandboxes, one per service; see
+[Multi-Container Tasks](/main/data/compose-tasks).
+
+### [agent]
+
+`timeout_sec` (default `28800`) is the agent's budget. `user` is the user the agent runs as; unset, the
+Dockerfile's final `USER`, else the image's.
+
+### [verifier]
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `timeout_sec` | `600` | Bound on `test.sh`. |
+| `user` | none | The user `test.sh` runs as. |
+| `env` | `{}` | The variables `test.sh` receives from the server. |
+| `environment_mode` | `shared` | `shared` runs `test.sh` in the agent's sandbox, `separate` in a fresh one. |
+| `environment` | none | A `[verifier.environment]` table with the keys of `[environment]`. Selects separate mode. |
+| `collect` | `[]` | `[[verifier.collect]]` hooks run before artifacts are collected: `command`, `service` (`main`), `timeout_sec` (`60`) and `user`. A failing or timed-out hook only logs a warning. |
+| `network_mode`, `allowed_hosts` | `public` | `no-network` or `allowlist`. Separate mode on OpenSandbox only. |
+
+### [solution]
+
+`env` holds variables for the oracle's `solve.sh`, resolved on the server's host.
+
+## Dataset settings
+
+`dataset.toml` holds Harbor's `[dataset]` table, which Gym leaves to Harbor, and Gym's `[gym]` table. Deployment
+settings, such as the sandbox provider, never go here.
+
+```toml
+[dataset]
+name = "local/my-dataset"   # Harbor requires org/name
+version = "0.1.0"
+
+[gym]
+license = "Apache 2.0"
+allowed_agents = ["terminus_2_sandboxed_agent", "hermes_agent"]
+
+[gym.defaults]
+num_repeats = 3
+
+[gym.tasks."hello".environment]
+memory_mb = 4096
+```
+
+### [gym]
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `type` | `validation` with a license, else `benchmark` | The split the rows enter: `train`, `validation`, `example` or `benchmark`. |
+| `license` | none | One of Gym's dataset license values. Required for `train` and `validation`. |
+| `allowed_agents` | any | Harnesses that may run the dataset, by `--agent` name. The oracle is always admitted. |
+| `domain` | none | One of Gym's domain values, such as `coding`. |
+| `verified` | `false` | Whether the rewards were baselined and reviewed. |
+| `source` | none | The hub reference a committed entry under `environments/harbor/` is pulled from. |
+
+None of these keys enters a task digest.
+
+### [gym.defaults]
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `num_repeats` | `1` | Rollouts per task for `gym eval run`. `+num_repeats=<n>` replaces it. |
+| `timeout_multiplier` | `1.0` | Scales every `[agent]` and `[verifier]` `timeout_sec`. |
+| `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb`, rounded up. GPUs never scale. |
+
+### [gym.tasks."task-id"]
+
+Per-task overrides, keyed by folder name. `environment` and `verifier` take any key of the task's table: `env`
+merges over the task's own, and every other key replaces it. `verifier` also takes the Gym-only `inputs` list (see
+[Sidecar inputs](/main/data/task-folder-verifiers#sidecar-inputs)). `artifacts` adds entries after the task's own.
+Once the table sets a multiplier or any override, every task's digest includes the defaults and its own (possibly
+empty) override, so adding the first such key, or removing the last, changes every digest.
+
+<Note>
+`harbor add`, `harbor remove` and `harbor sync` rewrite `dataset.toml` without the `[gym]` table. Keep the
+dataset in git and restore the table afterwards.
+</Note>
+
+## Dockerfile modes
+
+Prepare puts each distinct `environment/Dockerfile` in one of three modes.
+
+| Mode | Dockerfile | How it runs |
+| --- | --- | --- |
+| Pull | `FROM` plus `WORKDIR`, `ENV`, `USER` and `LABEL` | The base image starts, pinned to its digest at prepare, with the Dockerfile's settings applied. |
+| Overlay | The same plus `RUN` lines | The base image starts and each `RUN` line runs at seed, with no build or registry. A failing line fails the seed with its output. |
+| Build | Anything else, such as `COPY`, multi-stage builds or `ENTRYPOINT` | Gym builds the image once from `environment/` and runs it like a pulled image. |
+
+Pull and overlay mode read the base image's configuration from its registry at prepare. A built image is named
+`hb__<hash>` after Harbor's content hash of `environment/`, so identical folders share one image. A task whose
+build fails or is turned off is listed in `skipped.json`. To configure builds, see
+[Harbor image builds](/main/reference/configuration#harbor-image-builds).
+
+## Compatibility with Harbor
+
+Harbor is the input format and Gym owns execution: Harbor's agents and trial runtime do not run. See
+[Harbor Environment Server](/main/agent-interactions/harbor).
+
+These run as under Harbor: single-step and multi-step tasks, prebuilt images and every Dockerfile mode, Compose
+environments, shared and separate verification with `reward.txt` or `reward.json`, collect hooks, artifacts,
+`[environment.healthcheck]`, GPU tasks, and the image's `ENTRYPOINT` and `HEALTHCHECK` when its configuration is on
+record.
+
+Gym adds what Harbor has no field for: the `[gym]` table, Python verifiers, `solution/answer.md`, typed task fields,
+parameterized tasks and `[verifier].inputs`. `gym dataset publish --harbor` writes a copy Harbor can run.
+
+Gym differs here:
+
+| Behavior | In Gym |
+| --- | --- |
+| Shared verification | `/tests` and `/logs/verifier` are emptied before `test.sh` runs, so the agent cannot plant a reward. |
+| Overlay-mode Dockerfile | `RUN` lines run in the sandbox at seed, not in a build. |
+| Prebuilt `docker_image` | In a single-sandbox task its `ENTRYPOINT` and `HEALTHCHECK` do not run, unless a pull-mode `environment/Dockerfile` (`FROM` that image) sits beside it. In a Compose task they run, as under Harbor. |
+| Network restrictions | Only on `[verifier]` in separate mode, on OpenSandbox. |
+| MCP servers, `skills_dir` | Refused to a harness that cannot start task tools, unless `task_mcp_grants: required` grants every server and there is no `skills_dir`. |
+| Seed trajectory (`trajectory.json`) | Only the oracle runs the task. |
+
+## What the loader refuses
+
+The loader refuses a task with the reason in its message. `gym eval run` lists refused tasks in `skipped.json` and
+stops unless you pass `--skip-unloadable`. `gym dataset validate` lists them and exits 1.
+
+| Category | Causes |
+| --- | --- |
+| Missing files | No `task.toml` or `instruction.md`, no `tests/` folder (single-step, without a dataset `verifier.py`), or a step with no `test.sh` in its own or the task's `tests/`. |
+| Missing images | A build-mode Dockerfile, base image or `tests/Dockerfile` with no record from prepare, or a separate verifier with no image. |
+| Unsupported settings | Windows, TPU, network restrictions outside separate-mode `[verifier]`, or a shared verifier with its own environment. |
+| Invalid values | A malformed `task.toml` or override, a bad `inputs` entry, an MCP server without an endpoint, or an artifact under `/tests` or `/logs/verifier`. |
+| Dataset settings | `type = "example"`, a harness outside `allowed_agents`, or a `[gym.tasks]` table naming no task. These stop the whole command. |
+
+A `tests/` folder with neither `test.sh` nor `verifier.py` loads. Unless a separate verifier's image ships
+`/tests/test.sh`, it scores 0 with `harbor:missing_reward`. For fixes, see
+[Task Folders](/main/troubleshooting/task-folders).

@@ -18,7 +18,7 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 export OPENAI_API_KEY="<api-key>"
 
 gym eval run environments/hello_python_verifier \
-  --agent opencode \
+  --agent opencode_agent \
   --model openai/gpt-5 \
   --sandbox docker
 ```

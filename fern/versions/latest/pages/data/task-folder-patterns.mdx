@@ -1,0 +1,177 @@
+---
+title: "Task Folder Patterns"
+description: "Generate many tasks from one template, type each task's fields, give a task its own MCP tool, and share verifier code across tasks."
+position: 10
+---
+
+# Task Folder Patterns
+
+A task folder describes one task. These patterns cover what a dataset needs once it grows past a few hand-written
+folders. Each has a committed example under `environments/` to copy.
+
+| Pattern | Use it when | Example |
+| --- | --- | --- |
+| [Parameterized tasks](#parameterized-tasks) | Many tasks share one environment, instruction pattern and verifier. | `hello_parameterized_tasks` |
+| [Typed task fields](#typed-task-fields) | Each task carries values its verifier reads, and you want them checked. | `hello_parameterized_tasks` |
+| [A task with its own MCP tool](#a-task-with-its-own-mcp-tool) | The agent needs a tool that only this task provides. | `hello_mcp_tool` |
+| [Shared verifier code](#shared-verifier-code) | Several tasks check their results the same way. | `hello_verifier_reuse` |
+
+For a dataset of independent hand-written tasks, start from `environments/hello_dataset`. Every example ships a
+reference solution, so you can check it end to end:
+
+```bash
+gym dataset validate environments/hello_parameterized_tasks --sandbox docker
+```
+
+## Parameterized tasks
+
+When tasks differ only in a few values, such as a question and its answer, write one template folder and one JSONL
+row per task. The template is a task folder with `tasks.jsonl` beside its `task.toml`:
+
+```text
+hello_parameterized_tasks/
+├── dataset.toml
+├── task_data.py                  # optional: types the rows
+├── task.toml                     # shared by every task
+├── tasks.jsonl                   # one row per task
+├── instruction.template.md       # {{ task_data.question }} is filled per row
+├── environment/Dockerfile
+├── tests/verifier.py             # reads task_data["expected_answer"]
+└── solution/answer.template.md   # {{ task_data.expected_answer }}
+```
+
+Each row names the task and gives its fields:
+
+```json
+{"task_id":"addition","task_data":{"question":"What is 17 + 25?","expected_answer":"42"}}
+```
+
+Prepare renders one plain task folder per row into `results/harbor/<taskset>/rendered/<task_id>/`, for both
+`gym eval run` and `gym dataset validate`:
+
+- A file named `<stem>.template<suffix>` has its `{{ task_data.<key> }}` placeholders filled and is written as
+  `<stem><suffix>`. Values are inserted as they are, so put a value that must survive shell quoting in a text file,
+  not inside a quoted string of a `solve.template.sh`.
+- Every other file is copied, apart from `tasks.jsonl` and the template's root `README.md`.
+- The row's fields become the task's `task_data.json`.
+- When the template's `task.toml` has a `[task]` table, each rendered `[task].name` becomes `<org>/<task_id>`, so every
+  task has its own name under Harbor.
+
+Prepare fails, naming the task and the file, for a placeholder that names no field, any other `{{ ... }}` left in a
+rendered file, a duplicate or invalid `task_id`, or a row that `TaskData` rejects.
+
+The rendered `solution/answer.md` is a reference answer. The oracle writes it to `answer.md` in the working directory,
+where the verifier reads it (see [Reference answers](/main/data/task-folder-verifiers#reference-answers)).
+
+To start a template from scratch:
+
+```bash
+gym dataset init my-qa --parameterized
+```
+
+Use separate task folders instead when tasks need their own files, dependencies, tools or scoring logic.
+
+## Typed task fields
+
+A task can carry its own field values in `task_data.json`, a JSON object in its folder. A parameterized task gets
+one from its row. The values travel in the task's row under `task_input.task_data`, and a Python verifier receives
+them as its `task_data` argument.
+
+A `task_data.py` beside `dataset.toml` types those fields. It exports one Pydantic model named `TaskData`:
+
+```python
+from pydantic import BaseModel
+
+
+class TaskData(BaseModel):
+    question: str
+    expected_answer: str
+```
+
+Gym checks every task against the model and names the task in the error:
+
+- **At prepare.** `gym eval run` and `gym dataset validate` check every task before any image is recorded or built.
+  One task that fails refuses the whole dataset.
+- **At seed.** The `harbor` Environment Server refuses a row the model rejects, or whose fields differ from the task
+  folder's `task_data.json`. The failure is not retried.
+- **At collate.** `gym dataset collate` checks the rows again.
+
+The check is strict. Unknown keys always fail, whatever the model's `extra` setting. Values are checked as JSON, so
+`"3"` is not an `int`. Keys that start with `_ng_` are reserved for Gym. The module is imported on the host, so keep
+it to the model.
+
+## A task with its own MCP tool
+
+A task can declare tool servers with the Model Context Protocol (MCP). `environments/hello_mcp_tool` ships a stdio
+server in its image and declares it in `task.toml`:
+
+```toml
+[[environment.mcp_servers]]
+name = "hello-tools"
+transport = "stdio"
+command = "python"
+args = ["/opt/hello-tools/server.py"]
+```
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `name` | required | The server's name. |
+| `transport` | `"sse"` | `stdio`, `sse` or `streamable-http`. |
+| `command`, `args` | none | How to start a `stdio` server in the sandbox. |
+| `url` | none | Required for `sse` and `streamable-http`. A Compose sidecar's URL names its service. |
+
+The `harbor` Environment Server writes the list to `/tmp/.nemo-gym/task.json` in the agent's sandbox. A harness that
+starts task tool servers itself, such as `miniswe_sandboxed_agent`, reads it there. Any other harness is refused for
+the task with a terminal failure that names the reason, rather than run without the tool. The oracle of
+`gym dataset validate` always takes the task.
+
+To give a `streamable-http` server to a harness that does not start servers itself, set `task_mcp_grants: required`
+on the server (see [Configure the server](/main/agent-interactions/harbor#configure-the-server)). The server then
+grants the tool to the agent's session.
+
+The example's Dockerfile has `RUN` and `COPY` lines, so prepare builds it. With `--sandbox docker`, Gym builds it into
+the local Docker daemon. With OpenSandbox, the image must be pushed to a registry, so set `builds.repository` (see
+[Harbor image builds](/main/reference/configuration#harbor-image-builds)).
+
+## Shared verifier code
+
+Keep scoring logic in one place in one of three ways.
+
+**Gym's verifier helpers.** `nemo_gym.verifiers` (`final_text`, `exact_match`, `numeric_match`) and
+`nemo_gym.verifiers.files` (`read_text`, `file_exists`, `text_file_equals`) are copied into the sandbox with every
+Python verifier, so the task image needs nothing installed. `environments/hello_verifier_reuse` uses them both ways.
+One task reuses a complete verifier with its own settings:
+
+```python
+# exact-greeting/tests/verifier.py
+from functools import partial
+
+from nemo_gym.verifiers.files import text_file_equals
+
+verify = partial(text_file_equals, path="hello-gym.txt", content="Hello from NeMo Gym!")
+```
+
+The other writes its own check around a helper:
+
+```python
+# uppercase-greeting/tests/verifier.py
+from pathlib import Path
+
+from nemo_gym.verifiers.files import read_text
+
+
+def verify(workspace: Path) -> float:
+    content = read_text(workspace, "shout.txt")
+    return float(content == "HELLO FROM NEMO GYM!" and content.isupper())
+```
+
+**One dataset-level verifier.** A `verifier.py` beside `dataset.toml` grades every task that has no `tests/` folder,
+and its content enters those tasks' digests. Only that one file is uploaded, so it can import the helpers above but
+no other file of the dataset.
+
+**One template.** A parameterized dataset shares its `tests/verifier.py` by construction, and each task's values reach
+it as `task_data`.
+
+A task's own `tests/verifier.py` can also import other modules from its `tests/` folder.
+[Python verifiers](/main/data/task-folder-verifiers#python-verifiers) lists the arguments `verify` can declare and
+what it may return.

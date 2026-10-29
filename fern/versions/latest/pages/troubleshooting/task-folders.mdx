@@ -1,0 +1,250 @@
+---
+title: "Task Folders"
+description: "Symptoms, causes and fixes for task-folder runs of gym eval run and gym dataset validate."
+position: 2
+---
+
+# Task Folders
+
+Each entry gives the symptom, cause and fix for a task-folder run of `gym eval run <target>` or
+`gym dataset validate <target>`. Start with the run summary, `results/harbor/<taskset>/rollouts_run_summary.json`,
+which lists every task's status, `failure_kind` and verifier log folder (see
+[The run summary](/main/reference/task-folder-storage#the-run-summary)). Add `-v` for DEBUG logs from every server.
+
+## Docker Hub answers 429
+
+**Symptom.** Prepare stops with `Could not record the configuration of image ...` followed by
+`registry returned HTTP 429 for <path>`. Or an image build fails with `toomanyrequests`, and its tasks are listed
+in `skipped.json`.
+
+**Cause.** Docker Hub limits anonymous pulls per IP address. Prepare reads every image it has no record of, and the
+build tool pulls each build's base image. Every job on one login node shares an address.
+
+**Fix.**
+
+- Log the build tool in to Docker Hub: `buildah login docker.io`, `podman login docker.io` or `docker login`.
+- Give prepare a Docker Hub account under the prefix `"docker.io/"` of the sandbox provider block, with keys you
+  add to `env.yaml`:
+
+  ```yaml
+  sandbox:
+    opensandbox:
+      images:
+        auth:
+          "docker.io/":
+            username: ${dockerhub_username}
+            password: ${dockerhub_password}
+  ```
+
+- Before a fan-out of jobs on one dataset, start one job and wait until it prints `Run config written to ...`.
+  Later jobs then read its image records instead of asking the registry.
+- When sandboxes hit the limit while pulling, point them at a mirror with `images.rewrites` in the
+  [OpenSandbox provider block](/main/infrastructure/sandbox/opensandbox#image-policy-and-setup-commands).
+
+## A task does not load
+
+**Symptom.** `gym eval run` stops with `<n> task(s) could not load (see <dir>/skipped.json)` and
+`Use --skip-unloadable to explicitly run only the loadable subset.` `gym dataset validate` prints the task as
+`skipped: <reason>` and exits 1.
+
+**Cause.** The loader refused the task folder, its image build failed, or its Compose file asks for something the
+provider cannot run. `skipped.json` maps each task ID to the reason.
+
+**Fix.** Read the reason ([What the loader refuses](/main/data/task-folder-format#what-the-loader-refuses) lists the
+common ones). With `gym eval run`, pass `--skip-unloadable` to run the rest; `gym dataset validate` already runs
+them. Either command takes `--exclude-tasks <name or glob>` to leave a task out.
+
+## No task produced a result
+
+**Symptom.** `gym eval run` or `gym dataset validate` prints no per-task results and stops with
+`None of the <n> dispatched rollouts produced a result {...}. Inspect <failures file>; the run has no score to report.`
+
+**Cause.** Every episode failed before a result row existed, most often because no sandbox could be created: Docker
+is not installed, `--sandbox` was left out, or the provider has no endpoint or key.
+
+**Fix.** Read the failures file the message names, or each task's `failure.message` in the
+[run summary](/main/reference/task-folder-storage#the-run-summary). Pass `--sandbox <provider>` and check the provider
+settings on its [sandbox page](/main/infrastructure/sandbox).
+
+## The dataset refuses the harness
+
+**Symptom.** `gym eval run` stops before anything is built, with a message that starts
+`<dataset>/dataset.toml [gym] allowed_agents admits <list>`.
+
+**Cause.** The dataset's `[gym] allowed_agents` does not list the harness you passed.
+
+**Fix.** Run with a listed harness, or pass `--allow-unsupported-pairing` to run another one on purpose. The oracle
+of `gym dataset validate` is always admitted.
+
+## The image platform does not match
+
+**Symptom.** A build fails with `the image came out as linux/arm64, not linux/amd64`. Or sandboxes fail to start, or
+a command in them fails with `exec format error`.
+
+**Cause.** Gym builds and records images for `linux/amd64` unless `builds.platform` says otherwise, and many
+published task images exist for `linux/amd64` only. An arm64 host cannot run them without emulation.
+
+**Fix.** Build on an x86_64 host (check with `uname -m`), or register qemu binfmt emulation on the build host. Run
+the sandboxes on amd64 nodes. On an OpenSandbox cluster with both architectures, set the platform for every sandbox.
+OpenSandbox needs both keys:
+
+```bash
+++harbor_environment_server.environment_servers.harbor.sandbox_provider_options.platform.os=linux \
+++harbor_environment_server.environment_servers.harbor.sandbox_provider_options.platform.arch=amd64
+```
+
+## Builds without a repository
+
+**Symptom.** Prepare stops with
+`No image builder found: install docker (buildah and podman need builds.repository), or name one with builds.tool`,
+or with `buildah keeps built images in a store no sandbox provider reads`. Or OpenSandbox cannot pull an
+`hb__<hash>` image.
+
+**Cause.** Without `builds.repository`, a built image stays on the build host. A sandbox provider starts local
+images only from the Docker daemon, so only `docker` builds without a repository, for the Docker provider.
+
+**Fix.** Set `builds.repository` (or `NEMO_GYM_BUILD_REPOSITORY`) to a registry path you can push to, log the build
+tool in to that registry, and give OpenSandbox the pull credentials in `images.auth`. See
+[Harbor image builds](/main/reference/configuration#harbor-image-builds).
+
+## The sandbox cannot reach the Model Server
+
+**Symptom.** Episodes fail after the agent starts, with a connection error or a request timeout in the failure
+reason, and the collector retries them.
+
+**Cause.** Some harnesses, such as `hermes_agent` and `codex_agent`, call the Model Server from inside the sandbox.
+For them, `gym eval run` makes the Model Server advertise the machine's network address instead of loopback, which
+a sandbox reaches only when the network routes to it and no firewall blocks the port.
+
+**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. A deployment that
+needs other servers reachable sets `absolute_ip_server_types` or `default_host` (see
+[Multi-Node Configuration](/main/reference/configuration#multi-node-configuration)).
+
+## A harness cannot install its runtime in the sandbox
+
+**Symptom.** Every episode fails at the agent stage with `Hermes sandbox installation failed`, the installer's
+output, or `Installing a sandbox runtime requires uv on the agent host`.
+
+**Cause.** `hermes_agent` installs its runtime into each sandbox with `uv`, from GitHub and the Python package
+index, unless the image already holds it.
+
+**Fix.** Allow the sandbox outbound access to GitHub and the package index, or bake the runtime into the image at
+`/tmp/nemo-gym-hermes-runtime-<commit>/venv` (see the
+[Hermes agent README](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_agent/README.md#runtime-and-model-requirements)).
+On a slow network, raise the agent's `sandbox_install_timeout_seconds` (900 s). Put `uv` on the host's `PATH`.
+
+## Verifier or agent timeout
+
+**Symptom.** A row has `failure_kind: harbor:verifier_timeout` and reward 0. Or a row fails with
+`harbor:task_deadline` and `Episode exceeded the time budget of task ...`.
+
+**Cause.**
+
+- `harbor:verifier_timeout`: `test.sh` ran past `[verifier].timeout_sec` (600 s by default) without writing a
+  reward.
+- `harbor:task_deadline`: the episode ran past its task's budget (harness setup, `[agent].timeout_sec`, collect
+  hooks, `[verifier].timeout_sec` and a grace period, from the moment the sandbox is ready).
+
+**Fix.** Raise the budgets in the dataset, not in the task: `timeout_multiplier` in `[gym.defaults]` scales every
+agent and verifier budget, and `[gym.tasks."<task>".verifier] timeout_sec = <seconds>` raises one task's verifier
+(see [Dataset settings](/main/data/task-folder-format#dataset-settings)). Setting `enforce_task_timeouts: false` on
+the server runs every episode under `default_episode_timeout_seconds` instead (see
+[Configure the server](/main/agent-interactions/harbor#configure-the-server)).
+
+## Reward missing or invalid
+
+A row's `failure_kind` says why the verifier gave no reward, or why the row is left out of the score.
+
+| `failure_kind` | Meaning | Scored |
+| --- | --- | --- |
+| `harbor:missing_reward` | `test.sh` wrote neither `reward.txt` nor `reward.json`. A Python verifier that raised lands here. | Yes, as 0 |
+| `harbor:invalid_reward` | The reward file could not be read as a finite number. | Yes, as 0 |
+| `harbor:verifier_timeout` | `test.sh` ran past its timeout without a reward. | Yes, as 0 |
+| `harbor:task_deadline` | The episode ran past its task's budget. | No, retried |
+| `harbor:trajectory_export_failed` | The transcript could not be written for the verifier. | No, masked |
+| `harbor:entrypoint_failed` | The image's entrypoint exited non-zero. | No, masked |
+| `harbor:overlay_failed` | An overlay-mode `RUN` line failed in the verifier's own sandbox. | No, masked |
+
+Other masked kinds come from Gym's shared list: `provider_unavailable` (a sandbox operation failed during
+verification), `verifier_error` (`test.sh` could not run) and `persistence_failed` (Gym could not create the
+verifier log folder).
+
+When the harness marks its own failed response with a cause, the server's `agent_outcome_policy` decides whether
+the episode is verified, retried or failed. A failed episode is recorded in `rollouts_failures.jsonl` with its stage
+in `_ng_failure_stage`: `admission` (it waited past `queue_timeout_seconds` for a slot under
+`max_concurrent_episodes`), `seed`, `agent`, `verification` or `cleanup`.
+
+**Fix.** Open the task's `test-stdout.txt`, which holds everything `test.sh` printed, or read `failure_reason` for a
+masked row. To check a verifier without a model, run `gym dataset validate` on the task. See
+[Reward files](/main/data/task-folder-verifiers#reward-files) for the contract.
+
+### A sidecar's file in /logs/verifier is gone
+
+Before a shared-mode verifier runs, the server empties `/logs/verifier`, so an agent cannot plant a reward there. A
+Compose task whose sidecar writes its file there scores 0 on every rollout, the oracle's included, until
+`dataset.toml` declares the file (see [Sidecar inputs](/main/data/task-folder-verifiers#sidecar-inputs)):
+
+```toml
+[gym.tasks."<task>".verifier]
+inputs = ["actions.jsonl"]
+```
+
+## A multi-step task stops at a step
+
+**Symptom.** The episode stops early, `stopped_after_turn` names a step, and the turn's `failure_kind` is
+`harbor:step_setup_failed` (`workdir/setup.sh` failed), `harbor:step_workdir_failed` (`workdir/` could not be
+unpacked) or `harbor:step_healthcheck_failed` (`[steps.healthcheck]` never passed).
+
+**Cause.** The step's preparation failed in the sandbox the earlier steps used: the task is broken, or an earlier
+agent left the sandbox in a state the step cannot handle.
+
+**Fix.** Run `gym dataset validate` on the task. When the oracle fails at the same step, fix `setup.sh` or the
+health check. When only model runs fail, the failed step scores 0 by design (see
+[Reward roll-up](/main/data/multi-step-tasks#reward-roll-up)).
+
+## A Compose task does not start on OpenSandbox
+
+**Symptom.** Episodes fail at seed with `OpenSandbox networking requires networking.enabled=true` or
+`OpenSandbox port forwarding requires networking.loopback_forwarding=true`.
+
+**Cause.** The shipped OpenSandbox config has no `networking` block, and a group of Compose services needs one.
+
+**Fix.** Add the settings to the provider block, as described in
+[Networking and shared storage](/main/infrastructure/sandbox/compose#networking-and-shared-storage). See
+[Multi-Container Tasks](/main/data/compose-tasks) for what a Compose task needs from the deployment.
+
+## A task folder changed
+
+**Symptom.** Episodes fail at seed with
+`Task folder <folder> changed since materialization; re-materialize the taskset`. Or prepare refuses a pulled
+dataset whose folders no longer match its `manifest.toml`.
+
+**Cause.** A task folder was edited after its rows were written, or a pulled task folder was edited by hand.
+
+**Fix.** For your own dataset, run the command again; prepare writes new rows. For a pulled dataset, move the edited
+folder aside and run again to fetch it fresh. Put changes in `dataset.toml` overrides instead of editing pulled
+tasks.
+
+`Note: <folder> holds an earlier fetch of <reference>` means a committed entry now declares that reference as its
+`[gym] source` and fetches it into its own folder. Nothing reads the old one, so move it aside or delete it.
+
+## Found conflicting aggregate metrics
+
+**Symptom.** A run stops with `Found conflicting aggregate metrics` before any sandbox starts, naming a
+`_metrics.json` file under its results folder.
+
+**Cause.** Two runs wrote one results folder at the same time.
+
+**Fix.** Run the jobs one at a time, or give each its own checkout, as described in the next entry.
+
+## Two runs on one checkout overwrite each other
+
+**Symptom.** Two runs of one dataset from one checkout report each other's tasks, or a run summary lists
+`stale_files`.
+
+**Cause.** Both runs write the same files under `results/harbor/<taskset>/`: the rows, the run config,
+`skipped.json`, `images.json` and the rollouts. `--output` separates only the rollouts.
+
+**Fix.** Run one job per taskset and harness at a time on a checkout, or give each concurrent job its own checkout.
+Point every checkout at one shared `NEMO_GYM_DATASETS_DIR` so they share the task folders and image records (see
+[Pulled datasets](/main/reference/task-folder-storage#pulled-datasets)).

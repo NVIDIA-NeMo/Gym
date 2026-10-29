@@ -66,6 +66,8 @@ Evaluate skills as a run-level variable — swap skill sets without touching the
 
 A benchmark is a versioned evaluation protocol built on top of an environment's resources server: the same verifier plus a canonical dataset split, prompt configuration, and documented repeat count. All environments can be used for training; a benchmark is the evaluation-configured overlay.
 
+Task folders in the Harbor format carry their own verifiers and run on the `harbor` Environment Server instead. `gym eval run` takes a task folder, a folder of task folders, a committed entry under `environments/harbor/` or a `harbor:` reference; check the reference solutions with `gym dataset validate` before a model run. `gym list` and `gym search` do not show these datasets. See [Run an agent](/main/data/harbor-tasks#run-an-agent) and [Bring in existing tasks](/main/data/harbor-tasks#bring-in-existing-tasks).
+
 <Cards>
 
 <Card title="Benchmarks" href="/evaluation/benchmarks">

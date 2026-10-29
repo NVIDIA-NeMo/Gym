@@ -57,6 +57,18 @@ Some environments have minimal state (e.g., math — just input and output). Oth
 
 Runtimes and sandboxes host and run the environment. A runtime is the execution infrastructure (e.g. local process, Docker, Apptainer). A sandbox is a runtime with isolated execution — for example, a container per episode — providing security boundaries when the agent can execute arbitrary code.
 
+## Two ways to define a task
+
+NeMo Gym accepts tasks in two shapes. Both produce rollouts with rewards; they differ in where the verifier and the state live.
+
+| | JSONL rows and a Resources Server | Task folders |
+| --- | --- | --- |
+| Task | One JSONL row: the input messages plus task-specific fields for the verifier | One folder: `task.toml`, `instruction.md`, `environment/`, `tests/` and an optional `solution/`, in the [Harbor](https://github.com/harbor-framework/harbor) format |
+| Verifier and state | A Resources Server: Python `verify()`, environment tools and per-task sessions | The task's own `tests/`, run inside the task's sandbox |
+| Runs on | An Environment Server that pairs an agent with the Resources Server | The `harbor` Environment Server, with any harness that works in a sandbox |
+
+Use JSONL rows when tasks share one environment, need no sandbox, or score the response with Python logic, as in math or tool-calling benchmarks. Use task folders when each task brings its own software environment and its verifier checks what the agent left in it, as in Terminal-Bench. To build the Resources Server path, see [Build Environments](/main/environment-tutorials). To write task folders, see [Author Task Folders](/main/data/harbor-tasks). [Prepare Tasks](/main/data#two-kinds-of-tasks) compares the two in more detail.
+
 
 ## Environments Unify Agent Improvement
 
