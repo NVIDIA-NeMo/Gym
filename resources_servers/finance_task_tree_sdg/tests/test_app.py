@@ -253,6 +253,7 @@ def _corpus(tmp_path: Path) -> LocalSecCorpus:
         "10-K/exhibits/EX-10.1.html": "<html><body><p>Whichever exhibit was written last.</p></body></html>",
         "10-Q/q1.html": "<html><body><p>Quarter.</p></body></html>",
         "4/form4.html": "<html><body><p>Rendered Form 4.</p></body></html>",
+        "10-K/15.html": "<html><body><p>Item 15. Exhibits.</p></body></html>",
     }
     for name, text in files.items():
         (download / "data" / name).parent.mkdir(parents=True, exist_ok=True)
@@ -304,6 +305,14 @@ def _corpus(tmp_path: Path) -> LocalSecCorpus:
             "exhibit",
             "10-K/exhibits/EX-10.1.html",
         ),
+        row(
+            k,
+            "10-K",
+            "2023-11-03",
+            f"{_ARCHIVE}/000032019323000106/aapl-20230930.htm",
+            "section",
+            "10-K/15.html",
+        ),
         row(q, "10-Q", "2024-02-02", f"{_ARCHIVE}/000032019324000006/q1.htm", "primary_document", "10-Q/q1.html"),
         row(
             f4,
@@ -352,7 +361,8 @@ async def test_offline_fetch_url_serves_the_corpus_and_refuses_the_rest(
     for page in (f"{folder}/0000320193-23-000106-index.htm", f"{folder}/", folder):
         index = await fetch.run({"url": page}, as_of)
         assert f"{folder}/aapl-20230930.htm" in index and f"{folder}/ex991.htm" in index and "EX-99.1" in index
-        assert "ex101a" not in index
+        assert "ex101a" not in index and index.count("aapl-20230930.htm") == 1
+    assert "Item 15" not in await fetch.run({"url": f"{folder}/aapl-20230930.htm"}, as_of)
     for url in (
         f"{folder}/ex101a.htm",
         f"{_ARCHIVE}/000032019323000090/xslF345X05/form4.xml",

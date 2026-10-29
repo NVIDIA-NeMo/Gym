@@ -106,6 +106,8 @@ class LocalSecCorpus:
     Only HTML documents whose saved file belongs to exactly one URL are served: the
     downloader names exhibits by document type, so same-type exhibits of one filing
     overwrite each other on disk, and raw XML filings are stored as rendered HTML.
+    Section rows are skipped: they are local per-item splits that reuse the primary
+    document's URL, and EDGAR serves only the whole document at that URL.
     A filing is listed only when its primary document is served.
     """
 
@@ -118,6 +120,8 @@ class LocalSecCorpus:
         self._tickers: dict[str, str] = {}
         histories: defaultdict[str, list[FilingRecord]] = defaultdict(list)
         for row in rows:
+            if row["file_type"] == "section":
+                continue
             url = normalize_sec_url(row["url"])
             parsed = archive_accession(url)
             if parsed is None or owners[row["file_location"]] > 1 or not _HTML_PATH_RE.search(urlsplit(url).path):
