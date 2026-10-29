@@ -19,6 +19,7 @@ from .base import (
     EnvStepRequest,
     EnvStepResponse,
     GymnasiumServer,
+    Observation,
     extract_text,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "EnvStepRequest",
     "EnvStepResponse",
     "GymnasiumServer",
+    "Observation",
     "extract_text",
 ]

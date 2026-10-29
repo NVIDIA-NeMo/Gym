@@ -1,0 +1,30 @@
+name: vab_css
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: VisualAgentBench VAB-CSS, 165 tasks where a multimodal model fixes one corrupted CSS rule from
+  screenshots; reward 1 when 1 - SSIM to the target screenshot is below 0.1.
+modality: text, image
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: vab_css
+agent_server: gymnasium_agent
+datasets:
+- name: vab_css
+  type: benchmark
+  jsonl_fpath: benchmarks/vab_css/data/vab_css_benchmark.jsonl
+  prepare_script: benchmarks/vab_css/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

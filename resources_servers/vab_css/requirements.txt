@@ -1,0 +1,6 @@
+-e nemo-gym[dev] @ ../../
+# Renders the pages; pinned to a minor because `playwright install` fetches a browser tied to the driver version.
+playwright>=1.62,<1.63
+beautifulsoup4
+cssutils
+scikit-image

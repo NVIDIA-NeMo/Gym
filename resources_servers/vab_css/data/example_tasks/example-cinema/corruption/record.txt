@@ -1,0 +1,1 @@
+{'selector': '.card', 'property': 'float', 'original': 'left', 'corrupted': 'none'}

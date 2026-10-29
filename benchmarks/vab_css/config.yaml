@@ -1,0 +1,30 @@
+# VAB-CSS from VisualAgentBench. The test split is not published upstream: prepare it from a local copy of
+# upstream's data/css_dataset (prepare_script_args.data_dir) and set the resources server's data_dir to the
+# same folder.
+config_paths:
+  - resources_servers/vab_css/configs/vab_css.yaml
+
+# We use `_inherit_from` directives to inherit from and not use the generic config above to ensure this benchmark config is isolated.
+vab_css_benchmark_resources_server:
+  _inherit_from: vab_css
+
+vab_css_benchmark_gymnasium_agent:
+  _inherit_from: vab_css_gymnasium_agent
+  responses_api_agents:
+    gymnasium_agent:
+      resources_server:
+        name: vab_css_benchmark_resources_server
+      datasets:
+      - name: vab_css
+        type: benchmark
+        jsonl_fpath: benchmarks/vab_css/data/vab_css_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/vab_css/prepare.py
+        num_repeats: 1
+
+vab_css_benchmark_environment_server:
+  _inherit_from: vab_css_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: vab_css_benchmark_gymnasium_agent
