@@ -521,12 +521,14 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         """Create verification response with reward and evaluations."""
         payload = body.model_dump()
         payload.pop("expected_answer", None)
-        has_image = payload.pop("has_image", None)
         if self.config.report_hle_domains:
+            has_image = payload.pop("has_image", None)
             payload["modality"] = (
                 ("vision" if has_image else "text") if type(has_image) is bool else payload.get("modality")
             )
         else:
+            if payload.get("has_image") is None:
+                payload.pop("has_image", None)
             for field in ("category", "raw_subject", "modality"):
                 payload.pop(field, None)
         return LLMJudgeVerifyResponse(

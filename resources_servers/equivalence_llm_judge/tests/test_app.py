@@ -885,7 +885,8 @@ async def test_verify_response_preserves_domain_labels_through_aggregation(has_i
     assert "mean/has_image" not in result.agent_metrics
     config.report_hle_domains = False
     disabled = json.loads((await server.verify(request)).model_dump_json())
-    assert not {"category", "raw_subject", "modality", "has_image"} & disabled.keys()
+    assert not {"category", "raw_subject", "modality"} & disabled.keys()
+    assert disabled["has_image"] is has_image
 
 
 async def test_domain_aggregation_runs_off_event_loop():
