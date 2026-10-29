@@ -876,7 +876,7 @@ layers = [
     # agents/
     "nemo_gym.agent_activation_types : nemo_gym.agent_outcome : nemo_gym.agent_utils : nemo_gym.base_responses_api_agent : nemo_gym.sandbox.agent_tools : nemo_gym.skills",
     # models/
-    "nemo_gym.models : nemo_gym.base_responses_api_model",
+    "nemo_gym.models",
     # server_runtime/
     "nemo_gym.server_runtime",
     # artifacts/

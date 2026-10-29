@@ -12,9 +12,9 @@ from typing import Any, Literal, Mapping, Optional
 
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+from nemo_gym.models.model_call_capture import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.server_runtime.verifier_observability import merge_verifier_call_observation
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,

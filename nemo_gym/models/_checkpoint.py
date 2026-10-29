@@ -49,7 +49,7 @@ from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.core.episode import EpisodeId
-from nemo_gym.models.chat_streaming import SSE_KEEPALIVE
+from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.models.token_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.models.token_capture.external_capture import publish_deferred_commit

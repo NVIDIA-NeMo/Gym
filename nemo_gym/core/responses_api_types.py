@@ -1517,6 +1517,10 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     # functions: Iterable[Function]
 
 
+# The dispatch and checkpoint gate share this exact liveness-only SSE frame.
+SSE_KEEPALIVE = b": keep-alive\n\n"
+
+
 ########################################
 # Clients
 ########################################

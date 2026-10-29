@@ -67,6 +67,7 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.base_responses_api_model": MovedPath(new="nemo_gym.models.base_responses_api_model", since="0.8.0"),
     "nemo_gym.openai_utils": MovedPath(new="nemo_gym.models.openai_utils", since="0.8.0"),
     "nemo_gym.anthropic_utils": MovedPath(new="nemo_gym.models.anthropic_utils", since="0.8.0"),
     "nemo_gym.anthropic_converter": MovedPath(new="nemo_gym.models.anthropic_converter", since="0.8.0"),
@@ -463,6 +464,54 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.batch_status": {
         # Moved, and still imported by batch_status for its own use.
         **_names("nemo_gym.artifacts.run_files", "0.8.0", "AGGREGATION_ERROR_KEY"),
+    },
+    "nemo_gym.base_responses_api_model": {
+        # Split out of base_responses_api_model.
+        **_names(
+            "nemo_gym.models.model_call_capture",
+            "0.8.0",
+            """
+            CaptureStore ModelExecutionOutcome _CLIENT_SESSION_HEADER _CaptureMiddleware _OBSERVED_PATHS
+            _PENDING_SUFFIX _ROLLOUT_PATH_RE _TERMINAL_SSE_LINES _classify_exception _classify_status
+            _consume_terminal_sse_event _exception_http_details _fail_uncommitted_external_call
+            _headers_content_type _parse_sse_events _pending_token _preserve_capture_prefix_on_redirect
+            _reconstruct_anthropic_sse _reconstruct_chat_sse _reconstruct_responses_sse
+            _reconstruct_streamed_response _record _unique_request_header _validate_rollout_id
+            make_capture_store start_model_execution
+            """,
+        ),
+        # Moved, and still imported by base_responses_api_model for its own use.
+        **_names(
+            "nemo_gym.models.model_call_capture",
+            "0.8.0",
+            """
+            ModelCallCaptureConfig _SSE_KEEPALIVE install_model_call_capture
+            """,
+        ),
+        # base_responses_api_model imported these for code that moved out of it.
+        **_names("nemo_gym.config.config_types", "0.8.0", "ROLLOUT_PATH_PREFIX TOKEN_CAPTURE_PATH_SEGMENT"),
+        **_names("nemo_gym.core.episode", "0.8.0", "VERIFIER_INVOCATION_HEADER rollout_context"),
+        **_names("nemo_gym.models._checkpoint", "0.8.0", "attach_capture_context ledger_removal_refusal"),
+        **_names("nemo_gym.core.responses_api_types", "0.8.0", "SSE_KEEPALIVE"),
+        **_names("nemo_gym.models.model_call_capture", "0.8.0", "model_validator"),
+        **_names("nemo_gym.models.responses_streaming", "0.8.0", "is_responses_lifecycle_chunk"),
+        **_names(
+            "nemo_gym.models.token_capture",
+            "0.8.0",
+            """
+            CaptureContext installed_lineage_store installed_token_sink reset_token_sink set_token_sink
+            """,
+        ),
+        **_names("nemo_gym.models.token_capture.control_routes", "0.8.0", "install_rollout_control_routes"),
+        **_names("nemo_gym.models.token_capture.lineage", "0.8.0", "FileLineageStore InMemoryLineageStore"),
+        **_names("nemo_gym.models.token_capture.protocols", "0.8.0", "ParentResolutionMode"),
+        **_names("nemo_gym.models.token_capture.records", "0.8.0", "UNCOMMITTED_CALL_REASON"),
+        **_names("nemo_gym.models.token_capture.store", "0.8.0", "make_token_store"),
+        **_names("nemo_gym.server_runtime.request_handling.rollout_context", "0.8.0", "scope_with_routed_path"),
+    },
+    "nemo_gym.chat_streaming": {
+        # Split out of chat_streaming.
+        **_names("nemo_gym.core.responses_api_types", "0.8.0", "SSE_KEEPALIVE"),
     },
 }
 

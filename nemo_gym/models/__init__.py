@@ -22,6 +22,15 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.models._checkpoint import note_generation_backend, note_generation_request
+    from nemo_gym.models.base_responses_api_model import (
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+        BaseResponsesAPIModelConfig,
+        Body,
+        SimpleResponsesAPIModel,
+        context_overflow_error_fields,
+        is_propagated_refusal,
+    )
     from nemo_gym.models.chat_completions_converter import (
         ResponsesConverter,
         VLLMConverter,
@@ -30,6 +39,12 @@ if TYPE_CHECKING:
         split_responses_input_output_items,
     )
     from nemo_gym.models.chat_streaming import synthesize_chat_completion_sse
+    from nemo_gym.models.model_call_capture import (
+        CaptureStore,
+        ModelCallCaptureConfig,
+        install_model_call_capture,
+        start_model_execution,
+    )
     from nemo_gym.models.openai_utils import (
         MAX_NUM_TRIES,
         RATE_LIMIT_ERROR_CODES,
@@ -68,24 +83,34 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "BaseResponsesAPIModelConfig": "base_responses_api_model",
+    "Body": "base_responses_api_model",
     "CAPTURE_REFUSAL_HEADER": "token_capture.protocols",
+    "CONTEXT_LENGTH_EXCEEDED_ERROR_CODE": "base_responses_api_model",
     "CaptureAdmissionError": "token_capture.protocols",
     "CaptureContext": "token_capture.sink",
     "CaptureInputError": "token_capture.protocols",
+    "CaptureStore": "model_call_capture",
     "ExternalCaptureHandler": "token_capture.external_capture",
     "MAX_NUM_TRIES": "openai_utils",
+    "ModelCallCaptureConfig": "model_call_capture",
     "NeMoGymAsyncOpenAI": "openai_utils",
+    "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
     "PermanentEndpointError": "openai_utils",
     "RATE_LIMIT_ERROR_CODES": "openai_utils",
     "RETRY_ERROR_CODES": "openai_utils",
     "ResponsesConverter": "chat_completions_converter",
+    "SimpleResponsesAPIModel": "base_responses_api_model",
     "TokenSource": "token_capture.protocols",
     "VLLMConverter": "chat_completions_converter",
     "VLLMConverterResponsesToChatCompletionsState": "chat_completions_converter",
     "capture_engine_refusal": "token_capture.sink",
     "chat_completion_usage_to_response_usage": "chat_completions_converter",
+    "context_overflow_error_fields": "base_responses_api_model",
     "current_capture_context": "token_capture.sink",
     "flatten_namespace_tools": "responses_streaming",
+    "install_model_call_capture": "model_call_capture",
+    "is_propagated_refusal": "base_responses_api_model",
     "make_external_capture_handler": "token_capture.external_capture",
     "note_generation_backend": "_checkpoint",
     "note_generation_request": "_checkpoint",
@@ -95,6 +120,7 @@ _PUBLIC_API = {
     "run_conformance": "token_capture.conformance",
     "set_token_sink": "token_capture.sink",
     "split_responses_input_output_items": "chat_completions_converter",
+    "start_model_execution": "model_call_capture",
     "synthesize_chat_completion_sse": "chat_streaming",
     "synthesize_responses_sse": "responses_streaming",
     "token_id_capture_config": "token_capture.config",

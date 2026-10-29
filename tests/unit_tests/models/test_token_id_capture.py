@@ -41,12 +41,6 @@ from fastapi.testclient import TestClient
 from openai.types.responses.response import IncompleteDetails
 from pydantic import BaseModel, ValidationError
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    CaptureStore,
-    SimpleResponsesAPIModel,
-    _request_messages,
-)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -55,7 +49,10 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models import (
+    BaseResponsesAPIModelConfig,
     CaptureContext,
+    CaptureStore,
+    SimpleResponsesAPIModel,
     TokenSource,
     capture_engine_refusal,
     current_capture_context,
@@ -63,6 +60,7 @@ from nemo_gym.models import (
     resolve_parent,
     set_token_sink,
 )
+from nemo_gym.models.base_responses_api_model import _request_messages
 from nemo_gym.models.token_capture import (
     TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
@@ -1305,7 +1303,7 @@ def _both_enabled(tmp_path) -> dict:
 def test_disabled_capture_does_not_serialize_request_messages(path, body):
     client = TestClient(_server({}).setup_webserver())
     with patch(
-        "nemo_gym.base_responses_api_model._request_messages",
+        "nemo_gym.models.base_responses_api_model._request_messages",
         side_effect=AssertionError("disabled capture serialized request messages"),
     ):
         response = client.post(path, json=body)

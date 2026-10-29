@@ -71,11 +71,6 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 import orjson
 
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.base_responses_api_model import (
-    clear_model_call_captures_for_rollouts,
-    merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
-)
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
@@ -92,6 +87,11 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+)
+from nemo_gym.models.base_responses_api_model import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
 )
 from nemo_gym.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,

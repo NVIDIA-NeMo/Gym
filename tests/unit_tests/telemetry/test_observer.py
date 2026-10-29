@@ -309,7 +309,7 @@ class TestRequestCounters:
 def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(collected, monkeypatch, prefix_middleware):
     from fastapi import FastAPI, Response
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
     from nemo_gym.server_runtime import RolloutContextMiddleware, server_utils
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
@@ -407,7 +407,7 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 ):
     from fastapi import FastAPI, Response
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
     from nemo_gym.server_runtime import RolloutContextMiddleware, server_utils
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)

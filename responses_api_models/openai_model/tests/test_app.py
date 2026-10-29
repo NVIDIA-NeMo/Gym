@@ -27,14 +27,14 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from nemo_gym.base_responses_api_model import CaptureStore, _CaptureMiddleware
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.models import PermanentEndpointError
+from nemo_gym.models import CaptureStore, PermanentEndpointError
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
 from nemo_gym.server_runtime import server_utils
 from responses_api_models.openai_model import app as openai_model_module
@@ -156,7 +156,7 @@ class TestApp:
     async def test_late_chat_error_preserves_selected_provider_details(
         self, monkeypatch: MonkeyPatch, status: int, propagate: bool, body_format: str
     ) -> None:
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
         server = self._setup_server(propagate_upstream_http_status_codes=[status] if propagate else [])
         message = "Provider rejected the request"
         error = ClientResponseError(MagicMock(), (), status=status, message=message)

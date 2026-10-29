@@ -23,8 +23,8 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSessionSetupError,
 )
-from nemo_gym.base_responses_api_model import ModelCallRecord
 from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.models.base_responses_api_model import ModelCallRecord
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult

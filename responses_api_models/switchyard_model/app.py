@@ -43,11 +43,6 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from pydantic import Field, model_validator
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-)
 from nemo_gym.client import request
 from nemo_gym.config import (
     DISALLOWED_PORTS_KEY_NAME,
@@ -63,7 +58,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.models import NeMoGymAsyncOpenAI
+from nemo_gym.models import BaseResponsesAPIModelConfig, Body, NeMoGymAsyncOpenAI, SimpleResponsesAPIModel
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

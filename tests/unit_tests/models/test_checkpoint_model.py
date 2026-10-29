@@ -14,8 +14,8 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from nemo_gym.base_responses_api_model import _CaptureMiddleware
 from nemo_gym.core import EpisodeId, current_rollout_id
+from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models import CaptureAdmissionError, CaptureContext, current_capture_context, note_generation_backend
 from nemo_gym.models._checkpoint import (
     ModelRecord,
@@ -26,7 +26,7 @@ from nemo_gym.models._checkpoint import (
     import_model_records,
     ledger_removal_refusal,
 )
-from nemo_gym.models.chat_streaming import SSE_KEEPALIVE
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from nemo_gym.models.responses_streaming import synthesize_responses_keepalive_sse
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
 from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
@@ -1768,7 +1768,7 @@ async def test_a_call_whose_capture_attaches_after_the_snapshot_cannot_land_its_
 def test_a_misspelled_model_server_checkpoint_setting_fails_at_startup() -> None:
     from pydantic import ValidationError
 
-    from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig
+    from nemo_gym.models import BaseResponsesAPIModelConfig
 
     with pytest.raises(ValidationError, match="polciy"):
         BaseResponsesAPIModelConfig.model_validate(
@@ -1785,7 +1785,8 @@ def _model_server_starting(name: str, global_config: dict, ledger: FileLineageSt
     """Run a model server's checkpoint setup, as its startup does."""
     from types import SimpleNamespace
 
-    from nemo_gym.base_responses_api_model import ModelCheckpointConfig, SimpleResponsesAPIModel
+    from nemo_gym.models import SimpleResponsesAPIModel
+    from nemo_gym.models.base_responses_api_model import ModelCheckpointConfig
 
     entry = next(iter(global_config[name]["responses_api_models"].values()))
     server = SimpleNamespace(

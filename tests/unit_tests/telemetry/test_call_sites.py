@@ -241,7 +241,7 @@ def test_server_type_is_derived_from_the_class_hierarchy():
     modules import `server_utils` and importing them back would be circular.
     """
     from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-    from nemo_gym.base_responses_api_model import SimpleResponsesAPIModel
+    from nemo_gym.models import SimpleResponsesAPIModel
     from nemo_gym.server_runtime import SimpleResourcesServer
     from nemo_gym.server_runtime.server_utils import _telemetry_server_type
 

@@ -5,7 +5,7 @@ import orjson
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.models import CaptureStore
 from nemo_gym.observability.model_calls import build_model_call_record
 
 
@@ -259,7 +259,7 @@ def _capture_exchange(dialect, model_server, usage, response):
 
 
 def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.models import CaptureStore
     from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
@@ -329,7 +329,7 @@ def test_merge_capture_attaches_metrics_without_raw_payloads(tmp_path):
 
 
 def test_merge_capture_owns_opencode_calls_by_client_session(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.models import CaptureStore
     from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
@@ -358,7 +358,7 @@ def test_merge_capture_owns_opencode_calls_by_client_session(tmp_path):
 
 
 def test_merge_capture_reports_observation_join_failure(tmp_path, monkeypatch):
-    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.models import CaptureStore
     from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
@@ -384,7 +384,7 @@ def test_merge_capture_reports_observation_join_failure(tmp_path, monkeypatch):
 
 
 def test_merge_capture_reports_missing_capture(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.models import CaptureStore
     from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     rec = {
@@ -439,7 +439,7 @@ def test_merge_capture_preserves_valid_records_around_malformed_data(tmp_path):
 
 
 def test_merge_capture_reports_partial_write_loss(tmp_path):
-    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.models import CaptureStore
     from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)

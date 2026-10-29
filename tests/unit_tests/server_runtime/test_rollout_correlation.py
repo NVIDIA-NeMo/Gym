@@ -23,17 +23,17 @@ from pydantic import ConfigDict
 from starlette.testclient import TestClient
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.base_responses_api_model import (
+from nemo_gym.client import ServerClient, get_response_json
+from nemo_gym.config import BaseServerConfig
+from nemo_gym.core import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.models import (
     BaseResponsesAPIModelConfig,
     CaptureStore,
     ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
-    _CaptureMiddleware,
     install_model_call_capture,
 )
-from nemo_gym.client import ServerClient, get_response_json
-from nemo_gym.config import BaseServerConfig
-from nemo_gym.core import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,

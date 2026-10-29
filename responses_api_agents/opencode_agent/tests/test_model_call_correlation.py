@@ -5,8 +5,8 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config import ModelServerRef
+from nemo_gym.models import CaptureStore
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record, read_model_call_records
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.trajectory import AgentObservationBundle, ContextCompactionObservation, TrajectoryRecord
@@ -319,8 +319,8 @@ def test_harness_property_reaches_model_capture_and_links_message(tmp_path, pars
     from fastapi.testclient import TestClient
     from omegaconf import OmegaConf
 
-    from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
     from nemo_gym.client import ServerClient
+    from nemo_gym.models import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 
     class Model(SimpleResponsesAPIModel):
         async def chat_completions(self, body):
