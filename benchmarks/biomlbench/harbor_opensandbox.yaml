@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# BioML-bench v0.1a (20 CPU tasks) through Gym's Harbor bridge: Terminus-2 runs in a Ray worker beside
+# the model server, and its terminal commands run in the upstream task image on OpenSandbox.
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+uv_cache_dir: /tmp/biomlbench-uv-${oc.env:SLURM_JOB_ID,local}
+biomlbench_max_input_tokens: 131072
+
+biomlbench_harbor_agent:
+  responses_api_agents:
+    harbor_agent_general:
+      domain: agent
+      description: BioML-bench evaluates agents on end-to-end biomedical machine learning tasks.
+      # Every task at once: each rollout runs for up to 8 hours.
+      concurrency: 20
+      datasets:
+      - name: biomlbench
+        type: benchmark
+        jsonl_fpath: benchmarks/biomlbench/data/biomlbench.jsonl
+        prepare_script: benchmarks/biomlbench/prepare.py
+        prepare_dependencies:
+        - PyYAML==6.0.3
+        # The batch launcher creates a fresh driver venv; the general adapter needs Ray there too.
+        - ray[default]>=2.58.0
+        prompt_config: null
+        # The paper reports the mean of four replicates per task.
+        num_repeats: 4
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      entrypoint: biomlbench_app.py
+      sandbox_provider: sandbox
+      harbor_resolve_paths_from_gym_root: true
+      harbor_unique_job_names: true
+      harbor_worker_env:
+        # LiteLLM requires a key for hosted_vllm; Gym's model server ignores it.
+        HOSTED_VLLM_API_KEY: unused
+      job:
+        jobs_dir: results/biomlbench/harbor_jobs
+        # A failed trial is retried by Gym, not by Harbor inside the same request.
+        retry:
+          max_retries: 0
+        datasets:
+        - path: benchmarks/biomlbench/data/tasks
+        agents:
+        - name: terminus-2
+          # Gym's model server sets the served model; Harbor accepts only one '/' in a hosted_vllm name.
+          model_name: hosted_vllm/policy_model
+          kwargs:
+            temperature: 1.0
+            # Long tasks outgrow the context; Terminus-2 summarizes instead of failing.
+            enable_summarize: true
+            # No asciinema relay in the task shell: large pastes froze the terminal on TB-Lite.
+            record_terminal_session: false
+            model_info:
+              max_input_tokens: ${biomlbench_max_input_tokens}
+              max_output_tokens: 32768
+              input_cost_per_token: 0.0
+              output_cost_per_token: 0.0
+        environment:
+          type: null
+          import_path: benchmarks.biomlbench.environment:BioMLBenchSandboxEnvironment
+          kwargs:
+            sandbox_metadata:
+              harbor-benchmark: biomlbench
+            # The 8 h agent budget plus image pull, data preparation and grading.
+            sandbox_ttl_s: 43200
+            # The upstream image is about 12 GB; a cold pull took 6 minutes.
+            sandbox_ready_timeout_s: 1800
+            default_exec_timeout_s: 3600
+
+biomlbench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: biomlbench_harbor_agent
