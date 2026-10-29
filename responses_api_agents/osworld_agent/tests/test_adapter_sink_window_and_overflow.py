@@ -734,3 +734,92 @@ def test_default_context_options_keep_the_published_contract() -> None:
     stop = normalize_nemotron_agent_options({"context_overflow_policy": "stop", "context_prompt_token_limit": 40960})
     assert stop["context_overflow_policy"] == "stop"
     assert stop["context_prompt_token_limit"] == 40960
+    assert "unterminated_episode_policy" not in default
+    assert normalize_nemotron_agent_options({"unterminated_episode_policy": "fail"})["unterminated_episode_policy"] == "fail"
+    with pytest.raises(ValueError, match="unterminated_episode_policy"):
+        normalize_nemotron_agent_options({"unterminated_episode_policy": "score"})
+
+
+PRINT_DONE = '## Action:\nThe task is complete.\n## Code:\n```python\nprint("Task completed successfully")\n```'
+
+
+def _fail_agent(**options: Any) -> NemotronV3NanoOmniAgent:
+    return NemotronV3NanoOmniAgent(
+        model="policy-under-test", max_steps=3, parse_retries=2, unterminated_episode_policy="fail", **options
+    )
+
+
+def test_fail_policy_forces_fail_at_the_step_horizon_without_terminate() -> None:
+    agent = _fail_agent()
+    agent.call_llm = lambda _payload, _model: {**_reply(0), "content": PRINT_DONE}  # type: ignore[method-assign]
+
+    for index in range(2):
+        _, actions, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+        assert actions == ['print("Task completed successfully")']
+        assert "forced_terminal" not in info
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-3"})
+
+    assert actions == ["FAIL"]
+    assert info["forced_terminal"] == "max_steps"
+
+
+def test_fail_policy_keeps_a_policy_terminate_on_the_last_step() -> None:
+    agent = _fail_agent()
+    done = '## Action:\nDone.\n## Code:\n```python\ncomputer.terminate(status="success")\n```'
+    replies = iter([GOOD, GOOD, done])
+    agent.call_llm = lambda _payload, _model: {**_reply(0), "content": next(replies)}  # type: ignore[method-assign]
+
+    for index in range(3):
+        _, actions, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+    assert actions == ["DONE"]
+    assert "forced_terminal" not in info
+
+
+def test_fail_policy_turns_exhausted_parse_retries_into_fail() -> None:
+    agent = _fail_agent()
+    bad = "## Action:\nClick.\n## Code:\n```python\npyautogui.click(]\n```"
+    agent.call_llm = lambda _payload, _model: {**_reply(0), "content": bad}  # type: ignore[method-assign]
+
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == ["FAIL"]
+    assert info["forced_terminal"] == "model_response_invalid"
+    assert "stop_rollout" not in info
+    assert info["parse_failure"]["attempt_count"] == 2
+
+
+def test_fail_policy_turns_the_context_limit_stop_into_fail() -> None:
+    agent = _fail_agent(context_overflow_policy="stop")
+
+    def call_llm(_payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        raise ValueError("Error code: 400 - This model's maximum context length is 64000 tokens")
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == ["FAIL"]
+    assert info["forced_terminal"] == "context_limit"
+
+
+def test_fail_policy_leaves_transport_failures_to_runtime_admission() -> None:
+    agent = _fail_agent()
+
+    def call_llm(_payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        raise ConnectionError("connection reset by peer")
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == []
+    assert info["stop_rollout"] is True
+    assert "forced_terminal" not in info
+
+
+def test_default_policy_still_evaluates_an_unterminated_horizon() -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy-under-test", max_steps=1, parse_retries=2)
+    agent.call_llm = lambda _payload, _model: {**_reply(0), "content": PRINT_DONE}  # type: ignore[method-assign]
+
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == ['print("Task completed successfully")']
+    assert "forced_terminal" not in info

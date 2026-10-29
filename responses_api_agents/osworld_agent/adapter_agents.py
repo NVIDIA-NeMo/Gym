@@ -533,6 +533,11 @@ NEMOTRON_AGENT_OPTION_DEFAULTS: Dict[str, Any] = {
 # shrink: drop one live image per overflow and retry the step.
 # stop: end the rollout at the first overflow and score it as is.
 _CONTEXT_OVERFLOW_POLICIES = frozenset({"shrink", "stop"})
+# evaluate: an episode the policy never terminated is scored on its final state.
+# fail: like the reference Nemotron agent, reaching the step horizon, exhausting
+# parse retries or the context-limit stop executes FAIL, so OSWorld scores a
+# feasible task 0 unless the policy itself returned computer.terminate.
+_UNTERMINATED_EPISODE_POLICIES = frozenset({"evaluate", "fail"})
 
 
 def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, Any]:
@@ -573,6 +578,11 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
         if type(prompt_token_limit) is not int or prompt_token_limit <= 0:
             raise ValueError("context_prompt_token_limit must be a positive integer")
         result["context_prompt_token_limit"] = prompt_token_limit
+    unterminated_episode_policy = options.get("unterminated_episode_policy", "evaluate")
+    if unterminated_episode_policy not in _UNTERMINATED_EPISODE_POLICIES:
+        raise ValueError("unterminated_episode_policy must be 'evaluate' or 'fail'")
+    if unterminated_episode_policy != "evaluate":
+        result["unterminated_episode_policy"] = unterminated_episode_policy
     return result
 
 
@@ -661,6 +671,7 @@ class NemotronV3NanoOmniAgent:
         assistant_history_replay: str = "normalized",
         context_overflow_policy: str = "shrink",
         context_prompt_token_limit: int | None = None,
+        unterminated_episode_policy: str = "evaluate",
         platform: str = "ubuntu",
         max_tokens: int = 16384,
         top_p: float | None = 0.95,
@@ -693,6 +704,7 @@ class NemotronV3NanoOmniAgent:
                 "assistant_history_replay": assistant_history_replay,
                 "context_overflow_policy": context_overflow_policy,
                 "context_prompt_token_limit": context_prompt_token_limit,
+                "unterminated_episode_policy": unterminated_episode_policy,
             }
         )
         if action_space != "pyautogui":
@@ -735,6 +747,7 @@ class NemotronV3NanoOmniAgent:
         )
         self.context_overflow_policy = behavior_options.get("context_overflow_policy", "shrink")
         self.context_prompt_token_limit = behavior_options.get("context_prompt_token_limit")
+        self.unterminated_episode_policy = behavior_options.get("unterminated_episode_policy", "evaluate")
         self.max_steps = max_steps
         self.client_password = client_password
         self.thinking = behavior_options["thinking"]
@@ -1207,6 +1220,25 @@ class NemotronV3NanoOmniAgent:
             # In particular, do not turn malformed sampled output into a
             # synthetic model-authored FAIL action.
             context_limit_stop = last_failure_kind == "context_overflow" and self.context_overflow_policy == "stop"
+            parse_failure = {
+                "attempt_count": len(model_calls),
+                "completed_model_call_count": completed_model_calls,
+                "last_failure_stage": last_failure_stage,
+                "last_failure_kind": last_failure_kind,
+                "failure_kind_counts": dict(failure_kind_counts),
+                "prompt_shrink_events": list(prompt_shrink_events),
+                "last_error_type": last_error_type,
+                "last_error": last_error,
+            }
+            # Transport failures stay runtime facts for admission to mask.
+            if self.unterminated_episode_policy == "fail" and (context_limit_stop or model_call_completed):
+                parsed_info.update(
+                    {
+                        "forced_terminal": "context_limit" if context_limit_stop else "model_response_invalid",
+                        "parse_failure": parse_failure,
+                    }
+                )
+                return last_error, ["FAIL"], parsed_info
             parsed_info.update(
                 {
                     "agent_outcome": (
@@ -1217,16 +1249,7 @@ class NemotronV3NanoOmniAgent:
                     # Admission needs the terminal attempt's fact. An earlier
                     # malformed sample must not hide a later transport failure.
                     "model_call_completed": model_call_completed,
-                    "parse_failure": {
-                        "attempt_count": len(model_calls),
-                        "completed_model_call_count": completed_model_calls,
-                        "last_failure_stage": last_failure_stage,
-                        "last_failure_kind": last_failure_kind,
-                        "failure_kind_counts": dict(failure_kind_counts),
-                        "prompt_shrink_events": list(prompt_shrink_events),
-                        "last_error_type": last_error_type,
-                        "last_error": last_error,
-                    },
+                    "parse_failure": parse_failure,
                 }
             )
             return last_error, [], parsed_info
@@ -1253,5 +1276,13 @@ class NemotronV3NanoOmniAgent:
         }
         history_entry["raw_output"] = self._served_assistant_output(response)
         self.cots.append(history_entry)
+
+        if (
+            self.unterminated_episode_policy == "fail"
+            and len(self.actions) >= self.max_steps
+            and not any(action in {"DONE", "FAIL"} for action in actions)
+        ):
+            actions = ["FAIL"]
+            parsed_info["forced_terminal"] = "max_steps"
 
         return content, actions, parsed_info

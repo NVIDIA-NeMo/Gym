@@ -50,5 +50,8 @@ osworld_nano_omni_agent:
         # did; the limit reserves output room below the server's window.
         context_overflow_policy: ${oc.env:OSWORLD_CONTEXT_OVERFLOW_POLICY,stop}
         context_prompt_token_limit: ${oc.decode:${oc.env:OSWORLD_CONTEXT_PROMPT_TOKEN_LIMIT,null}}
+        # Match the reference Nemotron agent: without computer.terminate the
+        # episode ends in FAIL, so success requires the policy to declare it.
+        unterminated_episode_policy: ${oc.env:OSWORLD_UNTERMINATED_EPISODE_POLICY,fail}
       task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
       exact_trace_transport_version: 3
