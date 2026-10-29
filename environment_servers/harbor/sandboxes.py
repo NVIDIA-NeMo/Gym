@@ -724,10 +724,10 @@ class HarborSandboxMixin:
                     # The adapter defers WORKDIR until this hook has run. A built image already owns its
                     # directory; a Dockerfile overlay creates it under the USER in effect at that step.
                     await self._own_workdir(sandbox, task.entrypoint_workdir, task.entrypoint_user, create=True)
-                if image_startup:
+                if image_startup and document["services"]["main"].get("user") in (None, ""):
                     # Startup belongs to the image, even when [agent].user names someone else. The seed
                     # installs the agent's default after the group has started. An explicit Compose user
-                    # still wins because the adapter passes it on the command and image healthcheck.
+                    # replaces the image identity, so do not resolve or validate an unused image user.
                     await self._set_default_user(sandbox, task, names, role="verifier")
                     if sandbox.default_user is None:
                         sandbox.set_default_user("root")

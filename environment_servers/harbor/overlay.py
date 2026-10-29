@@ -160,8 +160,9 @@ class HarborOverlayMixin:
             if uid not in user_names:
                 lookup = await as_root(f"getent passwd {shlex.quote(uid)} | cut -d: -f1", label, f"USER {uid} lookup")
                 name = (lookup.stdout or "").strip().splitlines()
-                user_names[uid] = name[-1] if name and name[-1] else uid
-            return user_names[uid] + (f":{group}" if group else "")
+                # Share _user_name's missing-name sentinel so startup can use the provider's integer uid path.
+                user_names[uid] = name[-1] if name and name[-1] else ""
+            return (user_names[uid] or uid) + (f":{group}" if group else "")
 
         async def make_workdir(path: str, user: str | None, label: str) -> None:
             if path in prepared_workdirs:

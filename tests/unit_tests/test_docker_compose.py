@@ -674,7 +674,8 @@ async def test_health_probe_timeout_retries_then_starts_dependent(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("declaration", [{}, None], ids=["mapping", "null"])
-async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path, declaration):
+@pytest.mark.parametrize("with_setup", [False, True], ids=["image-workdir", "setup-workdir"])
+async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path, declaration, with_setup):
     # ``volumes:\n  data:`` (a null declaration, the canonical Compose spelling) provisions like ``data: {}``.
     shared = tmp_path / "shared"
     external = shared / "operator-data"
@@ -683,6 +684,12 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
     image_data = tmp_path / "image-data"
     image_data.mkdir()
     (image_data / "seed").write_text("image data")
+    workdir = tmp_path / "work" if with_setup else tmp_path
+    startup_cwd = tmp_path / "startup-cwd"
+
+    async def setup(sandbox):
+        result = await sandbox.exec(f"mkdir -p {shlex.quote(str(workdir))}")
+        assert result.return_code == 0
 
     class VolumeProvider(ConnectableShellProvider):
         def shared_volume_metadata(self):
@@ -692,6 +699,9 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
             return {"volumes": [{"source": source, "target": target, "read_only": read_only}]}
 
         async def exec(self, handle, command, **kwargs):
+            cwd = kwargs.get("cwd")
+            if cwd is not None and not os.path.isdir(cwd):
+                raise RuntimeError(f"working directory does not exist: {cwd}")
             spec = self.created[int(handle.sandbox_id) - 1]
             mounts = spec.provider_options.get("volumes", [])
             replacements = {"/data": str(image_data)}
@@ -713,6 +723,8 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
                 },
                 "second": {
                     "image": "image",
+                    "working_dir": str(workdir),
+                    "command": ["sh", "-c", f"pwd > {shlex.quote(str(startup_cwd))} && sleep 1"],
                     "volumes": [
                         {"type": "volume", "source": "data", "target": "/data"},
                         {"type": "bind", "source": "/operator/source", "target": "/external", "read_only": True},
@@ -723,9 +735,14 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
         },
         default_command=["sleep", "1"],
         volume_sources={"/operator/source": "operator-data"},
+        service_setup={"second": setup} if with_setup else {},
         poll_interval_s=0.01,
     )
     async with group:
+        await group._wait("second", "service_started")
+        assert startup_cwd.read_text().strip() == str(workdir)
+        (seed,) = group._seeds
+        assert seed._spec.workdir == (None if with_setup else str(workdir))
         for name in ("first", "second"):
             result = await group.services[name].exec("cat /data/seed")
             assert result.return_code == 0

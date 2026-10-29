@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from environment_servers.harbor import app as harbor_app
 from environment_servers.harbor import sandboxes as harbor_sandboxes
@@ -401,12 +402,22 @@ class TestGroup:
         "image_user,startup_user",
         [("app", "app"), ("root", "root"), ("1000", "agent"), ("12345", 12345)],
     )
-    async def test_startup_user_is_independent_of_agent_user(self, tmp_path, monkeypatch, image_user, startup_user):
+    @pytest.mark.parametrize("with_run", [False, True], ids=["pull", "overlay"])
+    async def test_startup_user_is_independent_of_agent_user(
+        self, tmp_path, monkeypatch, image_user, startup_user, with_run
+    ):
+        class NumericUserSandbox(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                # OpenSandbox's name-based path cannot switch to an unnamed numeric string.
+                assert not (isinstance(user, str) and user.isdigit()), user
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        run = "RUN true\n" if with_run else ""
         server, task, *_ = overlay_server(
             tmp_path,
             monkeypatch,
             toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "other"\n'),
-            dockerfile=f"FROM ubuntu:24.04\nUSER {image_user}\nWORKDIR /app\n",
+            dockerfile=f"FROM ubuntu:24.04\n{run}USER {image_user}\nWORKDIR /app\n",
             image_config={
                 "Env": [f"PATH={IMAGE_PATH}"],
                 "Entrypoint": ["/entry.sh"],
@@ -414,16 +425,50 @@ class TestGroup:
             },
             overlay=volume_free_overlay(tmp_path),
         )
-        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task, NumericUserSandbox())
         try:
             entry = entrypoint_exec_of(sandbox)
             assert entry["user"] == startup_user and entry["cwd"] == "/app"
             (check,) = [r for r in sandbox.execs if r["command"] == "test -f ready"]
             assert check["user"] == startup_user and check["cwd"] == "/app"
+            if image_user.isdigit():
+                assert sum(r["command"].startswith("getent passwd ") for r in sandbox.execs) == 1
             # The seed switches back only after startup; the agent still gets its own configured user.
             await server._set_default_user(compose.services["main"], task, server._overlay_names.pop("r1"))
             await compose.services["main"].exec("id")
             assert sandbox.execs[-1]["user"] == "other"
+        finally:
+            await compose.stop()
+
+    @pytest.mark.parametrize("compose_user", ["root", "0", "null", '""'])
+    async def test_explicit_job_user_replaces_an_unused_image_group(self, tmp_path, monkeypatch, compose_user):
+        overlay = volume_free_overlay(tmp_path)
+        with overlay.files[0].open("a") as file:
+            file.write(f"    user: {compose_user}\n")
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "root"\n').replace(
+                "[verifier]\n", '[verifier]\nuser = "root"\n'
+            ),
+            dockerfile="FROM ubuntu:24.04\nUSER root:1234\n",
+            image_config={
+                "Env": [f"PATH={IMAGE_PATH}"],
+                "Entrypoint": ["/entry.sh"],
+                "Healthcheck": {"Test": ["CMD", "true"]},
+            },
+            overlay=overlay,
+        )
+        if compose_user in ("null", '""'):
+            with pytest.raises(HTTPException, match="root:1234"):
+                await start_real_group(monkeypatch, server, task)
+            return
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        try:
+            expected = "root" if compose_user == "root" else 0
+            assert entrypoint_exec_of(sandbox)["user"] == expected
+            (check,) = [r for r in sandbox.execs if r["command"] == "true"]
+            assert check["user"] == expected
         finally:
             await compose.stop()
 

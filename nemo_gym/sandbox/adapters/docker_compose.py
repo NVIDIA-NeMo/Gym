@@ -596,6 +596,8 @@ class AsyncSandboxCompose:
                         service_options = self._plans[name]["spec"].provider_options
                         seed_spec = replace(
                             self._plans[name]["spec"],
+                            # Copy-up reads the base image before setup creates the service's final WORKDIR.
+                            workdir=None if name in self.service_setup else self._plans[name]["spec"].workdir,
                             metadata=metadata,
                             provider_options=_merge_provider_options(
                                 {key: value for key, value in service_options.items() if key != "volumes"},
