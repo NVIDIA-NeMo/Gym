@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Atom (NOOA) on SWE-bench Pro through the sandboxed NOOA adapter, on the 120-task roster in
+# swebench-pro-swe120.txt (one instance id per line). The benchmark's own tests decide; no judge model.
+#
+#   recipes/nooa-atom/preflight.sh swebench-pro
+#   PARALLEL=32 recipes/nooa-atom/run.sh swebench-pro
+#
+# Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY (HF_TOKEN if the dataset needs it).
+# Set in env.yaml: policy_base_url, policy_model_name. Set NOOA_RUNTIME_WHEELHOUSE to the prepared runtime.
+# swebench-pro.setup.sh prepares the full benchmark once and writes the roster rows the run collects.
+
+gym_commit: PENDING-UNTIL-FREEZE
+nooa_commit: 05fabd0c7034cf50b7c7424c1857d8297299bc4c
+# Pinned task set: sha256 of swebench-pro-swe120.txt, checked by setup.
+roster: recipes/nooa-atom/swebench-pro-swe120.txt
+roster_sha256: ee0804021e8b72209331890e19ec34e2bedc64163d254410012a424dc3734b6d
+
+split: benchmark
+overwrite_metrics_conflicts: true
+
+benchmark_config:
+  - benchmarks/swebench/pro/atom.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+# The agent SWE-bench Pro's resources server binds (see benchmarks/swebench/pro/nooa.yaml).
+swebench_pro_nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      runtime_wheelhouse: ${oc.env:NOOA_RUNTIME_WHEELHOUSE}
+      runtime_wheelhouse_required: true
+      context_window: 1048576
+      trace_jsonl: true
+      artifacts_dir: ${oc.env:NOOA_ARTIFACTS_DIR,nooa-artifacts}
+      nooa:
+        init_kwargs:
+          turn_method: handle_batch
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 1.0
+        max_tokens: 131072
+      propagate_context_overflow_errors: true
+
+sandbox:
+  opensandbox:
+    create:
+      timeout_s: 2400
+
+num_samples_in_parallel: 32

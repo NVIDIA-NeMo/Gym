@@ -59,18 +59,19 @@ if [ "${PIN_GYM:-1}" != 0 ]; then
     echo "checkout is at $(git rev-parse --short HEAD), recipe pins $GYM_COMMIT; check it out (PIN_GYM=0 to run anyway)" >&2; exit 1; }
 fi
 
-SETUP="$RECIPES/$BENCH.setup.sh"
-[ -f "$SETUP" ] && source "$SETUP"
-
 OUT="${OUT:-./results/$BENCH}"
 mkdir -p "$OUT"
 # Hydra writes under the run directory, never into the checkout.
 HYDRA=(hydra.run.dir="$OUT/hydra" hydra.output_subdir=null)
 
 gym eval prepare "${CONFIGS[@]}" "${HYDRA[@]}"
+# The recipe's setup runs after preparation: it may pin a task repo, or select the rows to collect (INPUT).
+SETUP="$RECIPES/$BENCH.setup.sh"
+[ -f "$SETUP" ] && source "$SETUP"
 gym eval run \
   "${CONFIGS[@]}" \
   --output "$OUT/evaluator_rollouts.jsonl" \
+  ${INPUT:+--input "$INPUT"} \
   ${RESUME:+--resume} \
   ${LIMIT:+--limit "$LIMIT"} \
   ${PARALLEL:+--concurrency "$PARALLEL"} \
