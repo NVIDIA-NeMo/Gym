@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agent_utils.supervisor_client import CleanupReceipt, HarnessTerminationError
+from nemo_gym.agents import CleanupReceipt
+from nemo_gym.agents.utils.supervisor_client import HarnessTerminationError
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import NOOARunFailure

@@ -11,7 +11,7 @@ from fastapi import Request, Response
 from PIL import Image
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,

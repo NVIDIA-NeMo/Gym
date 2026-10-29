@@ -22,7 +22,7 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 
 import nemo_gym.config.global_config
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     TOKEN_CAPTURE_BLOCK,

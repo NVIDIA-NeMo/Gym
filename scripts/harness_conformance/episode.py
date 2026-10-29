@@ -19,8 +19,7 @@ from pathlib import Path
 import uvicorn
 import yaml
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, SimpleResponsesAPIAgent
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.harness_capabilities.cli import digest_file
 

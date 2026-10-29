@@ -42,7 +42,7 @@ from step_utils import (
     process_problem_steps,
 )
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
