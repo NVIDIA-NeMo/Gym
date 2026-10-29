@@ -50,7 +50,7 @@ Before moving on, confirm each of these in the code:
 - [ ] A sandbox failure never falls back to running on the host.
 - [ ] Controls the harness does not support are rejected or documented, not silently dropped.
 - [ ] The harness's own files (configuration, history, caches) stay out of the task repository. Where the harness has no setting to move them, the README says what it writes under the task's home.
-- [ ] CLI harnesses use the shared `harness_runner.sh`; Python SDK shims bring their own interpreter. The `RUNNER_FILE` and `stdlib_runner=True` compatibility path remains temporarily for existing standard-library shims, but no built-in adapter uses it. Do not use it in a new adapter. See [Code layout](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#code-layout).
+- [ ] A CLI harness launches through the shared `harness_runner.sh` (`HARNESS_RUNNER_FILE` and `HARNESS_RUNNER_SCRIPT`) with `SandboxCommand(argv=...)`. A Python SDK shim uses an explicit interpreter from an adapter-managed runtime, such as `SandboxPythonRuntime`, rather than the task image's Python. See [Code layout](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#code-layout).
 - [ ] Only an error that ends the harness's run fails the response, by the harness's own rule at the pinned version. See [Convert outputs without silent loss](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#convert-outputs-without-silent-loss).
 - [ ] Usage is reported only when every model call has a usage record, with call references collected from every record the harness writes. Otherwise usage stays unknown, with a gap.
 

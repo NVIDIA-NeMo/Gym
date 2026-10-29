@@ -11,7 +11,6 @@ Session control files (all paths are relative to session_dir):
 Filename              Writer               When
 ===================== ==================== ===========================================
 process_supervisor.sh Session              Uploaded before launch
-bin/gym-runner        Launch shell         Interpreter link for a standard-library runner
 launch.claim          Launch or stop shell Atomically claims launch or fences it
 supervisor.pid        Launch shell         After claiming launch, before exec (see below)
 stop.request          Stop shell           Polled by the supervisor to stop the harness
@@ -22,11 +21,9 @@ output.log            Launch shell         Captures supervisor and harness diagn
 Agents in the task sandbox often clean up with ``pkill -f python3``, ``pkill python3`` or
 ``killall python3``. These must not stop the supervisor or a runner, which would end the
 harness. The supervisor and the shared harness runner are bash scripts, so their names
-never mention python. A standard-library Python runner that opts in runs under an
-interpreter link with a neutral name, from a file without a ``.py`` suffix, so neither its
-process name nor the supervisor's command line mentions python; a harness argv that keeps
-its own python (Hermes, Stirrup) still appears in the supervisor's command line. Gym stops
-the supervisor through the stop file, which does not depend on these names.
+never mention python; a harness argv that runs its own python (Hermes, NOOA, Stirrup) still
+appears in the supervisor's command line. Gym stops the supervisor through the stop file,
+which does not depend on these names.
 
 ``supervisor.pid`` holds the PID that executes the supervisor. When the provider did not
 make the launch shell a process group leader, that process starts the supervisor in a new
@@ -48,7 +45,6 @@ from nemo_gym.sandbox.utils import read_text
 
 SUPERVISOR_FILE = "process_supervisor.sh"
 SUPERVISOR_SCRIPT = Path(__file__).with_name(SUPERVISOR_FILE)
-RUNNER_INTERPRETER = "bin/gym-runner"
 LAUNCH_CLAIM_FILE = "launch.claim"
 SUPERVISOR_PID_FILE = "supervisor.pid"
 STOP_REQUEST_FILE = "stop.request"
@@ -89,8 +85,6 @@ def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIM
 
 
 _CLEANUP_RECEIPT = TypeAdapter(CleanupReceipt)
-# The interpreter binary itself, past virtual-environment links and launcher shims.
-_RESOLVE_INTERPRETER = 'import os; print(os.readlink("/proc/self/exe"))'
 LOG = logging.getLogger(__name__)
 
 
@@ -148,19 +142,12 @@ def _seconds(value: float) -> str:
     return str(value) if 0.01 <= value < 1e16 else f"{max(value, 0.01):.2f}"
 
 
-def check_stdlib_runner(command: list[str], *, stdlib_runner: bool) -> None:
-    """Reject ``stdlib_runner`` for a harness argv without an interpreter and a runner to rename."""
-    if stdlib_runner and len(command) < 2:
-        raise ValueError(f"stdlib_runner requires a harness argv that starts with its interpreter; got {command!r}")
-
-
 def supervised_launch_command(
     *,
     session_dir: str,
     command: list[str],
     timeout: float,
     cleanup_timeout: float,
-    stdlib_runner: bool = False,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -171,37 +158,18 @@ def supervised_launch_command(
     sandbox owner stops services that left the harness earlier. Stops reach the
     supervisor through the stop file, not a signal, so the harness keeps the default
     TERM disposition.
-
-    With ``stdlib_runner``, the harness argv starts with a Python interpreter, and the
-    runner runs through ``bin/gym-runner``, a link to the binary behind that interpreter,
-    so that python-matching kills in the task skip it. The link resolves a virtual
-    environment to its base interpreter, so only standard-library runners may opt in.
-    When the link cannot be made, the argv runs unchanged.
     """
-    check_stdlib_runner(command, stdlib_runner=stdlib_runner)
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     claim_path = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
-    harness = join(command)
-    runner = ""
-    if stdlib_runner:
-        python = quote(command[0])
-        bin_dir = quote(f"{session_dir}/bin")
-        runner_link = quote(f"{session_dir}/{RUNNER_INTERPRETER}")
-        # Create only bin, so a launch delayed past close cannot recreate the session directory.
-        runner = (
-            f"run={python}; real=$({python} -I -c {quote(_RESOLVE_INTERPRETER)} 2>/dev/null) && "
-            f'{{ [ -d {bin_dir} ] || mkdir {bin_dir}; }} && ln -sfn "$real" {runner_link} && run={runner_link}; '
-        )
-        harness = f'"$run" {join(command[1:])}'
     return (
         f"[ -d {quote(session_dir)} ] && [ ! -L {claim_path} ] || exit 0; "
         f"bash -n {supervisor} || exit $?; "
-        f"{runner}ln -s launch {claim_path} 2>/dev/null || exit 0; "
+        f"ln -s launch {claim_path} 2>/dev/null || exit 0; "
         f"echo $$ > {quote(f'{session_dir}/{SUPERVISOR_PID_FILE}')} && "
         f"exec bash {supervisor} "
         f"--timeout {_seconds(timeout)} --cleanup-timeout {_seconds(cleanup_timeout)} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
-        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {harness} "
+        f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {join(command)} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )
 
