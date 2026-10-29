@@ -31,11 +31,13 @@ An exporter takes a finished run, the rollouts file and the files `gym eval run`
 | --- | --- |
 | `ExportResult.succeeded(**detail)` | The run was exported. |
 | `ExportResult.skipped(**detail)` | Nothing was done because the run was already exported. |
-| `ExportResult.failed(error, exit_code=1, **detail)` | The export failed. Use a distinct `exit_code` for failures callers may want to tell apart. |
+| `ExportResult.failed(error, *, exit_code=1, **detail)` | The export failed. Use a distinct `exit_code` (a keyword argument) for failures callers may want to tell apart. |
 
 `detail` is printed by the command and stored in the result file, so it should be small and hold nothing secret. Make a second export of the same run harmless: report `skipped` when the destination already has it, as `gym eval submit` may run an export again.
 
-**The settings.** The settings model must be importable without the exporter's SDK, because `gym eval submit` validates it on a machine that may not have the SDK. Keep SDK imports inside `export()` (or inside the worker, below). Hydra types command-line values, so `1` arrives as an integer and a `str` field rejects it. Say so in the field's `description` when a setting is likely to look numeric, such as a version.
+**The settings.** The settings model must be importable without the exporter's SDK, because `gym eval submit` validates it on a machine that may not have the SDK. Keep SDK imports inside `export()` (or inside the worker, below). Hydra types command-line values, so on the command line `1` arrives as an integer and a `str` field rejects it. Say so in the field's `description` when a setting is likely to look numeric, such as a version. A submit config does not have this problem: submit writes each value so that Hydra reads it back as the same string, number or boolean, so a string setting written as `"1"` stays a string.
+
+If readiness is more than the settings validating, define `is_available` on the settings model. `gym eval submit` refuses an export whose model reports `False`, with an "incomplete settings" error. For example, `WandbExportConfig` needs only a project and a run name, because a post-run export can take the API key from the environment.
 
 ## Write the Exporter
 
@@ -125,7 +127,7 @@ gym eval export --help        # lists summary
 gym eval export summary +rollouts_jsonl_fpath=results/rollouts.jsonl +destination_dirpath=results/summaries
 ```
 
-**With `gym eval submit`.** An entry for the exporter under `export` in a submit config is validated against the settings model before anything is sent: unknown settings and invalid values are rejected. Submit fills in `rollouts_jsonl_fpath` and `result_json_fpath` per benchmark. If your exporter needs names derived from the benchmark or submission, such as a run name, add a branch for it in `export_run_settings` in `nemo_gym/orchestration/exports.py`.
+**With `gym eval submit`.** An entry for the exporter under `export` in a submit config is validated against the settings model before anything is sent: unknown settings and invalid values are rejected, and so are incomplete ones (see `is_available` above). Submit fills in `rollouts_jsonl_fpath` and `result_json_fpath` per benchmark. If your exporter needs names derived from the benchmark or submission, such as a run name, add a branch for it in `export_run_settings` in `nemo_gym/orchestration/exports.py`.
 
 ## In-Process or Isolated
 
@@ -136,7 +138,7 @@ gym eval export summary +rollouts_jsonl_fpath=results/rollouts.jsonl +destinatio
 | Use when | There is no SDK, or it is a light library Gym already depends on | The SDK has heavy or conflicting dependencies, or updates itself |
 | SDK install | An extra of Gym (`nemo-gym[<extra>]`) | The exporter installs it into its own environment on first use |
 
-`BaseExporter` is for tracking backends such as MLflow and W&B. It is the same class live runs use: you implement `setup`, `teardown`, `_log_config`, `_log_metrics` and `_log_rollouts`. `setup` also reports the backend's run id with `_record_run_id(run_id)`; a post-run export fails without it, because the id goes into the already-exported marker. `gym eval export` replays the run's saved configuration, aggregate metrics and rollouts through them. It also makes the backend usable live during `gym eval run`, which needs an `ExporterConfig` (with `is_available`) registered in `EXPORTER_REGISTRY` in `nemo_gym/exporters/__init__.py` and an extra in `pyproject.toml`. Read `nemo_gym/exporters/mlflow.py` for a complete example. If the destination is not a tracking backend, prefer `Exporter` or `IsolatedExporter`.
+`BaseExporter` is for tracking backends such as MLflow and W&B. It is the same class live runs use: you implement `setup`, `teardown`, `_log_config`, `_log_metrics` and `_log_rollouts`. `setup` also reports the backend's run id with `_record_run_id(run_id)`; a post-run export fails without it, because the id goes into the already-exported marker. That marker is `<stem>_<name>_export_done`, written once the whole run is sent. It is separate from the `<stem>_<name>_run_id` a live run keeps so that a resume can reopen its run, which a post-run export never reads or writes. `gym eval export` replays the run's saved configuration, aggregate metrics and rollouts through them. It also makes the backend usable live during `gym eval run`, which needs an `ExporterConfig` (with `is_available`) registered in `EXPORTER_REGISTRY` in `nemo_gym/exporters/__init__.py` and an extra in `pyproject.toml`. Read `nemo_gym/exporters/mlflow.py` for a complete example. If the destination is not a tracking backend, prefer `Exporter` or `IsolatedExporter`.
 
 ## Run the SDK in Its Own Environment
 
@@ -210,13 +212,15 @@ How it fits together:
 - **The environment** is built on first use from `required_packages()` (or a `requirements` class attribute), under `<uv_venv_dir>/exporters/<name>/`, and reused afterwards. A changed requirement list gets a fresh one. Where the SDK is installed from is the user's uv configuration, so do not hard-code a package index.
 - **The worker** defines `run(payload) -> dict` and must not import `nemo_gym`: its environment does not have it. It returns `state` (`succeeded` by default, `skipped` or `failed`), and optionally `error`, `exit_code` and `detail`. An exception it raises becomes a `failed` result.
 - **The payload** reaches the worker as JSON on stdin and the result comes back in a file, so credentials stay out of the process list and anything the SDK prints cannot corrupt the result.
+- **The launch** makes the worker's environment the exporter's: the environment's `bin` leads `PATH`, so a bare `python` or an SDK command is the exporter's, and relative paths are made absolute before the worker changes into its scratch directory. The worker's own directory is kept off `sys.path`, so a module that sits beside it cannot shadow an SDK of the same name. A worker that reports a result and then exits non-zero fails, because an SDK that errors while flushing at exit has not delivered. A launch that cannot start is a `failed` result too.
+- **A time limit** is optional: override `worker_timeout_s(payload)` to return the seconds the worker may run, and one that outlives it is killed and the export fails. The default is no limit, so set one for an SDK that can stall on a network call. A timeout setting that only covers the wait for the destination's answer does not bound the upload itself, so bound the whole worker.
 
 Register `acme` in `RUN_EXPORTERS` and `RUN_EXPORTER_CONFIGS` exactly as above. No extra is needed, because the SDK never enters Gym's environment.
 
 ## Test It
 
 - Test an in-process exporter with a temporary run: write a rollouts file, its aggregate metrics and saved config, call `export`, and assert the result and the destination. Cover the failure and `skipped` paths too.
-- Test an isolated exporter against a stand-in for the SDK, not the real one. Put a small fake package (here `acme_sdk`) on the worker's `PYTHONPATH` and run the real worker as a subprocess, so the payload, the harness and the result protocol are all exercised.
+- Test an isolated exporter against a stand-in for the SDK, not the real one. Put a small fake package (here `acme_sdk`) on the worker's `PYTHONPATH` and run the real worker as a subprocess, so the payload, the harness and the result protocol are all exercised. The real launch does not pass `PYTHONPATH` on, because it would point the worker at Gym's packages, so the example test replaces `isolated._worker_environment` (which receives the interpreter) with a function that adds it.
 - If a test needs the real SDK, make it opt-in rather than blocking, like the `--with_downloads` option in `tests/conftest.py`: a flag, a marker, and a skip without the flag. It can check that the calls your worker makes still exist, without uploading anything.
 
 The two examples on this page live in `tests/unit_tests/exporter_guide/`, are exercised by `tests/unit_tests/test_exporter_guide.py`, and a test checks that the code blocks above match those files.
@@ -224,5 +228,6 @@ The two examples on this page live in `tests/unit_tests/exporter_guide/`, are ex
 ## Handle Credentials Safely
 
 - Credentials come from the export command (command line, `env.yaml`) or from the SDK's own login or environment. The run's saved configuration has its secrets masked, so never read credentials from it.
+- In a submit config, credentials are not export settings. The saved submit record and `--resolve-only` output are shared, and submit resolves `${oc.env:...}` references before it writes them, so a key written as a setting would end up there in plain text. Users pass credentials through `driver.env` as `host:VAR`, and your exporter should read them from the environment, as the W&B exporter does with `WANDB_API_KEY`. Say which variable it reads in your exporter's documentation.
 - Keep secrets out of `detail`, error messages and logs: results are printed and written to files.
 - Do not hard-code package indexes, endpoints or tokens. Take an endpoint as a setting, and leave package indexes to the user's uv configuration.
