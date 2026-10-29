@@ -1125,7 +1125,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable"),
-            ObservationGap(code="compaction_observations_unavailable"),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
             *(
@@ -1180,6 +1179,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 gaps=gaps,
             )
         else:
+            gaps.append(ObservationGap(code="compaction_observations_unavailable"))
             gaps.append(ObservationGap(code=_MODEL_CALL_JOIN_GAP, detail="CLI events omit model response IDs"))
             tools = []
             starts = {}

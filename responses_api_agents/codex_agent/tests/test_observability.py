@@ -265,3 +265,70 @@ def test_a_transcript_that_could_not_be_read_leaves_tool_time_unknown() -> None:
 def test_a_record_it_could_not_read_leaves_tool_time_unknown(transcript: str, expected: tuple) -> None:
     """An unreadable record may have been a tool call; a token usage record it could not read was not."""
     assert _time_split(parse_codex_observations(transcript, "0-0", returncode=-9, timed_out=True)) == expected
+
+
+@pytest.mark.parametrize(
+    "damage", [None, "wrong_scope", "policy_request", "different_summary", "duplicate", "shared_event", "failed"]
+)
+def test_compaction_requires_native_event_and_unique_scoped_summary_call(damage):
+    from nemo_gym.observability.model_calls import ModelCallRecord
+    from nemo_gym.rollout_observability import ContextCompactionObservation
+    from responses_api_agents.codex_agent.observability import (
+        _COMPACTION_PREFIX,
+        _COMPACTION_PROMPT,
+        associate_codex_compaction_calls,
+    )
+
+    transcript = json.dumps(
+        {
+            "type": "compacted",
+            "timestamp": "2026-10-29T10:00:00Z",
+            "payload": {"message": _COMPACTION_PREFIX + "Keep the changes."},
+        }
+    )
+    bundle = parse_codex_observations(transcript, "root", returncode=0, timed_out=False)
+    call = ModelCallRecord(
+        call_index=0,
+        model_call_id="helper",
+        response_id="response-helper",
+        client_session_id="root",
+        status_code=200,
+        request={"input": [{"role": "user", "content": _COMPACTION_PROMPT}]},
+        response={
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Keep the changes."}],
+                }
+            ]
+        },
+    )
+    calls = [call]
+    if damage == "wrong_scope":
+        call.client_session_id = "child"
+    elif damage == "policy_request":
+        call.request["input"][0]["content"] = "Continue"
+    elif damage == "different_summary":
+        call.response["output"][0]["content"][0]["text"] = "Different"
+    elif damage == "duplicate":
+        calls.append(call.model_copy(update={"model_call_id": "other"}))
+    elif damage == "shared_event":
+        bundle.records.append(bundle.records[-1].model_copy(deep=True))
+    elif damage == "failed":
+        call.status_code = 500
+    joined = associate_codex_compaction_calls(bundle, calls)
+    event = next(r for r in joined.records if isinstance(r, ContextCompactionObservation))
+    assert event.summary == "Keep the changes."
+    assert event.outcome == "completed"
+    assert [ref.model_call_id for ref in event.model_calls] == ([] if damage else ["helper"])
+    assert bool(joined.gaps) == bool(damage)
+    assert bundle.records[-1].model_calls == []
+    if damage is None:
+        repeated = associate_codex_compaction_calls(joined, calls)
+        assert repeated == joined
+        repeated = associate_codex_compaction_calls(
+            joined, calls + [call.model_copy(update={"model_call_id": "duplicate"})]
+        )
+        event = next(r for r in repeated.records if isinstance(r, ContextCompactionObservation))
+        assert not event.model_calls and repeated.gaps

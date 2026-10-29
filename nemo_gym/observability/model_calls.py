@@ -524,6 +524,10 @@ def merge_model_call_capture_into_record(
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             agent_calls = exclude_verifier_model_calls(calls, verifier_invocations.values())
+            if bundle.source == "codex":
+                from responses_api_agents.codex_agent.observability import associate_codex_compaction_calls
+
+                bundle = associate_codex_compaction_calls(bundle, agent_calls)
             bundle = join_agent_model_calls(bundle, agent_calls)
             if any(call.client_assistant_message_id for call in calls):
                 try:

@@ -6,9 +6,10 @@
 import json
 import logging
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -18,7 +19,28 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.responses_converter import message_content_to_text
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+)
+
+
+if TYPE_CHECKING:
+    from nemo_gym.observability.model_calls import ModelCallRecord
+
+_COMPACTION_PREFIX = (
+    "Another language model started to solve this problem and produced a summary of its thinking process. "
+    "You also have access to the state of the tools that were used by that language model. "
+    "Use this to build on the work that has already been done and avoid duplicating work. "
+    "Here is the summary produced by the other language model, use the information in this summary "
+    "to assist with your own analysis:\n"
+)
+_COMPACTION_PROMPT = "You are performing a CONTEXT CHECKPOINT COMPACTION."
 
 
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)
@@ -98,6 +120,7 @@ def parse_codex_observations(
 ) -> AgentObservationBundle:
     """Parse a transcript, using the caller's final outcome and gaps when supplied."""
     conversation = []
+    compactions = []
     tools = {}
     patch_outcomes = {}
     gaps = list(gaps or [])
@@ -119,6 +142,21 @@ def parse_codex_observations(
                     _token_usage(payload)
                 if payload.get("type") == "patch_apply_end" and type(payload.get("success")) is bool:
                     patch_outcomes[payload["call_id"]] = payload["success"]
+                continue
+            if event.get("type") == "compacted":
+                native_event = True
+                message = event["payload"]["message"]
+                if not isinstance(message, str) or not message.startswith(_COMPACTION_PREFIX):
+                    raise ValueError("unsupported Codex compaction summary")
+                compactions.append(
+                    ContextCompactionObservation(
+                        invocation_id=invocation_id,
+                        observed_at=datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp(),
+                        trigger="automatic",
+                        outcome="completed",
+                        summary=message.removeprefix(_COMPACTION_PREFIX),
+                    )
+                )
                 continue
             if event.get("type") != "response_item":
                 if event.get("type") not in {"session_meta", "turn_context", "compacted", "world_state"}:
@@ -190,6 +228,59 @@ def parse_codex_observations(
                 error_type=error_type,
             ),
             *tools.values(),
+            *compactions,
         ],
         gaps=gaps,
     )
+
+
+def associate_codex_compaction_calls(
+    bundle: AgentObservationBundle, calls: list["ModelCallRecord"]
+) -> AgentObservationBundle:
+    """Join exec's persisted summary to one explicitly requested, successful helper response."""
+    result = bundle.model_copy(deep=True)
+    result.gaps = [gap for gap in result.gaps if gap.code != "compaction_model_call_reference_unavailable"]
+    events = [record for record in result.records if isinstance(record, ContextCompactionObservation)]
+    candidates = []
+    for event in events:
+        # Finalization can run again with additional capture records. Recompute
+        # references so newly ambiguous evidence cannot retain an earlier match.
+        event.model_calls = []
+        matches = []
+        for index, call in enumerate(calls):
+            history = (call.request or {}).get("input")
+            if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
+                continue
+            last = history[-1]
+            output = (call.response or {}).get("output")
+            if not isinstance(output, list):
+                continue
+            text = "".join(
+                message_content_to_text(item.get("content"))
+                for item in output
+                if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"
+            )
+            if (
+                call.client_session_id == event.invocation_id
+                and call.status_code == 200
+                and call.error_category is None
+                and call.model_call_id
+                and event.summary
+                and last.get("role") == "user"
+                and message_content_to_text(last.get("content")).startswith(_COMPACTION_PROMPT)
+                and text == event.summary
+            ):
+                matches.append(index)
+        candidates.append(matches)
+    counts = Counter(index for matches in candidates for index in matches)
+    for event, matches in zip(events, candidates):
+        if len(matches) == 1 and counts[matches[0]] == 1:
+            call = calls[matches[0]]
+            event.model_calls = [
+                ModelCallRef(model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id)
+            ]
+        else:
+            result.gaps.append(
+                ObservationGap(code="compaction_model_call_reference_unavailable", invocation_id=event.invocation_id)
+            )
+    return result
