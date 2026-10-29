@@ -74,7 +74,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 def _weather_sentence(city: str) -> str:
@@ -225,7 +226,7 @@ The shipped `resources_servers/workplace_assistant` stays byte-identical — the
 
 ```python
 # resources_servers/workplace_assistant/app_mcp.py
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.workplace_assistant.app import WorkbenchResourcesServer
 from resources_servers.workplace_assistant.utils import get_tools
 

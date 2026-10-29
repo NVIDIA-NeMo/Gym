@@ -63,7 +63,7 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import SESSION_ID_KEY, _redacted_url
 from nemo_gym.token_id_capture import (
     CaptureContext,
     capture_engine_refusal,
@@ -79,6 +79,7 @@ from nemo_gym.token_id_capture.external_capture import (
     validate_framework_context_options,
 )
 from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureAdmissionError, CaptureInputError
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
 

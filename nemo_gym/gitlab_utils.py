@@ -148,7 +148,7 @@ def delete_model_from_gitlab(model_name: str) -> None:  # pragma: no cover
 
 # Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.dataset`.
 # Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

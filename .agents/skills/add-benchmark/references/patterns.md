@@ -25,7 +25,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer, BaseResourcesServerConfig,
     BaseVerifyRequest, BaseVerifyResponse,
 )
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 class MyConfig(BaseResourcesServerConfig):
     pass

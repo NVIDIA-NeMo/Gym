@@ -35,10 +35,8 @@ from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import (
-    SESSION_ID_KEY,
-    is_nemo_gym_fastapi_entrypoint,
-)
+from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.environment import EnvironmentConfig, ExecLimitConfigurationError
 from resources_servers.terminal_bench_4.lifecycle import NATIVE_VERSION, Session

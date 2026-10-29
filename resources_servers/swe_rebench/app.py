@@ -50,7 +50,8 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_rebench.log_parsers import default_cache_dir, resolve_parser
 from resources_servers.swe_rebench.verification import (
     VerificationInputs,
