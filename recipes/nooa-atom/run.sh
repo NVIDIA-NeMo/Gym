@@ -63,6 +63,8 @@ OUT="${OUT:-./results/$BENCH}"
 mkdir -p "$OUT"
 # Hydra writes under the run directory, never into the checkout.
 HYDRA=(hydra.run.dir="$OUT/hydra" hydra.output_subdir=null)
+# Per-rollout NOOA artifacts (trace files) live beside the rollouts unless the caller chose a directory.
+export NOOA_ARTIFACTS_DIR="${NOOA_ARTIFACTS_DIR:-$OUT/nooa-artifacts}"
 
 gym eval prepare "${CONFIGS[@]}" "${HYDRA[@]}"
 # The recipe's setup runs after preparation: it may pin a task repo, or select the rows to collect (INPUT).
