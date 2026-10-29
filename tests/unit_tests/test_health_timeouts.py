@@ -32,7 +32,7 @@ from nemo_gym.health.timeouts import (
     summarize_timeouts,
 )
 from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, RunHealthLimits
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     RolloutAggregationConfig,

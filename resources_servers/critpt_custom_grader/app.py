@@ -43,7 +43,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,  # same import as resources_servers/swebench_pro/app.py
 )
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, failure_kinds
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.sandbox import (
     SandboxResources,
     SandboxSpec,

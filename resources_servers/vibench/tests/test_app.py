@@ -350,7 +350,7 @@ class TestAggregateMetrics:
     def test_signatures_match_the_framework_contract(self, tmp_path):
         """The bug this replaces was a signature mismatch that unit tests missed because they
         called these the way the code expected, not the way the framework does."""
-        from nemo_gym.reward_profile import AggregateMetricsMixin
+        from nemo_gym.metrics import AggregateMetricsMixin
 
         server = make_server(tmp_path)
         for name in ("compute_metrics", "get_key_metrics"):

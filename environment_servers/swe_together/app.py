@@ -66,7 +66,7 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import JUDGE_FAILED, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.episode_types import EpisodeFailure
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,

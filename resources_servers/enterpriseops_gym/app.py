@@ -47,7 +47,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import CACHE_DIR_KEY_NAME, get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
-from nemo_gym.reward_profile import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
+from nemo_gym.metrics import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,

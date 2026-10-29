@@ -23,12 +23,8 @@ import pandas as pd
 import pytest
 
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.reward_profile import (
-    RewardProfiler,
-    compute_aggregate_metrics,
-    coverage_by_agent,
-    select_measured,
-)
+from nemo_gym.metrics import RewardProfiler, compute_aggregate_metrics
+from nemo_gym.metrics.reward_profile import coverage_by_agent, select_measured
 
 
 def _row(task_idx: int, rollout_idx: int) -> dict:

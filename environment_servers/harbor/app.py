@@ -114,7 +114,7 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import NeMoGymResponse, TaskId, failure_kinds
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
+from nemo_gym.metrics import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxAccess
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task

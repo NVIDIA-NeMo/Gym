@@ -49,7 +49,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     TaskId,
 )
-from nemo_gym.reward_profile import select_measured
+from nemo_gym.metrics.reward_profile import select_measured
 from nemo_gym.session_routing import ResourcesSessionLifetimes
 from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
 from nemo_gym.testing.session_conformance import check_resources_session_contract

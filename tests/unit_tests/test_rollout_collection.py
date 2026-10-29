@@ -62,7 +62,7 @@ from nemo_gym.config.config_types import AmbiguousEnvironmentServerError, Config
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
 from nemo_gym.health.types import RunHealthLimits
-from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
+from nemo_gym.metrics import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,

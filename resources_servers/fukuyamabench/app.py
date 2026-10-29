@@ -28,7 +28,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_subset_metrics
+from nemo_gym.metrics import compute_subset_metrics
 
 
 logger = logging.getLogger(__name__)

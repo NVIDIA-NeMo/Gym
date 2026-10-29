@@ -45,7 +45,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 
 
 # Hallucination detection: chars/min above this rate signal repetition/hallucination.

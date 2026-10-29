@@ -52,7 +52,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics
+from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
 from nemo_gym.telemetry import init_telemetry
 

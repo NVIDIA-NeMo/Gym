@@ -40,8 +40,8 @@ from nemo_gym.core import (
 from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
 from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.prompt import fill_prompt, load_prompt_config
-from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.sandbox import resolve_provider_config
 from resources_servers.equivalence_llm_judge.app import (
     JudgeEvaluation,

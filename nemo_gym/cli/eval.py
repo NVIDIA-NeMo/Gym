@@ -862,7 +862,7 @@ def reverify_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
-    from nemo_gym.reward_profile import (
+    from nemo_gym.metrics.reward_profile import (
         RewardProfileConfig,
         RewardProfiler,
         coverage_by_agent,
