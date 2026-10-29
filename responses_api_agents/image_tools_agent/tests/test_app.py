@@ -204,7 +204,7 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     server_client = MagicMock(spec=ServerClient)
     server_client.post = server_client_post
     server_client.global_config_dict = {
-        "token_id_capture": {"enabled": capture_mode == "training", "all_agents": True},
+        "token_capture": {"enabled": capture_mode == "training", "all_agents": True},
         "observability_enabled": capture_mode == "evaluation",
     }
 
@@ -328,7 +328,7 @@ async def test_image_tools_agent_sums_usage_and_details_across_calls(
     server_client = MagicMock(spec=ServerClient)
     server_client.post = AsyncMock(side_effect=lambda **kwargs: _FakeClientResponse(next(turns)))
     server_client.global_config_dict = {
-        "token_id_capture": {"enabled": False, "all_agents": True},
+        "token_capture": {"enabled": False, "all_agents": True},
         "observability_enabled": False,
     }
     agent = ImageToolsAgent(config=config, server_client=server_client)

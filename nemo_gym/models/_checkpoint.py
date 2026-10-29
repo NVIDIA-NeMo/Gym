@@ -47,10 +47,15 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.core.episode import EpisodeId
-from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
+from nemo_gym.models.chat_streaming import SSE_KEEPALIVE
+from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
+from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.external_capture import publish_deferred_commit
+from nemo_gym.models.token_capture.fingerprint import conversation_digest
+from nemo_gym.models.token_capture.sink import CaptureContext
+from nemo_gym.models.token_capture.staging.records import CaptureAdmission, GenerationCutContinuation
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
@@ -71,11 +76,6 @@ from nemo_gym.server_runtime._checkpoint.generation_cut import (
 )
 from nemo_gym.server_runtime._checkpoint.telemetry import checkpoint_span
 from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
-from nemo_gym.token_id_capture.external_capture import publish_deferred_commit
-from nemo_gym.token_id_capture.fingerprint import conversation_digest
-from nemo_gym.token_id_capture.sink import CaptureContext
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission, GenerationCutContinuation
 
 
 LOGGER = logging.getLogger(__name__)
@@ -976,7 +976,7 @@ def reject_ungated_ledger_writers(global_config: Any) -> None:
     if not policies:
         return
     for agent, config in sorted(_server_configs(global_config, "responses_api_agents").items()):
-        if not token_id_capture_enabled_for_agent(global_config, agent):
+        if not token_capture_enabled_for_agent(global_config, agent):
             continue
         for writer in sorted((_model_server_refs(config) & set(models)) - set(policies)):
             raise ValueError(
@@ -1039,3 +1039,10 @@ def generation_cut_requester(
         return GenerationCutReceipt.model_validate(await get_response_json(response))
 
     return request_cut
+
+
+# Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

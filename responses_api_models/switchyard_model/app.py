@@ -53,7 +53,7 @@ from nemo_gym.config import (
     DISALLOWED_PORTS_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     ROLLOUT_PATH_PREFIX,
-    TOKEN_ID_CAPTURE_BLOCK,
+    TOKEN_CAPTURE_BLOCK,
     find_open_port,
     get_global_config_dict,
 )
@@ -63,7 +63,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models import NeMoGymAsyncOpenAI
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -326,7 +326,7 @@ class SwitchyardModel(SimpleResponsesAPIModel):
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return
-        token_capture_block = global_config.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        token_capture_block = global_config.get(TOKEN_CAPTURE_BLOCK) or {}
         correlation_active = bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)) or (
             isinstance(token_capture_block, Mapping) and bool(token_capture_block.get("enabled", False))
         )
@@ -334,7 +334,7 @@ class SwitchyardModel(SimpleResponsesAPIModel):
             return
         message = (
             "switchyard_model: forward_session_id is on, but neither observability_enabled nor "
-            "token_id_capture is -- so requests carry no /ng-rollout prefix, and no session id "
+            "token_capture is -- so requests carry no /ng-rollout prefix, and no session id "
             "will reach Switchyard. Enable ++observability_enabled=true (or token capture) to "
             "correlate rollouts, or set forward_session_id=false to accept uncorrelated routing."
         )

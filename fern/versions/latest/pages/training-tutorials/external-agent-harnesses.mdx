@@ -66,12 +66,14 @@ Replace the example values with the sampling settings used by the trainer. If th
 Add the run-wide capture settings:
 
 ```yaml
-token_id_capture:
+token_capture:
   enabled: true
-  dir: /tmp/nemo_gym_token_id_captures
+  dir: /tmp/nemo_gym_token_captures
   delta_records: true
   max_mask_fraction: 0.5
 ```
+
+Before nemo_gym 0.8.0 these keys were named `token_id_capture`, and the default directory was `/tmp/nemo_gym_token_id_captures`. The old key names still work until 0.10.0: Gym rewrites them to the new names when it loads the config and logs a warning. A writer and a consumer on different Gym versions that rely on the default directory should set `dir` explicitly.
 
 `delta_records: true` avoids storing the growing full prompt again for every resolved continuation. Root and unresolved calls remain self-contained so Gym can diagnose a broken chain.
 
@@ -79,7 +81,7 @@ token_id_capture:
 
 `mask_incomplete_when_attributed` (default `true`) decides what happens when a model call registered its capture intent but never committed a record, which is what a harness killed at its timeout leaves behind. By default such an incomplete capture always sets `mask_sample: true`. Set it to `false` to keep the rollout when terminal attribution delivered the verifier-scored chain whole: a call with no record cannot sit inside a delivered chain, so the uncaptured call lies outside the scored trajectory. Without a delivered attribution the rollout is still masked.
 
-A call the engine refuses because the prompt does not fit the context window is not a lost call. When the vLLM model server propagates the refusal (`propagate_context_overflow_errors: true`), it records the refusal in place of a token record, so the rollout is not incomplete and the harness can compact its history and continue. The record names the call the refused request continued (its request-time lineage, resolved before dispatch like a served call's). A context-window refusal of the request that continued the delivered terminal call marks the rebuilt response `incomplete` with reason `max_output_tokens`; a refusal on another branch of the rollout, one the harness recovered from, or one that named only an output-token parameter (no `code`) does not. `_ng_token_capture.engine_refusals` lists every refused call either way. Under worker custody (`external_staging: true`) the refusal is a capture-ledger failure row that carries the call id and the reason `engine_refused_request` only. A framework that assembles receipts from the ledger must treat the reasons in `nemo_gym.token_id_capture.UNSERVED_CALL_FAILURE_REASONS` as off-chain rather than as poisoning (NeMo RL's receipt builder does, through NVIDIA-NeMo/RL#4749); a rollout rebuilt from staged records is then not masked for the refusal but reports no truncation verdict either. NVIDIA-NeMo/Gym#4647 tracks carrying the code and the lineage on that row.
+A call the engine refuses because the prompt does not fit the context window is not a lost call. When the vLLM model server propagates the refusal (`propagate_context_overflow_errors: true`), it records the refusal in place of a token record, so the rollout is not incomplete and the harness can compact its history and continue. The record names the call the refused request continued (its request-time lineage, resolved before dispatch like a served call's). A context-window refusal of the request that continued the delivered terminal call marks the rebuilt response `incomplete` with reason `max_output_tokens`; a refusal on another branch of the rollout, one the harness recovered from, or one that named only an output-token parameter (no `code`) does not. `_ng_token_capture.engine_refusals` lists every refused call either way. Under worker custody (`external_staging: true`) the refusal is a capture-ledger failure row that carries the call id and the reason `engine_refused_request` only. A framework that assembles receipts from the ledger must treat the reasons in `nemo_gym.models.token_capture.UNSERVED_CALL_FAILURE_REASONS` as off-chain rather than as poisoning (NeMo RL's receipt builder does, through NVIDIA-NeMo/RL#4749); a rollout rebuilt from staged records is then not masked for the refusal but reports no truncation verdict either. NVIDIA-NeMo/Gym#4647 tracks carrying the code and the lineage on that row.
 
 ### 3. Opt in the external agent
 
@@ -89,10 +91,10 @@ Enable capture on each external harness that returns no token ids:
 claude_code_agent:
   responses_api_agents:
     claude_code_agent:
-      token_id_capture: true
+      token_capture: true
 ```
 
-Both the run-wide `enabled` setting and the agent opt-in are required. To capture every configured agent, set `token_id_capture.all_agents: true` instead of setting the flag on each agent.
+Both the run-wide `enabled` setting and the agent opt-in are required. To capture every configured agent, set `token_capture.all_agents: true` instead of setting the flag on each agent.
 
 Some harnesses probe optional model-server endpoints such as `/v1/models`. Gym does not need to implement or predict these endpoints, and no per-harness route configuration is required. An unimplemented request that returns 404 or 405 cannot contribute policy-generated text and does not make capture incomplete. Any other response from an unrecognized route fails closed because its content could enter a later prompt; the rollout is marked with `mask_sample: true`.
 
@@ -101,7 +103,7 @@ If a custom model server implements a successful metadata, health, or tokenizati
 ```yaml
 responses_api_models:
   custom_model:
-    token_id_capture_non_generating_requests:
+    token_capture_non_generating_requests:
       - method: GET
         path: /custom/metadata
 ```
@@ -109,7 +111,7 @@ responses_api_models:
 Declarations belong to the model server because the server owns the route and its response semantics. Gym rejects wildcards, query strings, non-string methods, and paths without a leading slash. Do not declare title generation, summarization, compaction, or another endpoint that can return policy-generated text. Unknown redirects, server errors, exceptions, and requests that finish without starting a response all mark the rollout incomplete.
 
 <Note>
-Native Gym agents normally leave `token_id_capture` disabled because their responses already contain the token ids needed for training.
+Native Gym agents normally leave `token_capture` disabled because their responses already contain the token ids needed for training.
 </Note>
 
 ### 4. Enable tool calling in the inference server
@@ -147,7 +149,7 @@ Gym links each model call to its rollout through the URL path. A training-captur
 
 For example, a harness that calls a chat-completions endpoint for rollout `3-0` sends its request to `http://<model-server>/ng-rollout/3-0/training-token-capture/v1/chat/completions`. The model server removes the prefix before routing the request. It records the call's token ids under rollout `3-0`.
 
-The built-in external agents, such as Claude Code, add this prefix when `token_id_capture` is enabled for them and they call a Gym model server. A custom harness must add it to every model call. Without the `training-token-capture` segment, the call is not recorded for training, and Gym masks the rollout because it finds no captured calls.
+The built-in external agents, such as Claude Code, add this prefix when `token_capture` is enabled for them and they call a Gym model server. A custom harness must add it to every model call. Without the `training-token-capture` segment, the call is not recorded for training, and Gym masks the rollout because it finds no captured calls.
 
 Agents based on `SimpleResponsesAPIAgent` can build the prefixed URL with `base_url_for_run(base_url, body)` or `url_path_for_run(url_path, body)`. While the agent exports traces, `base_url_for_run` also appends `/ng-trace/<traceparent>` after the prefix so the model server can parent the harness's calls to the run's span; the model server strips it, and a harness that inspects the URL should keep it (see [Distributed Tracing](/main/observability/distributed-tracing#trace-context-in-the-model-url)). The built-in agents known to rewrite the model URL, `harness_agent` (replaces a loopback host) and `vibench_agent` (replaces the host and keeps the path), keep every path segment; the OpenHands capture overlay only appends to the base URL. Both helpers read the rollout id from the run request and add the training segment when the agent has opted into capture. [Model-Call Capture](/main/model-server/model-call-capture#if-you-build-a-custom-agent) describes the same URL prefix for evaluation capture, along with the other routing helpers.
 
@@ -179,15 +181,15 @@ policy_model:
         top_p: 1.0
         top_k: -1
 
-token_id_capture:
+token_capture:
   enabled: true
-  dir: /tmp/nemo_gym_token_id_captures
+  dir: /tmp/nemo_gym_token_captures
   delta_records: true
 
 reasoning_gym_claude_code_agent_model_server:
   responses_api_agents:
     claude_code_agent:
-      token_id_capture: true
+      token_capture: true
 ```
 
 The last block opts in the Claude Code agent that this environment defines. That agent sends its model calls through the Gym model server named `policy_model`, which capture requires. A Claude Code agent that calls an external `anthropic_base_url` directly bypasses the Gym model server, so its calls are never captured.
@@ -295,7 +297,7 @@ The default file store is intended for a model server and rollout collector that
 Configure a sink and lineage resolver that connect to the same backend. In this example, `my_package.capture` stands for the framework's own module:
 
 ```yaml
-token_id_capture:
+token_capture:
   enabled: true
   sink: my_package.capture:CaptureSink
   sink_kwargs:
@@ -307,7 +309,7 @@ token_id_capture:
   rebuild_response: false
 ```
 
-The sink receives completed call records from each model-server worker. The lineage resolver lets any worker find a previously committed call from the same rollout. The framework creates a source in its rollout-consumer or trainer process to freeze and read the same records. The source implements the `TokenSource` protocol from `nemo_gym.token_id_capture.protocols`.
+The sink receives completed call records from each model-server worker. The lineage resolver lets any worker find a previously committed call from the same rollout. The framework creates a source in its rollout-consumer or trainer process to freeze and read the same records. The source implements the `TokenSource` protocol from `nemo_gym.models.token_capture.protocols`.
 
 <Warning>
 Configure sink and lineage classes by import path so Gym constructs them inside every model-server worker. Installing an object only in the launcher process does not configure separately spawned workers.
@@ -327,11 +329,11 @@ The following function performs these steps for one result. The framework suppli
 from collections.abc import Awaitable, Callable
 
 from nemo_gym.core import maybe_rollout_id_from_run_body
-from nemo_gym.token_id_capture.delivery import (
+from nemo_gym.models.token_capture.delivery import (
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
-from nemo_gym.token_id_capture.protocols import TokenSource
+from nemo_gym.models import TokenSource
 
 
 async def deliver_rollout(
@@ -363,14 +365,14 @@ Exclude any result with `mask_sample: true` from the loss. Call `retire_rollout_
 
 ### Check a custom transport
 
-Run `run_conformance` from `nemo_gym.token_id_capture.conformance` before using a custom transport for training. It takes factories rather than instances, because several checks need a fresh client. Each factory call must return a new client connected to the backend. The function is async, returns the names of the checks that passed, and raises `ConformanceError` on the first failure:
+Run `run_conformance` from `nemo_gym.models.token_capture.conformance` before using a custom transport for training. It takes factories rather than instances, because several checks need a fresh client. Each factory call must return a new client connected to the backend. The function is async, returns the names of the checks that passed, and raises `ConformanceError` on the first failure:
 
 ```python
 import asyncio
 import os
 
 from my_package.capture import CaptureLineageStore, CaptureSink, CaptureSource
-from nemo_gym.token_id_capture.conformance import run_conformance
+from nemo_gym.models import run_conformance
 
 
 async def main() -> None:
@@ -393,7 +395,7 @@ A sink that implements `begin_call` but not the optional `record_engine_refusal`
 ## Let the framework own context reconstruction
 
 For compaction-aware training with a compatible framework worker, enable
-`token_id_capture.parent_resolution: source_history` together with `external_staging: true`,
+`token_capture.parent_resolution: source_history` together with `external_staging: true`,
 `external_staging_backend: vllm_worker`, and `rebuild_response: false`.
 See [Source-history continuity and context compaction](/main/model-server/model-call-capture#source-history-continuity-and-context-compaction)
 for configuration prerequisites, supported APIs, measurement, and admission closure.

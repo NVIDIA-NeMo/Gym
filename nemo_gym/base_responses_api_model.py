@@ -47,10 +47,8 @@ from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.responses_api_types import (
@@ -75,8 +73,10 @@ from nemo_gym.models._checkpoint_workers import (
     PolicyWorkerLink,
     coordinator_socket_path,
 )
-from nemo_gym.responses_converter import CustomToolStrategy
-from nemo_gym.responses_streaming import (
+from nemo_gym.models.anthropic_converter import AnthropicConverter
+from nemo_gym.models.chat_completions_converter import CustomToolStrategy
+from nemo_gym.models.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.models.responses_streaming import (
     NamespaceMap,
     is_responses_lifecycle_chunk,
     restore_namespace_tool_calls,
@@ -86,13 +86,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
-from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
-from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
-from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
-from nemo_gym.telemetry.endpoints import traced_endpoint
-from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.token_capture import (
     CaptureContext,
     capture_tokens,
     current_capture_context,
@@ -106,18 +100,24 @@ from nemo_gym.token_id_capture import (
 
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
-from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
-from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
-from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_capture_config
+from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
+from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
     CaptureLedger,
     LineageResolver,
     ParentResolutionMode,
 )
-from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.models.token_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.store import make_token_store
+from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.telemetry.endpoints import traced_endpoint
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
@@ -288,7 +288,13 @@ class ModelCheckpointConfig(BaseModel):
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
-    token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
+    # Also read under its old name for configs built without the config loader.
+    token_capture_non_generating_requests: list[NonGeneratingRequest] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices(
+            "token_capture_non_generating_requests", "token_id_capture_non_generating_requests"
+        ),
+    )
     drop_hosted_tools: bool = Field(
         default=False,
         description=(
@@ -430,7 +436,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             non_generating_requests=self.non_generating_model_routes
             | {("POST", "/v1/embeddings")}
             | frozenset(
-                (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
+                (request.method, request.path) for request in self.config.token_capture_non_generating_requests
             ),
         )
 
@@ -469,10 +475,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             reject_ungated_ledger_writers(global_config_dict)
         if settings is None or not self.config.checkpoint.policy:
             return
-        capture_settings = token_id_capture_config(global_config_dict)
+        capture_settings = token_capture_config(global_config_dict)
         if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
             raise ValueError(
-                "checkpoint.policy with token_id_capture requires external_staging: only the token-free "
+                "checkpoint.policy with token_capture requires external_staging: only the token-free "
                 "capture ledger is checkpointed, and the training framework owns the staged tokens"
             )
         if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
@@ -480,9 +486,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         cut_requester = None
         if self.config.checkpoint.generation_cuts:
             if capture_ledger is None:
-                raise ValueError("checkpoint.generation_cuts requires token_id_capture with external_staging")
+                raise ValueError("checkpoint.generation_cuts requires token_capture with external_staging")
             cut_requester = generation_cut_requester(
-                capture_settings.token_id_capture.resolve_control_auth_token(),
+                capture_settings.token_capture.resolve_control_auth_token(),
                 control_root=self.generation_cut_control_root,
             )
         num_workers = self.config.num_workers or 1
@@ -574,7 +580,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ``responses()``, preserving the historical non-streaming behavior. When the client
         requests ``stream: true`` (blackbox Responses-over-SSE harnesses like the Codex CLI
         always do), the request is first sanitized from the streaming wire dialect (extra
-        bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.responses_streaming``),
+        bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.models.responses_streaming``),
         delegated to the same ``responses()``, and the complete response is re-emitted as a
         synthesized Responses SSE event stream. Upstream HTTP errors and ``HTTPException``
         retain their status before the stream starts. Other ``responses()`` failures become terminal
@@ -737,7 +743,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         standard 422 shape). When the client sends ``stream: true`` (blackbox
         Chat-Completions-over-SSE harnesses like the OpenClaw agent always do), the request is
         sanitized onto that same strict model (drop ``stream``/``stream_options``; see
-        ``nemo_gym.chat_streaming``), validated identically, delegated to the same
+        ``nemo_gym.models.chat_streaming``), validated identically, delegated to the same
         ``chat_completions()``, and the complete response is buffered and re-emitted as a
         synthesized ``chat.completion.chunk`` SSE stream. Keepalive comments maintain the
         connection while the backend computes; model output is still buffer-then-replay.
@@ -1608,7 +1614,7 @@ class _CaptureMiddleware:
         )
         # This store records training tokens for correlated training-capture calls.
         self._token_store = token_store
-        # Built from token_id_capture.sink, once, in this process.
+        # Built from token_capture.sink, once, in this process.
         self._configured_sink = configured_sink
         self._lineage_store: LineageResolver | None = lineage_store
         self._delta_records = delta_records
@@ -1998,7 +2004,7 @@ def install_model_call_capture(
     The model server records token ids from its complete response.
     Consumers access records through ``TokenSource.freeze``.
     """
-    capture_settings = token_id_capture_config(global_config_dict) if global_config_dict is not None else None
+    capture_settings = token_capture_config(global_config_dict) if global_config_dict is not None else None
     token_store = make_token_store(global_config_dict) if global_config_dict is not None else None
     # Build this sink at app startup.
     # Each uvicorn worker constructs its own sink.
@@ -2013,33 +2019,33 @@ def install_model_call_capture(
     if capture_settings is not None and capture_settings.enabled and (num_workers or 1) > 1:
         if lineage_store is None or not lineage_store.is_process_shared():
             raise ValueError(
-                "token_id_capture with num_workers > 1 requires a process-shared lineage resolver "
+                "token_capture with num_workers > 1 requires a process-shared lineage resolver "
                 "over the same backend used by the token sink"
             )
-    external_staging = capture_settings is not None and capture_settings.token_id_capture.external_staging
+    external_staging = capture_settings is not None and capture_settings.token_capture.external_staging
     if external_staging:
         if lineage_store is None:
             raise ValueError(
-                "token_id_capture.external_staging requires a lineage resolver that implements CaptureLedger"
+                "token_capture.external_staging requires a lineage resolver that implements CaptureLedger"
             )
         if isinstance(lineage_store, InMemoryLineageStore):
             # The in-memory index evicts rollouts under memory bounds, which is
             # acceptable for a resolution cache but not for a completeness
             # ledger. External staging requires a non-evicting store.
             raise ValueError(
-                "token_id_capture.external_staging requires a non-evicting lineage store "
+                "token_capture.external_staging requires a non-evicting lineage store "
                 "(e.g. FileLineageStore); InMemoryLineageStore cannot serve as the capture ledger"
             )
         if not isinstance(lineage_store, CaptureLedger):
             raise ValueError(
-                "token_id_capture.external_staging requires the lineage store to implement "
+                "token_capture.external_staging requires the lineage store to implement "
                 "the CaptureLedger protocol (record, record_failure, manifest, has_rows, retire, delete)"
             )
         capture_ledger: CaptureLedger = lineage_store
         install_rollout_control_routes(
             app,
             capture_ledger,
-            auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
+            auth_token=capture_settings.token_capture.resolve_control_auth_token(),
             refuse_removal=lambda: ledger_removal_refusal(app),
         )
 
@@ -2073,10 +2079,10 @@ def install_model_call_capture(
         token_store=token_store,
         configured_sink=configured_sink,
         lineage_store=lineage_store,
-        delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
+        delta_records=(capture_settings.token_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
         parent_resolution_mode=(
-            capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
+            capture_settings.token_capture.parent_resolution if capture_settings is not None else "fingerprint"
         ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
@@ -2091,6 +2097,7 @@ from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 __getattr__ = moved_attr_getter(
     __name__,
     {
+        "token_id_capture_config": "nemo_gym.models.token_capture.config:token_capture_config",
         **dict.fromkeys(
             (
                 "_token_count",

@@ -33,7 +33,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     ReasoningEffort,
 )
-from nemo_gym.openai_utils import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
+from nemo_gym.models import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
 
 
 LOG = logging.getLogger(__name__)

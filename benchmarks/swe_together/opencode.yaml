@@ -57,7 +57,7 @@ swe_together_candidate:
           prepare_script: benchmarks/swe_together/prepare.py
           num_repeats: 2
           license: Apache-2.0
-      token_id_capture: false
+      token_capture: false
       model: ${policy_model_name}
       opencode_version: 1.15.13
       sandbox_model_id: ${policy_model_name}
