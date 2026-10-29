@@ -1866,3 +1866,32 @@ async def test_each_boundary_records_the_budget_spent_without_parked_time() -> N
     assert recorded[0] < 0.1
     assert all(later >= earlier for earlier, later in zip(recorded, recorded[1:]))
     assert 0.15 < recorded[1] < 5
+
+
+@pytest.mark.parametrize("policy", [None, "before_agent_close"])
+async def test_an_episode_whose_resources_fork_cannot_outlive_the_agent_restarts_once_the_agent_closed(
+    policy: str | None,
+) -> None:
+    from nemo_gym._checkpoint.environment import EnvironmentParticipant
+
+    environment, client = _environment_server()
+    participant = EnvironmentParticipant(mode="exported")
+    environment._checkpoint = participant
+    headers = {"x-ng-checkpoint-restore-policy": policy} if policy else {}
+    client.responses[0] = _Response({"resources_session_id": "resources-session"}, headers)
+    restarts: list[list[str]] = []
+    mark_restart = participant.mark_restart
+
+    async def recording(episode_id: EpisodeId) -> None:
+        restarts.append([path for _, path, _ in client.calls])
+        await mark_restart(episode_id)
+
+    participant.mark_restart = recording
+    episode = await environment.run_request(_request())
+
+    assert episode.result is not None
+    # Marked inside the agent close step, so no checkpoint records the episode past the agent's close.
+    expected = [
+        ["/seed_session", "/v1/agent_sessions", "/ng-rollout/rollout-a2/v1/responses", "/v1/agent_sessions/close"]
+    ]
+    assert restarts == (expected if policy else [])

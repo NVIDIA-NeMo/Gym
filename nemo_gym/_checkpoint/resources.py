@@ -80,6 +80,7 @@ from nemo_gym._checkpoint.errors import (
 from nemo_gym._checkpoint.steps import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     CHECKPOINT_RESTART_HEADER,
+    CHECKPOINT_RESTORE_POLICY_HEADER,
     CHECKPOINT_VERIFY_HEADER,
     StepType,
 )
@@ -158,10 +159,13 @@ class ResourcesParticipant(CheckpointParticipant):
         self.hooks = hooks
         self.mode = mode
         self.verify_step_type = verify_step_type
-        # Requests the checkpoint does not wait for:
-        # a verification the server declared replayable does not change checkpointed state.
+        # Requests the checkpoint does not wait for: repeating a verification the server declared replayable
+        # yields the same result from either the state before it captured what it grades or the state after.
         # A seed is waited for, so the session matches the environment's boundary.
         self.replayable_paths = {"/verify"} if verify_step_type == "replay" else set()
+        # "before_agent_close" when a fork of the session's state cannot continue an episode once its agent closed,
+        # such as a grader that needs the agent's running processes; the seed reply says so.
+        self.restore_policy = "any_step"
         self.accepting = True
         self._open = asyncio.Event()
         self._open.set()
@@ -264,6 +268,13 @@ class ResourcesParticipant(CheckpointParticipant):
         except StaleAttemptError:
             return True
         return False
+
+    def restored_episode(self, session_id: str) -> Optional[EpisodeId]:
+        """The attempt a restored session continues, until the session ends; ``None`` for any other session.
+
+        The replacement attempt's seed of the session gets the restored state, without setting the task up again.
+        """
+        return self._sessions.get(session_id) if session_id in self._restored_sessions else None
 
     def ended(self, session_id: str) -> None:
         self._unbind(session_id)
@@ -715,6 +726,10 @@ class ResourcesCheckpointMiddleware:
                     headers = [(CHECKPOINT_VERIFY_HEADER.encode(), self.participant.verify_step_type.encode())]
                     if self.participant.mode == "restart_only":
                         headers.append((CHECKPOINT_RESTART_HEADER.encode(), b"1"))
+                    elif self.participant.restore_policy != "any_step":
+                        headers.append(
+                            (CHECKPOINT_RESTORE_POLICY_HEADER.encode(), self.participant.restore_policy.encode())
+                        )
                     message = {**message, "headers": [*message.get("headers", []), *headers]}
                 apply_session_change(message["status"])
             await send(message)

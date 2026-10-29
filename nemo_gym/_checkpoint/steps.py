@@ -85,6 +85,17 @@ def seed_rebinds_tools(headers: Optional[Mapping[str, str]]) -> bool:
     return (headers or {}).get(CHECKPOINT_REBINDS_TOOLS_HEADER) == "1"
 
 
+# A resources server whose state a restore can continue only until the episode's agent closed,
+# such as one whose grader needs processes the agent started, says so on its seed reply.
+# The caller then makes the episode a restart once its agent has closed.
+CHECKPOINT_RESTORE_POLICY_HEADER = "x-ng-checkpoint-restore-policy"
+
+
+def seed_restores_before_agent_close(headers: Optional[Mapping[str, str]]) -> bool:
+    """Whether a resources seed reply says a restore can continue the session only before its agent closed."""
+    return (headers or {}).get(CHECKPOINT_RESTORE_POLICY_HEADER) == "before_agent_close"
+
+
 def seed_restarts(headers: Optional[Mapping[str, str]]) -> bool:
     """Whether a seed reply says its session cannot be captured, so its episode must start over after a crash."""
     return (headers or {}).get(CHECKPOINT_RESTART_HEADER) == "1"
@@ -196,8 +207,12 @@ class EpisodeSteps:
         self._blocking += _blocks(episode)
 
     async def mark_restart(self, key: str) -> None:
-        """Make this episode a restart from now on, once no checkpoint is open; see the module docstring."""
-        while self.closed:
+        """Make this episode a restart from now on, once no checkpoint is open; see the module docstring.
+
+        An episode a checkpoint is still waiting for becomes a restart at once:
+        the checkpoint cannot have counted it yet, and waiting for resume would hold that checkpoint up.
+        """
+        while self.closed and not self._blocks_checkpoint(key):
             await self._open.wait()
         episode = self._episodes.get(key)
         if episode is None:
@@ -206,6 +221,10 @@ class EpisodeSteps:
         episode.restart = True
         self._blocking += _blocks(episode) - blocked
         await self._changed()
+
+    def _blocks_checkpoint(self, key: str) -> bool:
+        episode = self._episodes.get(key)
+        return episode is not None and _blocks(episode) and not episode.retired
 
     def continuation(self, key: str) -> Optional[Boundary]:
         """Return the restored boundary this episode continues from, once."""
