@@ -32,14 +32,23 @@ STREAM_LIMIT = 64 * 1024 * 1024
 
 
 class _WorkerProcess:
-    def __init__(self, python: str, upstream_src: str, env: dict[str, str], max_sessions: int) -> None:
+    def __init__(
+        self,
+        python: str,
+        upstream_src: str,
+        env: dict[str, str],
+        max_sessions: int,
+        worker_script: Path = WORKER_SCRIPT,
+        worker_args: tuple[str, ...] = (),
+    ) -> None:
         self._cmd = [
             python,
-            str(WORKER_SCRIPT),
+            str(worker_script),
             "--upstream-src",
             upstream_src,
             "--max-sessions",
             str(max_sessions),
+            *worker_args,
         ]
         self._env = env
         self._proc: asyncio.subprocess.Process | None = None
@@ -100,6 +109,8 @@ class UpstreamToolPool:
         num_workers: int,
         tool_timeout_s: float,
         max_sessions_per_worker: int,
+        worker_script: Path = WORKER_SCRIPT,
+        worker_args: tuple[str, ...] = (),
     ) -> None:
         for label, path in (("stat_data_path", stat_data_path), ("geo_data_path", geo_data_path)):
             if not Path(path).is_dir():
@@ -117,7 +128,8 @@ class UpstreamToolPool:
         }
         self._timeout = tool_timeout_s
         self._workers = [
-            _WorkerProcess(python, upstream_src, env, max_sessions_per_worker) for _ in range(num_workers)
+            _WorkerProcess(python, upstream_src, env, max_sessions_per_worker, worker_script, worker_args)
+            for _ in range(num_workers)
         ]
 
     def _worker(self, session_id: str) -> _WorkerProcess:
