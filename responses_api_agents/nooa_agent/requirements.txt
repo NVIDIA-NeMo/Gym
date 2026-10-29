@@ -7,3 +7,5 @@ nooa-cli @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/bbed2039c690ead
 nooa-bench @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/bbed2039c690ead85fedd480b3c8e73917901e40.tar.gz#subdirectory=packages/nooa-bench
 # Atom, the orchestrating NOOA agent (nooa_atom.gym:AtomHarness), same revision.
 nooa-atom @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/bbed2039c690ead85fedd480b3c8e73917901e40.tar.gz#subdirectory=packages/nooa-atom
+# Static ripgrep as the `rg` script for the agent's shells (also a nooa-atom dependency from labs-OO-Agents #509).
+ripgrep-bin>=15.2.0
