@@ -277,8 +277,9 @@ class SandboxPythonRuntime:
     def python(self) -> str:
         """The runtime's interpreter in the sandbox, once ``is_installed()`` passes or ``install()`` returns.
 
-        Run it with ``-s``: unlike a virtual environment's interpreter, it would otherwise import from the user
-        site-packages under the task's ``HOME``.
+        Run an absolute harness script with ``-E -s``: ignore the task's Python environment settings and user
+        site-packages without changing the environment inherited by tool subprocesses. The script directory
+        must belong to the harness, so task files cannot shadow its imports.
         """
         return f"{self.directory}/python/bin/python3"
 

@@ -45,7 +45,10 @@ _HERMES_RUNTIME = SandboxPythonRuntime(
     harness="hermes",
     # The pinned Hermes client requires the MCP 1 Streamable HTTP API.
     requirements=(_sandbox_hermes_requirement(), "mcp>=1.28.1,<2"),
-    import_check="import run_agent; from mcp.client.streamable_http import streamablehttp_client",
+    import_check=(
+        "import os; os.environ['HERMES_HOME'] = os.path.join(os.environ['HOME'], '.hermes'); "
+        "import run_agent; from mcp.client.streamable_http import streamablehttp_client"
+    ),
 )
 _SANDBOX_RUNTIME_DIR = _HERMES_RUNTIME.directory
 _SANDBOX_PYTHON = _HERMES_RUNTIME.python
@@ -147,7 +150,8 @@ class HermesSandboxSession(AgentSessionState):
         return SandboxCommand(
             argv=[
                 _SANDBOX_PYTHON,
-                # The task's user site-packages stay out of the harness, as they did in its virtual environment.
+                # Ignore task Python settings without changing the environment inherited by tool subprocesses.
+                "-E",
                 "-s",
                 _SANDBOX_RUNNER,
                 f"{self.session.session_dir}/input.json",
