@@ -9,8 +9,8 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.data.dataset_preparation import TrainDataProcessor
 from nemo_gym.rollout_collection import RolloutCollectionHelper
-from nemo_gym.train_data_utils import TrainDataProcessor
 
 
 def test_readme_collation_produces_rows_routable_by_the_documented_runtime(tmp_path: Path) -> None:

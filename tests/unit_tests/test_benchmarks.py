@@ -1076,8 +1076,8 @@ class TestMaterializedTasksetBenchmark:
         import json
 
         from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.data.dataset_preparation import TrainDataProcessor
         from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-        from nemo_gym.train_data_utils import TrainDataProcessor
 
         benchmark = BenchmarkConfig.from_initial_config_dict(
             path=tmp_path / "config.yaml",
@@ -1119,7 +1119,7 @@ class TestMaterializedTasksetBenchmark:
     )
     def test_collation_rejects_conflicting_route_before_writing(self, config, tmp_path, conflict, message):
         from nemo_gym.config.config_types import ConfigError
-        from nemo_gym.train_data_utils import TrainDataProcessor
+        from nemo_gym.data.dataset_preparation import TrainDataProcessor
 
         source = tmp_path / "source.jsonl"
         source.write_text('{"responses_create_params": {"input": "fix it"}}\n')
@@ -1262,8 +1262,8 @@ class TestMaterializedTasksetBenchmark:
     def test_collation_routes_a_multi_agent_taskset_of_any_type(self, multi_agent_config, tmp_path, dataset_type):
         import json
 
+        from nemo_gym.data.dataset_preparation import TrainDataProcessor
         from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-        from nemo_gym.train_data_utils import TrainDataProcessor
 
         source = tmp_path / "source.jsonl"
         rows = [{"instance_id": f"task-{index}", "answer": "expected"} for index in range(5)]
@@ -1311,8 +1311,8 @@ class TestAgentPinDiscoveryCollateRollout:
 
         from nemo_gym.benchmarks import BenchmarkConfig
         from nemo_gym.config.config_types import maybe_get_server_instance_config
+        from nemo_gym.data.dataset_preparation import TrainDataProcessor
         from nemo_gym.rollout_collection import RolloutCollectionHelper
-        from nemo_gym.train_data_utils import TrainDataProcessor
 
         data_fpath = tmp_path / "bench.jsonl"
         data_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")

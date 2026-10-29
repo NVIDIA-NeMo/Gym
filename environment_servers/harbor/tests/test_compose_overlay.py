@@ -30,11 +30,10 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.tests.test_app import COMPOSE_TOML, StubProvider
 from environment_servers.harbor.tests.test_multi_turn import MCP_TOML, THREE_STEPS, multi_turn_server
-from nemo_gym.tasks.harbor.compose_overlay import HarborComposeOverlay
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION, OverlayWorkdir
-from nemo_gym.tasks.harbor.image_configs import load_compose_document, record_compose_images
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.data import RECORD_VERSION, HarborComposeOverlay, load_compose_document, load_task
+from nemo_gym.data.tasks.harbor.dockerfile import OverlayWorkdir
+from nemo_gym.data.tasks.harbor.image_configs import record_compose_images
+from nemo_gym.data.tasks.harbor.materialize import materialize_task
 
 
 # A memory stack the way the memory team ships one: a standalone file with host ports and a global network name,

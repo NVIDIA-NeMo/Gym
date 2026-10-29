@@ -4,7 +4,7 @@
 import json
 from pathlib import Path
 
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.data.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, _row_digest, _validate_resolved_row
 from resources_servers.nemo_user_sim.task_data import TaskData
 

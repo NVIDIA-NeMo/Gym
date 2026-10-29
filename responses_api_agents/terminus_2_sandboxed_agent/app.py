@@ -51,10 +51,10 @@ from nemo_gym.core import (
     NeMoGymSummary,
     TaskId,
 )
+from nemo_gym.data import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.models import NeMoGymAsyncOpenAI
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,

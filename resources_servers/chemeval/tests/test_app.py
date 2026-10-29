@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
+from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.chemeval.app import (
     ChemEvalResourcesServer,

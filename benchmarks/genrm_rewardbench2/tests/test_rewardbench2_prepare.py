@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from benchmarks.genrm_rewardbench2.prepare import COLUMNS, PARQUET_FPATH, REVISION, convert_rows, prepare
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
 
 
 GENRM_EVAL_DIR = Path(__file__).resolve().parents[3] / "resources_servers" / "genrm_eval"

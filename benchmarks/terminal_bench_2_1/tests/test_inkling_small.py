@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_2_1 import prepare_inkling_small as preparation
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.data.task_materialization import materialize_task
 
 
 def git(path: Path, *args: str) -> str:

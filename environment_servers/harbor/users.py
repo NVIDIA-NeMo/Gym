@@ -20,8 +20,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from nemo_gym.data import HarborTask
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.tasks.harbor import HarborTask
 
 
 LOGGER = logging.getLogger(__name__)

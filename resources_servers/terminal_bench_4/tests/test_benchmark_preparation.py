@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_4 import prepare as preparation
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]

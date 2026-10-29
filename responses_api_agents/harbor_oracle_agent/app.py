@@ -77,7 +77,7 @@ ANSWER_FILE = f"{SOLUTION_DIR}/answer.md"
 ANSWER_READ_COMMAND = f"base64 {ANSWER_FILE}"
 # How the oracle leaves the answer in the working directory: a copy of the file inside the sandbox, run as the task
 # user in the session's working directory, so the file is the answer byte for byte whatever its size. The published
-# solve.sh writes the same file with `printf` (`nemo_gym.tasks.harbor.publish.answer_write_command`), which is fine
+# solve.sh writes the same file with `printf` (`nemo_gym.data.tasks.harbor.publish.answer_write_command`), which is fine
 # in a script bash reads from a file; an exec's command, though, is one argument to the provider's shell (the Docker
 # provider runs `docker exec ... sh -c <command>`), and Linux caps a single argument at MAX_ARG_STRLEN (128 KiB on
 # 4 KiB pages), so a command carrying a long answer fails with E2BIG before anything is written.

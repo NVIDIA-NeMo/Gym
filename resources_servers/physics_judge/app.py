@@ -22,7 +22,7 @@ tokens.
 Four overrides versus the parent:
 
   1. Judge prompt is loaded from a YAML file via Gym's prompt system
-     (``nemo_gym.prompt.load_prompt_config``). The default points at the
+     (``nemo_gym.data.prompt.load_prompt_config``). The default points at the
      bundled physics judge (byte-identical to NeMo Skills'
      ``judge/physics.yaml``); override ``judge_prompt_path`` in the server
      config to use a different judge prompt.
@@ -52,8 +52,8 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
 )
+from nemo_gym.data import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.metrics import compute_subset_metrics
-from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.verification import call_judge
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,

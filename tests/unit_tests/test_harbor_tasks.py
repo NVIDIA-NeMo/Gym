@@ -14,14 +14,14 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 
-import nemo_gym.tasks.harbor.build_options as build_options
-import nemo_gym.tasks.harbor.hub as hub_module
-import nemo_gym.tasks.harbor.manifest as manifest_module
-import nemo_gym.tasks.harbor.materialize as materialize_module
-import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
-from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
-from nemo_gym.tasks.harbor.cli import (
+import nemo_gym.data.tasks.harbor.build_options as build_options
+import nemo_gym.data.tasks.harbor.hub as hub_module
+import nemo_gym.data.tasks.harbor.manifest as manifest_module
+import nemo_gym.data.tasks.harbor.materialize as materialize_module
+import nemo_gym.data.tasks.harbor.prepare_builds as prepare_builds
+from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.data.tasks.harbor import DIGEST_KEY, HarborTaskConfig, content_hash, discover_tasks, load_task
+from nemo_gym.data.tasks.harbor.cli import (
     AgentSelection,
     PreparedTaskset,
     build_run,
@@ -30,8 +30,8 @@ from nemo_gym.tasks.harbor.cli import (
     run_images,
     runs_in_sandbox,
 )
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.dockerfile import (
+from nemo_gym.data.tasks.harbor.digest import context_digest
+from nemo_gym.data.tasks.harbor.dockerfile import (
     DEFAULT_PATH,
     RECORD_VERSION,
     BaseImageConfig,
@@ -45,8 +45,8 @@ from nemo_gym.tasks.harbor.dockerfile import (
     resolve_dockerfile,
     split_words,
 )
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.hub import (
+from nemo_gym.data.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor.hub import (
     HubError,
     HubRef,
     RegistryDataset,
@@ -57,11 +57,17 @@ from nemo_gym.tasks.harbor.hub import (
     validate_git_url,
     validate_task_name,
 )
-from nemo_gym.tasks.harbor.materialize import TASK_SOURCE_KEY, dataset_entry, materialize_task, run_config, write_rows
-from nemo_gym.tasks.harbor.models import HarborTaskConfig
-from nemo_gym.tasks.harbor.package_store import PackageStoreError
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from nemo_gym.tasks.harbor.task import task_digest
+from nemo_gym.data.tasks.harbor.materialize import (
+    TASK_SOURCE_KEY,
+    dataset_entry,
+    materialize_task,
+    run_config,
+    write_rows,
+)
+from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
+from nemo_gym.data.tasks.harbor.package_store import PackageStoreError
+from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
+from nemo_gym.data.tasks.harbor.task import task_digest
 from tests.unit_tests.harbor_registry_fakes import IMAGE_PATH, FakeRegistryClient
 
 
@@ -456,7 +462,7 @@ class TestDigest:
     def test_archive_hash_is_the_published_hash_without_exclusions(self, tmp_path):
         import hashlib
 
-        from nemo_gym.tasks.harbor.digest import archive_hash
+        from nemo_gym.data.tasks.harbor.digest import archive_hash
 
         task = write_task(tmp_path / "t")
         (task / "notes.txt").write_text("not covered by either digest")
@@ -722,7 +728,7 @@ class TestLoadTask:
     def test_unknown_task_toml_key_is_warned_once_per_key(self, tmp_path, caplog):
         toml = HELLO_TOML.replace('schema_version = "1.4"', 'schema_version = "1.4"\nallowlist = ["pypi.org"]')
         toml = toml.replace("gpus = 0", "gpus = 0\nnew_harbor_key = true")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(write_task(tmp_path / "t", toml=toml))
         assert task.config.environment.gpus == 0
         messages = [record.getMessage() for record in caplog.records]
@@ -732,8 +738,8 @@ class TestLoadTask:
         assert any("`environment.new_harbor_key`" in message for message in messages)
 
     def test_built_image_record_gives_the_entrypoint_its_user_workdir_and_healthcheck(self, tmp_path):
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor.digest import context_digest
+        from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE
 
         folder = write_task(tmp_path / "t", dockerfile='FROM ubuntu\nCOPY . /app\nENTRYPOINT ["/entrypoint.sh"]\n')
         built = "registry.example/ds-t:abc"
@@ -766,8 +772,8 @@ class TestLoadTask:
         assert task.image_shell == ("/bin/bash", "-o", "pipefail", "-c")
 
     def test_built_image_without_a_record_or_entrypoint_has_none(self, tmp_path):
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor.digest import context_digest
+        from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE
 
         folder = write_task(tmp_path / "t", dockerfile="FROM ubuntu\nCOPY . /app\n")
         built = "registry.example/ds-t:abc"
@@ -834,9 +840,9 @@ class TestDiscovery:
         assert deep.config.agent.timeout_sec == 240.0
 
     def test_duplicate_task_ids_across_folders_are_rejected(self, tmp_path):
-        from nemo_gym.tasks.harbor.build_plan import plan_builds
-        from nemo_gym.tasks.harbor.image_configs import dockerfile_base_images
-        from nemo_gym.tasks.harbor.task import iter_task_folders
+        from nemo_gym.data.tasks.harbor.build_plan import plan_builds
+        from nemo_gym.data.tasks.harbor.image_configs import dockerfile_base_images
+        from nemo_gym.data.tasks.harbor.task import iter_task_folders
 
         write_task(tmp_path / "ds" / "a")
         write_task(tmp_path / "ds" / "nested" / "a")
@@ -854,7 +860,7 @@ class TestDiscovery:
         write_task(tmp_path / "ds" / "a")
         write_task(tmp_path / "ds" / "b", toml=HELLO_TOML + "\n[environment.allowlist]\nhosts = []\n")
         write_task(tmp_path / "ds" / "c")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             tasks = discover_tasks(tmp_path / "ds")
         assert [t.task_id for t in tasks] == ["a", "b", "c"]
         assert [r.getMessage() for r in caplog.records] == [
@@ -879,7 +885,7 @@ class TestDiscovery:
             discover_tasks(tmp_path / "ds", skipped={})
 
     def test_discovery_reads_the_shared_image_configurations_once(self, tmp_path, monkeypatch):
-        import nemo_gym.tasks.harbor.task as task_module
+        import nemo_gym.data.tasks.harbor.task as task_module
 
         for name in ("a", "b", "c"):
             write_task(tmp_path / name, dockerfile="FROM img\nRUN true\n")
@@ -1042,7 +1048,7 @@ class TestMultiStepTasks:
         shutil.copytree(MEMORY_ARENA_TASK, dataset / MEMORY_ARENA_TASK.name)
         # The overlay-mode Dockerfile (RUN lines on python:3.12-slim) needs the base image's recorded configuration.
         write_image_config(dataset, "python:3.12-slim", Env=[f"PATH={IMAGE_PATH}"], WorkingDir="")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(dataset / MEMORY_ARENA_TASK.name)
         assert "unknown key" not in caplog.text and "legacy key" not in caplog.text
 
@@ -1079,7 +1085,7 @@ class TestMultiStepTasks:
         root = write_multi_step_task(tmp_path / "t")
         toml = MULTI_STEP_TOML.replace('multi_step_reward_strategy = "final"\n', 'multi_step_reward_mode = "final"\n')
         (root / "task.toml").write_text(toml)
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(root)
         assert task.config.multi_step_reward_strategy == "mean"
         messages = [record.getMessage() for record in caplog.records]
@@ -1150,7 +1156,7 @@ class TestMultiStepTasks:
         (workdir / "setup.sh").write_text("#!/bin/bash\nmake fixtures\n")
         (workdir / "fixture.txt").write_text("x\n")
         (root / "steps" / "02_implement" / "setup.sh").write_text("true\n")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(root)
         plan, implement = task.turns
         assert plan.workdir_dir == Path("steps/01_plan/workdir") and plan.setup_script == plan.workdir_dir / "setup.sh"
@@ -1175,7 +1181,7 @@ class TestMultiStepTasks:
         workdir = root / "steps" / "02_implement" / "workdir"
         workdir.mkdir()
         (workdir / "setup.sh").write_text("#!/bin/bash\nrm -rf /app/cheats\n")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             load_task(root)
         assert (
             "steps/02_implement/workdir/setup.sh runs as the image's own user (root unless the image sets USER) after "
@@ -1188,7 +1194,7 @@ class TestMultiStepTasks:
                 'name = "02_implement"\n', 'name = "02_implement"\n[steps.agent]\nuser = "0"\n'
             )
         )
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             load_task(root)
         assert "steps/02_implement/workdir/setup.sh runs as root after step '01_plan' ran as 'tester'" in caplog.text
 
@@ -1198,7 +1204,7 @@ class TestMultiStepTasks:
                 "[agent]\ntimeout_sec = 120.0\n", '[agent]\ntimeout_sec = 120.0\nuser = "tester"\n'
             )
         )
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             load_task(root)
         assert "setup.sh runs as" not in caplog.text
         # A root step without the script has no window to warn about.
@@ -1206,7 +1212,7 @@ class TestMultiStepTasks:
             MULTI_STEP_TOML.replace("timeout_sec = 2400.0\n", 'timeout_sec = 2400.0\nuser = "tester"\n')
         )
         shutil.rmtree(workdir)
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             load_task(root)
         assert "setup.sh runs as" not in caplog.text
 
@@ -1239,7 +1245,7 @@ class TestMultiStepTasks:
             + '[[steps.verifier.collect]]\ncommand = "pg_dump app > /logs/artifacts/app.sql"\nservice = "db"\n'
             'timeout_sec = 45.0\nuser = "postgres"\n'
         )
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             plan, implement = load_task(root).turns
         assert "unknown key" not in caplog.text
         assert plan.config.verifier.collect == []
@@ -1289,7 +1295,7 @@ class TestMultiStepTasks:
         toml = (root / "task.toml").read_text()
         assert "[verifier]\ntimeout_sec = 120.0\n" in toml  # HELLO_TOML's task-level figure
         (root / "task.toml").write_text(toml + "[steps.verifier]\ntimeout_sec = 90.0\n")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(root)
         plan, implement = task.turns
         assert task.config.step_verifier_timeout_sec(plan.config) == 600.0
@@ -1302,7 +1308,7 @@ class TestMultiStepTasks:
 
         caplog.clear()
         (root / "task.toml").write_text(toml.replace("[verifier]\ntimeout_sec = 120.0\n", "[verifier]\n"))
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(root)
         assert [task.config.step_verifier_timeout_sec(t.config) for t in task.turns] == [600.0, 600.0]
         assert "Harbor's step default" not in caplog.text
@@ -1316,7 +1322,7 @@ class TestMultiStepTasks:
         unscaled constant (which fired for every multiplied dataset)."""
         root = write_multi_step_task(tmp_path / "t")
         (tmp_path / "dataset.toml").write_text("[gym.defaults]\ntimeout_multiplier = 2.0\n")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(root)
         assert task.config.verifier.timeout_sec == 240.0  # HELLO_TOML's 120 s, scaled
         assert [t.config.verifier.timeout_sec for t in task.turns] == [None, None]
@@ -1332,7 +1338,7 @@ class TestMultiStepTasks:
         (root / "task.toml").write_text(
             toml.replace("[verifier]\ntimeout_sec = 120.0\n", "[verifier]\ntimeout_sec = 600.0\n")
         )
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(root)
         assert task.config.verifier.timeout_sec == 1200.0
         assert [task.config.step_verifier_timeout_sec(t.config) for t in task.turns] == [1200.0, 1200.0]
@@ -1400,7 +1406,7 @@ class TestMultiStepTasks:
         else from tests/Dockerfile (_verifier_env_build_context with a step). Prepare builds tests/Dockerfile only, so a
         step that starts from its own folder is refused naming the image to declare; one that starts from tests/ reads
         the recorded build, and is planned by prepare whatever the task's own mode."""
-        from nemo_gym.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
+        from nemo_gym.data.tasks.harbor.verifier_env import verifier_build_context, verifier_build_environment
 
         root = write_multi_step_task(tmp_path / "t")
         toml = (root / "task.toml").read_text() + '[steps.verifier]\nenvironment_mode = "separate"\n'
@@ -1616,11 +1622,11 @@ class TestMultiStepTasks:
         root = write_multi_step_task(tmp_path / "t")
         (root / "trajectory.json").write_text("{}")
         (root / "steps" / "02_implement" / "trajectory.json").write_text("{}")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(root)
         assert task.seed_trajectory is None and len(task.turns) == 2 and "seed trajectory" not in caplog.text
         (root / "steps" / "01_plan" / "trajectory.json").write_text("{}")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(root)
         assert task.seed_trajectory == Path("steps/01_plan/trajectory.json")
         assert "steps/01_plan/trajectory.json is Harbor's seed trajectory" in caplog.text
@@ -1686,7 +1692,7 @@ class TestMultiStepTasks:
 
 class TestTasksetMapping:
     def test_single_task_folder_maps_to_its_parent(self, tmp_path):
-        from nemo_gym.tasks.harbor.materialize import taskset_mapping
+        from nemo_gym.data.tasks.harbor.materialize import taskset_mapping
 
         task = load_task(write_task(tmp_path / "solo"))
         mapping = taskset_mapping([task], tmp_path / "solo")
@@ -1694,7 +1700,7 @@ class TestTasksetMapping:
         assert Path(mapping["folder"]) / "solo" == task.path
 
     def test_folder_of_tasks_maps_to_itself(self, tmp_path):
-        from nemo_gym.tasks.harbor.materialize import taskset_mapping
+        from nemo_gym.data.tasks.harbor.materialize import taskset_mapping
 
         tasks = [load_task(write_task(tmp_path / "ds" / name)) for name in ("a", "b")]
         assert taskset_mapping(tasks, tmp_path / "ds")["folder"] == str((tmp_path / "ds").resolve())
@@ -1973,7 +1979,7 @@ class TestSeparateVerifierFields:
         separate = HELLO_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n').replace(
             "[environment]\n", '[environment]\ndocker_image = "org/hello:1"\n'
         )
-        with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.task"):
+        with caplog.at_level("WARNING", logger="nemo_gym.data.tasks.harbor.task"):
             task = load_task(write_task(tmp_path / "t", toml=separate))
         assert not task.config.is_shared_verifier
         assert any("declares no artifacts" in record.message for record in caplog.records)
@@ -2012,7 +2018,7 @@ class TestSeparateVerifierFields:
 
 class TestInstruction:
     def test_leading_canary_lines_are_dropped_and_the_rest_kept_verbatim(self, tmp_path):
-        from nemo_gym.tasks.harbor.task import read_instruction
+        from nemo_gym.data.tasks.harbor.task import read_instruction
 
         path = tmp_path / "instruction.md"
         path.write_text(
@@ -2078,7 +2084,7 @@ class TestCli:
         assert not (folder / "00-services" / "compose-images.json").exists()
 
     def test_prepare_fails_clearly_when_a_base_image_cannot_be_fetched(self, tmp_path):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor.registry import ImageConfigError
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -2131,7 +2137,7 @@ class TestCli:
         folder = tmp_path / "ds"
         write_task(folder / "a")
         write_task(folder / "bad", toml="[[steps]]\nname = 'x'")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.cli"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.cli"):
             prepared = prepare_target(str(folder), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["a"]
         assert list(prepared.skipped) == ["bad"]
@@ -2188,7 +2194,7 @@ class TestCli:
         for name, line in services.items():
             write_task(folder / name)
             (folder / name / "environment" / "docker-compose.yaml").write_text(f"services:\n  main:\n    {line}\n")
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.cli"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.cli"):
             prepared = prepare_target(str(folder), output_root=tmp_path / "out")
         assert [t.task_id for t in prepared.tasks] == ["good"]
         assert sorted(prepared.skipped) == ["bad-env-file", "bad-required"]
@@ -2215,7 +2221,7 @@ class TestCli:
     def test_prepare_leaves_out_tasks_whose_image_fails_to_build_and_builds_the_rest(
         self, tmp_path, monkeypatch, capsys
     ):
-        from nemo_gym.tasks.harbor.build_tools import ImageBuilder
+        from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
 
         folder = tmp_path / "ds"
         write_task(folder / "plain")
@@ -2255,8 +2261,8 @@ class TestCli:
         # main's build section is read at build time, per context, never at planning: the cadir-ci-benchmark shape
         # (`${VAR:?...}` in services.main.build with the variable unset) and a task env the host does not set leave
         # those tasks out with their reasons and nothing else, with builds enabled or disabled.
-        from nemo_gym.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.tasks.harbor.build_tools import ImageBuilder
+        from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
 
         monkeypatch.delenv("NEMO_GYM_NOT_SET", raising=False)
         folder = tmp_path / "ds"
@@ -2419,7 +2425,7 @@ class TestCli:
         assert runs_in_sandbox(impl_name, {"entrypoint": "app.py"}) is False
 
     def test_runs_in_sandbox_from_declaration_or_config_key(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("nemo_gym.tasks.harbor.cli.component_search_roots", lambda: [tmp_path])
+        monkeypatch.setattr("nemo_gym.data.tasks.harbor.cli.component_search_roots", lambda: [tmp_path])
 
         def write_agent(name, source, entrypoint="app.py"):
             folder = tmp_path / "responses_api_agents" / name
@@ -2592,7 +2598,7 @@ def test_declared_sidecar_inputs_come_from_dataset_toml_and_are_plain_file_names
     the server's reset of the folder keeps; set from the dataset's `dataset.toml`, part of the task's digest, and
     never a path, a glob pattern (the server keeps them with `find -path`, which matches a pattern), a grader output
     or a repeated name."""
-    from nemo_gym.tasks.harbor.models import HarborVerifier
+    from nemo_gym.data.tasks.harbor.models import HarborVerifier
 
     folder = tmp_path / "ds"
     write_task(folder / "hello")
@@ -2828,7 +2834,7 @@ def test_a_staging_directory_an_interrupted_fetch_left_behind_is_not_a_task(
     """The process died after the pin was published but before the staging directory was cleaned up. The
     retry reuses the task, and discovery, which walks the dataset folder recursively, must not take the
     leftover clone for a second copy of the task (the same ID) or for an extra task (another name)."""
-    from nemo_gym.tasks.harbor.task import iter_task_folders
+    from nemo_gym.data.tasks.harbor.task import iter_task_folders
 
     dataset = registry_dataset(registry_repo, name=name)
     real_tempfile = hub_module.tempfile
@@ -2885,7 +2891,7 @@ def test_a_legacy_unhidden_staging_directory_is_refused_as_a_duplicate_task(tmp_
     and refuses it loudly (the clone holds the task that was being staged, so its ID is a duplicate) rather than
     running a second copy. The name is not special-cased (a user folder may start that way); the README says to
     delete those directories once."""
-    from nemo_gym.tasks.harbor.task import iter_task_folders
+    from nemo_gym.data.tasks.harbor.task import iter_task_folders
 
     dataset = tmp_path / "datasets" / "ds"
     write_task(dataset / "a")
@@ -2909,7 +2915,7 @@ def test_existing_unpinned_task_is_never_relabeled(tmp_path, registry_repo):
 
 @pytest.mark.usefixtures("fake_registry")  # prepare records base images; never reach Docker Hub
 def test_registry_versions_keep_distinct_rows_routes_and_outputs(tmp_path, monkeypatch):
-    import nemo_gym.tasks.harbor.cli as harbor_cli
+    import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
     for version in ("1.0", "2.0"):
         write_task(tmp_path / f"ds-{version}" / "a")
@@ -3147,7 +3153,7 @@ class TestDatasetConfig:
         assert hello.config.environment.gpu_types == ["H100"]
         assert other.env == {} and other.config.environment.gpu_types is None
         # The digest pins the task folder's content plus the dataset slice applied to it.
-        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
+        from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
 
         dataset = read_dataset_config(folder)
         assert hello.digest == task_digest(content_hash(folder / "hello"), dataset, "hello")
@@ -3165,7 +3171,7 @@ class TestDatasetConfig:
         assert load_task(folder / "hello").digest == content_hash(folder / "hello")
 
     def test_legacy_override_spellings_replace_the_tasks_current_fields(self, tmp_path):
-        from nemo_gym.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
+        from nemo_gym.data.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 
         folder = tmp_path / "ds"
         write_task(folder / "hello")
@@ -3206,7 +3212,7 @@ class TestDatasetConfig:
         """`env = 1` under the verifier table used to reach `dict(1)` in the merge, a TypeError that neither
         `load_task` nor the base-image scan catches: one malformed override aborted the whole dataset's preparation.
         It is refused like the environment table's `env`, so the task is skipped with its table named."""
-        from nemo_gym.tasks.harbor.image_configs import dockerfile_base_images
+        from nemo_gym.data.tasks.harbor.image_configs import dockerfile_base_images
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -3321,8 +3327,8 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     from nemo_gym import PARENT_DIR
     from nemo_gym.cli.main import _merge_config_paths
     from nemo_gym.config.global_config import GlobalConfigDictParser, get_global_config_dict
+    from nemo_gym.data.tasks.harbor.materialize import agent_instance, environment_server_instance
     from nemo_gym.rollout_collection import E2ERolloutCollectionConfig
-    from nemo_gym.tasks.harbor.materialize import agent_instance, environment_server_instance
 
     write_task(tmp_path / taskset / "a")
     prepared = prepare_target(str(tmp_path / taskset), output_root=tmp_path / "out")
@@ -3406,7 +3412,7 @@ def test_symlinked_child_tasks_are_reported_without_duplicate_rows(tmp_path, ext
 
 
 def test_duplicate_task_ids_are_rejected_before_rows_or_mapping_are_written(tmp_path):
-    from nemo_gym.tasks.harbor.materialize import taskset_mapping
+    from nemo_gym.data.tasks.harbor.materialize import taskset_mapping
 
     task = load_task(write_task(tmp_path / "ds" / "a"))
     rows = tmp_path / "tasks.jsonl"
@@ -3421,7 +3427,7 @@ def test_duplicate_task_ids_are_rejected_before_rows_or_mapping_are_written(tmp_
 def test_generated_instance_names_are_override_safe_and_collision_free():
     from hydra.core.override_parser.overrides_parser import OverridesParser
 
-    from nemo_gym.tasks.harbor.materialize import agent_instance, environment_server_instance
+    from nemo_gym.data.tasks.harbor.materialize import agent_instance, environment_server_instance
 
     tasksets = ["terminal-bench-2.0", "terminal-bench-2_0", "terminal-bench-2_2e0", "ds-1.0", "ds-2.0", "中文", "a b"]
     parser = OverridesParser.create()
@@ -3442,7 +3448,7 @@ def test_generated_agent_can_be_overridden_for_versioned_taskset(tmp_path, monke
     from nemo_gym import PARENT_DIR
     from nemo_gym.cli.main import _merge_config_paths
     from nemo_gym.config.global_config import get_global_config_dict
-    from nemo_gym.tasks.harbor.materialize import agent_instance
+    from nemo_gym.data.tasks.harbor.materialize import agent_instance
 
     monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     folder = tmp_path / "ds-2.0"
@@ -3524,7 +3530,7 @@ def test_a_compose_volume_problem_in_a_task_folder_exits_cleanly(tmp_path, monke
 def test_harbor_selectors_fail_before_any_preparation(monkeypatch, capsys, flags):
     import sys
 
-    import nemo_gym.tasks.harbor.cli as harbor_cli
+    import nemo_gym.data.tasks.harbor.cli as harbor_cli
     from nemo_gym.cli.main import main
 
     def unexpected_preparation(*args, **kwargs):
@@ -3541,7 +3547,7 @@ def test_harbor_selectors_fail_before_any_preparation(monkeypatch, capsys, flags
 def test_unexpected_harbor_programming_errors_remain_visible(monkeypatch):
     import sys
 
-    import nemo_gym.tasks.harbor.cli as harbor_cli
+    import nemo_gym.data.tasks.harbor.cli as harbor_cli
     from nemo_gym.cli.main import main
 
     def bug(*args, **kwargs):
@@ -3849,7 +3855,7 @@ class TestDatasetTaskAdditions:
 
 
 def test_taskset_mapping_records_the_relative_path_of_nested_tasks(tmp_path):
-    from nemo_gym.tasks.harbor.materialize import taskset_mapping
+    from nemo_gym.data.tasks.harbor.materialize import taskset_mapping
 
     folder = tmp_path / "ds"
     write_task(folder / "a")
@@ -3876,7 +3882,7 @@ def test_taskset_mapping_records_the_relative_path_of_nested_tasks(tmp_path):
 
 
 def test_validation_summary_reports_verify_time_and_network_per_task(tmp_path):
-    from nemo_gym.tasks.harbor.validation_report import summarize_validation
+    from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 
     rollouts = tmp_path / "rollouts.jsonl"
     rows = [
@@ -3909,7 +3915,7 @@ class TestComposeVolumeSourcesAtPrepare:
 
     @pytest.fixture
     def sources(self, tmp_path, monkeypatch):
-        import nemo_gym.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
         dotenv = tmp_path / "env.yaml"
         dotenv.write_text("some_key: 1\n")
@@ -3926,7 +3932,7 @@ class TestComposeVolumeSourcesAtPrepare:
         return dotenv, provider
 
     def test_volume_sources_come_from_the_sandbox_file_and_overrides(self, tmp_path, sources):
-        from nemo_gym.tasks.harbor.cli import volume_sources_from_overrides
+        from nemo_gym.data.tasks.harbor.cli import volume_sources_from_overrides
 
         assert volume_sources_from_overrides([], None) is None
         assert volume_sources_from_overrides([], "opensandbox") == {"pgdata": "datasets/pgdata"}
@@ -3950,7 +3956,7 @@ class TestComposeVolumeSourcesAtPrepare:
         """M35 D6: prepare answers whether the block's provider has shared storage from the one setting the server's
         provider requires (``shared_storage.host_path``), without resolving the block's credentials; unknown (no
         block, or none naming one provider) stays ``None`` and the seed decides."""
-        from nemo_gym.tasks.harbor.cli import (
+        from nemo_gym.data.tasks.harbor.cli import (
             GPU_SANDBOX_PROVIDER_KEY,
             gpu_shared_storage_from_overrides,
             shared_storage_from_overrides,
@@ -3987,7 +3993,7 @@ class TestComposeVolumeSourcesAtPrepare:
     def test_gpu_volume_sources_come_from_the_gpu_sandbox_provider_block(self, tmp_path, sources):
         # Review: GPU-declaring tasks are seeded from the server's `gpu_sandbox_provider` block, so prepare reads
         # that block's volume_sources too: None without a GPU block, {} for a GPU block without the key.
-        from nemo_gym.tasks.harbor.cli import GPU_SANDBOX_PROVIDER_KEY, gpu_volume_sources_from_overrides
+        from nemo_gym.data.tasks.harbor.cli import GPU_SANDBOX_PROVIDER_KEY, gpu_volume_sources_from_overrides
 
         gpu_block = f"++{GPU_SANDBOX_PROVIDER_KEY}=sandbox_gpu"
         assert GPU_SANDBOX_PROVIDER_KEY == "harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider"
@@ -4010,7 +4016,7 @@ class TestComposeVolumeSourcesAtPrepare:
     def test_run_and_validate_hand_volume_sources_to_prepare(self, tmp_path, monkeypatch, sources):
         import argparse
 
-        import nemo_gym.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
         seen = []
 
@@ -4046,8 +4052,8 @@ class TestComposeVolumeSourcesAtPrepare:
         """G7 round 24: prepare read registries anonymously, so a private Compose sidecar (registry.example.com...) stopped
         it with HTTP 403 though the sandbox block's `images.auth` would pull it. Prepare reads the same block's
         `images.auth`, resolved (so `${gitlab_registry_password}` comes from env.yaml), and records images with it."""
-        import nemo_gym.tasks.harbor.build_options as build_options
-        import nemo_gym.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.build_options as build_options
+        import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
         dotenv = tmp_path / "env.yaml"
         dotenv.write_text("gitlab_registry_username: bot\ngitlab_registry_password: secret\n")
@@ -4061,7 +4067,7 @@ class TestComposeVolumeSourcesAtPrepare:
         )
         monkeypatch.setattr(harbor_cli, "resolve_sandbox_config", lambda name: provider)
 
-        from nemo_gym.tasks.harbor.cli import registry_credentials_from_overrides
+        from nemo_gym.data.tasks.harbor.cli import registry_credentials_from_overrides
 
         # No block names a provider: anonymous, as before.
         assert registry_credentials_from_overrides([], None) == {}
@@ -4072,7 +4078,7 @@ class TestComposeVolumeSourcesAtPrepare:
     def test_run_and_validate_hand_registry_credentials_to_prepare(self, tmp_path, monkeypatch, sources):
         import argparse
 
-        import nemo_gym.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
         # The `sources` fixture's provider.yaml has no images.auth, so credentials are empty; a block with one is
         # covered above. This asserts both entry points read them and pass them on.
@@ -4151,7 +4157,7 @@ def test_pulled_datasets_default_to_the_working_directory_for_a_package_install(
         f"sys.path = [{str(site)!r}, *(p for p in sys.path if '__editable__' not in p and p != '')]\n"
         "sys.meta_path = [f for f in sys.meta_path if 'editable' not in getattr(f, '__module__', '').lower()]\n"
         "import nemo_gym\n"
-        "from nemo_gym.tasks.harbor.hub import datasets_dir\n"
+        "from nemo_gym.data.tasks.harbor.hub import datasets_dir\n"
         "print(nemo_gym.PARENT_DIR)\n"
         "print(datasets_dir())\n"
     )
@@ -4173,7 +4179,7 @@ def test_installed_entries_are_pulled_under_the_working_directory_not_the_instal
     The installed layout is rebuilt in a subprocess as in
     :func:`test_pulled_datasets_default_to_the_working_directory_for_a_package_install`: the package and the entry
     reached through a ``site/`` folder with no ``pyproject.toml`` beside it, run from a working directory elsewhere.
-    The plan is inspected (:func:`~nemo_gym.tasks.harbor.entries.plan_pull`) and the destination prepared; nothing
+    The plan is inspected (:func:`~nemo_gym.data.tasks.harbor.entries.plan_pull`) and the destination prepared; nothing
     is fetched.
     """
     import os
@@ -4196,7 +4202,7 @@ def test_installed_entries_are_pulled_under_the_working_directory_not_the_instal
         f"sys.path = [{str(site)!r}, *(p for p in sys.path if '__editable__' not in p and p != '')]\n"
         "sys.meta_path = [f for f in sys.meta_path if 'editable' not in getattr(f, '__module__', '').lower()]\n"
         "import nemo_gym\n"
-        "from nemo_gym.tasks.harbor.entries import entry_target, plan_pull, prepare_destination\n"
+        "from nemo_gym.data.tasks.harbor.entries import entry_target, plan_pull, prepare_destination\n"
         "print(nemo_gym.PARENT_DIR)\n"
         f"by_name, by_ref = plan_pull('tb4_installed'), plan_pull({ref!r})\n"
         "assert by_name.entry == by_ref.entry and by_name.ref == by_ref.ref, (by_name, by_ref)\n"
@@ -4254,7 +4260,7 @@ def test_installed_entries_in_a_project_local_venv_are_pulled_under_the_working_
         f"sys.path = [{str(site)!r}, *(p for p in sys.path if '__editable__' not in p and p != '')]\n"
         "sys.meta_path = [f for f in sys.meta_path if 'editable' not in getattr(f, '__module__', '').lower()]\n"
         "import nemo_gym\n"
-        "from nemo_gym.tasks.harbor.entries import entry_target, plan_pull, prepare_destination\n"
+        "from nemo_gym.data.tasks.harbor.entries import entry_target, plan_pull, prepare_destination\n"
         "print(nemo_gym.PARENT_DIR)\n"
         "print(nemo_gym.WORKING_DIR)\n"
         f"by_name, by_ref = plan_pull('tb4_installed'), plan_pull({ref!r})\n"
@@ -4286,7 +4292,7 @@ def test_installed_entries_in_a_project_local_venv_are_pulled_under_the_working_
 def test_pulled_datasets_default_to_environments_harbor_in_the_checkout(monkeypatch, tmp_path) -> None:
     """Fetched datasets land in environments/harbor/ of the Gym checkout unless NEMO_GYM_DATASETS_DIR says otherwise."""
     from nemo_gym import PARENT_DIR
-    from nemo_gym.tasks.harbor.hub import datasets_dir
+    from nemo_gym.data.tasks.harbor.hub import datasets_dir
 
     monkeypatch.delenv("NEMO_GYM_DATASETS_DIR", raising=False)
     monkeypatch.chdir(tmp_path)  # in an editable install (this checkout) the working directory plays no part
@@ -4318,7 +4324,7 @@ class TestTrainingMetadata:
 
     def test_entry_carries_the_gym_table(self, tmp_path):
         from nemo_gym.config.config_types import DatasetConfig
-        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
+        from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -4367,7 +4373,7 @@ class TestTrainingMetadata:
         assert row["task_input"]["task_data"] == {DIGEST_KEY: tasks[0].digest, "_ng_dataset_digest": "d" * 64}
 
     def test_entry_defaults_follow_the_rfc(self, tmp_path):
-        from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
+        from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig
 
         rows = tmp_path / "tasks.jsonl"
         # A license alone makes a validation set; a type alone (benchmark) needs none; domain is the enum's value.
@@ -4393,7 +4399,7 @@ class TestTrainingMetadata:
     def test_keys_that_shape_no_task_never_enter_its_digest(self, table):
         """Each key alone, against the empty table: the digest stays the bare folder hash, because nothing about
         the task changed. Only a table that shapes tasks folds a slice in, and the repeat count stays out of it."""
-        from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
+        from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig
 
         config = GymDatasetConfig.model_validate(table)
         assert not config.is_empty and not config.shapes_tasks
@@ -4510,7 +4516,7 @@ class TestTrainingMetadata:
         `build_run` refuses a hand-built taskset of that type as a backstop."""
         from dataclasses import replace
 
-        from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
+        from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -4645,7 +4651,7 @@ class TestTrainingMetadata:
 
         import nemo_gym.cli.main as main_module
         import nemo_gym.config.global_config as global_config
-        from nemo_gym.tasks.harbor.cli import pairing_override_from_overrides
+        from nemo_gym.data.tasks.harbor.cli import pairing_override_from_overrides
 
         folder = tmp_path / "ds"
         write_task(folder / "good")
@@ -4675,9 +4681,9 @@ class TestTrainingMetadata:
         """The entry's `allowed_agents` is not inert: the collector's pairing guard reads it from the generated
         agent block, so a run config edited to another harness after `gym eval run` admitted one is refused at
         dispatch too, naming the harness and the dataset."""
+        from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
+        from nemo_gym.data.tasks.harbor.materialize import environment_server_instance
         from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
-        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
-        from nemo_gym.tasks.harbor.materialize import environment_server_instance
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -4709,9 +4715,9 @@ class TestTrainingMetadata:
         """`gym dataset validate` is always admitted: the oracle's run config carries the entry without
         `allowed_agents` (the list speaks of model harnesses), so the collector's guard lets the oracle through,
         while an admitted harness's run config keeps the list and passes the same guard."""
+        from nemo_gym.data.tasks.harbor.cli import ORACLE_AGENT
+        from nemo_gym.data.tasks.harbor.materialize import environment_server_instance
         from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
-        from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
-        from nemo_gym.tasks.harbor.materialize import environment_server_instance
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -4766,14 +4772,14 @@ def test_a_task_shipping_harbors_seed_trajectory_loads_for_the_oracle_and_the_fi
     any other agent (see the server's tests). The file is still part of the task's identity: the folder digest and
     the package digest cover it, so a fetched task verifies against its advertised hash and the manifest records the
     hash with it."""
-    from nemo_gym.tasks.harbor.digest import archive_hash, content_hash, is_covered
+    from nemo_gym.data.tasks.harbor.digest import archive_hash, content_hash, is_covered
 
     root = write_task(tmp_path / "t")
     loaded = load_task(root)
     before = loaded.folder_digest
     assert loaded.seed_trajectory is None
     (root / "trajectory.json").write_text('{"schema_version": "ATIF-v1.7", "steps": []}')
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.task"):
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.task"):
         task = load_task(root)
     assert task.seed_trajectory == Path("trajectory.json")
     message = caplog.text

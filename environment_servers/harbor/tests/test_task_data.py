@@ -9,8 +9,8 @@ import pytest
 
 from environment_servers.harbor.app import HarborEpisodeRequest
 from environment_servers.harbor.tests.conftest import make_server, run_episode
-from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
-from nemo_gym.tasks.harbor.task_data import TASK_DATA_FILE, TASK_DATA_MODULE, TaskDataError, TaskDataSchema
+from nemo_gym.data import DIGEST_KEY, TaskDataError, TaskDataSchema, load_task
+from nemo_gym.data.tasks.harbor.task_data import TASK_DATA_FILE, TASK_DATA_MODULE
 
 
 QA_SCHEMA = """
