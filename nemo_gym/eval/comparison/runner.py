@@ -21,11 +21,11 @@ from pathlib import Path
 from typing import List, Tuple
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.comparison.diff import compare_runs
-from nemo_gym.comparison.loading import build_loaded_run, load_agg_metrics_file, resolve_agent_selections
-from nemo_gym.comparison.report import write_reports
-from nemo_gym.comparison.schema import ComparisonConfig, ComparisonResult
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides
+from nemo_gym.eval.comparison.diff import compare_runs
+from nemo_gym.eval.comparison.loading import build_loaded_run, load_agg_metrics_file, resolve_agent_selections
+from nemo_gym.eval.comparison.report import write_reports
+from nemo_gym.eval.comparison.schema import ComparisonConfig, ComparisonResult
 from nemo_gym.package_info import __version__
 
 

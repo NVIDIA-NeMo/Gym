@@ -837,7 +837,7 @@ class TestMaterializedInputs:
     """A multistage run's stage rows pair with its rollouts for ``gym eval reverify``."""
 
     def test_reverify_pairs_every_stage_and_forwards_its_identity(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_reverification import _build_verify_payload, _yield_inputs_and_rollouts_paired
+        from nemo_gym.eval.rollout_reverification import _build_verify_payload, _yield_inputs_and_rollouts_paired
         from resources_servers.gdpval.app import GDPValVerifyRequest
 
         rows = _materialized_rows(["t0", "t1"])
