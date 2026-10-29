@@ -48,13 +48,6 @@ import pandas as pd
 from pydantic import ConfigDict, Field
 from sklearn.linear_model import LogisticRegression
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -66,6 +59,13 @@ from nemo_gym.metrics import (
     highest_k_metrics,
 )
 from nemo_gym.prompt import PromptConfig, load_prompt_config
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
 from nemo_gym.verification import call_judge
 
 

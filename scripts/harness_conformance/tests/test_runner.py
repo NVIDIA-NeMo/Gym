@@ -156,7 +156,6 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
 
     import nemo_gym.config.global_config
     import nemo_gym.server_utils
-    from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
     from nemo_gym.base_responses_api_agent import (
         AgentCloseSessionResponse,
         AgentSessionState,
@@ -164,6 +163,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         SimpleResponsesAPIAgent,
     )
     from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
     from nemo_gym.trajectory import AgentObservationBundle
 
     calls = []

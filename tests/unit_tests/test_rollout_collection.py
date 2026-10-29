@@ -60,7 +60,6 @@ from nemo_gym.artifacts.rollout_rows import (
     NG_NO_PERSIST_KEY,
     _rollout_for_export,
 )
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import (
@@ -130,6 +129,7 @@ from nemo_gym.rollout_collection import (
 )
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
+from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -12448,7 +12448,7 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     """An Environment Server's failure kind (Harbor's ``harbor:task_deadline``) reaches the sidecar row as it left
     the wire, under the key the metrics label reads; a failure that names no kind adds no key."""
     import nemo_gym.rollout_collection as rollout_collection
-    from nemo_gym.episode_types import EpisodeFailure
+    from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     failure = EpisodeFailure(
         failure_reason="Episode exceeded the time budget",

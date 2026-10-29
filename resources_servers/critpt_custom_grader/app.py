@@ -28,16 +28,6 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ResourcesSeedSessionResponse,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
 from nemo_gym.config import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -53,6 +43,16 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ResourcesSeedSessionResponse,
+    ReverifyMode,
+    SimpleResourcesServer,
 )
 from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader.execution import (

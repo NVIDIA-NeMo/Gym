@@ -41,7 +41,6 @@ from openai import __version__ as openai_version
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym.artifacts.exporters import setup_exporters
 from nemo_gym.config.config_types import (
     AgentCompositionError,
@@ -69,6 +68,7 @@ from nemo_gym.config.config_types import (
 from nemo_gym.config.secret_utils import recursively_hide_secrets
 from nemo_gym.h2_ping_sidecar.config import H2_PING_SIDECAR_KEY_NAME
 from nemo_gym.sandbox.providers.registry import plugin_distributions
+from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
     configure_telemetry_env,

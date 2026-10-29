@@ -20,12 +20,12 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient, get_server_url
 from nemo_gym.config.config_types import ResourcesServerRef
 from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest
 
 
 def sandbox_server_url(name: str, *, require_reachable: bool = False) -> str:

@@ -21,18 +21,24 @@ from dataclasses import dataclass
 from fastapi import Body, Request
 from pydantic import ConfigDict, JsonValue, PrivateAttr, ValidationError
 
-from nemo_gym._checkpoint.agent import ActivationOutOfOrderError, LegacyRun, RestoredAgentSession, require_rollout
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ResourcesCloseSessionRequest,
-)
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    ActivationOutOfOrderError,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    LegacyRun,
+    ResourcesCloseSessionRequest,
+    RestoredAgentSession,
+    StepType,
+    require_rollout,
+    seed_restarts,
+    seed_verify_step_type,
+)
 
 
 LOG = logging.getLogger(__name__)

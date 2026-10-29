@@ -49,24 +49,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym._checkpoint.control import install_control_routes, install_participant
-from nemo_gym._checkpoint.model import (
-    CheckpointableLedger,
-    PolicyAdmissionMiddleware,
-    PolicyModelParticipant,
-    attach_capture_context,
-    generation_cut_requester,
-    ledger_removal_refusal,
-    reject_ungated_ledger_writers,
-    worker_control_root,
-)
-from nemo_gym._checkpoint.model_workers import (
-    COORDINATOR_SOCKET_ENV,
-    PolicyCoordinator,
-    PolicyWorkerLink,
-    coordinator_socket_path,
-)
-from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
@@ -76,6 +58,22 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.models._checkpoint import (
+    CheckpointableLedger,
+    PolicyAdmissionMiddleware,
+    PolicyModelParticipant,
+    attach_capture_context,
+    generation_cut_requester,
+    ledger_removal_refusal,
+    reject_ungated_ledger_writers,
+    worker_control_root,
+)
+from nemo_gym.models._checkpoint_workers import (
+    COORDINATOR_SOCKET_ENV,
+    PolicyCoordinator,
+    PolicyWorkerLink,
+    coordinator_socket_path,
 )
 from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
@@ -88,7 +86,9 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import scope_with_routed_path
+from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup

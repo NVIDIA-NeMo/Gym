@@ -10,8 +10,8 @@ import unicodedata
 from collections import defaultdict
 from typing import Any, ClassVar, Optional
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.mcqa.app import (
     MCQAResourcesServer,
     MCQAResourcesServerConfig,

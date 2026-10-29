@@ -21,14 +21,14 @@ from typing import Any, Optional
 
 from metrics import score_pathway
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_subset_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.metrics import compute_subset_metrics
 
 
 logger = logging.getLogger(__name__)

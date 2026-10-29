@@ -11,7 +11,7 @@ from typing import Any, ClassVar
 from fastapi import FastAPI
 from pydantic import Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

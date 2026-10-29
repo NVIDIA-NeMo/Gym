@@ -106,7 +106,7 @@ LEGACY_TIMEOUT_SIGNALS = (
     LegacySignal(
         "_ng_failure_message",
         "Episode timed out",
-        "nemo_gym/base_environment_server.py",
+        "nemo_gym/server_runtime/base_environment_server.py",
         'failure_reason="Episode timed out"',
     ),
     LegacySignal("agent_timed_out", None, "responses_api_agents/codex_agent/app.py", '"agent_timed_out": timed_out}'),
