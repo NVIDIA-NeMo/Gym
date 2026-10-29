@@ -412,7 +412,9 @@ def test_sandboxed_sessions_keep_the_resources_session_contract(tmp_path, provid
     check_resources_session_contract(
         resource.setup_webserver(), ResourcesSeedSessionRequest.model_validate(seed_for(task)), keeps_state=True
     )
-    assert provider.stopped == ["sandbox-0"]
+    # The contract check also seeds a session whose reply is lost, then closes it without a cookie.
+    assert provider.stopped == ["sandbox-0", "sandbox-1"]
+    assert not resource._episodes
 
 
 def test_a_sandbox_that_fails_to_stop_keeps_its_episode_for_a_retried_close(tmp_path, provider):

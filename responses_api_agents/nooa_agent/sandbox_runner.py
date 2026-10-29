@@ -86,7 +86,6 @@ class SandboxNOOARunner:
         )
         await upload_text(self.sandbox, path=f"{self.directory}/input.json", text=payload.model_dump_json())
         return SandboxCommand(
-            python=self.python,
             argv=[
                 self.python,
                 "-I",

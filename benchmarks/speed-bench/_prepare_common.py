@@ -14,21 +14,21 @@
 # limitations under the License.
 """Shared SPEED-Bench prepare helpers.
 
-Both `prepare.py` (qualitative) and `prepare_throughput_2k.py` (throughput_2k)
-delegate to `prepare_one_config` here so the multi-source resolution logic
-isn't duplicated.
+The unified standalone CLI and the split-specific Gym entrypoints delegate here.
 """
 
 from __future__ import annotations
 
-import importlib.util
+import argparse
 import json
 import logging
 from pathlib import Path
-from typing import List
 
 
 LOG = logging.getLogger(__name__)
+DEFAULT_DATASET_REPO = "nvidia/SPEED-Bench"
+DATA_DIR = Path(__file__).resolve().parent / "data"
+TURNS_PLACEHOLDER = "FULL BENCHMARK DATA SHOULD BE FETCHED FROM THE SOURCE USING SPECDEC_BENCH"
 
 ALL_CONFIGS = (
     "qualitative",
@@ -40,34 +40,13 @@ ALL_CONFIGS = (
 )
 
 
-def _load_skills_resolver():
-    """Import Skills' `_resolve_external_data` by file path.
-
-    Skills' module dir is `nemo_skills/dataset/speed-bench/` — Python's import
-    system can't dot-import a hyphenated package name, so we load the file
-    directly. Tries the in-container mounted path first, then the local
-    recipe checkout for off-cluster usage.
-    """
-    candidates = [
-        Path("/nemo_run/code/nemo_skills/dataset/speed-bench/prepare.py"),
-        Path(__file__).resolve().parents[3] / "nemo-skills" / "nemo_skills" / "dataset" / "speed-bench" / "prepare.py",
-        Path(__file__).resolve().parents[3] / "Skills" / "nemo_skills" / "dataset" / "speed-bench" / "prepare.py",
-    ]
-    for p in candidates:
-        if p.exists():
-            spec = importlib.util.spec_from_file_location("ns_speed_bench_prepare", p)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod._resolve_external_data
-    raise RuntimeError(
-        f"Could not find Skills' speed-bench prepare.py to import _resolve_external_data. Tried: {candidates}. \
-        Please clone the Skills repository from https://github.com/NVIDIA-NeMo/Skills under the same directory as the Gym repo."
-    )
-
-
 def _row_to_gym(example: dict, speed_config: str) -> dict:
     """Convert a Skills-style resolved row to Gym JSONL shape."""
-    turns: List[str] = list(example["turns"])
+    turns = example["turns"]
+    if not isinstance(turns, list) or not turns or not all(isinstance(turn, str) and turn.strip() for turn in turns):
+        raise ValueError(f"Expected nonempty text turns for {speed_config}, src_id={example.get('src_id')!r}")
+    if any(TURNS_PLACEHOLDER in turn for turn in turns):
+        raise ValueError(f"Unresolved SPEED-Bench placeholder for {speed_config}, src_id={example.get('src_id')!r}")
     return {
         "responses_create_params": {
             "input": [{"role": "user", "content": turn} for turn in turns],
@@ -82,7 +61,12 @@ def _row_to_gym(example: dict, speed_config: str) -> dict:
     }
 
 
-def prepare_one_config(speed_config: str) -> Path:
+def prepare_one_config(
+    speed_config: str,
+    *,
+    dataset_repo: str = DEFAULT_DATASET_REPO,
+    dataset_revision: str | None = None,
+) -> Path:
     """Download and resolve a single speed-bench config, write Gym JSONL.
 
     Returns the output JSONL path that the agent's
@@ -93,16 +77,21 @@ def prepare_one_config(speed_config: str) -> Path:
 
     from datasets import load_dataset  # imported lazily
 
-    output_dir = Path(__file__).resolve().parent / "data"
+    output_dir = DATA_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"speed_bench_{speed_config}_benchmark.jsonl"
 
-    LOG.info("Loading nvidia/SPEED-Bench config %s", speed_config)
-    dataset = load_dataset("nvidia/SPEED-Bench", speed_config, split="test")
+    LOG.info("Loading %s config %s at revision %s", dataset_repo, speed_config, dataset_revision or "default")
+    dataset = load_dataset(dataset_repo, speed_config, split="test", revision=dataset_revision)
 
-    LOG.info("Resolving external dataset placeholders for config %s (%d rows)", speed_config, len(dataset))
-    resolve = _load_skills_resolver()
-    resolved = resolve(dataset, speed_config)
+    needs_resolution = any(TURNS_PLACEHOLDER in turn for turns in dataset["turns"] for turn in turns)
+    if needs_resolution:
+        LOG.info("Resolving external dataset placeholders for config %s (%d rows)", speed_config, len(dataset))
+        from _resolve_external_data import _resolve_external_data
+
+        resolved = _resolve_external_data(dataset, speed_config)
+    else:
+        resolved = dataset
 
     n = 0
     with output_path.open("wt", encoding="utf-8") as f:
@@ -112,3 +101,16 @@ def prepare_one_config(speed_config: str) -> Path:
             n += 1
     LOG.info("Wrote %d rows to %s", n, output_path)
     return output_path
+
+
+def prepare_cli() -> None:
+    """Prepare one configuration or all six from the standalone command line."""
+    parser = argparse.ArgumentParser(description="Prepare SPEED-Bench data for Gym.")
+    parser.add_argument("--config", choices=(*ALL_CONFIGS, "all"), default="qualitative")
+    parser.add_argument("--dataset-repo", default=DEFAULT_DATASET_REPO)
+    parser.add_argument("--dataset-revision", default=None)
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO)
+    configs = ALL_CONFIGS if args.config == "all" else (args.config,)
+    for speed_config in configs:
+        prepare_one_config(speed_config, dataset_repo=args.dataset_repo, dataset_revision=args.dataset_revision)

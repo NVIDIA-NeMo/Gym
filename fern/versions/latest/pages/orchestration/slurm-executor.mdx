@@ -9,7 +9,7 @@ The Slurm executor is the only executor today. It targets clusters with [Pyxis](
 ## What the executor needs
 
 - **On the machine you submit from**, when `compute.<name>.hostname` is set to a different machine: `ssh` and `rsync`. Authentication must work without prompts (the connection runs with `BatchMode=yes`, so use keys or an agent) and unknown host keys are accepted on first contact (`StrictHostKeyChecking=accept-new`). Gym opens one SSH master connection and reuses it for the whole submit.
-- **On the cluster login node**: `sbatch`, plus `sacct` if a benchmark is [resumable](/orchestration/how-to/resumable-runs).
+- **On the cluster login node**: `sbatch`, plus `sacct` and `squeue` (with `--me`, Slurm 20.11 or later) if a benchmark is [resumable](/orchestration/how-to/resumable-runs).
 - **On the compute nodes**: Pyxis, and network access to pull container images and, when `gym_install` is used, to clone the repository and install `uv`.
 - **When `hostname` is unset, or equals the current machine's hostname**: nothing is copied over SSH. Commands run locally and files are copied locally. Use this when you submit from the login node.
 
@@ -87,7 +87,7 @@ The driver is one more `srun --overlap` step, in `driver.container`, with the be
 
 Inside one `bash -c`, in order:
 
-1. If `gym_install` is set: install `uv`, clone the repository to a temporary directory, check out `ref`, create a virtual environment, and `uv pip install -e .` (with the `telemetry` extra when Gym telemetry is on). The step changes into the checkout so a benchmark's relative paths resolve.
+1. If `gym_install` is set: install `uv`, clone the repository to a temporary directory, check out `ref`, create a virtual environment, and install the checkout with `uv pip install -e` and the `ray` extra, plus `telemetry` when Gym telemetry is on and the extra that a configured exporter or GitLab dataset storage needs. The step changes into the checkout so a benchmark's relative paths resolve.
 2. If `prepare` is non-empty: `gym eval prepare <overrides>`.
 3. `gym eval run` with `+output_jsonl_fpath=<benchmark dir>/artifacts/rollouts.jsonl`, `--model-type <policy_model_type>` when a policy is set, and the flattened `run` overrides. Or, when the benchmark has a `command`, that script instead.
 
