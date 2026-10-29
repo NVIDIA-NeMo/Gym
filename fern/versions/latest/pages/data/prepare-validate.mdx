@@ -222,7 +222,9 @@ gym dataset collate \
     --output-dir data
 ```
 
-This validates your data and adds the `agent_ref` field to each row, routing samples to your resources server.
+This validates your data (each row is also checked against the owning server's `task_data.py` schema when it ships
+one) and stamps each row with `task_source`, the name of the server instance that declares the dataset; rollout
+collection resolves the agent from it at run time. A legacy `agent_ref` in a source row is stripped with a warning.
 
 ---
 
