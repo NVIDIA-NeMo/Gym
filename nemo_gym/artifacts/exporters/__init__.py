@@ -29,17 +29,17 @@ from typing import Any, Optional
 
 from omegaconf import DictConfig
 
+from nemo_gym.artifacts.exporter_registry import RUN_EXPORTERS
+from nemo_gym.artifacts.exporters.base import BaseExporter, Exporter
 from nemo_gym.config.config_types import ConfigError, ExporterConfig, MLFlowConfig, WANDBConfig
-from nemo_gym.exporters.base import BaseExporter, Exporter
-from nemo_gym.run_exporter_registry import RUN_EXPORTERS
 
 
 logger = logging.getLogger(__name__)
 
 # Backend name -> (config model, "module:class", extra to install its SDK).
 EXPORTER_REGISTRY: dict[str, tuple[type[ExporterConfig], str, str]] = {
-    "wandb": (WANDBConfig, "nemo_gym.exporters.wandb:WandbExporter", "wandb"),
-    "mlflow": (MLFlowConfig, "nemo_gym.exporters.mlflow:MLflowExporter", "mlflow"),
+    "wandb": (WANDBConfig, "nemo_gym.artifacts.exporters.wandb:WandbExporter", "wandb"),
+    "mlflow": (MLFlowConfig, "nemo_gym.artifacts.exporters.mlflow:MLflowExporter", "mlflow"),
 }
 
 _EXPORTERS: list[BaseExporter] = []

@@ -25,10 +25,10 @@ import orjson
 from omegaconf import DictConfig, OmegaConf
 from pydantic import TypeAdapter, ValidationError
 
+from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.secret_utils import recursively_hide_secrets
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.run_artifacts import RunArtifacts
 from nemo_gym.utils.path_utils import exporter_run_id_path_for
 
 
@@ -131,7 +131,7 @@ def _aggregation_failure(aggregate_metrics: Path) -> Optional[str]:
     metrics. A live run keeps those partial metrics and reports the failure, but an export marks the run
     done, so it must not send a partial result.
     """
-    from nemo_gym.batch_status import AGGREGATION_ERROR_KEY
+    from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
 
     try:
         entries = orjson.loads(aggregate_metrics.read_bytes())
@@ -429,7 +429,7 @@ class BaseExporter(Exporter):
     @staticmethod
     def _read_rollouts(artifacts: RunArtifacts) -> list[dict[str, Any]]:
         """The rollouts a live run would have uploaded."""
-        from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
+        from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
 
         # Rows flagged as drained stand for tasks the dispatch budget never started, so there is nothing to upload,
         # and a live run leaves them out of its upload too. `_rollout_for_export` drops the bulky trajectory and
