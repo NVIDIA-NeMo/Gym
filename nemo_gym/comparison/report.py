@@ -18,6 +18,7 @@ The renderers are pure functions of the result object, so what the statistics la
 adds to the schema is the only thing that changes what they print.
 """
 
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
@@ -45,16 +46,24 @@ JSON_REPORT_NAME = "compare_report.json"
 
 MISSING = "—"
 
-CI_FOOTNOTE = (
-    "Displayed baseline/candidate values and each delta use `mean_across_repeats/<metric>` when recorded, "
-    "otherwise the metric value. "
-    "Delta CI = two-sided independent-sample 95% Welch t-interval for candidate minus baseline, "
-    "computed from the named metric's values in each run's `repeat_level_metrics`. "
-    f"`{MISSING}` means a point value or interval was unavailable: "
-    "delta intervals require at least 2 finite repeat-level values on each side. "
-    "Baseline/candidate CI = 95% t-interval of the per-repeat mean across repeats, read verbatim from "
-    "`ci_{low,high}_95_across_repeats/<metric>` in `*_aggregate_metrics.json`."
-)
+
+def _confidence_percent(confidence_level: float) -> str:
+    """Keep decimal precision in labels, including levels close to one."""
+    return f"{Decimal(str(confidence_level)):%}"
+
+
+def _ci_footnote(confidence_level: float) -> str:
+    return (
+        "Displayed baseline/candidate values and each delta use `mean_across_repeats/<metric>` when recorded, "
+        "otherwise the metric value. "
+        f"Delta CI = two-sided independent-sample {_confidence_percent(confidence_level)} Welch t-interval "
+        "for candidate minus baseline, "
+        "computed from the named metric's values in each run's `repeat_level_metrics`. "
+        f"`{MISSING}` means a point value or interval was unavailable: "
+        "delta intervals require at least 2 finite repeat-level values on each side. "
+        "Baseline/candidate CI = 95% t-interval of the per-repeat mean across repeats, read verbatim from "
+        "`ci_{low,high}_95_across_repeats/<metric>` in `*_aggregate_metrics.json`."
+    )
 
 
 def _fmt(value: Optional[float]) -> str:
@@ -150,11 +159,14 @@ def _run_summary_table(result: ComparisonResult, comparison: AgentComparison) ->
 
 
 DELTA_HEADER = "Δ (cand − base)"
-DELTA_CI_HEADER = f"95% CI for {DELTA_HEADER}"
 
 
-def _metric_table(rows: Sequence[MetricRow], candidate_labels: Sequence[str]) -> List[str]:
-    header = ["Metric", DELTA_HEADER, DELTA_CI_HEADER]
+def _delta_ci_header(confidence_level: float) -> str:
+    return f"{_confidence_percent(confidence_level)} CI for {DELTA_HEADER}"
+
+
+def _metric_table(rows: Sequence[MetricRow], candidate_labels: Sequence[str], *, confidence_level: float) -> List[str]:
+    header = ["Metric", DELTA_HEADER, _delta_ci_header(confidence_level)]
     alignments = ["---", "---:", "---"]
     header += ["Baseline", "Baseline 95% CI"]
     alignments += ["---:", "---"]
@@ -267,17 +279,17 @@ def render_markdown(result: ComparisonResult) -> str:
 
         lines += ["### Key metrics", ""]
         if key_rows:
-            lines += _metric_table(key_rows, candidate_labels)
+            lines += _metric_table(key_rows, candidate_labels, confidence_level=result.confidence_level)
         else:
             lines += ["No key metrics were recorded for this agent."]
-        lines += ["", CI_FOOTNOTE, ""]
+        lines += ["", _ci_footnote(result.confidence_level), ""]
 
         if other_rows:
             lines += [
                 "<details>",
                 f"<summary>All other metrics ({len(other_rows)} rows)</summary>",
                 "",
-                *_metric_table(other_rows, candidate_labels),
+                *_metric_table(other_rows, candidate_labels, confidence_level=result.confidence_level),
                 "",
                 "</details>",
                 "",
@@ -353,7 +365,7 @@ def render_key_metrics_tables(result: ComparisonResult) -> List["Table"]:
         table = Table(title=f"Key metrics — {comparison.baseline_agent}")
         table.add_column("Metric")
         table.add_column(DELTA_HEADER, justify="right")
-        table.add_column(DELTA_CI_HEADER)
+        table.add_column(_delta_ci_header(result.confidence_level))
         table.add_column("Baseline", justify="right")
         table.add_column("Baseline 95% CI")
         table.add_column("Candidate", justify="right")
