@@ -48,6 +48,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import (
     CAPTURE_REFUSAL_HEADER,
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
@@ -73,11 +74,7 @@ from nemo_gym.models import (
     token_capture_config,
     validate_framework_context_options,
 )
-from nemo_gym.models.base_responses_api_model import (
-    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
-    _request_messages,
-    _validate_responses_params,
-)
+from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
