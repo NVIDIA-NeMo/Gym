@@ -19,9 +19,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from nemo_gym.comparison.suite_loading import load_suite_manifest, load_suite_run, resolve_metric_definitions
-from nemo_gym.comparison.suite_processing import aggregate_suite_cells, compare_suite_cell
-from nemo_gym.comparison.suite_schema import SuiteComparisonConfig, SuiteComparisonResult
+from nemo_gym.comparison.suite.loading import load_suite_manifest, load_suite_run, resolve_metric_definitions
+from nemo_gym.comparison.suite.processing import aggregate_suite_cells, compare_suite_cell
+from nemo_gym.comparison.suite.schema import SuiteComparisonConfig, SuiteComparisonResult
 from nemo_gym.config_types import ConfigError
 from nemo_gym.package_info import __version__
 from nemo_gym.secret_utils import hide_secrets_in_overrides

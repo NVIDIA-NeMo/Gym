@@ -25,8 +25,8 @@ from nemo_gym.comparison.statistics.unpaired_welch_fixed_suite import (
     normalize_score,
     summarize_sample,
 )
-from nemo_gym.comparison.suite_loading import LoadedSuiteRun
-from nemo_gym.comparison.suite_schema import (
+from nemo_gym.comparison.suite.loading import LoadedSuiteRun
+from nemo_gym.comparison.suite.schema import (
     SuiteAggregateResult,
     SuiteCellResult,
     SuiteCoverage,
