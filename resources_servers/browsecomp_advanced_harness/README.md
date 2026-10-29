@@ -21,7 +21,8 @@ Reward is computed via an LLM judge that compares the model's final answer again
 Add to your `env.yaml` (or pass via CLI):
 
 ```yaml
-ydc_api_key: <YOUR_YOU_COM_KEY>   # or a list of keys for rotation; use exa_api_key / tavily_api_key with search_provider=exa|tavily
+ydc_api_key: <YOUR_YDC_KEY>   # or a list of keys for rotation; use exa_api_key / tavily_api_key with search_provider=exa|tavily
+tavily_api_key: <YOUR_TAVILY_KEY>   # or a list of keys for rotation; use exa_api_key / tavily_api_key with search_provider=exa|tavily
 exclude_domains_file_path: /path/to/excluded_domains.json
 
 judge_model_base_url: <YOUR_JUDGE_MODEL_URL>

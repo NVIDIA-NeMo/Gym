@@ -71,9 +71,9 @@ _EXA_DEEP_ANSWER_MAX_FRACTION = 0.5
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    # Search/browse backend. "ydc" (default), "tavily" or "exa". The chosen provider's
+    # Search/browse backend. "tavily" (default), "ydc" or "exa". The chosen provider's
     # key must be present (validated below). exclude_domains are honored by all three.
-    search_provider: str = "ydc"
+    search_provider: str = "tavily"
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
     ydc_api_key: str | List[str] | None = None
