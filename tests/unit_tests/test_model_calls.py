@@ -624,6 +624,12 @@ _USAGE_SHAPES = {
         120,
         None,
     ),
+    "chat completions boolean cache write": (
+        {"prompt_tokens": 100, "prompt_tokens_details": {"cache_write_tokens": True}, "completion_tokens": 20},
+        100,
+        120,
+        None,
+    ),
     "chat completions": ({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}, 100, 120, None),
     "chat completions cached subset": (
         {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 80}, "completion_tokens": 20},
