@@ -25,8 +25,8 @@ budget, after a submission, or in phase 2), `agent_finished` (a-Interact), and t
 
 ## Harnesses
 
-What each harness's Gym adapter accepts today, read from its session seed checks. Only `simple_agent` has run BIRD
-with a model; the other rows are not results from runs.
+What each harness's Gym adapter accepts today, read from its session seed checks. `simple_agent`, in both modes, and
+Codex, in a-Interact over `mcp`, have run BIRD with a model; the other rows are not results from runs.
 
 | Harness | c-Interact | a-Interact |
 |---|---|---|
@@ -46,6 +46,10 @@ with a model; the other rows are not results from runs.
   must be reachable from there, as the model server's already must be. To run a-Interact on Codex or Pi, point
   `agent_server` at the harness and set `resources_tool_transports: [mcp]`. `benchmarks/gdpval/codex.yaml` and
   `benchmarks/gdpval/pi.yaml` show the agent settings, such as the version and the model's limits.
+- **With the Docker provider**, start the servers with `+default_host` set to an address the container can reach,
+  such as the `docker0` bridge address. If the host's firewall drops traffic from the bridge to host ports, Codex
+  times out on the MCP handshake; give the harness's sandbox provider `network: host`. BIRD's database sandbox needs
+  neither, because the Resources Server runs commands in it and it calls nothing.
 
 The gaps are in the adapters, not in BIRD: multi-turn sessions in Codex, Pi, Hermes, Stirrup, Claude Code, Kilo and
 OpenClaw for c-Interact, and tool grants in Claude Code, Kilo, OpenClaw and OpenCode for a-Interact.
