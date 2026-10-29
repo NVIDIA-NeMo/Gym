@@ -348,7 +348,22 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
-        sandbox_mock.download = AsyncMock()
+
+        async def download(remote: str, local: Path) -> None:
+            # Serve the plugin upload read-back from the real file; the export download is a no-op.
+            # The sandbox path carries a prefix the repo file does not, so strip it before looking:
+            # /tmp/nemo-gym-plugin-<name> lives under plugins/, /tmp/nemo-gym-<name> beside app.py.
+            name = Path(remote).name
+            for prefix, subdir in (("nemo-gym-plugin-", "plugins"), ("nemo-gym-", "")):
+                if name.startswith(prefix):
+                    stem = name[len(prefix) :]
+                    base = Path(app_module.__file__).parent
+                    source = base / subdir / stem if subdir else base / stem
+                    if source.is_file():
+                        local.write_bytes(source.read_bytes())
+                    return
+
+        sandbox_mock.download = AsyncMock(side_effect=download)
         sandbox_mock.upload = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(
@@ -394,7 +409,7 @@ class TestOpenCodeSandboxedAgent:
             assert plugins == ["file:///user-plugin.js"]
 
         assert sandbox_mock.upload.await_count == (
-            len(server._runtime_plugins()) + int(observability_enabled) + int(stage_ripgrep)
+            len(server._plugin_uploads()) + int(observability_enabled) + int(stage_ripgrep)
         )
 
         expected_response = NeMoGymResponse(
@@ -486,8 +501,11 @@ class TestOpenCodeSandboxedAgent:
         if stage_ripgrep:
             expected_uploads.append(call(binary, "/tmp/nemo-gym-ripgrep-"))
         assert sandbox_mock.upload.await_args_list == expected_uploads
-        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[: len(expected_uploads) + 1]] == [
-            *(["upload"] * len(expected_uploads)),
+        # Each plugin upload is followed by its read-back; the patch and ripgrep stay plain uploads.
+        expected_calls = ["upload", "download"] * int(remaining_context)
+        expected_calls += ["upload"] * (int(observability_enabled) + int(stage_ripgrep))
+        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[: len(expected_calls) + 1]] == [
+            *expected_calls,
             "exec",
         ]
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
@@ -849,13 +867,16 @@ class TestOpenCodeSandboxedAgent:
             # No positional message at all, so run.ts's `message` is "" and resolveRunInput returns
             # the piped text untouched. A bare "--" would put us back on the quote-rewrapping path.
             assert "--" not in argv, argv
-            assert argv[-2] == "<", argv
-            query_file = argv[-1]
+            # The question is piped in, not staged in a file and redirected.
+            assert "<" not in argv, argv
 
-            # printf '%s' <question> > <query_file>, seeded before the run in the same && chain.
-            seed = next(c for c in commands if c and c[0] == "printf")
-            assert seed[seed.index("%s") + 1] == question
-            assert seed[-1] == query_file
+            # `printf '%s' <question> | <VAR=value...> opencode run ...`: one && entry, because `|`
+            # binds tighter than `&&`. The chain therefore waits on the pipeline -- whose status is
+            # opencode's -- so the trailing `&& echo "OpenCode run finished"` still gates on the run.
+            pipeline = next(c for c in commands if c and c[0] == "printf")
+            assert pipeline[pipeline.index("%s") + 1] == question, pipeline
+            assert pipeline[pipeline.index("%s") + 2] == "|", pipeline
+            assert pipeline.index("|") < pipeline.index("opencode"), pipeline
         else:
             assert "<" not in argv, argv
             assert argv[-2] == "--", argv
@@ -1414,9 +1435,21 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def download(remote: str, local: Path) -> None:
+        # The sandbox path carries a prefix the repo file does not: /tmp/nemo-gym-<name> lives
+        # beside app.py, /tmp/nemo-gym-plugin-<name> under plugins/. Strip before looking.
+        name = Path(remote).name
+        base = Path(app_module.__file__).parent
+        for prefix, subdir in (("nemo-gym-plugin-", "plugins"), ("nemo-gym-", "")):
+            if name.startswith(prefix):
+                stem = name[len(prefix) :]
+                local.write_bytes((base / subdir / stem if subdir else base / stem).read_bytes())
+                return
+
     sandbox = MagicMock(
         upload=AsyncMock(),
-        download=AsyncMock(),
+        download=AsyncMock(side_effect=download),
         exec=AsyncMock(
             side_effect=[
                 SimpleNamespace(stdout="", stderr="MCP unavailable", return_code=1, error_type=None),
@@ -1440,8 +1473,41 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
         Path(app_module.__file__).with_name("required-mcp.js"), "/tmp/nemo-gym-required-mcp.js"
     )
     assert sandbox.exec.await_count == 2
-    sandbox.download.assert_not_awaited()
+    # The only download is the plugin read-back: no export was pulled for an unscored rollout.
+    assert [awaited.args[0] for awaited in sandbox.download.await_args_list] == ["/tmp/nemo-gym-required-mcp.js"]
     assert not server._sandbox_id_to_run_result
+
+
+async def test_plugin_registration_and_upload_come_from_one_list(monkeypatch):
+    """Config-named and policy-driven plugins share one ordered list, one registration, one upload."""
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.opencode_plugins = ["nemo_gym_sentinel.js", "nemo_gym_web_guard.js"]
+    config.output_token_policy = "remaining_context"
+    config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(app_module, "sandbox_server_url", lambda _, **kwargs: "http://model.example:8000")
+    monkeypatch.setattr(
+        OpenCodeSandboxedAgent, "base_url_for_run", MagicMock(return_value="http://model.example:8000")
+    )
+    request = MagicMock()
+    request.json = AsyncMock(return_value={})
+
+    # The sentinel loads ahead of the guards it vouches for, and both prefixes survive unification.
+    assert (await server._create_opencode_config(request))["plugin"] == [
+        "file:///tmp/nemo-gym-plugin-nemo_gym_sentinel.js",
+        "file:///tmp/nemo-gym-plugin-nemo_gym_web_guard.js",
+        "file:///tmp/nemo-gym-remaining-context.js",
+        "file:///tmp/nemo-gym-required-mcp.js",
+    ]
+    # What gets registered is exactly what gets uploaded, in the same order.
+    assert [f"file://{remote}" for _, remote in server._plugin_uploads()] == (
+        await server._create_opencode_config(request)
+    )["plugin"]
+    assert all(local.is_file() for local, _ in server._plugin_uploads())
+
+    config.opencode_plugins = ["nemo_gym_sentinel.js", "not_a_plugin.js"]
+    with raises(FileNotFoundError, match="not_a_plugin.js"):
+        server._plugin_uploads()
 
 
 @mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")

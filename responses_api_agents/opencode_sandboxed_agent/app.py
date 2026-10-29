@@ -686,13 +686,40 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return sandbox
 
-    def _runtime_plugins(self) -> list[str]:
-        plugins = []
+    def _plugin_uploads(self) -> list[tuple[Path, str]]:
+        """Every opencode plugin this rollout ships, as (local file, sandbox path), in load order.
+
+        One list with two consumers. `_create_opencode_config` registers the sandbox paths in the
+        `plugin` array and `responses` uploads the files. The registration site has no sandbox,
+        which is fine: a sandbox path is a deterministic function of the plugin name, so both
+        sites can derive it from this method and a registered plugin cannot drift away from an
+        uploaded one. That drift is the failure this guards -- opencode silently ignores a
+        `plugin` entry whose file is absent.
+
+        The two groups are plugins in exactly the same sense: `required-mcp.js` and
+        `remaining-context.js` each export a hook factory and reach opencode through the same
+        `plugin` array as the files under `plugins/`. They differ only in where the repo keeps
+        them, which is why their sandbox paths keep distinct prefixes -- `plugins/` is
+        config-named and open-ended, so a future `plugins/remaining-context.js` must not land on
+        top of this directory's copy.
+
+        Config-named plugins come first. `nemo_gym_sentinel.js` heads that list, and the point of
+        the sentinel is to load ahead of the guards whose presence it attests to.
+        """
+        plugin_dir = Path(__file__).parent / "plugins"
+        uploads: list[tuple[Path, str]] = []
+        for name in self.config.opencode_plugins:
+            local = plugin_dir / name
+            if not local.is_file():
+                raise FileNotFoundError(f"opencode plugin not found: {local}")
+            uploads.append((local, f"/tmp/nemo-gym-plugin-{name}"))
+        policy_plugins = []
         if self.config.output_token_policy == "remaining_context":
-            plugins.append("remaining-context.js")
+            policy_plugins.append("remaining-context.js")
         if self.config.tool_servers:
-            plugins.append("required-mcp.js")
-        return plugins
+            policy_plugins.append("required-mcp.js")
+        uploads.extend((Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}") for name in policy_plugins)
+        return uploads
 
     def _agent_sandbox_observation(
         self,
@@ -791,7 +818,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     base[key] = deepcopy(value)
 
         _merge(config, self.config.opencode_config)
-        config.setdefault("plugin", []).extend(f"file:///tmp/nemo-gym-{name}" for name in self._runtime_plugins())
+        config.setdefault("plugin", []).extend(f"file://{remote}" for _, remote in self._plugin_uploads())
         rollout_mcp = getattr(request.state, "_ng_opencode_mcp", None)
         if isinstance(rollout_mcp, dict):
             config.setdefault("mcp", {}).update(rollout_mcp)
@@ -957,8 +984,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         returns at pod-SCHEDULED rather than pod-READY, so an early write is exactly the kind of
         operation that can be accepted and then not land.
 
-        Verifying costs one small read per plugin -- 36 KB total across all four -- against a
-        rollout that runs for minutes. Cheap insurance against losing an eighth of a run.
+        Verifying costs one small read per plugin -- under 40 KB across the whole list -- against
+        a rollout that runs for minutes. Cheap insurance against losing an eighth of a run.
         """
         expected = local.read_bytes()
         last = ""
@@ -1038,8 +1065,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             && VERSION={self.config.opencode_version} bash "$installer\""""
 
         effective_config = await self._create_opencode_config(request)
-        for name in self._runtime_plugins():
-            await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
+        # Uploaded per rollout rather than baked into the image, so a plugin edit ships with a
+        # config change and no image rebuild. Kept in /tmp, outside any task directory, so it
+        # cannot be picked up by tooling that inspects the workspace. Every plugin is read back
+        # after the write, because opencode swallows a load failure: an upload that reports
+        # success and does not land would otherwise leave the MCP gate, the output-token hook or
+        # a guard silently absent from a run that still looks healthy and still gets scored.
+        for local, remote in self._plugin_uploads():
+            await self._upload_plugin_verified(sandbox, local, remote)
         build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
         for name in ("temperature", "top_p"):
             value = getattr(body, name, None)
@@ -1049,21 +1082,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # Keep the plugin outside the task repo so it cannot enter a generated patch.
             await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
             apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
-        if self.config.opencode_plugins:
-            # Uploaded per rollout rather than baked into the image, so a plugin edit ships with a
-            # config change and no image rebuild. Kept in /tmp, outside any task directory, so it
-            # cannot be picked up by tooling that inspects the workspace.
-            plugin_dir = Path(__file__).parent / "plugins"
-            remote_paths = []
-            for name in self.config.opencode_plugins:
-                local = plugin_dir / name
-                if not local.is_file():
-                    raise FileNotFoundError(f"opencode plugin not found: {local}")
-                remote = f"/tmp/nemo-gym-plugin-{name}"
-                await self._upload_plugin_verified(sandbox, local, remote)
-                remote_paths.append(f"file://{remote}")
-            effective_config.setdefault("plugin", []).extend(remote_paths)
-
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -1090,21 +1108,31 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         extra_env_str = " ".join(f"{k}={quote(v)}" for k, v in sorted(self._resolve_opencode_env(query).items()))
 
         # Query delivery. argv is the default and preserves today's behaviour exactly; stdin is
-        # opt-in because it is the only way to get the message through run.ts un-rewrapped (see
-        # `opencode_query_via_stdin`). The file is written with printf '%s' so there is no trailing
-        # newline and no shell expansion, and the `&&` chain aborts loudly if the write fails
-        # rather than letting opencode exit 1 on an empty message.
+        # opt-in (see `opencode_query_via_stdin`).
+        #
+        # The reason is run.ts's own rewrapping, NOT argument length and NOT shell escaping:
+        # `quote()` already makes any question safe as a single argv, and a natural-language
+        # question is nowhere near any execve argument limit. run.ts maps every argv message
+        # through `arg.includes(" ") ? '"' + arg.replace(/"/g, '\\"') + '"' : arg`, so the model
+        # receives a space-bearing question double-quoted with its inner quotes backslash-escaped.
+        # `resolveRunInput(message, piped)` returns the piped text verbatim only when that argv
+        # message is empty, which is why stdin mode passes no positional message at all.
         query_seed_str = ""
         query_arg_str = f"-- {quote(query)}"
-        query_stdin_str = ""
         if self.config.opencode_query_via_stdin:
-            query_file = f"/tmp/nemo-gym-query-{uuid4().hex}.txt"
-            # Single line on purpose: the backslashes in `command` below are Python string
-            # continuations, so the whole script is already one physical line by the time the
-            # sandbox shell sees it. Emitting a real newline here would be the only one.
-            query_seed_str = f"printf '%s' {quote(query)} > {query_file} && "
+            # Piped straight into the run rather than staged through a temp file: run.ts gates on
+            # `process.stdin.isTTY`, which is false for a pipe exactly as it is for a redirect, so
+            # the pipe is a drop-in that leaves nothing behind in the sandbox's /tmp. printf '%s'
+            # keeps the bytes exact -- no trailing newline, no shell expansion.
+            #
+            # Precedence: `|` binds tighter than `&&`, so the chain below reads as
+            # `... && (printf ... | ... opencode run ...) && echo "OpenCode run finished"`. The
+            # chain waits on the pipeline, whose status is opencode's, so the trailing `&&` still
+            # gates on the run and no subshell is needed. Kept on one line because the backslashes
+            # in `command` below are Python string continuations: the sandbox shell sees one
+            # physical line, and a real newline here would be the only one.
+            query_seed_str = f"printf '%s' {quote(query)} | "
             query_arg_str = ""
-            query_stdin_str = f"< {query_file}"
 
         # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
         # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
@@ -1120,7 +1148,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {query_arg_str} {query_stdin_str} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {query_arg_str} \
         && echo "OpenCode run finished"
         """
 
