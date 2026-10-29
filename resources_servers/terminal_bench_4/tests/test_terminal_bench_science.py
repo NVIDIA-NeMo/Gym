@@ -481,6 +481,7 @@ async def test_every_trial_sandbox_asks_for_single_process_oom_kills(tmp_path, m
         await provider.create(spec)
         assert sent[-1]["nemo.nvidia.com/oom-kill"] == "process", role
         assert sent[-1]["nemo.nvidia.com/resources"] == "custom", role
+        assert sent[-1]["nemo.nvidia.com/s3-hostpath"] == "false", role
     await provider.aclose()
 
 
