@@ -1102,10 +1102,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         started = monotonic()
         previous_session_id = state.harness_session_id
         sampling = ModelCallSampling.from_request(body)
+        output_limit = min(sampling.max_output_tokens or self.config.max_output_tokens, self.config.max_output_tokens)
+        sampling = sampling.model_copy(update={"max_output_tokens": output_limit})
         base_url = model_sampling_base_url(
             self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key), sampling
         )
-        output_limit = body.max_output_tokens if body.max_output_tokens is not None else self.config.max_output_tokens
         config = {
             "model": "nemo_gym/" + self.config.sandbox_model_id,
             "small_model": "nemo_gym/" + self.config.sandbox_model_id,

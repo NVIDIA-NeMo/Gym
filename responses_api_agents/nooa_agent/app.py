@@ -17,17 +17,25 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from fastapi import Body, FastAPI, HTTPException, Request
 
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
     SimpleResponsesAPIAgent,
+    assert_model_url_reachable_from_sandbox,
 )
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
@@ -38,6 +46,8 @@ from responses_api_agents.nooa_agent.runner import (
     NOOARunRequest,
     NOOARunResult,
 )
+from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
+from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
@@ -58,6 +68,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Run one NOOA activation per Environment Server-owned episode."""
 
     config: NOOAAgentConfig
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -80,6 +91,48 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             tool_access=access,
             resources_cookies=dict(access.cookies) if access else {},
         )
+        if self.config.nooa.execution_mode == "sandboxed":
+            access = body.sandbox_access
+            if access is None:
+                raise AgentSeedRejectedError("Sandboxed NOOA requires a task-owned sandbox grant")
+            if access.user is not None or access.env:
+                raise AgentSeedRejectedError("NOOA does not support sandbox user or environment overrides")
+            provider_config = resolve_provider_config(access.connection.provider_config_ref, get_global_config_dict())
+            base_url = self.resolve_model_base_url(self.config.model_server.name, trace_context=False).removesuffix(
+                "/v1"
+            )
+            assert_model_url_reachable_from_sandbox(base_url, provider_name=next(iter(provider_config), None))
+            provider = create_provider(provider_config)
+            try:
+                sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+            # Retain the borrower before setup so failed cleanup remains retryable.
+            runner = SandboxNOOARunner(
+                sandbox=sandbox,
+                workdir=access.workdir,
+                python="",
+                invocation=self.config.nooa,
+                model_base_url=base_url,
+                model_server_name=self.config.model_server.name,
+                max_policy_calls=self.config.max_policy_calls,
+                timeout=self.config.sandbox_timeout_seconds,
+                close_timeout=self.config.session_close_timeout_seconds,
+            )
+            state.runner = runner
+            try:
+                runner.python = await prepare_nooa_runtime(sandbox)
+                await runner.prepare()
+            except BaseException as error:
+                try:
+                    await runner.close()
+                except BaseException:
+                    raise AgentSessionSetupError(state, error=error) from error
+                raise
+            return state
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("A task sandbox requires nooa.execution_mode='sandboxed'")
         state.runner = InProcessNOOARunner(
             invocation=self.config.nooa,
             server_client=self.server_client,
@@ -100,6 +153,14 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Agent session does not match the rollout route")
         if body.tools and state.tool_access is None:
             raise HTTPException(422, "Resource tools require a direct HTTP grant")
+        if self.config.max_output_tokens is not None:
+            body = body.model_copy(
+                update={
+                    "max_output_tokens": min(
+                        self.config.max_output_tokens, body.max_output_tokens or self.config.max_output_tokens
+                    )
+                }
+            )
         route = self.url_path_for_request("/v1/responses", request)
         async with state.lock:
             if state.closing:
@@ -154,12 +215,16 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if not execution.done():
                 execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)
+        if isinstance(state.runner, SandboxNOOARunner):
+            await state.runner.close()
         return self._session_evidence(state)
 
     def _session_evidence(self, state: NOOASessionState) -> AgentCloseSessionResponse:
         observations = None
         if state.result is not None:
             _, observations = finalize_run_result(state.result)
+        if isinstance(state.runner, SandboxNOOARunner) and state.runner.observations is not None:
+            observations = state.runner.observations
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=observations,

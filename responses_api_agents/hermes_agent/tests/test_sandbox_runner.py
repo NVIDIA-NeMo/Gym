@@ -233,6 +233,9 @@ def test_interruption_uses_supplied_stop_request_path(tmp_path, monkeypatch, res
     class Agent:
         def __init__(self, **kwargs):
             self._session_messages = [{"role": "assistant", "content": "partial answer"}]
+            self._ensure_primary_openai_client = lambda **kwargs: None
+            self._handle_max_iterations = lambda *args: None
+            self._interruptible_api_call = lambda request: None
 
         def _build_api_kwargs(self, messages):
             return {}

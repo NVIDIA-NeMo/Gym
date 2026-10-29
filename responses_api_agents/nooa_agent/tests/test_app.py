@@ -320,3 +320,80 @@ async def test_no_tool_grant_preserves_resources_cookie_jar(monkeypatch: pytest.
     receipt = await close(instance)
     # SWE-bench Pro has no resource tools; only Resources knows its session cookie.
     assert receipt.resources_cookies is None
+
+
+def sandbox_grant():
+    return {
+        "connection": {"provider_config_ref": "sandbox", "descriptor": {"id": "owned-by-resources"}},
+        "workdir": "/repo",
+    }
+
+
+async def test_borrowed_sandbox_seed_run_and_close_preserve_owner(monkeypatch):
+    from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
+    from responses_api_agents.nooa_agent.tests.test_sandbox_runner import MemorySandbox
+
+    instance, _ = agent(monkeypatch)
+    instance.config.nooa.execution_mode = "sandboxed"
+    sandbox = MemorySandbox()
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    monkeypatch.setattr(app_module, "create_provider", lambda config: AsyncMock())
+    monkeypatch.setattr(app_module.AsyncSandbox, "connect", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(NOOAAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    monkeypatch.setattr(app_module, "prepare_nooa_runtime", AsyncMock(return_value="/opt/private/python"))
+    run = AsyncMock(return_value=result())
+    monkeypatch.setattr(SandboxNOOARunner, "run", run)
+    req = await open_session(instance, sandbox_access=sandbox_grant())
+    state = instance._require_agent_session("session")
+    assert isinstance(state.runner, SandboxNOOARunner)
+    assert state.runner.python == "/opt/private/python"
+    assert state.runner.model_base_url == "http://model:8000"
+    assert state.runner.session.workdir == "/repo"
+    await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert run.await_args.args[0].model_url_path == "/ng-rollout/rollout-a2/v1/responses"
+    await close(instance)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_embedded_mode_refuses_to_ignore_borrowed_sandbox(monkeypatch):
+    instance, _ = agent(monkeypatch)
+    with pytest.raises(HTTPException) as error:
+        await open_session(instance, sandbox_access=sandbox_grant())
+    assert error.value.status_code == 422
+    assert "sandboxed" in error.value.detail
+
+
+@pytest.mark.parametrize("requested,expected", [(None, 64), (128, 64), (32, 32)])
+async def test_output_ceiling_reaches_runner(monkeypatch, requested, expected):
+    instance, runner_run = agent(monkeypatch)
+    instance.config.max_output_tokens = 64
+    req = await open_session(instance)
+    await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task", max_output_tokens=requested))
+    assert runner_run.await_args.args[0].responses_create_params.max_output_tokens == expected
+
+
+async def test_failed_sandbox_seed_retains_retryable_cleanup(monkeypatch):
+    from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
+    from responses_api_agents.nooa_agent.tests.test_sandbox_runner import MemorySandbox
+
+    instance, _ = agent(monkeypatch)
+    instance.config.nooa.execution_mode = "sandboxed"
+    sandbox = MemorySandbox()
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *args: {"opensandbox": {}})
+    monkeypatch.setattr(app_module, "create_provider", lambda config: AsyncMock())
+    monkeypatch.setattr(app_module.AsyncSandbox, "connect", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(NOOAAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    monkeypatch.setattr(app_module, "prepare_nooa_runtime", AsyncMock(side_effect=RuntimeError("setup failed")))
+    original_close = SandboxNOOARunner.close
+    failed_close = AsyncMock(side_effect=ConnectionError("disconnect failed"))
+    monkeypatch.setattr(SandboxNOOARunner, "close", failed_close)
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await open_session(instance, sandbox_access=sandbox_grant())
+    assert instance._session_records["session"].state is not None
+    monkeypatch.setattr(SandboxNOOARunner, "close", original_close)
+    await close(instance)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()

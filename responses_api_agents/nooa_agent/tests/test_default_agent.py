@@ -96,11 +96,8 @@ async def test_default_benchagent_runs_and_serializes_module_locals(
     assert json.loads(observations.model_dump_json())["records"]
 
 
-def test_server_rejects_sandboxed_execution_until_sessions_are_wired() -> None:
-    from pydantic import ValidationError
-
+def test_server_accepts_sandboxed_execution() -> None:
     config = default_config()
     values = config.model_dump()
     values["nooa"]["execution_mode"] = "sandboxed"
-    with pytest.raises(ValidationError, match="execution_mode='sandboxed'.*unavailable"):
-        NOOAAgentConfig.model_validate(values)
+    assert NOOAAgentConfig.model_validate(values).nooa.execution_mode == "sandboxed"

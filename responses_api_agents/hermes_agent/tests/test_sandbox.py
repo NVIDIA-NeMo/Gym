@@ -180,7 +180,7 @@ async def test_invalid_activation_keeps_session_ready(agent: HermesAgent, state:
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     agent._run_sandbox_episode = AsyncMock(return_value=episode(agent))
     with pytest.raises(HTTPException) as error:
-        await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task", top_p=0.9))
+        await agent.responses(request(state), NeMoGymResponseCreateParamsNonStreaming(input="task", store=True))
     assert error.value.status_code == 422
     assert state.task is None
     agent._run_sandbox_episode.assert_not_awaited()
@@ -1021,9 +1021,6 @@ async def test_exec_reads_final_output_after_confirmed_cleanup(agent, state, out
 @pytest.mark.parametrize(
     "override",
     [
-        {"top_p": 0.8},
-        {"top_p": 1.0},
-        {"max_output_tokens": 32},
         {"model": "different-model"},
         {"store": True},
         {"store": False},
@@ -1587,3 +1584,20 @@ def test_http_status_alone_does_not_establish_context_overflow(agent, status):
         "model_request_error",
         status,
     )
+
+
+@pytest.mark.parametrize("requested,configured,expected", [(32, 64, 32), (128, 64, 64), (32, None, 32)])
+def test_training_sampling_and_output_ceiling(agent, requested, configured, expected):
+    agent.config.max_tokens = configured
+    body = agent._validate_request(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input="task",
+            temperature=0.7,
+            top_p=0.8,
+            max_output_tokens=requested,
+        )
+    )
+    params = agent._conversation_params(body)
+    assert params["temperature"] == 0.7
+    assert params["top_p"] == 0.8
+    assert params["max_tokens"] == expected

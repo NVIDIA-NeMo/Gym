@@ -52,6 +52,9 @@ def test_pinned_hermes_summary_passes_gym_schema_and_retains_call_ownership(
     def complete(**kwargs):
         # OpenAI consumes client options before validating the model request body.
         assert kwargs.pop("extra_headers", {}) == ({"x-session-id": "root"} if sandbox else {})
+        assert kwargs["temperature"] == 0.3
+        assert kwargs["top_p"] == 0.7
+        assert kwargs["max_tokens"] <= 64
         requests.append(NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(kwargs))
         content = "" if retry and len(requests) == 1 else "Applied a partial patch."
         return SimpleNamespace(
@@ -62,7 +65,11 @@ def test_pinned_hermes_summary_passes_gym_schema_and_retains_call_ownership(
     client.chat.completions.create.side_effect = complete
     monkeypatch.setattr(agent, "_create_request_openai_client", lambda **kwargs: client)
     monkeypatch.setattr(agent, "_close_request_openai_client", lambda *args, **kwargs: None)
-    install_summary_compat(agent, preserve_reasoning_history=False)
+    install_summary_compat(
+        agent,
+        preserve_reasoning_history=False,
+        sampling_overrides={"temperature": 0.3, "top_p": 0.7, "max_tokens": 64},
+    )
     observer = (
         SandboxHermesObserver()
         if sandbox
@@ -105,7 +112,11 @@ def test_delegated_child_limit_summary_uses_gym_and_belongs_to_child(
             skip_memory=True,
         )
         if install_before_observer:
-            install_summary_compat(parent, preserve_reasoning_history=False)
+            install_summary_compat(
+                parent,
+                preserve_reasoning_history=False,
+                sampling_overrides={"temperature": 0.3, "top_p": 0.7, "max_tokens": 64},
+            )
         observer = None
         if observer_kind == "host":
             observer = HermesAgentObserver(
@@ -114,7 +125,11 @@ def test_delegated_child_limit_summary_uses_gym_and_belongs_to_child(
         elif observer_kind == "sandbox":
             observer = SandboxHermesObserver().instrument(parent)
         if not install_before_observer:
-            install_summary_compat(parent, preserve_reasoning_history=False)
+            install_summary_compat(
+                parent,
+                preserve_reasoning_history=False,
+                sampling_overrides={"temperature": 0.3, "top_p": 0.7, "max_tokens": 64},
+            )
         child = _build_child_agent(
             task_index=0,
             goal="Inspect a file",
@@ -132,6 +147,9 @@ def test_delegated_child_limit_summary_uses_gym_and_belongs_to_child(
         assert kwargs.pop("extra_headers", {}) == (
             {"x-session-id": "root.child-1"} if observer_kind == "sandbox" else {}
         )
+        assert kwargs["temperature"] == 0.3
+        assert kwargs["top_p"] == 0.7
+        assert kwargs["max_tokens"] <= 64
         requests.append(NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(kwargs))
         return SimpleNamespace(
             id="child-summary", choices=[SimpleNamespace(message=SimpleNamespace(content="Partial findings."))]
@@ -194,10 +212,15 @@ def test_iteration_limit_hook_fires_once_before_summary_even_when_summary_fails(
     agent = SimpleNamespace(
         _ensure_primary_openai_client=lambda *, reason: None,
         _handle_max_iterations=fail_summary,
+        _interruptible_api_call=MagicMock(),
         _gym_invocation_id="root.child-1",
         _gym_on_iteration_limit_reached=lambda *, invocation_id: events.append(invocation_id),
     )
-    install_summary_compat(agent, preserve_reasoning_history=False)
+    install_summary_compat(
+        agent,
+        preserve_reasoning_history=False,
+        sampling_overrides={"temperature": 0.3, "top_p": 0.7, "max_tokens": 64},
+    )
 
     for _ in range(2):
         with pytest.raises(RuntimeError, match="summary unavailable"):

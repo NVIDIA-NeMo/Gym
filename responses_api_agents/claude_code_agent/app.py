@@ -57,6 +57,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.rollout_correlation import ModelCallSampling, model_sampling_base_url
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentObservationBundle,
@@ -90,6 +91,9 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     model: str = "claude-sonnet-4-6"
     anthropic_api_key: str = ""  # pragma: allowlist secret
     anthropic_base_url: Optional[str] = None
+    auto_compaction: bool = True
+    context_window: int | None = Field(default=None, gt=0)
+    max_output_tokens: int | None = Field(default=None, gt=0, le=2**53 - 1)
     max_turns: Optional[int] = 30  # None -> unlimited turns
     timeout: int = 300
     system_prompt: Optional[str] = None
@@ -200,7 +204,21 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             user_settings = json.loads(Path(self.config.settings).expanduser().read_text())
             user_env = user_settings.get("env") or {}
             settings = {**settings, **user_settings, "env": {**settings["env"], **user_env}}
+        # Keep explicit training controls authoritative over a user settings file.
+        settings["env"].update(self._context_env())
         return settings
+
+    def _context_env(self) -> dict[str, str]:
+        """Controls inherited by the CLI and its delegated model calls."""
+        env = {}
+        if not self.config.auto_compaction:
+            # DISABLE_COMPACT also disables reactive overflow compaction in the pinned CLI.
+            env.update(DISABLE_COMPACT="1", DISABLE_AUTO_COMPACT="1")
+            if self.config.context_window is not None:
+                env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(self.config.context_window)
+        if self.config.max_output_tokens is not None:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(self.config.max_output_tokens)
+        return env
 
     def _setup_config_dir(self, skills_path: Optional[str] = None) -> Path:
         """Create a per-run CLAUDE_CONFIG_DIR and stage settings (and optionally skills) into it.
@@ -313,6 +331,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
+                **self._context_env(),
             }
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
@@ -649,7 +668,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         )
 
     def _validate_sandbox_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
-        supported = {"input", "model"}
+        sampling = ModelCallSampling.from_request(body)
+        if any(value is not None for value in sampling.model_dump().values()) and self.config.model_server is None:
+            raise HTTPException(422, "Claude sampling controls require a Gym model server")
+        supported = {"input", "model", "temperature", "top_p", "max_output_tokens"}
         for name, field in type(body).model_fields.items():
             value = getattr(body, name)
             if name in supported or (name in {"stream", "background"} and value is False):
@@ -686,6 +708,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         directory = state.session.session_dir
         base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
+        sampling = ModelCallSampling.from_request(body)
+        if self.config.max_output_tokens is not None:
+            sampling = sampling.model_copy(
+                update={
+                    "max_output_tokens": min(
+                        self.config.max_output_tokens, body.max_output_tokens or self.config.max_output_tokens
+                    )
+                }
+            )
+        if self.config.model_server:
+            # Anthropic's SDK appends /v1/messages to this root URL.
+            base_url = model_sampling_base_url(base_url.rstrip("/") + "/v1", sampling).removesuffix("/v1")
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         env = {
             "CLAUDE_CONFIG_DIR": directory + "/config",
@@ -696,6 +730,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
             "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
+            **self._context_env(),
             "DISABLE_AUTOUPDATER": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         }
@@ -704,6 +739,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 ANTHROPIC_BASE_URL=base_url,
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
+        settings = self._build_settings()
+        for name, value in settings["env"].items():
+            if name in env and value != env[name]:
+                raise HTTPException(422, f"Claude settings env conflicts with the session's {name}")
         artifacts = None
         failure = None
         try:
@@ -721,7 +760,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "command": command,
                         "cwd": state.session.workdir,
                         "env": env,
-                        "settings": self._build_settings(),
+                        "settings": settings,
                         "mcp_config": self._get_static_mcp_config() if mcp_config else None,
                         "skills_path": skills_path,
                     },
