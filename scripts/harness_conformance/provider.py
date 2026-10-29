@@ -3,6 +3,7 @@
 
 """Controlled Chat/Responses endpoints and private episode witnesses."""
 
+import asyncio
 import json
 import shlex
 from dataclasses import dataclass, field
@@ -344,6 +345,26 @@ class Probe:
             self.save()
             return {"resources_session_id": body.resources_session_id}
 
+        async def bash(request: Request) -> JSONResponse:
+            body = await request.json()
+            process = await asyncio.create_subprocess_exec(
+                "sh",
+                "-c",
+                body["command"],
+                cwd=self.directory,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            return JSONResponse(
+                {
+                    "stdout": stdout.decode(errors="replace"),
+                    "stderr": stderr.decode(errors="replace"),
+                    "exit_code": process.returncode,
+                },
+                status_code=200 if process.returncode == 0 else 400,
+            )
+
         async def verify(request: Request) -> dict:
             body = await request.json()
             output = body.get("response", {}).get("output", [])
@@ -371,4 +392,5 @@ class Probe:
             app.post(prefix + "/seed_session")(seed)
             app.post(prefix + "/close_session")(close)
             app.post(prefix + "/verify")(verify)
+            app.post(prefix + "/bash")(bash)
         return app

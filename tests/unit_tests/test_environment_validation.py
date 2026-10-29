@@ -28,6 +28,7 @@ from nemo_gym.environment.validation import (
     "name",
     [
         "terminal_bench_4/miniswe",
+        "terminal_bench_science/miniswe",
         "deepsearchqa",
         "widesearch",
         "fukuyamabench",

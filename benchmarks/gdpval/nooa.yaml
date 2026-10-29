@@ -12,7 +12,6 @@ nooa_environment_server: null
 gdpval_resources_server:
   resources_servers:
     gdpval:
-      allowed_agents: [nooa_agent]
       datasets:
         - name: gdpval
           type: benchmark
