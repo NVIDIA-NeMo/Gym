@@ -308,9 +308,10 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
             "output": output_budget,
         }
         assert payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == str(output_budget)
-        assert (
-            config["provider"]["nemo_gym"]["options"]["baseURL"]
-            == "http://model.example:9000/ng-rollout/opencode-smoke-a2/v1"
+        assert_model_sampling(
+            config["provider"]["nemo_gym"]["options"]["baseURL"],
+            {"max_output_tokens": output_budget},
+            routed_base_path="/ng-rollout/opencode-smoke-a2/v1",
         )
         assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
@@ -1803,3 +1804,27 @@ def test_request_output_cap_respects_context_window_without_consuming_activation
         accepted = client.post(path, json={"input": "Fix the code", "max_output_tokens": 4096})
         assert accepted.status_code == 200, accepted.text
     sandbox.launch.assert_awaited_once()
+
+
+@pytest.mark.parametrize("requested", [None, 128, 2048])
+def test_configured_output_ceiling_reaches_every_model_route(setup, requested):
+    agent, sandbox = setup
+    agent.config.max_output_tokens = 512
+    body = {"input": "Fix the code"}
+    if requested is not None:
+        body["max_output_tokens"] = requested
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        path = "/ng-rollout/opencode-smoke-a2/v1/responses"
+        response = client.post(path, json=body)
+        assert response.status_code == 200, response.text
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        limit = min(requested or 512, 512)
+        assert payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == str(limit)
+        assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"]["output"] == limit
+        assert_model_sampling(
+            config["provider"]["nemo_gym"]["options"]["baseURL"],
+            {"max_output_tokens": limit},
+            routed_base_path=path.removesuffix("/responses"),
+        )
