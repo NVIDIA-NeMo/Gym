@@ -15,7 +15,7 @@ from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnviro
 from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest, UserTurn, episode_response
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_verifier_invocation_id
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_agent_instance, current_verifier_invocation_id
 from nemo_gym.rollouts.rollout_collection import _episode_record
 
 
@@ -599,7 +599,8 @@ async def test_local_lifecycle_closes_candidate_before_verification(
         value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
 
     async def verify(self, value, initial, activations):
-        assert current_verifier_invocation_id().startswith("verify-")
+        assert current_verifier_invocation_id()
+        assert current_agent_instance() == f"verify.{current_verifier_invocation_id()}"
         assert order[-1] == "agent close"
         order.append("verify")
         model = {"type": "responses_api_models", "name": "judge-model"}

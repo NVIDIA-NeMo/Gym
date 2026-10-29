@@ -29,7 +29,12 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    current_agent_instance,
+)
 from nemo_gym.metrics import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -116,13 +121,16 @@ class ProofJuryJudgeServer(SimpleResourcesServer):
         self._reconcile_prompt = yaml.safe_load((PROMPTS_DIR / "reconcile.yaml").read_text())["user"]
         return super().model_post_init(context)
 
-    async def _judge(self, judge: ModelServerRef, prompt: str, round_idx: int) -> Judgment:
+    async def _judge(self, judge: ModelServerRef, prompt: str, round_idx: int, juror: int) -> Judgment:
         response = await call_judge(
             self.server_client,
             server_name=judge.name,
             url_path="/v1/responses",
             json=NeMoGymResponseCreateParamsNonStreaming(input=[NeMoGymEasyInputMessage(role="user", content=prompt)]),
             response_model=NeMoGymResponse,
+            # Each juror is its own agent instance. Inside a verifier run the run's name ``verify.<id>`` stands,
+            # so its observability still owns every juror call.
+            agent_instance=None if current_agent_instance() is not None else f"judge.{juror}",
         )
         # The paper reruns incomplete panels: a cut-off reply or a vote without a score is a failed
         # judge call (sidecar, retried on resume), not a score of 0 for the policy. A cut-off reply
@@ -138,7 +146,9 @@ class ProofJuryJudgeServer(SimpleResourcesServer):
         return Judgment(judge=judge.name, round=round_idx, score=score, text=text)
 
     async def _round(self, prompt: str, round_idx: int) -> List[Judgment]:
-        tasks = [asyncio.create_task(self._judge(j, prompt, round_idx)) for j in self.config.judges]
+        tasks = [
+            asyncio.create_task(self._judge(j, prompt, round_idx, juror)) for juror, j in enumerate(self.config.judges)
+        ]
         try:
             return list(await asyncio.gather(*tasks))
         except BaseException:

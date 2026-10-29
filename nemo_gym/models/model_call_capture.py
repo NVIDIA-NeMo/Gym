@@ -39,8 +39,8 @@ import orjson
 from fastapi import Request, Response
 from pydantic import BaseModel, model_validator
 
-from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve
-from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve, verifier_invocation_id_of
+from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
@@ -902,9 +902,8 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
-        verifier_invocation_id = _unique_request_header(
-            scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
-        )
+        # A verifier run names itself ``verify.<id>`` in the path; the id joins its calls to the run.
+        verifier_invocation_id = verifier_invocation_id_of(agent_instance)
         session_id = client_session_id(scope)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)

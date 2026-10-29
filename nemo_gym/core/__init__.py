@@ -22,6 +22,8 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.core.episode_context import (
+        agent_instance_context,
+        current_agent_instance,
         current_rollout_id,
         current_verifier_invocation_id,
         maybe_rollout_id_from_run_body,
@@ -215,6 +217,8 @@ _PUBLIC_API = {
     "TaskId": "episode_types",
     "VERIFIER_ERROR": "failure_kinds",
     "accumulate_response_usage": "responses_api_types",
+    "agent_instance_context": "episode_context",
+    "current_agent_instance": "episode_context",
     "agent_route_failure": "typed_exceptions",
     "current_rollout_id": "episode_context",
     "current_verifier_invocation_id": "episode_context",
