@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import Request
 
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
 
@@ -17,12 +19,12 @@ async def session(setup):
     body = seed()
     await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     state = agent._session_records[body.agent_session_id].state
+    private = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
     payload = {
-        "directory": state.session.session_dir,
         "cwd": state.session.workdir,
         "prompt": "task",
         "command": [],
-        "env": {},
+        "env": {key: f"{state.session.session_dir}/{key}" for key in private},
     }
     return state, sandbox, payload
 
@@ -55,8 +57,11 @@ async def test_invalid_runtime_preserves_output_and_confirmed_close(setup, runti
 async def test_unconfirmed_receipt_skips_runtime_and_distinguishes_terminal_failure(setup, invalid):
     state, sandbox, payload = await session(setup)
     sandbox.result.update(invalid)
-    with pytest.raises(RuntimeError):
+    # A malformed receipt stays a retryable RuntimeError; a negative one is the harness's final typed failure.
+    final = invalid["cleanup_confirmed"] is False
+    with pytest.raises(NgFailureEvent if final else RuntimeError) as failure:
         await state.execute(payload, timeout=5, close_timeout=1)
+    assert is_harness_termination_failure(failure.value) is final
     assert state.session.cleanup is None
     assert state.runtime_info is None
     if invalid["cleanup_confirmed"] is False:
@@ -84,7 +89,7 @@ async def test_output_failure_does_not_erase_cleanup_confirmation(setup):
     execute = sandbox.exec.side_effect
 
     async def fail_output(command, **kwargs):
-        if "--snapshot" in command:
+        if "opencode.db-wal" in command:
             assert state.session.cleanup["cleanup_confirmed"] is True
             return SimpleNamespace(return_code=1, error_type=None, stderr="database unreadable")
         return await execute(command, **kwargs)
@@ -106,7 +111,7 @@ async def test_cancel_captures_partial_output_only_after_cleanup_and_keeps_origi
     snapshots = []
 
     async def capture(command, **kwargs):
-        if "--snapshot" in command:
+        if "opencode.db-wal" in command:
             assert state.session.cleanup["cleanup_confirmed"] is True
             snapshots.append(command)
             if capture_fails:
@@ -129,12 +134,12 @@ async def test_cancel_captures_partial_output_only_after_cleanup_and_keeps_origi
 @pytest.mark.parametrize(
     "receipt", [None, {"cleanup_confirmed": False, "return_code": 0, "error": None, "timed_out": False}]
 )
-async def test_snapshot_requires_positive_cleanup_before_any_io(setup, receipt):
+async def test_snapshot_requires_positive_cleanup_before_any_io(setup, tmp_path, receipt):
     state, sandbox, _ = await session(setup)
     state.session.cleanup = receipt
     sandbox.exec.reset_mock()
     with pytest.raises(RuntimeError, match="requires confirmed cleanup"):
-        await state.snapshot(1)
+        await state.snapshot(tmp_path, 1)
     sandbox.exec.assert_not_awaited()
     await state.close(1)
 

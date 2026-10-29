@@ -19,6 +19,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, normalize_math_judge_verdict, reraise_judge_errors
+from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER
 from nemo_gym.typed_exceptions import NgFailureEvent
 
 
@@ -262,3 +263,28 @@ async def test_beam_task_group_keeps_unrelated_canonical_failures():
     with pytest.raises(ExceptionGroup) as caught:
         await namespace["_gather_or_cancel"]([fail(unrelated)])
     assert caught.value.exceptions == (unrelated,)
+
+
+@pytest.mark.asyncio
+async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
+    from nemo_gym.judge import is_judge_failure
+    from nemo_gym.rollout_correlation import verifier_invocation_context
+
+    client = _client(status=200, body=b'{"verdict":"CORRECT"}')
+    await _call(client)
+    assert "headers" not in client.post.call_args.kwargs
+    with verifier_invocation_context("verify-one"):
+        await _call(client)
+        await _call(client)
+        assert all(
+            call.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
+            for call in client.post.call_args_list[1:]
+        )
+        failed = _client(status=400, body=b'{"error":"rejected"}')
+        # #5072 raises the judge's typed failure in place of JudgeError.
+        with pytest.raises(NgFailureEvent, match="HTTP 400") as failure:
+            await _call(failed)
+        assert is_judge_failure(failure.value)
+        assert failed.post.call_args.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
+    await _call(client)
+    assert "headers" not in client.post.call_args.kwargs

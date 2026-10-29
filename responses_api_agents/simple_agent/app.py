@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import logging
 import re
@@ -20,6 +21,7 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from time import monotonic, perf_counter, time
 from typing import Any
+from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import Request, Response
@@ -35,6 +37,8 @@ from nemo_gym._checkpoint.agent import (
 )
 from nemo_gym._checkpoint.errors import RolloutIdRequiredError
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.base_environment_server import is_retryable_dependency_status
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -56,7 +60,7 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, FailureBoundary
 from nemo_gym.exception_inspection import explicit_causes
-from nemo_gym.failure_kinds import AGENT_RUN_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import AGENT_RUN_ERROR, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow, report_for_current_request
 from nemo_gym.health.timeouts import TimeoutEvent
 from nemo_gym.openai_utils import (
@@ -174,6 +178,11 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     max_steps: int = None
+    max_model_retries: int = Field(
+        default=2,
+        ge=0,
+        description="Additional attempts for model HTTP 408, 425, 429 and 5xx responses, with bounded exponential backoff.",
+    )
     execute_tools: bool = Field(
         default=True,
         description=(
@@ -384,6 +393,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         usage = None
         step = 0
         invocation_status = "completed"
+        invocation_error_type = None
         model_server_cookies = None
         # A restored boundary after a model response resumes with that response's tool calls.
         pending_tools = False
@@ -453,27 +463,80 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     turn_timestamp = time()
 
                 async def call_model() -> tuple[Any, Any]:
-                    response = await self.server_client.post(
-                        server_name=self.config.model_server.name,
-                        url_path=model_url_path,
-                        json=new_body,
-                        cookies=model_server_cookies,
-                    )
-                    # We raise for status here since we expect model calls to always work.
-                    await raise_for_status(response)
-                    return await get_response_json(response), response.cookies
+                    retry = 0
+                    while True:
+                        response = await self.server_client.post(
+                            server_name=self.config.model_server.name,
+                            url_path=model_url_path,
+                            json=new_body,
+                            cookies=model_server_cookies,
+                            **({"headers": {"x-session-id": invocation_id}} if collect_trajectory else {}),
+                        )
+                        try:
+                            await raise_for_status(response)
+                        except ClientResponseError as error:
+                            # A report of every attempt timing out is final: the model server spent its own attempts.
+                            if (
+                                retry == self.config.max_model_retries
+                                or not is_retryable_dependency_status(error.status)
+                                or _policy_request_timed_out(error)
+                            ):
+                                raise
+                            LOG.warning(
+                                "Retrying model HTTP %s (%s/%s) model_server=%s rollout_id=%s",
+                                error.status,
+                                retry + 1,
+                                self.config.max_model_retries,
+                                self.config.model_server.name,
+                                rollout_id,
+                            )
+                            await asyncio.sleep(0.5 * 2 ** min(retry, 4))
+                            retry += 1
+                            continue
+                        return await get_response_json(response), response.cookies
 
                 try:
                     model_response_json, model_server_cookies = await self._call_policy(activation, call_model)
                 except ClientResponseError as error:
-                    if self.config.final_on_model_timeout and _policy_request_timed_out(error):
-                        raise NgFailureEvent(
-                            boundary=FailureBoundary.AGENT,
-                            failure_kind=MODEL_TRANSPORT_ERROR,
-                            failure_reason="Policy model request timed out on every attempt",
-                            operation=POLICY_TIMEOUT_OPERATION,
-                        ) from error
-                    raise
+                    if not in_session:
+                        if self.config.final_on_model_timeout and _policy_request_timed_out(error):
+                            raise NgFailureEvent(
+                                boundary=FailureBoundary.AGENT,
+                                failure_kind=MODEL_TRANSPORT_ERROR,
+                                failure_reason="Policy model request timed out on every attempt",
+                                operation=POLICY_TIMEOUT_OPERATION,
+                            ) from error
+                        raise
+                    # Return the cause and partial work; the Environment Server owns grading and retry policy.
+                    content = getattr(error, "response_content", b"")
+                    detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+                    invocation_status = "failed"
+                    invocation_error_type = MODEL_REQUEST_ERROR
+                    model_response = NeMoGymResponse(
+                        id=f"resp_{uuid4().hex}",
+                        created_at=time(),
+                        model=body.model or self.config.model_server.name,
+                        object="response",
+                        output=[],
+                        status="failed",
+                        error={
+                            "code": "server_error",
+                            "message": f"Model HTTP {error.status}: {detail or error.message}",
+                        },
+                        tools=body.tools,
+                        tool_choice=body.tool_choice,
+                        parallel_tool_calls=body.parallel_tool_calls,
+                        metadata={
+                            **(body.metadata or {}),
+                            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                                failure_kind=MODEL_REQUEST_ERROR, status_code=error.status
+                            ).model_dump_json(),
+                        },
+                    )
+                    # No successful model response means known zero aggregate usage, not invented per-call usage.
+                    if step == 1:
+                        usage = NeMoGymResponseUsage.sum_from_list([])
+                    break
                 try:
                     model_response = NeMoGymResponse.model_validate(model_response_json)
                 except ValidationError as e:
@@ -653,6 +716,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             invocation = AgentInvocation(
                 invocation_id=invocation_id,
                 status=invocation_status,
+                error_type=invocation_error_type,
                 model_calls=model_calls,
                 conversation=[*body.input, *new_outputs],
             )
@@ -744,7 +808,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     previous = state.observations
                     state.observations = AgentObservationBundle(
                         source="simple_agent",
-                        records=[*(previous.records if previous else []), *trajectory.invocations],
+                        records=[
+                            *(previous.records if previous else []),
+                            *trajectory.invocations,
+                            *trajectory.tool_calls,
+                        ],
                         gaps=[*(previous.gaps if previous else []), *trajectory.gaps],
                     )
 

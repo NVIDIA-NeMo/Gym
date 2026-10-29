@@ -10,6 +10,7 @@ import shlex
 import shutil
 import signal
 import socket
+import subprocess
 import sys
 import threading
 from contextlib import asynccontextmanager, contextmanager
@@ -24,7 +25,8 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -32,7 +34,8 @@ from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from nemo_gym.testing.failure_assertions import raises_agent_failure
-from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest
+from nemo_gym.typed_exceptions import NgFailureEvent
+from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
 
 
 def seed(*, session_id: str = "pi-session") -> AgentSeedSessionRequest:
@@ -95,6 +98,22 @@ def events(*, stop_reason="stop") -> str:
     )
 
 
+def staged(sandbox) -> dict:
+    """The activation as the runner sees it: params.sh sourced by bash, plus the staged prompt."""
+    script = 'source /dev/stdin; printf "%s\\0" "$cwd" "${#command[@]}" "${command[@]}" "${env[@]}"'
+    params = sandbox.files[f"{sandbox.directory}/params.sh"]
+    values = subprocess.run(
+        ["bash", "-c", script], input=params, capture_output=True, text=True, check=True
+    ).stdout.split("\0")[:-1]
+    count = int(values[1])
+    return {
+        "cwd": values[0],
+        "command": values[2 : 2 + count],
+        "env": dict(item.split("=", 1) for item in values[2 + count :]),
+        "prompt": sandbox.files[f"{sandbox.directory}/prompt.txt"],
+    }
+
+
 class Sandbox:
     def __init__(self):
         self.files = {}
@@ -118,7 +137,7 @@ class Sandbox:
         self.cleanup_available = True
 
     async def execute(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor" in command:
+        if "--receipt" in command and "process_supervisor.sh" in command:
             return await self.launch(command, **kwargs)
         if "ln -s stop " in command:
             await self.signal()
@@ -140,13 +159,11 @@ class Sandbox:
         self.files[f"{self.directory}/events.jsonl"] = self.events
 
     async def run(self, command, **kwargs):
-        payload_path = next(path for path in self.files if path.endswith("/input.json"))
-        payload = json.loads(self.files[payload_path])
-        assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
+        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh"))
+        assert staged(self)["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "/sandbox_runner " in command and "/bin/gym-runner" in command
-        assert "process_supervisor" in command
-        self.directory = payload["directory"]
+        assert f"bash {self.directory}/{HARNESS_RUNNER_FILE} {self.directory}/params.sh" in command
+        assert "process_supervisor.sh" in command
         self.started.set()
         if not self.blocked:
             self.exited.set()
@@ -155,7 +172,7 @@ class Sandbox:
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
     async def stop_runner(self):
-        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/input.json"))
+        self.directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh"))
         self.result["timed_out"] = True
         self.save_result()
         self.exited.set()
@@ -217,7 +234,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert created.status_code == 200, created.text
             session_id = created.json()["agent_session_id"]
             directory = agent._session_records[session_id].state.session.session_dir
-            assert f"{directory}/process_supervisor" not in sandbox.files
+            assert f"{directory}/process_supervisor.sh" not in sandbox.files
             installer = f"{directory}/install_pi_runtime.sh"
             assert installer in sandbox.files
             assert agent.config.resources_server is None
@@ -228,7 +245,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert install_call.kwargs["timeout_s"] == agent.config.sandbox_install_timeout_seconds
             result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"})
             assert result.status_code == 200, result.text
-            assert f"{directory}/process_supervisor" in sandbox.files
+            assert f"{directory}/process_supervisor.sh" in sandbox.files
             body = result.json()
             assert body["status"] == "completed"
             assert [item["type"] for item in body["output"]] == [
@@ -241,7 +258,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert body["usage"]["input_tokens_details"]["cached_tokens"] is None
             assert body["metadata"]["harness_execution"] == "sandbox"
             assert "_ng_agent_observations" not in body
-            payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+            payload = staged(sandbox)
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
             assert "PATH" not in payload["env"]
@@ -537,7 +554,7 @@ async def test_sandbox_runtime_guards_reach_the_pi_invocation(setup):
     request, session_id, task = await activate(agent, sandbox)
     response = await task
     assert response.status == "completed"
-    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    payload = staged(sandbox)
     assert payload["env"]["NEMO_GYM_PI_BASH_TIMEOUT"] == "123"
     assert f"{sandbox.directory}/runtime-guards.mjs" in payload["command"]
     assert "tool_call" in sandbox.files[f"{sandbox.directory}/runtime-guards.mjs"]
@@ -562,7 +579,7 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup):
     request, session_id, task = await activate(agent, sandbox, body)
     response = await task
     assert response.status == "completed"
-    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    payload = staged(sandbox)
     extension = f"{sandbox.directory}/gym_mcp.mjs"
     assert sandbox.files[extension] == Path(__file__).parents[1].joinpath("gym_mcp.mjs").read_text()
     assert payload["command"][payload["command"].index(extension) - 1] == "--extension"
@@ -604,7 +621,7 @@ async def test_no_mcp_grant_stages_no_tool_extension(setup):
     agent, sandbox = setup
     request, session_id, task = await activate(agent, sandbox)
     await task
-    payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+    payload = staged(sandbox)
     assert not any(path.endswith("gym_mcp.mjs") for path in [*payload["command"], *sandbox.files])
     assert "NEMO_GYM_PI_MCP_CONFIG" not in payload["env"]
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -772,8 +789,9 @@ async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
+    with pytest.raises(NgFailureEvent, match="harness termination was not confirmed") as failure:
         await task
+    assert is_harness_termination_failure(failure.value)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert agent._session_records[session_id].state is None
     sandbox.disconnect.assert_awaited_once()
@@ -892,7 +910,7 @@ def test_instructions_and_text_parts_reach_pi_without_other_provider_credentials
             },
         )
         assert response.status_code == 200, response.text
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = staged(sandbox)
         assert payload["command"][-2:] == [
             "--append-system-prompt",
             "config instruction\n\nrequest instruction\n\ninput instruction",
@@ -1479,10 +1497,8 @@ async def _run_locally(command, *, limit=8, **kwargs):
 
 def _run_session_locally(sandbox, state, directory: Path, *, limit: float = 8) -> None:
     """Point a seeded session's files and commands at local paths and processes."""
-    from responses_api_agents.pi_agent import sandbox_runner
-
     state.session.session_dir = str(directory)
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
     sandbox.upload = AsyncMock(side_effect=shutil.copyfile)
     sandbox.download = AsyncMock(side_effect=shutil.copyfile)
     sandbox.exec.side_effect = functools.partial(_run_locally, limit=limit)
@@ -1510,7 +1526,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
     commands = []
 
     async def queued_exec(command, **kwargs):
-        if "--receipt" in command and "process_supervisor" in command:
+        if "--receipt" in command and "process_supervisor.sh" in command:
             commands.append(command)
             waiting.set()
             if failure == "cancel":
@@ -1519,7 +1535,7 @@ async def test_close_fences_delayed_launch_before_and_after_removing_session(loc
         return await execute(command, **kwargs)
 
     state.session.sandbox.exec.side_effect = queued_exec
-    state.task = asyncio.create_task(state.execute({}, timeout=5, close_timeout=2))
+    state.task = asyncio.create_task(state.execute(command=["true"], env={}, prompt="", timeout=5, close_timeout=2))
     await asyncio.wait_for(waiting.wait(), 2)
     if failure == "cancel":
         state.task.cancel()
@@ -1552,21 +1568,11 @@ async def test_launch_claim_without_receipt_blocks_close(local_session):
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux sandbox contract")
 async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_session):
     state, _ = local_session
-    payload = {
-        "directory": state.session.session_dir,
-        "cwd": state.request.sandbox_access.workdir,
-        # This stdlib-only event producer must not load the host's editable installs or site hooks.
-        "command": [
-            sys.executable,
-            "-I",
-            "-S",
-            "-c",
-            "import json,sys; print(json.dumps({'prompt':sys.stdin.read()}))",
-        ],
-        "env": {},
-        "prompt": "real invocation",
-    }
-    raw = await state.execute(payload, timeout=3, close_timeout=2)
+    # Diagnostics and malformed lines reach stdout too; only [seen_at, object] records reach the transcript.
+    script = 'echo starting; echo "{\\"prompt\\": \\"$(cat)\\", \\"cwd\\": \\"$PWD\\"}"; echo "{broken"'
+    raw = await state.execute(
+        command=["bash", "-c", script], env={}, prompt="real invocation", timeout=3, close_timeout=2
+    )
     diagnostics = {
         name: path.read_text(errors="replace")
         for name in ("cleanup.json", "runtime.json", "output.log", "stderr.log", "events.jsonl")
@@ -1574,8 +1580,9 @@ async def test_adapter_uses_shared_supervisor_and_captures_real_events(local_ses
     }
     assert state.session.cleanup["cleanup_confirmed"] and state.session.cleanup["return_code"] == 0, diagnostics
     assert raw.strip(), diagnostics
-    _, event = json.loads(raw)
-    assert event == {"prompt": "real invocation"}
+    assert "{broken" in raw
+    events = _parse_recorded_events(raw)
+    assert [event for _, event in events] == [{"prompt": "real invocation", "cwd": state.session.workdir}]
     assert state.runtime_info.hostname
     await state.close(2)
     assert not Path(state.session.session_dir).exists()
@@ -1591,14 +1598,9 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
         "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
         f"Path({str(processes_path)!r}).write_text(json.dumps([os.getpid(),child.pid])); time.sleep(60)"
     )
-    payload = {
-        "directory": state.session.session_dir,
-        "cwd": state.request.sandbox_access.workdir,
-        "command": [sys.executable, "-c", code],
-        "env": {},
-        "prompt": "",
-    }
-    state.task = asyncio.create_task(state.execute(payload, timeout=30, close_timeout=3))
+    state.task = asyncio.create_task(
+        state.execute(command=[sys.executable, "-c", code], env={}, prompt="", timeout=30, close_timeout=3)
+    )
     processes = []
     try:
         async with asyncio.timeout(5):
@@ -1611,8 +1613,9 @@ async def test_close_confirms_cleanup_before_provider_cancellation(local_session
         cli_pid, task_pid, wrapper_pid = processes
         assert not Path(f"/proc/{cli_pid}").exists()
         assert not Path(f"/proc/{wrapper_pid}").exists()
-        # The in-flight detached tool is drained before borrowed-session release.
-        assert not Path(f"/proc/{task_pid}").exists()
+        # The in-flight detached tool is stopped before borrowed-session release; init may still hold it as a zombie.
+        stat = Path(f"/proc/{task_pid}/stat")
+        assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] in "ZX"
         state.session.sandbox.disconnect.assert_awaited_once()
         state.session.sandbox.stop.assert_not_awaited()
     finally:
@@ -2025,7 +2028,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
         from nemo_gym.observability.model_calls import ModelCallRecord
-        from nemo_gym.rollout_observability import join_model_call_observations
+        from nemo_gym.rollout_observability import join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"
@@ -2034,7 +2037,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
             ModelCallRecord(model_call_id=f"attempt-{i}", client_session_id=root.invocation_id, call_index=i)
             for i in range(2)
         ]
-        joined = join_model_call_observations(close.agent_observations, captured)
+        joined = join_agent_model_calls(close.agent_observations, captured)
         assert [ref.model_call_id for ref in joined.records[0].model_calls] == ["attempt-0", "attempt-1"]
         assert all(ref.response_id is None for ref in joined.records[0].model_calls)
         assert "model_call_ownership_unavailable" not in [gap.code for gap in joined.gaps]

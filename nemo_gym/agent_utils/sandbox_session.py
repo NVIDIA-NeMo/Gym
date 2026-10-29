@@ -4,18 +4,20 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Coroutine
+import re
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from shlex import quote
 from time import monotonic
 from typing import cast
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
 from nemo_gym.agent_utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
+    SUPERVISOR_SCRIPT,
+    CleanupReceipt,
     check_stdlib_runner,
     is_harness_termination_failure,
     remove_session_directory,
@@ -30,9 +32,17 @@ from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 LOG = logging.getLogger(__name__)
-# Where adapters upload a standard-library runner, relative to session_dir. Without a
+# Shared runner uploaded by adapters; reads the bash source written by shell_assignments().
+HARNESS_RUNNER_FILE = "harness_runner.sh"
+HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
+# The runner's exit statuses when the CLI never ran: its own failure (bad cwd, setup), and a CLI that
+# could not be started. Any other status is the CLI's own.
+HARNESS_RUNNER_FAILED = 125
+HARNESS_COMMAND_NOT_STARTED = (126, 127)
+# Where adapters upload a standard-library Python runner, relative to session_dir. Without a
 # .py suffix, a `pkill -f '\.py'` in the task cannot match the runner's command line.
 RUNNER_FILE = "sandbox_runner"
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _reuse_or_start[T](
@@ -45,20 +55,48 @@ def _reuse_or_start[T](
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxCommand:
-    """Harness argv and the installed interpreter used to launch its supervisor.
+    """Harness argv, run under the bash process supervisor.
 
-    ``stdlib_runner`` declares that the runner needs nothing beyond the standard library.
-    Its argv, which must start with ``python``, then runs under a neutral process name,
-    as the supervisor always does, so that ``pkill python3`` in the task cannot stop it.
-    The renamed interpreter is the base interpreter, outside any virtual environment.
+    ``stdlib_runner`` declares a Python runner that needs nothing beyond the standard library.
+    Its argv, which must start with the interpreter, then runs under a neutral process name so
+    that ``pkill python3`` in the task cannot stop it. The renamed interpreter is the base
+    interpreter, outside any virtual environment.
     """
 
     argv: list[str]
-    python: str
     stdlib_runner: bool = False
 
     def __post_init__(self) -> None:
-        check_stdlib_runner(self.argv, python=self.python, stdlib_runner=self.stdlib_runner)
+        check_stdlib_runner(self.argv, stdlib_runner=self.stdlib_runner)
+
+
+def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, str]]) -> str:
+    """Bash source assigning each value, for sandbox runners that cannot parse JSON.
+
+    A string becomes a scalar and a sequence an array. A mapping becomes an array of
+    ``KEY=VALUE`` words, ready for ``export`` or ``env``. Every word is shell-quoted.
+    Words must be strings without NUL, which bash cannot hold.
+    """
+
+    def word(item: object) -> str:
+        if not isinstance(item, str) or "\0" in item:
+            raise ValueError(f"Invalid shell word, which must be a string without NUL: {item!r}")
+        return quote(item)
+
+    lines = []
+    for name, value in values.items():
+        if not _SHELL_NAME.fullmatch(name):
+            raise ValueError(f"Invalid shell variable name: {name!r}")
+        if isinstance(value, str):
+            lines.append(f"{name}={word(value)}")
+            continue
+        if isinstance(value, Mapping):
+            invalid = [key for key in value if not _SHELL_NAME.fullmatch(key)]
+            if invalid:
+                raise ValueError(f"Invalid environment variable names: {invalid!r}")
+            value = [f"{key}={item}" if isinstance(item, str) else item for key, item in value.items()]
+        lines.append(f"{name}=({' '.join(word(item) for item in value)})")
+    return "".join(f"{line}\n" for line in lines)
 
 
 @dataclass(kw_only=True)
@@ -78,11 +116,12 @@ class SandboxSession[Artifacts]:
     receipt skips capture, releases a borrowed connection and leaves teardown to
     Resources; an owned sandbox falls back to provider stop. Closed means release succeeded.
 
-    On timeout or close, the supervisor preserves previously adopted children outside
-    the harness group and drains newly adopted children, including services orphaned
-    by in-flight tools during the stop. Preserved children can also be unfinished
-    background jobs; they remain until the sandbox owner destroys the sandbox.
-    Natural CLI exit has no adoption cutoff, so detached unfinished tools may remain.
+    The supervisor stops the harness process group; a forced stop also reaches the
+    harness's descendants in other groups and processes that inherited its
+    ``NEMO_GYM_SUPERVISOR`` marker. Processes that had left the harness when the stop
+    began, processes in other groups after a natural exit, and a process that left
+    between two scans without the marker remain until the sandbox owner destroys the
+    sandbox.
     Borrowed sandboxes stay available for Resources verification; owned sandboxes are
     stopped on close. Unconfirmed harness termination prevents capture and verification.
 
@@ -145,7 +184,7 @@ class SandboxSession[Artifacts]:
 
     async def _stage(self, stage_activation: Callable[[], Awaitable[SandboxCommand]]) -> SandboxCommand:
         command = await stage_activation()
-        await self.sandbox.upload(Path(process_supervisor.__file__), f"{self.session_dir}/{SUPERVISOR_FILE}")
+        await self.sandbox.upload(SUPERVISOR_SCRIPT, f"{self.session_dir}/{SUPERVISOR_FILE}")
         return command
 
     async def execute(
@@ -175,7 +214,8 @@ class SandboxSession[Artifacts]:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
             if deadline is not None:
                 timeout = min(timeout, deadline - monotonic())
-            if timeout <= 0:
+            # The supervisor counts whole centiseconds; less than one cannot run the harness.
+            if timeout < 0.01:
                 raise TimeoutError(f"{self.harness} activation deadline expired before launch")
             cleanup_timeout, provider_timeout = supervision_timeouts(timeout=timeout, close_timeout=close_timeout)
             launch = supervised_launch_command(
@@ -183,7 +223,6 @@ class SandboxSession[Artifacts]:
                 command=command.argv,
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
-                python=command.python,
                 stdlib_runner=command.stdlib_runner,
             )
             self.launch_started = True

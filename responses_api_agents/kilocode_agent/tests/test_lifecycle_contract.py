@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.kilocode_agent.sandbox import KiloSandboxSession
 from responses_api_agents.kilocode_agent.tests.test_sandbox import seed
 
@@ -28,13 +30,12 @@ class Sandbox:
         self.disconnect = AsyncMock()
 
     async def run_exec(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor" in command:
+        if "--receipt" in command and "process_supervisor.sh" in command:
             self.events.append("launch")
             self.files[f"{DIRECTORY}/stdout.jsonl"] = '{"type":"text","part":{"text":"done"}}\n'
             self.files[f"{DIRECTORY}/stderr.log"] = ""
-            self.files[f"{DIRECTORY}/exit.json"] = "0"
             self.files[f"{DIRECTORY}/cleanup.json"] = json.dumps(self.result)
-        elif "--snapshot" in command:
+        elif "kilo.db" in command:
             self.events.append("snapshot")
             return SandboxExecResult(stdout="", stderr="no database", return_code=1)
         return OK
@@ -85,8 +86,11 @@ async def test_capture_follows_confirmed_cleanup_and_keeps_output():
 async def test_bad_cleanup_keeps_state_retryable_without_capture(invalid):
     state, sandbox = session()
     sandbox.result.update(invalid)
-    with pytest.raises(RuntimeError):
+    # A malformed receipt stays a retryable RuntimeError; a negative one is the harness's final typed failure.
+    final = invalid["cleanup_confirmed"] is False
+    with pytest.raises(NgFailureEvent if final else RuntimeError) as failure:
         await execute(state)
+    assert is_harness_termination_failure(failure.value) is final
     assert state.session.cleanup is None
     assert state.session.artifacts is None
     assert "read stdout.jsonl" not in sandbox.events and "snapshot" not in sandbox.events

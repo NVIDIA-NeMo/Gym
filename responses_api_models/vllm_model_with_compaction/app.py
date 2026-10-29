@@ -50,6 +50,12 @@ class VLLMModelWithCompaction(VLLMModel):
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/tokenize")})
     _TOKENIZE_CHAT_FIELDS = (*VLLMModel._TOKENIZE_CHAT_FIELDS, "required_prefix_token_ids")
 
+    def model_post_init(self, context):
+        # This server's own dispatch never sets the unlisted effort aside, so the option would do nothing.
+        if self.config.forward_unvalidated_reasoning_effort:
+            raise ValueError("vllm_model_with_compaction does not support forward_unvalidated_reasoning_effort")
+        super().model_post_init(context)
+
     def setup_webserver(self):
         app = super().setup_webserver()
         app.post("/tokenize")(self.tokenize)

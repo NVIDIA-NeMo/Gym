@@ -29,7 +29,7 @@ from pytest import approx, fixture, raises
 from starlette.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
+from nemo_gym.judge import is_judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -37,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (
     PhysicsJudgeResourcesServer,
@@ -447,7 +448,7 @@ class TestJudgeFailureInheritance:
         self, server: PhysicsJudgeResourcesServer
     ) -> None:
         # Covered transitively: the inherited math_with_judge judge call goes through
-        # call_judge, so a transport failure surfaces as JudgeError (routed to the
+        # call_judge, so a transport failure surfaces as a judge failure (routed to the
         # failures sidecar), not a raw 500.
         server.server_client.post = AsyncMock(side_effect=RuntimeError("judge down"))
         request = LibraryJudgeMathVerifyRequest(
@@ -456,5 +457,6 @@ class TestJudgeFailureInheritance:
             question="What is 2+2?",
             expected_answer="4",
         )
-        with raises(JudgeError, match="judge down"):
+        with raises(NgFailureEvent, match="judge down") as failure:
             await server.verify(request)
+        assert is_judge_failure(failure.value)

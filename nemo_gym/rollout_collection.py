@@ -28,7 +28,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -61,6 +61,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureReport, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.failure_kinds import CANCELLED, COLLECTION_DISPATCH_FAILED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.global_config import (
@@ -108,6 +109,7 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -118,6 +120,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTokenStats,
     TrajectoryToolCall,
     TrajectoryTurn,
+    VerifierInvocation,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
@@ -258,6 +261,22 @@ def is_omitted_rollout_row(row: Mapping[str, Any]) -> bool:
 def is_unstarted_rollout_row(row: Mapping[str, Any]) -> bool:
     """Whether a sidecar row records a rollout the dispatch budget never started: no execution, so no history."""
     return is_omitted_rollout_row(row) and bool(row.get(NG_DISPATCH_DRAINED_KEY))
+
+
+# Set only on the omitted-rollout row that keeps the evidence of a failed /run with route_failures_to_sidecar off.
+NG_UNROUTED_RUN_ERROR_KEY = "_ng_unrouted_run_error"
+
+
+def is_non_superseding_rollout_row(row: Mapping[str, Any]) -> bool:
+    """Whether readers skip a sidecar row before they pick a rollout's latest attempt.
+
+    A row never started is no execution. A failed /run kept as evidence with routing off is no new outcome: the
+    attempt it records stands no more than before it was kept, so an older failure still stands and a later attempt
+    still replaces it. An interrupted ``record_omitted_rollouts`` row is neither and still hides older failures.
+    """
+    return is_unstarted_rollout_row(row) or (
+        is_omitted_rollout_row(row) and row.get(NG_UNROUTED_RUN_ERROR_KEY) is True
+    )
 
 
 NG_TERMINAL_KEY = "_ng_failure_terminal"
@@ -570,6 +589,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         if failure.get("trajectory") is not None:
             # The harness's own turns before the failure, in the producer's slot the projection reads first.
             record[NG_TRAJECTORY_KEY] = failure["trajectory"]
+        if failure.get("verifier_invocations") is not None:
+            record[NG_VERIFIER_INVOCATIONS_KEY] = failure["verifier_invocations"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -617,6 +638,8 @@ class _CompletedRollout:
     # The failure report the `/run` reply forwarded, or Collection's own for a failed dispatch. Only the writer
     # saves it, so run_examples yields the same result as before.
     failure_report: Optional[FailureReport] = None
+    # A failed `/run` with route_failures_to_sidecar off: the writer keeps evidence of it, then raises this error.
+    run_error: Optional[BaseException] = None
 
 
 def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
@@ -730,13 +753,19 @@ def _turns_from_model_calls(
     invocations: list[AgentInvocation],
     model_calls: list[TrajectoryModelCall],
     resolved: Any,
+    *,
+    verifier_invocations: Iterable[VerifierInvocation] = (),
 ) -> list[TrajectoryTurn]:
     """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
 
     A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
     in the raw evidence but do not become turns: even a single-agent rollout may capture judge
-    or auxiliary calls that do not belong to the agent.
+    or auxiliary calls that do not belong to the agent. Explicit verifier ownership also excludes
+    a call from turns when an agent incorrectly references it; retain both ownership claims for validation.
     """
+    verifier_call_ids = {
+        ref.model_call_id for invocation in verifier_invocations for ref in invocation.model_calls if ref.model_call_id
+    }
     invocation_by_call_id: dict[str, str] = {}
     invocation_by_response_id: dict[str, str] = {}
     for invocation in invocations:
@@ -751,6 +780,8 @@ def _turns_from_model_calls(
     tool_counts: Counter = Counter()
     for call in model_calls:
         metadata = call.response_metadata
+        if call.model_call_id in verifier_call_ids:
+            continue
         if call.response is None or (metadata.status_code is not None and metadata.status_code >= 400):
             # HTTP error payloads are retained attempts, not model decisions.
             continue
@@ -791,6 +822,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
     invocations: list[AgentInvocation] = []
+    verifier_invocations: list[VerifierInvocation] = []
     turns: list[TrajectoryTurn] = []
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
@@ -818,6 +850,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 turns = trajectory.turns
             gaps.extend(trajectory.gaps)
             invocations = trajectory.invocations
+            verifier_invocations = trajectory.verifier_invocations
             tools = trajectory.tool_calls
             model_calls = trajectory.model_calls
         except Exception as exc:
@@ -935,6 +968,24 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected
 
+    # Join returned verifier outcomes with model-call references reconstructed from capture.
+    for raw_invocation in [
+        *(capture.get("verifier_invocations") or []),
+        *(result.get(NG_VERIFIER_INVOCATIONS_KEY) or []),
+    ]:
+        try:
+            invocation = VerifierInvocation.model_validate(raw_invocation)
+            existing = next((i for i in verifier_invocations if i.invocation_id == invocation.invocation_id), None)
+            if existing is None:
+                verifier_invocations.append(invocation)
+            else:
+                existing.model_calls.extend(ref for ref in invocation.model_calls if ref not in existing.model_calls)
+                if invocation.status != "unknown":
+                    existing.status = invocation.status
+                    existing.failure_kind = invocation.failure_kind
+        except Exception:
+            gaps.append(ObservationGap(code="verifier_invocation_invalid"))
+
     for raw_gap in capture.get("gaps") or []:
         if isinstance(raw_gap, dict):
             try:
@@ -944,7 +995,14 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     if not isinstance(raw_trajectory, dict):
         # An agent that sends its own trajectory owns its turns, and an empty list there means no turn
         # completed. Otherwise, build turns only from calls explicitly referenced by invocations.
-        turns = _turns_from_model_calls(task_id, rollout_id, invocations, model_calls, result.get("resolved"))
+        turns = _turns_from_model_calls(
+            task_id,
+            rollout_id,
+            invocations,
+            model_calls,
+            result.get("resolved"),
+            verifier_invocations=verifier_invocations,
+        )
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
     if not turns and not producer_turns_observed:
@@ -960,6 +1018,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         task_id=task_id,
         rollout_id=rollout_id,
         invocations=invocations,
+        verifier_invocations=verifier_invocations,
         turns=turns,
         model_calls=model_calls,
         tool_calls=tools,
@@ -985,8 +1044,11 @@ def _record_policy_model_server(result: dict[str, Any], global_config: Any, agen
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
+    result.pop(NG_VERIFIER_INVOCATIONS_KEY, None)
     capture = result.get("ng_model_call_capture")
     calls = capture.get("calls") if isinstance(capture, dict) else None
+    if isinstance(capture, dict):
+        capture.pop("verifier_invocations", None)
     for call in calls if isinstance(calls, list) else []:
         if isinstance(call, dict):
             for key in _MODEL_CALL_PAYLOAD_KEYS:
@@ -1081,7 +1143,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
         return None
 
     # Index captured calls by both identities ModelCallRef supports, mirroring
-    # join_model_call_observations: a ref may carry model_call_id, or the exact
+    # join_agent_model_calls: a ref may carry model_call_id, or the exact
     # (model_ref, response_id) pair.
     calls_by_id: dict[str, list[int]] = {}
     calls_by_response: dict[tuple[str, str, str], list[int]] = {}
@@ -1117,7 +1179,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     # De-duplicate by matched call *position* rather than model_call_id; the id is
     # optional because a (model_ref, response_id)-only match has none. One physical call
     # can't be claimed twice even if two invocations' refs both resolve to it (e.g. a
-    # join_model_call_observations conflict that left a ref attached to its losing
+    # join_agent_model_calls conflict that left a ref attached to its losing
     # invocation, unremoved, just gap-flagged).
     seen_positions: set[int] = set()
     owned_calls = []
@@ -1376,7 +1438,8 @@ class SharedRolloutCollectionConfig(
         description=(
             "Record a failed agent /run as a failures-sidecar row and keep going, instead of ending "
             "the run. The failed rollouts are then absent from the rollouts jsonl and from the "
-            "score, which is reported over fewer rollouts than were dispatched."
+            "score, which is reported over fewer rollouts than were dispatched. Off, the first failed "
+            "/run ends the run, after an omitted-rollout row records it (not scored, not an attempt)."
         ),
     )
     rollout_collection_driver: Optional[str] = Field(
@@ -1417,8 +1480,18 @@ class SharedRolloutCollectionConfig(
             raise ValueError("environment_server_routes are required when environment_routing_mode=taskset")
         return self
 
-    def check_completion(self, *, expected: int, results: List[Dict[str, Any]]) -> None:
-        """Reject incomplete submitted runs after saving their partial artifacts."""
+    def check_completion(
+        self,
+        *,
+        expected: int,
+        results: List[Dict[str, Any]],
+        final_zero_rows: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        """Reject incomplete submitted runs after saving their partial artifacts.
+
+        ``final_zero_rows`` are failure rows that settle their rollout as a scored zero (see
+        ``_final_zero_failure_rows``): resume does not run them again, so they are completed samples.
+        """
         if not self.require_complete:
             return
         completed = len(
@@ -1426,6 +1499,11 @@ class SharedRolloutCollectionConfig(
                 (r.get("stage_index"), r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
                 for r in results
                 if r.get(NG_FAILURE_CLASS_KEY) is None and not r.get(NG_NO_PERSIST_KEY)
+            }
+            | {
+                (r.get("stage_index"), r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+                for r in final_zero_rows
+                if r.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
             }
         )
         if completed < expected:
@@ -2395,7 +2473,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
 
     An interrupted attempt that ``record_omitted_rollouts`` recorded is the rollout's latest execution but no
     failure: it hides any older failure, so the rollout is left out here and is missing. A row the dispatch budget
-    never started is no execution and is skipped.
+    never started, and the evidence of a failed /run with routing off, are skipped (``is_non_superseding_rollout_row``).
     """
     latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
     for fpath in failures_fpaths:
@@ -2407,7 +2485,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if is_unstarted_rollout_row(row):
+                if is_non_superseding_rollout_row(row):
                     continue
                 latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
     return {key: row for key, row in latest_by_key.items() if not is_omitted_rollout_row(row)}
@@ -2434,6 +2512,24 @@ def _failure_rows_counted_as_zero(
         _counted_failure_row(row)
         for key, row in latest_by_key.items()
         if key not in scored_keys and _counts_as_zero(row, wanted)
+    ]
+
+
+def _final_zero_failure_rows(
+    failures_fpaths: List[Path], scored_keys: set, *, retry_terminal_timeouts: bool
+) -> List[Dict[str, Any]]:
+    """The latest failure rows that settle their rollout as a scored zero: final, and marked by their producer.
+
+    Resume does not run such a rollout again and the metrics count it as 0, so its work is done. A row counted only
+    because ``count_failure_classes_as_zero`` names its class is not settled: that option scores the metrics, and
+    resume may still run the rollout.
+    """
+    return [
+        row
+        for key, row in _latest_failure_rows(failures_fpaths).items()
+        if key not in scored_keys
+        and row.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
+        and is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts)
     ]
 
 
@@ -2641,7 +2737,7 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if is_unstarted_rollout_row(row):
+                if is_non_superseding_rollout_row(row):
                     continue
                 latest[identity(row)] = row
                 if is_omitted_rollout_row(row):
@@ -2983,6 +3079,22 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    """Collect rollouts by sending tasks to a running Gym deployment.
+
+    Each rollout batch fetches the deployment's configuration from the head server.
+    A caller that runs many batches against one deployment can set ``reuse_server_client=True``.
+    The helper then fetches the configuration once.
+    Build a new helper after that deployment's configuration changes.
+    """
+
+    reuse_server_client: bool = Field(
+        default=False,
+        description="Reuse one resolved client and configuration per helper. "
+        "Build a new helper after the deployment's configuration changes.",
+    )
+    _cached_server_client: Optional[ServerClient] = PrivateAttr(default=None)
+    _cached_head_server_config: Optional[BaseServerConfig] = PrivateAttr(default=None)
+
     # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
     # so a run stopped by SIGTERM can be accounted for without re-reading that file.
     _landed_keys: set = PrivateAttr(default_factory=set)
@@ -3340,7 +3452,10 @@ class RolloutCollectionHelper(BaseModel):
         # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
         resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
         budget_used: Counter = Counter()
-        terminal_keys: set = set()
+        # A rollout is sidecar-terminal when its latest row is a terminal failure, picked by the rule scoring uses
+        # (`_latest_failure_rows`): a later interrupted attempt supersedes an older terminal failure, the evidence of
+        # an unrouted /run and a never-started row do not.
+        latest_by_key: Dict[Tuple, Dict[str, Any]] = {}
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
@@ -3349,17 +3464,17 @@ class RolloutCollectionHelper(BaseModel):
                     if not line:
                         continue
                     fr = orjson.loads(line)
-                    # A rollout that produced no result used no attempt; resume runs it again.
-                    if is_omitted_rollout_row(fr):
-                        continue
                     if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
+                    if not is_non_superseding_rollout_row(fr):
+                        latest_by_key[k] = fr
+                    # A rollout that produced no result used no attempt; resume runs it again.
+                    if is_omitted_rollout_row(fr):
+                        continue
                     attempts_by_key[k] += 1
                     if line_index >= resubmit_offset:
                         budget_used[k] += 1
-                    if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
-                        terminal_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -3367,6 +3482,12 @@ class RolloutCollectionHelper(BaseModel):
                     if observed is not None:
                         elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
+        terminal_keys = {
+            k
+            for k, fr in latest_by_key.items()
+            if not is_omitted_rollout_row(fr)
+            and is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts)
+        }
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
         gated = successes_seen | terminal_keys | maxed_out
@@ -3751,6 +3872,7 @@ class RolloutCollectionHelper(BaseModel):
                 input_rows,
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
+                record_unrouted_failures=True,
                 max_resident_tasks=config.max_resident_rollout_tasks,
                 interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,
@@ -3808,7 +3930,9 @@ class RolloutCollectionHelper(BaseModel):
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
                 # A failed episode that returned agent evidence made model calls worth joining.
-                if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
+                if capture_dirs and (
+                    not no_result or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
+                ):
                     # A cancelled call's capture write runs detached, so drain the claims this
                     # rollout still holds before snapshotting; otherwise a late row is lost.
                     rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
@@ -3824,6 +3948,7 @@ class RolloutCollectionHelper(BaseModel):
                     "ng_model_call_capture" in result
                     or NG_AGENT_OBSERVATIONS_KEY in result
                     or NG_TRAJECTORY_KEY in result
+                    or NG_VERIFIER_INVOCATIONS_KEY in result
                 ):
                     _attach_trajectory_record(row, result)
 
@@ -3878,6 +4003,23 @@ class RolloutCollectionHelper(BaseModel):
                     upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
 
                 dispatch_name = self._dispatch_name(row)
+                if completed.run_error is not None:
+                    # route_failures_to_sidecar is off, so this failed /run ends the run. Its identity, cause and
+                    # report are kept as an omitted-rollout row first: no reader counts it as a failure, an attempt
+                    # or a score, so resume still runs the rollout and no denominator shrinks unasked.
+                    write_started = perf_counter()
+                    omitted_bytes = orjson.dumps(omitted_rollout_record(result) | {NG_UNROUTED_RUN_ERROR_KEY: True})
+                    failures_file.write(omitted_bytes + b"\n")
+                    failures_file.flush()
+                    _record_output_write(write_started, omitted_bytes)
+                    _record_rollout_outcome(result, "omitted", dispatch_name)
+                    print(
+                        "[rollout_collection] the run stops at a failed /run (route_failures_to_sidecar is off); "
+                        f"it is recorded in {failures_fpath}. {len(input_rows) - completed_count + 1} of "
+                        f"{len(input_rows)} dispatched rollouts have no result, and resume_from_cache runs them.",
+                        flush=True,
+                    )
+                    raise completed.run_error
                 if not no_persist and not sources_dropped:
                     # The rows this run adds are not the merged ones an aggregation's shard list names. The list goes with the
                     # first row the run writes, so a run that writes none leaves it as it was.
@@ -4235,7 +4377,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 print(format_health_report(health_result))
                 export_run_health_timeouts(health_result)
 
-        config.check_completion(expected=expected_rollouts, results=persisted_results)
+        final_zero_rows = (
+            await asyncio.to_thread(
+                _final_zero_failure_rows,
+                [failures_fpath],
+                persisted_success_keys,
+                retry_terminal_timeouts=config.retry_terminal_timeouts,
+            )
+            if config.require_complete
+            else []
+        )
+        config.check_completion(expected=expected_rollouts, results=persisted_results, final_zero_rows=final_zero_rows)
         return results
 
     async def _call_aggregate_metrics(
@@ -4389,24 +4541,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics.sort(key=lambda entry: entry[AGENT_REF_KEY_NAME]["name"])
 
-        primitive_types = (bool, int, float, str, type(None))
-        metrics_to_log = dict()
-        for agent_entry in all_agent_metrics:
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-            metrics_to_log.update(
-                {
-                    f"{agent_name}/{k}": v
-                    for k, v in agent_entry["agent_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
-            metrics_to_log.update(
-                {
-                    f"key_metrics/{agent_name}/{k}": v
-                    for k, v in agent_entry["key_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
+        metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
 
         export_metrics(metrics_to_log)
 
@@ -4694,9 +4829,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
         run_timing: Optional[RunTimingReport] = None,
+        record_unrouted_failures: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
+
+        ``record_unrouted_failures`` returns a failed `/run` that ``route_failures_to_sidecar`` would route as a
+        failure row whose ``run_error`` holds the error, so the collection writer can keep evidence of it before it
+        raises the error. Other callers keep receiving the exception.
 
         When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
         at once. When unset, all examples are scheduled as before. The collection
@@ -4828,7 +4968,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                         flush=True,
                     )
-                    if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
+                    if not isinstance(e, _RUN_FAILURE_ERRORS) or not (
+                        route_failures_to_sidecar or record_unrouted_failures
+                    ):
                         raise
                     if res is not None:
                         res.release()
@@ -4849,6 +4991,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             failure_row[NG_FAILURE_CLASS_KEY],
                             getattr(e, "headers", None) or getattr(res, "headers", None),
                         ),
+                        run_error=None if route_failures_to_sidecar else e,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
@@ -4963,10 +5106,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             )
         )
 
-    def setup_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None
-    ) -> ServerClient:  # pragma: no cover
-        return setup_server_client_utils(head_server_config)
+    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
+        """Return a client for the head server, reusing the cached one when the helper opted in.
+
+        Without opt-in, every call fetches the configuration from the head server again.
+        An opted-in helper keeps one client and fetches again only when the head config differs from the cached one.
+        Build a new helper after the configuration behind the same head changes.
+        """
+        if not self.reuse_server_client:
+            return setup_server_client_utils(head_server_config)
+        if self._cached_server_client is None or head_server_config != self._cached_head_server_config:
+            client = setup_server_client_utils(head_server_config)
+            head_snapshot = head_server_config.model_copy(deep=True) if head_server_config is not None else None
+            self._cached_server_client = client
+            self._cached_head_server_config = head_snapshot
+        return self._cached_server_client
 
 
 class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
