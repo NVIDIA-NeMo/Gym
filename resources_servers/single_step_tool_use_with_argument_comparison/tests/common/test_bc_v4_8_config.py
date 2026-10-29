@@ -77,10 +77,11 @@ def test_every_config_key_is_a_known_option() -> None:
 def test_wiring() -> None:
     raw = _raw()
     assert set(raw) == {"bc_v4_8_rs", "bc_v4_8_agent", "bc_v4_8_environment_server"}
-    agent = raw["bc_v4_8_agent"]["responses_api_agents"]["tool_simulation_agent"]
+    agent = raw["bc_v4_8_agent"]["responses_api_agents"]["simple_agent"]
+    assert agent["execute_tools"] is False
     assert agent["resources_server"]["name"] == "bc_v4_8_rs"
     assert agent["model_server"]["name"] == "policy_model"
-    environment = raw["bc_v4_8_environment_server"]["environment_servers"]["legacy_agent"]
+    environment = raw["bc_v4_8_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
     assert environment["agent_server"]["name"] == "bc_v4_8_agent"
 
 
