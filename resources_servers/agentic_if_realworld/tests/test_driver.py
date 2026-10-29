@@ -5,6 +5,7 @@
 import asyncio
 import copy
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -29,20 +30,21 @@ from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_
 
 
 @pytest.mark.parametrize(
-    "complete_stage,fail_last_dispatch,interrupted,fresh_resume",
+    "complete_stage,fail_last_dispatch,interrupted,fresh_resume,multiple",
     [
-        (1, False, False, False),
-        (3, False, False, False),
-        (None, False, False, False),
-        (None, True, False, False),
-        (1, False, True, False),
-        (1, False, False, True),
+        (1, False, False, False, False),
+        (3, False, False, False, False),
+        (None, False, False, False, False),
+        (None, True, False, False, False),
+        (1, False, True, False, False),
+        (1, False, False, True, False),
+        (1, False, False, False, True),
     ],
 )
 def test_adaptive_capture_selected_parameters_and_resume(
-    tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume
+    tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple
 ):
-    create(tmp_path / "data", examples=interrupted)
+    create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
     prepared = tmp_path / "prepared.jsonl"
     prepared.write_text("".join(json.dumps(row) + "\n" for row in dataset.prepared()))
@@ -97,14 +99,15 @@ def test_adaptive_capture_selected_parameters_and_resume(
             params = row["responses_create_params"]
             metadata = params["metadata"]
             receipt_id = metadata["receipt_id"]
-            stage = len(calls)
+            stage = core.PHASES.index((int(metadata["seed"]), params["max_output_tokens"]))
             capture_key = maybe_rollout_id_from_run_body(row)
             calls.append((int(metadata["seed"]), params["max_output_tokens"], capture_key))
             complete = stage == complete_stage
-            text, finish = ("OK.", "stop") if complete else ("partial", "length")
+            literal = "DONE." if row["task_id"] == "synthetic-done" else "OK."
+            text, finish = (literal, "stop") if complete else ("partial", "length")
             upstream = {
                 "model": "synthetic-policy",
-                **dataset.request("synthetic"),
+                **dataset.request(row["task_id"]),
                 "seed": int(metadata["seed"]),
                 "max_tokens": params["max_output_tokens"],
             }
@@ -170,7 +173,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
                 NeMoGymResponseCreateParamsNonStreaming.model_validate(params),
                 model_url_path="/v1/responses",
                 rollout_id=capture_key,
-                task_id="synthetic",
+                task_id=row["task_id"],
                 collect_trajectory=True,
             )
             result = {
@@ -206,8 +209,9 @@ def test_adaptive_capture_selected_parameters_and_resume(
         responses_create_params=None,
         input_jsonl_fpath=str(prepared),
         output_jsonl_fpath=str(tmp_path / "out.jsonl"),
-        limit=2 if interrupted else None,
+        limit=2 if interrupted or multiple else None,
         resume_from_cache=fresh_resume,
+        num_samples_in_parallel=2 if multiple else None,
     )
     settings = {
         "policy_api_key": "synthetic-secret-never-save",
@@ -248,13 +252,135 @@ def test_adaptive_capture_selected_parameters_and_resume(
     inventory_path = materialized_path_for(tmp_path / "out.jsonl")
     inventory_bytes = inventory_path.read_bytes()
     inventory = [json.loads(line) for line in inventory_bytes.splitlines()]
-    assert len(inventory) == (2 if interrupted else 1)
+    assert len(inventory) == (2 if interrupted or multiple else 1)
     assert inventory_path.stat().st_mode & 0o077 == 0
+    assert all(
+        (tmp_path / name).stat().st_mode & 0o077 == 0
+        for name in ["out.jsonl", "out.summary.json", "out_aggregate_metrics.json"]
+    )
     assert all("_ng_attempt_index" not in row for row in inventory)
     assert [row["_ng_task_index"] for row in inventory] == list(range(len(inventory)))
     health = run_health_checks(tmp_path / "out.jsonl", workers=1).summary["run"]["artifacts"]
     assert health["expected"] == len(inventory) and health["missing"] == int(interrupted)
     assert health["healthy"] is (not interrupted)
+    artifacts = {
+        path: path.read_bytes() for path in tmp_path.iterdir() if path.is_file() and path.name != "prepared.jsonl"
+    }
+    if multiple:
+        assert len((tmp_path / "out.jsonl").read_text().splitlines()) == 2
+        config.resume_from_cache = True
+        later_id = inventory[1]["task_id"]
+        journal_path = verifier.receipt_dir / "cells" / (core.judge.sha(later_id) + ".json")
+        journal = core.read(journal_path)
+        selected_receipt = core.read(Path(journal["selected"]["receipt_path"]))
+        judge_work = next(
+            path.parent
+            for path in verifier.receipt_dir.glob("judges/*/payload.json")
+            if core.read(path)["item_id"] == later_id
+        )
+        damages = [journal_path, Path(selected_receipt["raw_attempts"][-1]["path"]), judge_work / "result.json"]
+        for damaged in damages:
+            original = damaged.read_bytes()
+            try:
+                if damaged == journal_path:
+                    core.write(damaged, {**journal, "fingerprint": "changed"})
+                else:
+                    damaged.write_text("changed")
+                with pytest.raises(ValueError):
+                    asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+                assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+                assert len(calls) == 4 and len(judge_calls) == 2
+            finally:
+                damaged.write_bytes(original)
+        first_journal = verifier.receipt_dir / "cells" / (core.judge.sha(inventory[0]["task_id"]) + ".json")
+        preserved_journal = first_journal.with_suffix(".saved")
+        first_journal.rename(preserved_journal)
+        try:
+            with pytest.raises(ValueError, match="Missing journal for published rollout"):
+                asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+            assert not first_journal.exists()
+            assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+        finally:
+            preserved_journal.rename(first_journal)
+
+        from nemo_gym.observability import model_calls
+
+        merge = model_calls.merge_model_call_capture_into_record
+        assembled = []
+
+        def assemble(record, *args, **kwargs):
+            assembled.append(record["task_id"])
+            if record["task_id"] == later_id:
+                raise ValueError("Later saved rollout cannot be assembled")
+            return merge(record, *args, **kwargs)
+
+        with monkeypatch.context() as context:
+            context.setattr(model_calls, "merge_model_call_capture_into_record", assemble)
+            config.num_samples_in_parallel = 1
+            with pytest.raises(ValueError, match="cannot be assembled"):
+                asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        assert assembled == [row["task_id"] for row in inventory]
+        assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+        assert len(calls) == 4 and len(judge_calls) == 2
+
+        reports = rollout_driver.write_reports
+
+        def failed_report(output, results, dataset):
+            assert output.parent != tmp_path and output.parent.stat().st_mode & 0o077 == 0
+            if len(results) == 2:
+                raise OSError("Synthetic report write failed")
+            return reports(output, results, dataset)
+
+        with monkeypatch.context() as context:
+            context.setattr(rollout_driver, "write_reports", failed_report)
+            with pytest.raises(OSError, match="report write failed"):
+                asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+        assert not list(tmp_path.glob(".out-*"))
+        assert len(calls) == 4 and len(judge_calls) == 2
+
+        snapshot_path = tmp_path / "resolved-config.yaml"
+        sidecars = [snapshot_path, inventory_path, verifier.receipt_dir / "cells"]
+        for path in sidecars:
+            path.rename(path.with_name(path.name + ".saved"))
+        try:
+            config.resume_from_cache = False
+            with pytest.raises(ValueError, match="Existing rollout output"):
+                asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+            assert all(not path.exists() for path in sidecars)
+            assert all(path.read_bytes() == saved for path, saved in artifacts.items() if path not in sidecars)
+        finally:
+            for path in sidecars:
+                path.with_name(path.name + ".saved").rename(path)
+
+        pending = tmp_path / "pending-resume"
+        pending.mkdir(mode=0o700)
+        previous_receipts = verifier.receipt_dir
+        verifier.receipt_dir = pending / "receipts"
+        shutil.copytree(previous_receipts, verifier.receipt_dir)
+        (verifier.receipt_dir / "cells" / first_journal.name).unlink()
+        pending_journal = verifier.receipt_dir / "cells" / journal_path.name
+        unresolved = core.read(pending_journal)
+        unresolved["result"] = core.unscored(later_id, "judge_delivery_or_validation_error")
+        unresolved["result_sha256"] = core.judge.sha(unresolved["result"])
+        core.write(pending_journal, unresolved)
+        pending_judge = verifier.receipt_dir / judge_work.relative_to(previous_receipts)
+        (pending_judge / "result.json").unlink()
+        attempt_path = pending_judge / "attempt0.json"
+        core.write(attempt_path, {**core.read(attempt_path), "status": "started"})
+        config.resume_from_cache = True
+        config.output_jsonl_fpath = str(pending / "out.jsonl")
+        settings["agentic_if_realworld_resources"]["resources_servers"]["agentic_if_realworld"]["receipt_dir"] = str(
+            verifier.receipt_dir
+        )
+        shutil.copyfile(inventory_path, materialized_path_for(Path(config.output_jsonl_fpath)))
+        with pytest.raises(ValueError, match="Ambiguous"):
+            asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        assert not Path(config.output_jsonl_fpath).exists()
+        assert not (verifier.receipt_dir / "cells" / first_journal.name).exists()
+        assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+        assert len(calls) == 4 and len(judge_calls) == 2
+        return
     if interrupted:
         assert core.read(tmp_path / "out.summary.json")["expected_items"] == 5
         saved = core.read(tmp_path / "out.jsonl")["response"]
@@ -265,6 +391,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
         config.limit = 2
         with pytest.raises(ValueError, match="Ambiguous"):
             asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+        assert all(path.read_bytes() == saved for path, saved in artifacts.items())
         assert inventory_path.read_bytes() == inventory_bytes
         assert len(calls) == 2 and len(judge_calls) == 1
         assert core.read(tmp_path / "out.jsonl")["response"] == saved
@@ -312,6 +439,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
     assert len(verification) == 2 * int(complete_stage is not None)
     assert all(core.digest(path) == digest for path, digest in before.items())
     assert core.read(tmp_path / "out.jsonl").get("response") == record.get("response")
+    artifacts = {path: path.read_bytes() for path in artifacts}
     preserved_inventory = inventory_path.with_suffix(".saved")
     inventory_path.rename(preserved_inventory)
     try:
@@ -326,6 +454,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
     )
     with pytest.raises(ValueError, match="fingerprint"):
         asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    assert all(path.read_bytes() == saved for path, saved in artifacts.items())
     assert snapshot_path.read_bytes() == snapshot_bytes
     assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
     assert len(verification) == 2 * int(complete_stage is not None)
@@ -347,6 +476,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
                 with pytest.raises(ValueError):
                     asyncio.run(rollout_driver.run_rollout_collection(config, settings))
                 assert saved.read_text() == "changed"
+                assert all(path == saved or path.read_bytes() == data for path, data in artifacts.items())
             finally:
                 saved.write_bytes(original)
         assert len(calls) == last_stage + 1 and len(judge_calls) == 1

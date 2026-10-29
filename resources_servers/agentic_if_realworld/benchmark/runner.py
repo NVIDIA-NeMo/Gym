@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from .core import PHASES, Dataset, digest, judge, read, unscored, write
+from .transport import verified_response
 
 
 async def run_cell(
@@ -19,7 +20,9 @@ async def run_cell(
     generate: Callable[[dict, int, int, str], Awaitable[dict]],
     verify: Callable[..., Awaitable[dict]],
     resume: bool = False,
-) -> dict:
+    validate_only: bool = False,
+) -> dict | None:
+    """Validate saved state before resuming; validation never creates or dispatches work."""
     fingerprint = judge.sha(
         {
             "dataset": dataset.report,
@@ -33,11 +36,31 @@ async def run_cell(
         if not resume:
             raise ValueError("Existing journal requires explicit resume")
         state = read(path)
-        if state["fingerprint"] != fingerprint:
+        if state["item_id"] != identifier or state["fingerprint"] != fingerprint:
             raise ValueError("Resume configuration fingerprint mismatch")
     else:
+        if validate_only:
+            return None
         state = {"item_id": identifier, "fingerprint": fingerprint, "attempts": []}
         write(path, state)
+    for attempt in state["attempts"]:
+        if attempt["status"] == "started":
+            raise ValueError("Ambiguous in-flight generation; reconcile receipt before resume")
+        if "receipt_path" in attempt:
+            receipt = read(Path(attempt["receipt_path"]))
+            if digest(Path(attempt["receipt_path"])) != attempt["receipt_sha256"]:
+                raise ValueError("Saved generation transport receipt changed")
+            if receipt["status"] == "started":
+                raise ValueError("Ambiguous in-flight generation receipt; reconcile receipt before resume")
+            if judge.sha(receipt["request_body"]) != receipt["request_sha256"]:
+                raise ValueError("Saved generation request binding changed")
+            if any(receipt["request_body"].get(key) != value for key, value in dataset.request(identifier).items()):
+                raise ValueError("Saved generation input differs from frozen task")
+            for raw in receipt["raw_attempts"]:
+                if digest(Path(raw["path"])) != raw["sha256"]:
+                    raise ValueError("Raw transport binding changed")
+            if receipt["status"] == "generated":
+                verified_response(receipt)
     if "selected" in state:
         if judge.sha(state["selected"]) != state["selected_sha256"]:
             raise ValueError("Saved selected response changed")
@@ -53,6 +76,10 @@ async def run_cell(
         if result != state["result"]:
             raise ValueError("Saved result differs from validated cached judge result")
         return result
+    if validate_only:
+        if "selected" in state:
+            await verify(state["selected"], dataset.criteria[identifier], validate_only=True)
+        return None
     for stage, (seed, cap) in enumerate(PHASES):
         if "selected" in state:
             break

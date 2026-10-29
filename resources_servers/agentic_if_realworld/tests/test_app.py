@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import json
 import tempfile
 from copy import deepcopy
 from unittest.mock import AsyncMock
 
 import pytest
 
+import nemo_gym.server_utils
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.agentic_if_realworld.app import (
     VERIFIER_FIXTURE,
@@ -17,7 +19,7 @@ from resources_servers.agentic_if_realworld.app import (
 )
 from resources_servers.agentic_if_realworld.benchmark import scoring
 from resources_servers.agentic_if_realworld.benchmark.core import digest, read, write
-from resources_servers.agentic_if_realworld.benchmark.synthetic import delivery
+from resources_servers.agentic_if_realworld.benchmark.synthetic import delivery, review
 
 
 @pytest.fixture
@@ -128,6 +130,161 @@ def test_production_verifier_masks_judge_technical_failures(verifier, monkeypatc
     assert result.scoring_status == "not_scored"
     assert result.item_verdict is None and result.mask_sample is True
     assert result.reward == 0.0 and len(calls) == 2
+
+
+class JudgeContent:
+    def __init__(self, data: bytes):
+        self.data = data
+
+    async def iter_chunked(self, size):
+        yield self.data
+
+
+class JudgeResponse:
+    status = 200
+    headers = {"content-type": "application/json"}
+
+    def __init__(self, data: bytes):
+        self.content = JudgeContent(data)
+
+    def release(self):
+        pass
+
+
+@pytest.mark.parametrize("first_outcomes", [["transport", "transport"], ["malformed", "transport"]])
+def test_judge_attempt_budget_is_preserved_on_resume(verifier, monkeypatch, first_outcomes):
+    calls = []
+
+    async def request(method, url, **kwargs):
+        calls.append(1)
+        outcome = first_outcomes[len(calls) - 1] if len(calls) <= len(first_outcomes) else "graded"
+        if outcome == "transport":
+            raise ConnectionError("judge unreachable")
+        content = "not JSON"
+        if outcome == "graded":
+            prompt = kwargs["json"]["messages"][0]["content"]
+            content = json.dumps(review(json.loads(prompt.rsplit("UNTRUSTED_EVALUATION_PAYLOAD:\n", 1)[1])))
+        choice = {"finish_reason": "stop", "message": {"content": content}}
+        return JudgeResponse(json.dumps({"id": "judge", "choices": [choice]}).encode())
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setenv("AGENTIC_IF_JUDGE_API_KEY", "synthetic")
+    production = Verifier(
+        dataset=verifier.dataset, receipt_dir=verifier.receipt_dir, endpoint="http://synthetic.invalid"
+    )
+    body = VerifyRequest.model_validate(delivery(verifier.dataset, verifier.receipt_dir, "OK."))
+    # Neither attempt gives a grade: the item is masked.
+    assert asyncio.run(production.verify(body)).scoring_status == "not_scored" and len(calls) == 2
+    saved = {path: digest(path) for path in verifier.receipt_dir.glob("judges/*/attempt*.*")}
+    assert len(list(verifier.receipt_dir.glob("judges/*/attempt*.json"))) == 2
+    for _ in range(2):
+        result = asyncio.run(production.verify(body))
+        assert result.scoring_status == "not_scored" and result.mask_sample is True
+        assert result.item_verdict is None and len(calls) == 2
+        assert {path: digest(path) for path in verifier.receipt_dir.glob("judges/*/attempt*.*")} == saved
+
+
+@pytest.mark.parametrize("response_source", ["raw_receipt", "gym_response"])
+@pytest.mark.parametrize(
+    "damage", [None, "payload", "schema", "request", "request_hash", "endpoint", "raw", "started"]
+)
+def test_pending_judge_cache_validation_is_readonly(verifier, monkeypatch, response_source, damage):
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(1)
+        raise ConnectionError("synthetic judge unavailable")
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setenv("AGENTIC_IF_JUDGE_API_KEY", "synthetic")
+    production = Verifier(
+        dataset=verifier.dataset,
+        receipt_dir=verifier.receipt_dir,
+        endpoint="http://synthetic.invalid",
+        response_source=response_source,
+    )
+    row = delivery(verifier.dataset, verifier.receipt_dir, "OK.")
+    if response_source == "gym_response":
+        row["response"]["metadata"] = {}
+        row["response"]["status"] = "completed"
+    validate = VerifyRequest.model_validate({**row, "validate_judge_cache": True})
+
+    def saved_files():
+        return {path: path.read_bytes() for path in verifier.receipt_dir.rglob("*") if path.is_file()}
+
+    # A saved answer may not have reached its first judge dispatch yet.
+    before = saved_files()
+    result = asyncio.run(production.verify(validate))
+    assert result.scoring_status == "not_scored" and result.mask_sample is True
+    assert result.reason == "judge_cache_validated_without_scoring"
+    assert not calls and saved_files() == before
+    assert not (verifier.receipt_dir / "judges").exists()
+
+    assert asyncio.run(production.verify(VerifyRequest.model_validate(row))).scoring_status == "not_scored"
+    assert len(calls) == 2
+    work = next((verifier.receipt_dir / "judges").iterdir())
+    assert len(list(work.glob("attempt*.json"))) == 2
+    assert not (work / "result.json").exists()
+    attempt_path = work / "attempt0.json"
+    attempt = read(attempt_path)
+    if damage == "payload":
+        write(work / "payload.json", {"changed": True})
+    elif damage == "schema":
+        write(work / "transport_schema.json", {"changed": True})
+    elif damage == "raw":
+        next(work.glob("attempt0.a*.http")).write_bytes(b"changed")
+    elif damage:
+        if damage == "request":
+            attempt["request_body"]["model"] = "changed"
+        elif damage == "request_hash":
+            attempt["request_sha256"] = "0" * 64
+        elif damage == "endpoint":
+            attempt["endpoint"] = "http://changed.invalid"
+        else:
+            attempt["status"] = "started"
+        write(attempt_path, attempt)
+    before = saved_files()
+    if damage:
+        with pytest.raises(ValueError):
+            asyncio.run(production.verify(validate))
+    else:
+        for _ in range(2):
+            result = asyncio.run(production.verify(validate))
+            assert result.scoring_status == "not_scored" and result.mask_sample is True
+    assert len(calls) == 2 and saved_files() == before
+
+
+def test_judge_cache_validation_rechecks_successful_review(verifier, monkeypatch):
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(1)
+        prompt = kwargs["json"]["messages"][0]["content"]
+        payload = json.loads(prompt.rsplit("UNTRUSTED_EVALUATION_PAYLOAD:\n", 1)[1])
+        choice = {"finish_reason": "stop", "message": {"content": json.dumps(review(payload))}}
+        return JudgeResponse(json.dumps({"choices": [choice]}).encode())
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setenv("AGENTIC_IF_JUDGE_API_KEY", "synthetic")
+    production = Verifier(
+        dataset=verifier.dataset, receipt_dir=verifier.receipt_dir, endpoint="http://synthetic.invalid"
+    )
+    row = delivery(verifier.dataset, verifier.receipt_dir, "OK.")
+    assert asyncio.run(production.verify(VerifyRequest.model_validate(row))).reward == 1
+    validate = VerifyRequest.model_validate({**row, "validate_judge_cache": True})
+    saved = {path: path.read_bytes() for path in verifier.receipt_dir.rglob("*") if path.is_file()}
+    result = asyncio.run(production.verify(validate))
+    assert result.scoring_status == "scored" and result.reward == 1 and result.mask_sample is False
+    assert len(calls) == 1
+    assert {path: path.read_bytes() for path in saved} == saved
+    result_path = next(verifier.receipt_dir.glob("judges/*/result.json"))
+    cached = read(result_path)
+    cached["raw_review"]["item_verdict"] = "fail"
+    write(result_path, cached)
+    damaged = result_path.read_bytes()
+    with pytest.raises(ValueError, match="Cached grade differs"):
+        asyncio.run(production.verify(validate))
+    assert len(calls) == 1 and result_path.read_bytes() == damaged
 
 
 @pytest.fixture

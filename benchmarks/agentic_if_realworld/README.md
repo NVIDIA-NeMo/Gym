@@ -73,11 +73,13 @@ and these (seed, maximum-output-token) attempts:
 `(17,32768), (17,65536), (17,131072), (29,131072), (43,131072)`.
 Advance only after incomplete delivery. Keep the first complete answer regardless
 of its grade. Judge recovery never regenerates that answer. Two judge attempts
-are allowed, with bounded transport retries and the existing timeouts.
+are allowed across resumes, with bounded transport retries and the existing
+timeouts. After both attempts are exhausted, unresolved scoring stays unscored.
 
 Every run fingerprints model settings, source bytes and dependencies. Resume
-requires matching settings and rejects ambiguous in-flight receipts. Use a new
-run directory for changed settings. Historical grades and recovery waves
+requires matching settings and rejects ambiguous in-flight receipts. A rejected
+resume preserves the saved output and reports. Use a new run directory for changed
+settings. Historical grades and recovery waves
 remain historical; this adaptive protocol does not reproduce them.
 The runtime identity records the running Gym revision and hashes its agent/core
 source separately from the historical source pin. Older journals are rejected
@@ -105,7 +107,10 @@ inventory and never replaces it. Older runs without one require a new run direct
 `rollouts.summary.json` reports both views, subtype overlap, expected tasks,
 pass/fail/unscored counts and coverage. `rollouts_aggregate_metrics.json` exposes
 `composite/complete_accuracy`, which stays null until every declared task has a
-valid grade. Never substitute resolved-only mean reward for complete accuracy.
+valid grade. Gym's standard aggregation endpoint uses the same full-dataset
+accounting for native collection, reverification and reaggregation, including
+masked and unattempted tasks. Never substitute resolved-only mean reward for
+complete accuracy.
 
 ## Run
 
@@ -130,6 +135,11 @@ gym eval run --benchmark agentic_if_realworld --split benchmark --num-repeats 1 
 
 Repeat the final command with `--resume` and the same paths to resume generation
 and judging independently. Preserve saved response hashes and receipts.
+`--concurrency N` runs up to N tasks at once, each with its own journal. A policy
+transport error (429, 5xx, timeout) moves a task to its next attempt, as an
+incomplete delivery does, so keep N within what the policy server serves without
+errors. A run stopped mid-generation leaves its in-flight tasks ambiguous, and
+resume rejects them until their receipts are reconciled.
 
 ### Private YAML configuration
 

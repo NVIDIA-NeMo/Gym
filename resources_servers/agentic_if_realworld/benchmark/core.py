@@ -338,6 +338,25 @@ def summarize(records: list[dict], dataset: Dataset) -> dict:
     return result
 
 
+def summary_metrics(summary: dict) -> dict:
+    """Flatten frozen full-cohort accounting for standard Gym and adaptive-driver reports."""
+    fields = ["expected_items", "pass", "fail", "not_scored", "unattempted", "scoring_coverage", "complete"]
+    metrics = {key: summary[key] for key in fields}
+    metrics.update(
+        {
+            "composite/complete_accuracy": summary["complete_accuracy"],
+            "masked": summary["not_scored"] - summary["unattempted"],
+            "subtype_denominators_overlap": summary["subtype_denominators_overlap"],
+        }
+    )
+    for group, prefix in [("views", ""), ("subtypes", "subtypes/")]:
+        for name, values in summary[group].items():
+            label = prefix + name + "/"
+            metrics.update({label + key: values[key] for key in [*fields, "complete_accuracy"]})
+            metrics[label + "masked"] = values["not_scored"] - values["unattempted"]
+    return metrics
+
+
 def source_preflight(
     split_registry: Path | str | None = None,
     ground_truth: Path | str | None = None,

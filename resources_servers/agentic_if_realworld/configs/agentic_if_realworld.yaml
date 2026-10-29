@@ -1,5 +1,7 @@
 mlflow_tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,""}
 mlflow_tracking_token: ${oc.env:MLFLOW_TRACKING_TOKEN,""}
+# Raw rollouts contain private traces; apply this default to every profile.
+upload_rollouts: false
 
 agentic_if_realworld_resources:
   resources_servers:

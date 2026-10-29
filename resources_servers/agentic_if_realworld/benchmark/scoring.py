@@ -55,6 +55,7 @@ async def score(
     key_env: str = "AGENTIC_IF_JUDGE_API_KEY",
     reasoning: str = "medium",
     cached_only: bool = False,
+    validate_only: bool = False,
 ) -> dict:
     directory = private_path(directory)
     if not isinstance(policy_prompt, str) or not policy_prompt.strip():
@@ -83,6 +84,8 @@ async def score(
     work = directory / "judges" / identity
     if cached_only and not (work / "result.json").is_file():
         raise ValueError("Saved judge result missing; cached-only verification cannot dispatch")
+    if validate_only and not work.exists():
+        return unscored(payload["item_id"], "judge_cache_validated_without_scoring")
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     async with _cache_lock(work):
         if (work / "result.json").exists():
@@ -112,6 +115,19 @@ async def score(
             return checked
         if cached_only:
             raise ValueError("Saved judge result missing; cached-only verification cannot dispatch")
+        if validate_only:
+            for name, expected in [("payload.json", payload), ("transport_schema.json", schema)]:
+                if (work / name).exists() and read(work / name) != expected:
+                    raise ValueError("Saved pending judge payload or schema changed")
+            for attempt in range(2):
+                receipt_path = work / f"attempt{attempt}.json"
+                if not receipt_path.exists():
+                    continue
+                # The cache lock and existing receipt keep this on the no-dispatch transport path.
+                receipt = await wire_call(body, endpoint=endpoint, key_env=key_env, path=receipt_path)
+                if receipt["status"] == "generated":
+                    verified_response(receipt)
+            return unscored(payload["item_id"], "judge_cache_validated_without_scoring")
         write(work / "payload.json", payload)
         write(work / "transport_schema.json", schema)
         for attempt in range(2):

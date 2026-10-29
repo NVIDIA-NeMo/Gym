@@ -6,6 +6,7 @@ import asyncio
 import copy
 import fcntl
 import json
+import logging
 import os
 import tempfile
 from datetime import UTC, datetime
@@ -22,11 +23,15 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
     runtime_identity,
     source_preflight,
     summarize,
+    summary_metrics,
     write,
 )
 from resources_servers.agentic_if_realworld.benchmark.registry import private_path
 from resources_servers.agentic_if_realworld.benchmark.runner import run_cell
 from resources_servers.agentic_if_realworld.benchmark.transport import delivered
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 async def run_rollout_collection(rollout_collection_config, global_config_dict) -> None:
@@ -93,10 +98,16 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
     )
     by_id = {r["task_id"]: r for r in rows}
     output = private_path(Path(config.output_jsonl_fpath))
+    if output.exists() and not config.resume_from_cache:
+        raise ValueError("Existing rollout output requires explicit resume or a new run directory")
     output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock = (directory / ".lock").open("a")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if config.resume_from_cache and output.exists():
+            for identifier in indexed(output, "task_id"):
+                if identifier not in by_id or not (directory / "cells" / (judge.sha(identifier) + ".json")).exists():
+                    raise ValueError("Missing journal for published rollout; reconcile this run before resuming")
         snapshot = OmegaConf.create(global_config_dict)
         OmegaConf.resolve(snapshot)
         recursively_hide_secrets(snapshot)
@@ -124,8 +135,14 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         if not snapshot_path.exists():
             # JSON is valid YAML; reuse the atomic private receipt writer.
             write(snapshot_path, OmegaConf.to_container(snapshot, resolve=True))
-        results, rollouts = [], []
-        for row in rows:
+        results, failures, validated_results = [], [], {}
+        writing_failed = False
+        # Each task keeps its own journal and receipts, so tasks run concurrently (sequential by default).
+        slots = asyncio.Semaphore(config.num_samples_in_parallel or 1)
+        writing = asyncio.Lock()
+
+        async def collect(row: dict, *, validate_only: bool = False) -> dict | None:
+            nonlocal writing_failed
             identifier = row["task_id"]
 
             async def generate(prepared, seed, cap, receipt_id):
@@ -167,7 +184,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     "receipt_sha256": digest(path),
                 }
 
-            async def verify(selected, criteria, identifier=identifier, *, cached_only=False):
+            async def verify(selected, criteria, identifier=identifier, *, cached_only=False, validate_only=False):
                 path = Path(selected["receipt_path"])
                 if digest(path) != selected["receipt_sha256"]:
                     raise ValueError("Saved delivery receipt changed")
@@ -179,6 +196,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                 }
                 if cached_only:
                     body["cached_judge_only"] = True
+                if validate_only:
+                    body["validate_judge_cache"] = True
                 response = await client.post(
                     server_name="agentic_if_realworld_resources",
                     url_path="/verify",
@@ -188,53 +207,98 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     await raise_for_status(response)
                     result = await get_response_json(response)
                     result.pop("cached_judge_only", None)
+                    result.pop("validate_judge_cache", None)
                     return result
                 finally:
                     response.release()
 
-            result = await run_cell(
-                dataset,
-                identifier,
-                directory=directory,
-                settings=settings,
-                generate=generate,
-                verify=verify,
-                resume=config.resume_from_cache,
-            )
-            results.append(result)
-            # Exactly one canonical row per task; attempt placeholders never enter metrics.
-            state = read(directory / "cells" / (judge.sha(identifier) + ".json"))
-            landed = state.get("selected", state["attempts"][-1]).get("rollout", {})
-            record = {**row, **landed, **result}
-            # The agent skips inline judging; the driver verifies each selected delivery.
-            record["verification_skipped"] = "selected" not in state
-            if capture_dirs:
-                rollout_id = maybe_rollout_id_from_run_body(record)
-                if rollout_id:
-                    await await_model_call_capture_quiescence(rollout_id, capture_dirs)
-                merge_model_call_capture_into_record(record, capture_dirs, include_payloads=True)
-                _attach_trajectory_record(record, record)
-            rollouts.append(record)
-            fd = __import__("os").open(
-                output,
-                __import__("os").O_WRONLY | __import__("os").O_CREAT | __import__("os").O_TRUNC,
-                0o600,
-            )
-            with __import__("os").fdopen(fd, "w") as stream:
-                for value in rollouts:
-                    stream.write(json.dumps(value, ensure_ascii=False) + "\n")
-            write_reports(output, results, dataset)
-        write_reports(output, results, dataset)
-        write(
-            output.with_suffix(".run.json"),
-            {
-                "created_at": datetime.now(UTC).isoformat(),
-                "dataset": dataset.report,
-                "settings": settings,
-                "settings_sha256": judge.sha(settings),
-                "new_protocol_not_historical_reproduction": True,
-            },
-        )
+            if validate_only:
+                return await run_cell(
+                    dataset,
+                    identifier,
+                    directory=directory,
+                    settings=settings,
+                    generate=generate,
+                    verify=verify,
+                    resume=True,
+                    validate_only=True,
+                )
+            async with slots:
+                # After a failure, admit no new task, but let started ones settle their journals.
+                if failures:
+                    return
+                try:
+                    result = validated_results.get(identifier)
+                    if result is None:
+                        result = await run_cell(
+                            dataset,
+                            identifier,
+                            directory=directory,
+                            settings=settings,
+                            generate=generate,
+                            verify=verify,
+                            resume=config.resume_from_cache,
+                        )
+                    # Exactly one canonical row per task; attempt placeholders never enter metrics.
+                    state = read(directory / "cells" / (judge.sha(identifier) + ".json"))
+                    landed = state.get("selected", state["attempts"][-1]).get("rollout", {})
+                    record = {**row, **landed, **result}
+                    # The agent skips inline judging; the driver verifies each selected delivery.
+                    record["verification_skipped"] = "selected" not in state
+                    if capture_dirs:
+                        rollout_id = maybe_rollout_id_from_run_body(record)
+                        if rollout_id:
+                            await await_model_call_capture_quiescence(rollout_id, capture_dirs)
+                        merge_model_call_capture_into_record(record, capture_dirs, include_payloads=True)
+                        _attach_trajectory_record(record, record)
+                    async with writing:
+                        try:
+                            results.append(result)
+                            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                            stream.flush()
+                            write_reports(staged_output, results, dataset)
+                        except Exception:
+                            writing_failed = True
+                            raise
+                except (Exception, asyncio.CancelledError) as error:
+                    LOGGER.error("Task %s failed: %r", identifier, error)
+                    failures.append(error)
+
+        if config.resume_from_cache:
+            # Reject any saved task before dispatching new work or replacing published artifacts.
+            for row in rows:
+                validated_results[row["task_id"]] = await collect(row, validate_only=True)
+        with tempfile.TemporaryDirectory(dir=output.parent, prefix=f".{output.stem}-") as pending:
+            staged_output = Path(pending) / output.name
+            stream = os.fdopen(os.open(staged_output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w")
+            completed = False
+            try:
+                await asyncio.gather(*(collect(row) for row in rows))
+                if failures:
+                    raise failures[0]
+                write_reports(staged_output, results, dataset)
+                write(
+                    staged_output.with_suffix(".run.json"),
+                    {
+                        "created_at": datetime.now(UTC).isoformat(),
+                        "dataset": dataset.report,
+                        "settings": settings,
+                        "settings_sha256": judge.sha(settings),
+                        "new_protocol_not_historical_reproduction": True,
+                    },
+                )
+                completed = True
+            finally:
+                try:
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                finally:
+                    stream.close()
+                # A rejected resume preserves published artifacts; fresh interruptions retain settled rows.
+                if completed or (not config.resume_from_cache and not writing_failed):
+                    staged_output.replace(output)
+                    for report in Path(pending).glob("*.json"):
+                        report.replace(output.parent / report.name)
     finally:
         lock.close()
 
@@ -243,13 +307,7 @@ def write_reports(output: Path, results: list[dict], dataset: Dataset) -> None:
     """Expose full-denominator accuracy to Gym/EFB; incomplete accuracy stays null."""
     summary = summarize(results, dataset)
     write(output.with_suffix(".summary.json"), summary)
-    metrics = {
-        "composite/complete_accuracy": summary["complete_accuracy"],
-        **{key: summary[key] for key in ["scoring_coverage", "expected_items", "pass", "fail", "not_scored"]},
-    }
-    for view, values in summary["views"].items():
-        metrics[view + "/complete_accuracy"] = values["complete_accuracy"]
-        metrics[view + "/scoring_coverage"] = values["scoring_coverage"]
+    metrics = summary_metrics(summary)
     write(
         output.with_name(output.stem + "_aggregate_metrics.json"),
         [

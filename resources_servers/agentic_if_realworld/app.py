@@ -6,7 +6,13 @@ from pathlib import Path
 from typing import ClassVar, Literal
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
-from resources_servers.agentic_if_realworld.benchmark.core import DEFAULT_JUDGE_MODEL
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from resources_servers.agentic_if_realworld.benchmark.core import (
+    DEFAULT_JUDGE_MODEL,
+    judge,
+    summarize,
+    summary_metrics,
+)
 from resources_servers.agentic_if_realworld.verifier import (
     VERIFIER_FIXTURE as VERIFIER_FIXTURE,
 )
@@ -63,6 +69,34 @@ class ResourcesServer(SimpleResourcesServer):
             response_source=self.config.response_source,
         )
         return await verifier.verify(body)
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        """Keep the frozen full-cohort denominator for native, reverify and reaggregate runs."""
+        if not self.config.synthetic:
+            cached_preflight(self.config.split_registry_path, self.config.ground_truth_path, self.config.dataset_dir)
+        dataset = cached_dataset(self.config.dataset_dir, self.config.synthetic)
+        for row in body.verify_responses:
+            identifier = row.get("item_id")
+            if not isinstance(identifier, str) or identifier not in dataset.inputs or row.get("task_id") != identifier:
+                raise ValueError("Aggregate result has an unknown or inconsistent frozen task identifier")
+            if row.get("verifier_metadata") != {
+                "item_id": identifier,
+                "dataset_sha256": dataset.manifest_sha256,
+                "input_sha256": judge.sha(dataset.request(identifier)),
+            }:
+                raise ValueError("Aggregate result provenance differs from frozen dataset")
+            scored = row.get("scoring_status") == "scored"
+            if (
+                row.get("mask_sample") is not (not scored)
+                or row.get("evaluation_completed", scored) is not scored
+                or row.get("reward") != float(scored and row.get("item_verdict") == "pass")
+            ):
+                raise ValueError("Aggregate result has inconsistent grade, reward or masking")
+        metrics = summary_metrics(summarize(body.verify_responses, dataset))
+        aggregate = await super().aggregate_metrics(body)
+        aggregate.agent_metrics.update(metrics)
+        aggregate.key_metrics = metrics
+        return aggregate
 
 
 if __name__ == "__main__":

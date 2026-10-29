@@ -31,6 +31,7 @@ class VerifyRequest(BaseVerifyRequest):
     task_id: str
     verifier_metadata: dict
     cached_judge_only: bool = False
+    validate_judge_cache: bool = False
 
 
 class VerifyResponse(BaseVerifyResponse):
@@ -87,7 +88,7 @@ class Verifier:
             reasoning,
         )
 
-    async def evaluate(self, payload: dict, *, cached_only: bool = False) -> dict:
+    async def evaluate(self, payload: dict, *, cached_only: bool = False, validate_only: bool = False) -> dict:
         return await score(
             payload,
             directory=self.receipt_dir,
@@ -97,6 +98,7 @@ class Verifier:
             key_env=self.key_env,
             reasoning=self.reasoning,
             cached_only=cached_only,
+            validate_only=validate_only,
         )
 
     async def verify(self, body: VerifyRequest) -> VerifyResponse:
@@ -131,28 +133,46 @@ class Verifier:
             try:
                 response = project_gym_response(body.response)
             except ValueError:
-                if body.cached_judge_only:
+                if body.cached_judge_only or body.validate_judge_cache:
                     raise
                 result = unscored(identifier, "incomplete_or_unsupported_gym_response")
             else:
-                result = await self.score_response(identifier, expected, response, cached_only=body.cached_judge_only)
+                result = await self.score_response(
+                    identifier,
+                    expected,
+                    response,
+                    cached_only=body.cached_judge_only,
+                    validate_only=body.validate_judge_cache,
+                )
             return VerifyResponse(
                 **{**body.model_dump(), **result, "evaluation_completed": result["scoring_status"] == "scored"}
             )
 
         response = self.receipt_response(body, expected)
         if response is None:
-            if body.cached_judge_only:
+            if body.cached_judge_only or body.validate_judge_cache:
                 raise ValueError("Saved selected model delivery failed integrity validation")
             result = unscored(identifier, "incomplete_model_delivery")
         else:
-            result = await self.score_response(identifier, expected, response, cached_only=body.cached_judge_only)
+            result = await self.score_response(
+                identifier,
+                expected,
+                response,
+                cached_only=body.cached_judge_only,
+                validate_only=body.validate_judge_cache,
+            )
         return VerifyResponse(
             **{**body.model_dump(), **result, "evaluation_completed": result["scoring_status"] == "scored"}
         )
 
     async def score_response(
-        self, identifier: str, expected: dict, response: dict, *, cached_only: bool = False
+        self,
+        identifier: str,
+        expected: dict,
+        response: dict,
+        *,
+        cached_only: bool = False,
+        validate_only: bool = False,
     ) -> dict:
         binding = {
             "id": identifier,
@@ -163,6 +183,8 @@ class Verifier:
         payload = self.dataset.payload(identifier, response, binding)
         if cached_only:
             return await self.evaluate(payload, cached_only=True)
+        if validate_only:
+            return await self.evaluate(payload, validate_only=True)
         return await self.evaluate(payload)
 
     def receipt_response(self, body: VerifyRequest, expected: dict) -> dict | None:
@@ -215,7 +237,7 @@ class FixtureVerifier(Verifier):
         for text, finish in [("OK.", "stop"), ("OK..", "stop"), ("partial", "length")]:
             delivery(self.dataset, self.receipt_dir, text, finish)
 
-    async def evaluate(self, payload: dict, *, cached_only: bool = False) -> dict:
+    async def evaluate(self, payload: dict, *, cached_only: bool = False, validate_only: bool = False) -> dict:
         from resources_servers.agentic_if_realworld.benchmark.synthetic import review
 
         checked = judge.validate_review(review(payload), payload)
