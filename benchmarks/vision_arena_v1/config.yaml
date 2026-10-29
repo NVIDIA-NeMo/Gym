@@ -59,6 +59,6 @@ health_check_max_not_final_failure_fraction: 0.05
 vision_arena_v1_benchmark_environment_server:
   _inherit_from: vision_arena_v1_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: vision_arena_v1_benchmark_agent

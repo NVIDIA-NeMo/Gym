@@ -23,6 +23,6 @@ imo_gradingbench_imo_gradingbench_simple_agent:
 imo_gradingbench_imo_gradingbench_environment_server:
   _inherit_from: imo_gradingbench_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: imo_gradingbench_imo_gradingbench_simple_agent

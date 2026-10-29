@@ -60,6 +60,8 @@ from pathlib import Path
 
 import yaml
 
+from nemo_gym.global_config import AGENT_SESSION_AGENT_TYPES
+
 
 REPO = Path(__file__).resolve().parents[1]
 ROOTS = ("benchmarks", "environments", "resources_servers", "responses_api_agents", "responses_api_models")
@@ -155,22 +157,7 @@ def needs_environment_server(instance: dict) -> bool:
     # Explicitly unbound templates for agent sessions do not use the compatibility /run route.
     # A legacy relay would conflict with the Environment Server supplied by composition.
     # An omitted binding can inherit Resources and must still migrate.
-    if (
-        agent_type
-        in {
-            "hermes_agent",
-            "pi_agent",
-            "codex_agent",
-            "openclaw_agent",
-            "opencode_agent",
-            "kilocode_agent",
-            "claude_code_agent",
-            "harbor_oracle_agent",
-            "terminus_2_sandboxed_agent",
-            "miniswe_sandboxed_agent",
-        }
-        and resources_server is None
-    ):
+    if agent_type in AGENT_SESSION_AGENT_TYPES and resources_server is None:
         return False
     # Stirrup runs only in agent sessions and has no /run for a legacy relay to call.
     if agent_type == "stirrup_agent":

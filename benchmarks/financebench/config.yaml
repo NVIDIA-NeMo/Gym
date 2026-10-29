@@ -50,6 +50,6 @@ financebench_simple_agent:
 financebench_environment_server:
   _inherit_from: equivalence_llm_judge_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: financebench_simple_agent
