@@ -42,7 +42,7 @@ def test_current_benchmark_manifests_match_runtime_composition(name: str) -> Non
     from nemo_gym.environment.manifest import resolve_manifest_config_path
     from nemo_gym.environment.validation import _mirror_differences
 
-    path = Path(__file__).parents[2] / "benchmarks" / name / "manifest.yaml"
+    path = Path(__file__).parents[3] / "benchmarks" / name / "manifest.yaml"
     manifest = load_manifest(path)
     composition = _resolve_manifest_composition(
         resolve_manifest_config_path(path, manifest), dataset_owner=manifest.dataset_owner
@@ -401,7 +401,7 @@ def test_infers_representative_builtin_agent_profiles(implementation: str, profi
         name=implementation,
         implementation=implementation,
         boundary="responses_api_agents",
-        entrypoint=str(Path(__file__).parents[2] / "responses_api_agents" / implementation / "app.py"),
+        entrypoint=str(Path(__file__).parents[3] / "responses_api_agents" / implementation / "app.py"),
     )
     composition = ResolvedComposition(
         resources_server=None,

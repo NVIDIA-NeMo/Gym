@@ -33,7 +33,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
-from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
+from nemo_gym.environment.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 
 
 BENCHMARKS_SUBDIR = "benchmarks"
@@ -205,7 +205,7 @@ def _discover_benchmarks_in_dir(benchmarks_dir: Path) -> Dict[str, BenchmarkConf
 def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
     """Map benchmark name -> :class:`BenchmarkConfig` for every discoverable benchmark config.
 
-    Scans the ``benchmarks/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots` root
+    Scans the ``benchmarks/`` subdir of every :func:`~nemo_gym.environment.discovery.component_search_roots` root
     (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user benchmarks shadow same-named built-ins.
     """
     return discover_components(BENCHMARKS_SUBDIR, _discover_benchmarks_in_dir)

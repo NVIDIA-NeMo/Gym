@@ -15,9 +15,9 @@ from nemo_gym.environment.publication import (
     EnvironmentPublicationReport,
     finalize_publication,
 )
+from nemo_gym.environment.registry import EnvironmentCatalogEntry, discover_environment_catalog, resolve_catalog_entry
 from nemo_gym.environment.scaffold import scaffold_environment
 from nemo_gym.environment.validation import validate_environment
-from nemo_gym.registry import EnvironmentCatalogEntry, discover_environment_catalog, resolve_catalog_entry
 
 
 def _entry(tmp_path: Path, **manifest_updates: object) -> EnvironmentCatalogEntry:

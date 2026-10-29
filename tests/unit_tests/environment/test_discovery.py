@@ -29,7 +29,7 @@ from nemo_gym import (
     _augment_sys_path,
     component_search_roots,
 )
-from nemo_gym.discovery import (
+from nemo_gym.environment.discovery import (
     _UNSET_VALUE_PLACEHOLDER,
     _parse_no_environment_tolerating_unset_values,
     merge_by_name,
@@ -400,7 +400,7 @@ class TestReadConfigMetadata:
     def test_reads_domain_and_description_from_real_benchmark_config(self) -> None:
         # aime24 inherits both fields from its resources server via `config_paths`/`_inherit_from`, so
         # this only resolves via the tolerant fallback parse.
-        from nemo_gym.benchmarks import BENCHMARKS_DIR
+        from nemo_gym.environment.benchmarks import BENCHMARKS_DIR
 
         domain, description = read_config_metadata(BENCHMARKS_DIR / "aime24" / "config.yaml")
 
