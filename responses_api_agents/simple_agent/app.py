@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from time import perf_counter, time
@@ -670,8 +670,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        path_params = getattr(request, "path_params", None)
-        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        inbound = self.inbound_correlation(request)
+        rollout_id = inbound.capture_key if inbound is not None else None
         collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
         agent_session_id = self._agent_session_id_from_request(request)
         state = self._require_agent_session(agent_session_id) if agent_session_id is not None else None

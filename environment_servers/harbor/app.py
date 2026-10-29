@@ -103,7 +103,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
 )
-from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, TaskId
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -115,6 +115,7 @@ from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
+    rollout_path_prefix,
 )
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
@@ -2031,8 +2032,7 @@ class HarborEnvironmentServer(
         token_capture = bool(block.get("enabled", False)) and (
             bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
         )
-        capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        return f"{rollout_path_prefix(request.episode_id.capture_key, token_capture=token_capture)}/v1/responses"
 
     @staticmethod
     def _failure(

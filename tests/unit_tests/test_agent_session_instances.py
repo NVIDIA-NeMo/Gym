@@ -172,3 +172,19 @@ def test_an_environment_server_refuses_to_seed_a_name_twice():
     require_distinct_agent_instances(["assistant", "user", None, None])
     with pytest.raises(ValueError, match="seeded twice"):
         require_distinct_agent_instances(["assistant", "debater.1", "debater.1"])
+
+
+def test_an_inbound_name_wins_over_the_session_s_when_carrying_the_path(agent):
+    from types import SimpleNamespace
+
+    from nemo_gym.rollout_correlation import agent_instance_context
+
+    request = SimpleNamespace(scope={"type": "http", "path": "/ng-rollout/r/ng-agent-instance/user/v1/responses"})
+    unnamed = SimpleNamespace(scope={"type": "http", "path": "/ng-rollout/r/training-token-capture/v1/responses"})
+    with agent_instance_context("assistant"):
+        assert agent.url_path_for_request("/v1/x", request) == "/ng-rollout/r/ng-agent-instance/user/v1/x"
+        assert (
+            agent.url_path_for_request("/v1/x", unnamed)
+            == "/ng-rollout/r/ng-agent-instance/assistant/training-token-capture/v1/x"
+        )
+    assert agent.url_path_for_request("/v1/x", SimpleNamespace(scope={"type": "http", "path": "/v1/x"})) == "/v1/x"

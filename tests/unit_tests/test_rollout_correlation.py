@@ -391,7 +391,7 @@ def _naming_client(*, observability: bool) -> ServerClient:
 
 
 @pytest.mark.asyncio
-async def test_server_client_names_the_context_agent_instance_only_on_the_prefix_it_adds(monkeypatch) -> None:
+async def test_server_client_names_the_context_agent_instance_on_model_calls_only(monkeypatch) -> None:
     from nemo_gym.rollout_correlation import agent_instance_context
 
     sent = []
@@ -412,7 +412,8 @@ async def test_server_client_names_the_context_agent_instance_only_on_the_prefix
     assert sent == [
         "http://judge.test:80/ng-rollout/4-2/ng-agent-instance/judge.1/v1/responses",
         "http://resources.test:80/ng-rollout/4-2/verify",
-        "http://judge.test:80/ng-rollout/4-2/v1/responses",
+        # A caller's own prefix gets the name too, so a name set in context is never dropped.
+        "http://judge.test:80/ng-rollout/4-2/ng-agent-instance/judge.1/v1/responses",
         "http://judge.test:80/ng-rollout/4-2/v1/responses",
     ]
 
@@ -460,3 +461,33 @@ def test_agent_instance_context_refuses_an_invalid_name_and_restores_the_outer_o
             assert current_agent_instance() is None
         assert current_agent_instance() == "assistant"
     assert current_agent_instance() is None
+
+
+@pytest.mark.asyncio
+async def test_server_client_inserts_the_context_name_into_a_prefixed_path_and_never_a_second_one(monkeypatch) -> None:
+    from nemo_gym.rollout_correlation import agent_instance_context
+
+    sent = []
+
+    async def transport(method: str, url: str, **kwargs):
+        sent.append(url)
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", transport)
+    client = _naming_client(observability=False)
+
+    with agent_instance_context("user"):
+        await client.post(server_name="judge", url_path="/ng-rollout/4-2/training-token-capture/v1/responses", json={})
+        await client.post(
+            server_name="judge", url_path="/ng-rollout/4-2/ng-agent-instance/judge/v1/responses", json={}
+        )
+        await client.post(server_name="judge", url_path="/ng-rollout/4-2/v1/models", json={})
+        await client.post(server_name="resources", url_path="/ng-rollout/4-2/verify", json={})
+    await client.post(server_name="judge", url_path="/ng-rollout/4-2/v1/responses", json={})
+
+    assert sent == [
+        "http://judge.test:80/ng-rollout/4-2/ng-agent-instance/user/training-token-capture/v1/responses",
+        "http://judge.test:80/ng-rollout/4-2/ng-agent-instance/judge/v1/responses",
+        "http://judge.test:80/ng-rollout/4-2/v1/models",
+        "http://resources.test:80/ng-rollout/4-2/verify",
+        "http://judge.test:80/ng-rollout/4-2/v1/responses",
+    ]
