@@ -6,8 +6,9 @@
 swe_next_resources_server:
   resources_servers:
     swe_next:
-      allowed_agents: [opencode_sandboxed_agent]
+      allowed_agents: [opencode_sandboxed_agent, opencode_agent, claude_code_agent, pi_agent, hermes_agent, nooa_agent]
       entrypoint: app.py
+      num_workers: 1
       domain: coding
       verified: false
 
@@ -38,6 +39,7 @@ swe_next_golden_patch_resources_server:
   resources_servers:
     swe_next:
       entrypoint: app.py
+      num_workers: 1
       domain: coding
       verified: false
 
