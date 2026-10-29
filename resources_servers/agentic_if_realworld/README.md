@@ -64,6 +64,3 @@ credentials. From an installed Gym checkout, run:
 gym env test +entrypoint=resources_servers/agentic_if_realworld +should_validate_data=true
 gym env test +entrypoint=responses_api_models/agentic_if_text +should_validate_data=true
 ```
-
-The benchmark runbook's local mock smoke additionally checks generation,
-verification, health and P0 evidence.
