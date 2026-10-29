@@ -40,6 +40,7 @@ from pydantic import (
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AGENT_OUTCOME_METADATA_KEY,
+    POLICY_TIMEOUT_OPERATION,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -52,8 +53,8 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
     confirmed_policy_response_timeout,
     failure_outcome_policy,
+    policy_timeout_failure,
 )
-from nemo_gym.agents.agent_outcome import POLICY_TIMEOUT_OPERATION, policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
@@ -85,7 +86,7 @@ from nemo_gym.core import (
     accumulate_response_usage,
     report_for_current_request,
 )
-from nemo_gym.rollouts.health.timeouts import TimeoutEvent
+from nemo_gym.rollouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,
@@ -379,7 +380,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resources_cookies=dict(direct_access.cookies) if direct_access is not None else None,
         )
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: self._export_agent_session(session_key) for session_key in session_keys}
 
     def _export_agent_session(self, session_key: str) -> dict[str, JsonValue]:
