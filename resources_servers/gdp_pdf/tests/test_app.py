@@ -35,7 +35,7 @@ from benchmarks.gdp_pdf.prepare import (
     write_example,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
+from nemo_gym.judge import JudgeError, is_judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -48,6 +48,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
     GdpPdfResourcesServer,
@@ -429,8 +430,9 @@ class TestVerify:
         # wrong answer.
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge down"))
 
-        with raises(JudgeError):
+        with raises(NgFailureEvent) as failure:
             await server.verify(_verify_request("answer"))
+        assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_concurrency_semaphore_disabled(self, config: GdpPdfConfig) -> None:
