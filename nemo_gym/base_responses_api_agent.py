@@ -59,7 +59,7 @@ from nemo_gym.agent_activation_types import (
 )
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -1034,6 +1034,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 stopped = session is not None and await session.expire(
                     timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=reason
                 )
+            except ExpiryUnsupportedError as error:
+                raise HTTPException(501, f"Cannot stop rollout {rollout_id}: {error}") from error
             except RuntimeError as error:
                 raise HTTPException(502, f"Could not stop rollout {rollout_id}: {error}") from error
         LOG.info("Rollout %s stop (stopped=%s, reason=%s)", rollout_id, stopped, reason)

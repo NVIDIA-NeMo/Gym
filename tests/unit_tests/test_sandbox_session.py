@@ -8,14 +8,21 @@ import shutil
 import subprocess
 import sys
 from time import monotonic
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from nemo_gym.agent_utils import supervisor_client
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession, shell_assignments
+from nemo_gym.agent_utils.sandbox_session import (
+    ExpiryUnsupportedError,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox.providers import SupportsSandboxIndependentUploads
 from nemo_gym.sandbox.providers.local import LocalProvider
+from nemo_gym.sandbox.providers.registry import get_provider_class
 
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
@@ -882,6 +889,65 @@ async def test_a_stop_write_still_pending_when_finalization_stops_waiting_stays_
             await asyncio.wait_for(stop, 2)
     assert not session.expired
     await session.close(timeout=1)
+
+
+async def test_expire_refuses_a_running_harness_whose_sandbox_uploads_can_wait_behind_it(session, receipt_reader):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.uploads_independent_of_execs = False
+    async with _launched(session, launched) as activation:
+        with pytest.raises(ExpiryUnsupportedError, match="cannot stop a running harness"):
+            await session.expire(timeout=1, reason="budget")
+        assert _expiry_writes(session) == 0 and session.expire_reason is None
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert not session.expired
+    await session.close(timeout=1)
+
+
+async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, receipt_reader):
+    session.sandbox.uploads_independent_of_execs = False
+    assert await session.expire(timeout=1) is True
+    receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": None, "timed_out": True})
+    assert await execute(session) == "transcript"
+    assert session.expired_before_launch
+    await session.close(timeout=1)
+
+
+@pytest.mark.parametrize(
+    "name,options,independent",
+    [
+        ("local", {}, True),
+        ("opensandbox", {"operations": {"background_exec": True}}, True),
+        # A running foreground command holds one of the shared HTTP pool's connections.
+        ("opensandbox", {"operations": {"background_exec": False}}, False),
+        # Uploads share the CLI slots or worker threads that running commands hold.
+        ("docker", None, False),
+        ("apptainer", None, False),
+        ("enroot", None, False),
+        ("openshell", None, False),
+        # Not shown to be independent: their SDKs keep running commands on connection pools Gym does not bound.
+        ("daytona", None, False),
+        ("e2b", None, False),
+        ("ecs_fargate", None, False),
+    ],
+)
+def test_which_sandboxes_can_stop_a_running_harness(name, options, independent):
+    provider_class = get_provider_class(name)
+    if options is None:
+        assert not issubclass(provider_class, SupportsSandboxIndependentUploads)
+        provider = MagicMock(spec=provider_class)
+    else:
+        provider = provider_class(**options)
+    assert AsyncSandbox(provider=provider, spec=SandboxSpec()).uploads_independent_of_execs is independent
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")

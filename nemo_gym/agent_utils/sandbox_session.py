@@ -32,6 +32,8 @@ from nemo_gym.sandbox.utils import read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)
+
+
 # Shared runner uploaded by adapters; reads the bash source written by shell_assignments().
 HARNESS_RUNNER_FILE = "harness_runner.sh"
 HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
@@ -97,6 +99,10 @@ def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, st
             value = [f"{key}={item}" if isinstance(item, str) else item for key, item in value.items()]
         lines.append(f"{name}=({' '.join(word(item) for item in value)})")
     return "".join(f"{line}\n" for line in lines)
+
+
+class ExpiryUnsupportedError(Exception):
+    """``expire`` cannot stop this running harness: its sandbox's uploads can wait for capacity the harness holds."""
 
 
 @dataclass(kw_only=True)
@@ -318,11 +324,20 @@ class SandboxSession[Artifacts]:
         Unlike ``stop_harness`` (a cancellation), the activation is then graded like a timeout.
         A request made before launch ends the harness as it would launch. Returns False when the
         activation already finished, the session is closing, or expiry was already requested.
+
+        Stopping a running harness takes an upload, which on a provider without
+        ``SupportsSandboxIndependentUploads`` can wait behind the very commands it must stop, so there it
+        raises ``ExpiryUnsupportedError``. A request before launch works on every provider.
         """
         if self.closing or self.sandbox_stopped or self._expire_requested or self.cleanup is not None:
             return False
         if self._exec_task is not None and self._exec_task.done():
             return False
+        if self.launch_started and not self.sandbox.uploads_independent_of_execs:
+            raise ExpiryUnsupportedError(
+                f"the {self.harness} sandbox's provider cannot stop a running harness: its file uploads can wait "
+                "for the capacity running commands hold"
+            )
         self._expire_requested = True
         self.expire_reason = reason
         if self.launch_started:

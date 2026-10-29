@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.agent_activation_types import AgentContinuationCapabilities
+from nemo_gym.agent_utils.sandbox_session import ExpiryUnsupportedError
 from nemo_gym.base_responses_api_agent import (
     ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
@@ -317,6 +318,24 @@ def test_rollout_stop_expires_the_running_harness_once() -> None:
     assert first == RolloutStopResponse(rollout_id="rollout-a2", stopped=True)
     assert second == RolloutStopResponse(rollout_id="rollout-a2", stopped=False)
     assert [call.kwargs["reason"] for call in agent._sandbox_session.expire.await_args_list] == ["budget", None]
+
+
+def test_rollout_stop_answers_501_when_the_sandbox_cannot_stop_a_running_harness() -> None:
+    async def scenario():
+        agent = _stoppable_agent([])
+        unsupported = ExpiryUnsupportedError("the test sandbox's provider cannot stop a running harness")
+        agent._sandbox_session.expire = AsyncMock(side_effect=unsupported)
+        agent._installed.set()
+        await agent.seed_agent_session(MagicMock(session={}), _seed_request())
+        with pytest.raises(HTTPException) as refused:
+            await agent.stop_rollout("rollout-a2", RolloutStopRequest(reason="budget"))
+        return refused.value
+
+    refused = asyncio.run(scenario())
+    assert refused.status_code == 501
+    assert refused.detail == (
+        "Cannot stop rollout rollout-a2: the test sandbox's provider cannot stop a running harness"
+    )
 
 
 def test_rollout_stop_during_install_expires_the_harness_at_launch() -> None:

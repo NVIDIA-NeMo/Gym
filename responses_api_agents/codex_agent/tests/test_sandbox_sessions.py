@@ -86,6 +86,9 @@ def events(*, stop_reason="stop") -> str:
 
 
 class Sandbox:
+    # Like OpenSandbox in background mode: a stop's upload never waits behind the running worker.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.files = {}
         self.result = {
