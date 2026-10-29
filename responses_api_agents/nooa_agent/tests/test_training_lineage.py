@@ -18,7 +18,10 @@ from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse,
 
 
 @pytest.mark.parametrize("delegation", [False, True])
-async def test_real_bench_runtime_keeps_capture_lineage_and_synthetic_terminal(tmp_path, monkeypatch, delegation):
+@pytest.mark.parametrize("history_case", ["prints", "live_task", "mutable_list"])
+async def test_real_bench_runtime_keeps_capture_lineage_and_synthetic_terminal(
+    tmp_path, monkeypatch, delegation, history_case
+):
     monkeypatch.chdir(tmp_path)
     lineage = RolloutLineage()
     store = TokenCaptureStore(tmp_path / "capture")
@@ -31,13 +34,16 @@ async def test_real_bench_runtime_keeps_capture_lineage_and_synthetic_terminal(t
         "return_result(TaskResult(solution_description='done', evidence='two outputs', how_to_verify='inspect'))",
     ]
 
-    if delegation:
-        codes = [
-            "child = await self.delegate(objective='Print once then finish')\nprint(child)",
-            "print('child output')",
-            codes[-1],
-            codes[-1],
+    if history_case == "live_task":
+        codes[:2] = [
+            "import asyncio\ngate = asyncio.Event()\nasync def work():\n await gate.wait()\n return 7\n"
+            "pending = asyncio.create_task(work())\npending",
+            "gate.set()\nawait pending",
         ]
+    elif history_case == "mutable_list":
+        codes[:2] = ["values = []\nvalues", "values.append('later')\nprint(values)"]
+    if delegation:
+        codes = ["child = await self.delegate(objective='Run cells then finish')\nprint(child)", *codes, codes[-1]]
 
     async def post(**kwargs):
         body = kwargs["json"]
@@ -91,7 +97,7 @@ async def test_real_bench_runtime_keeps_capture_lineage_and_synthetic_terminal(t
     )
     assert result.termination_reason is None
     assert len(entries) == len(codes)
-    expected = [None, None, "call-1", "call-0"] if delegation else [None, "call-0", "call-1"]
+    expected = [None, None, "call-1", "call-2", "call-0"] if delegation else [None, "call-0", "call-1"]
     assert [entry.parent_call_id for entry in entries] == expected
     assert [status for status, _ in resolutions] == [
         ParentResolutionStatus.ROOT if parent is None else ParentResolutionStatus.RESOLVED for parent in expected
@@ -114,7 +120,7 @@ async def test_real_bench_runtime_keeps_capture_lineage_and_synthetic_terminal(t
     assert built["mask_sample"] is False, built
     assert built["metrics"]["roots"] == (2 if delegation else 1)
     assert built["metrics"]["chains"] == (2 if delegation else 1)
-    assert built["metrics"]["delivered_fraction"] == (0.5 if delegation else 1.0)
+    assert built["metrics"]["delivered_fraction"] == (0.4 if delegation else 1.0)
 
 
 @pytest.mark.parametrize("drift", ["changed_user", "missing_nonterminal_user", "changed_tool_result"])

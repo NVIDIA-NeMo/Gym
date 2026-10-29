@@ -22,6 +22,7 @@ async def test_delegation_preserves_disabled_compaction(tmp_path, monkeypatch):
     try:
         await parent.delegate("inspect files")
         assert len(children) == 1
+        assert parent.render_config.block_formatter is not children[0].render_config.block_formatter
         for agent in [parent, *children]:
             assert agent._summarization.policy == "none"
             assert agent._truncation.max_context_tokens is None

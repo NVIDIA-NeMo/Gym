@@ -9,6 +9,8 @@ from nooa.config.truncation_config import TruncationConfig
 from nooa.interactive import SummarizationConfig
 from nooa_bench.bench_agent import BenchAgent
 
+from responses_api_agents.nooa_agent.training_formatter import TrainingBlockFormatter
+
 
 class BenchAgentWithoutCompaction(BenchAgent):
     """Disable automatic summaries, history eviction and overflow recovery pruning.
@@ -29,6 +31,12 @@ class BenchAgentWithoutCompaction(BenchAgent):
             summarization=SummarizationConfig(policy="none"),
             truncation=TruncationConfig(max_context_tokens=None, max_event_tokens=None, response_reserve_tokens=0),
             **kwargs,
+        )
+
+        # Each root/child owns its formatter cache. The live execution values
+        # stay available to NOOA; only their already-presented text is stable.
+        self.render_config = self.render_config.model_copy(
+            update={"block_formatter": TrainingBlockFormatter(self.render_config.block_formatter)}
         )
 
         def refuse_context_pruning(ctx_window: int | None, exc: BaseException | None = None) -> None:
