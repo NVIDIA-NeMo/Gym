@@ -27,10 +27,11 @@ from __future__ import annotations
 
 import hashlib
 import struct
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 
 # Separator between a namespace tool's group name and a member tool's name when
@@ -129,6 +130,80 @@ def compute_digest(token_ids: list[int]) -> str:
     return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
+class ModelRef(BaseModel):
+    """The model server that served a call.
+
+    The same shape and value as ``nemo_gym.config_types.ModelServerRef`` on model-call records, defined here so
+    capture records stay importable without Gym's configuration stack. It always comes from the serving model
+    server's own configuration, never from the request.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    type: Literal["responses_api_models"] = "responses_api_models"
+    name: str = Field(min_length=1)
+
+
+IDENTITY_FIELDS = ("agent_instance", "agent_kind", "model_ref")
+
+
+def agent_kind_of(agent_instance: str) -> str:
+    """The agent kind of an agent instance name: the part before the dot."""
+    return agent_instance.partition(".")[0]
+
+
+@dataclass(frozen=True)
+class CallIdentity:
+    """Who made a captured call: the agent instance the URL named, and the model server that served it.
+
+    ``agent_instance`` is ``None`` for an unnamed agent, as in a single-agent episode. ``model_ref`` is ``None``
+    only for a model server without a configured name.
+    """
+
+    agent_instance: str | None = None
+    model_ref: ModelRef | None = None
+
+    @property
+    def agent_kind(self) -> str | None:
+        return agent_kind_of(self.agent_instance) if self.agent_instance is not None else None
+
+    def columns(self) -> dict[str, Any]:
+        """The identity as row columns, omitting absent ones so unnamed rows carry no null columns."""
+        columns: dict[str, Any] = {}
+        if self.agent_instance is not None:
+            columns["agent_instance"] = self.agent_instance
+            columns["agent_kind"] = self.agent_kind
+        if self.model_ref is not None:
+            columns["model_ref"] = self.model_ref.model_dump(mode="json")
+        return columns
+
+    @classmethod
+    def from_columns(cls, row: dict[str, Any]) -> CallIdentity:
+        """Read the identity back from row columns written by ``columns``."""
+        model_ref = row.get("model_ref")
+        return cls(
+            agent_instance=row.get("agent_instance"),
+            model_ref=ModelRef.model_validate(model_ref) if model_ref is not None else None,
+        )
+
+
+class OmitsAbsentIdentity(BaseModel):
+    """Serialize ``agent_instance``, ``agent_kind`` and ``model_ref`` only when present.
+
+    A record of an unnamed agent then serializes exactly as before the identity fields existed,
+    except for ``model_ref``.
+    """
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_identity(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if isinstance(data, dict):
+            for name in IDENTITY_FIELDS:
+                if name in data and data[name] is None:
+                    del data[name]
+        return data
+
+
 class EngineRefusalRecord(BaseModel):
     """One model call the engine refused, so the rollout has no record for it.
 
@@ -158,7 +233,7 @@ class EngineRefusalRecord(BaseModel):
     parent_resolution: ParentResolutionStatus | None = None
 
 
-class TokenEntry(BaseModel):
+class TokenEntry(OmitsAbsentIdentity):
     """Store one model call's content and token metadata.
 
     The rollout id identifies the training sample.
@@ -196,6 +271,11 @@ class TokenEntry(BaseModel):
     finish_reason: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
+    # The agent instance the request URL named, and its agent kind; absent for an unnamed agent.
+    agent_instance: str | None = None
+    agent_kind: str | None = None
+    # The model server that served the call.
+    model_ref: ModelRef | None = None
 
     # These fields preserve parent resolution within the initial schema.
     # A missing parent call ID triggers strict token-prefix matching.

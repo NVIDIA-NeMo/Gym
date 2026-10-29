@@ -50,6 +50,8 @@ from nemo_gym.token_id_capture.protocols import (
 from nemo_gym.token_id_capture.records import (
     ENGINE_REFUSED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
+    CallIdentity,
+    ModelRef,
     ParentResolutionStatus,
     TokenEntry,
     extract_token_fields,
@@ -141,6 +143,19 @@ class CaptureContext:
     # ``capture_engine_refusal`` recorded that the engine refused this call. The call has no
     # entry, and the worker-custody sweep must not record it a second time as uncommitted.
     engine_refusal_recorded: bool = False
+    # The agent instance the request URL named; ``None`` for an unnamed agent.
+    agent_instance: str | None = None
+    # The serving model server, from its own configuration, never from the request.
+    model_ref: ModelRef | None = None
+
+    @property
+    def identity(self) -> CallIdentity:
+        """The agent instance and model server every record of this call carries."""
+        return CallIdentity(agent_instance=self.agent_instance, model_ref=self.model_ref)
+
+    @property
+    def agent_kind(self) -> str | None:
+        return self.identity.agent_kind
 
     @property
     def parent_call_id(self) -> str | None:
@@ -312,6 +327,7 @@ async def resolve_parent(request_messages: list | None) -> None:
                 context.capture_key,
                 context.model_call_id,
                 UNRESOLVED_PARENT_REASON,
+                identity=context.identity,
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
@@ -342,6 +358,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         context.capture_key,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
+        identity=context.identity,
     )
 
 
@@ -459,7 +476,7 @@ async def register_call_intent() -> None:
         if begin is None or context.capture_admission is None:
             raise ValueError("Framework-owned capture requires durable call intents")
         try:
-            await begin(context.capture_key, context.model_call_id)
+            await begin(context.capture_key, context.model_call_id, identity=context.identity)
         except RolloutRetiredError as error:
             raise CaptureAdmissionError(str(error)) from error
         context.intent_registered = True
@@ -469,7 +486,7 @@ async def register_call_intent() -> None:
     begin = getattr(context.token_sink, "begin_call", None)
     if begin is None:
         return
-    await begin(context.capture_key, context.model_call_id)
+    await begin(context.capture_key, context.model_call_id, identity=context.identity)
     context.intent_registered = True
 
 
@@ -549,7 +566,9 @@ async def _record_external_refusal(context: CaptureContext) -> None:
     ledger = context.lineage_store
     if context.capture_admission is None or context.committed or not isinstance(ledger, CaptureLedger):
         return
-    await ledger.record_failure(context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
+    await ledger.record_failure(
+        context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON, identity=context.identity
+    )
     context.engine_refusal_recorded = True
 
 
@@ -672,6 +691,11 @@ async def commit_entry(
     if context.token_sink is None:
         context.committed = True
         return
+    # The identity comes from the capture context, which the model server built from its own configuration
+    # and the request URL; an engine-side caller does not supply it.
+    entry.agent_instance = context.agent_instance
+    entry.agent_kind = context.agent_kind
+    entry.model_ref = context.model_ref
     try:
         # Use the resolution decided before dispatch.
         # Engine-side callers may pass their own resolution.
@@ -790,7 +814,7 @@ async def _mark_incomplete(context: CaptureContext) -> bool:
         )
         return True
     try:
-        await mark(context.capture_key, context.model_call_id)
+        await mark(context.capture_key, context.model_call_id, identity=context.identity)
     except TokenCaptureFrozenError:
         # The rollout was frozen or retired while this call was in flight, for example an abandoned attempt's
         # late call. Its verdict is sealed, or nobody will read it, so there is nothing to mark.

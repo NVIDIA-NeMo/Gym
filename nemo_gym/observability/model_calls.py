@@ -209,6 +209,11 @@ class ModelCallRecord(BaseModel):
         description="Persisted client assistant-message ID; retries may share it, model_call_id remains per attempt.",
     )
 
+    # The agent instance the request URL named (``/ng-agent-instance/<name>``) and its agent kind;
+    # ``None`` for an unnamed agent, as in a single-agent episode.
+    agent_instance: Optional[str] = None
+    agent_kind: Optional[str] = None
+
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
     model_ref: Optional[ModelServerRef] = None
@@ -297,6 +302,8 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
             if isinstance(exchange.get("client_assistant_message_id"), str)
             else None
         ),
+        agent_instance=exchange.get("agent_instance") if isinstance(exchange.get("agent_instance"), str) else None,
+        agent_kind=exchange.get("agent_kind") if isinstance(exchange.get("agent_kind"), str) else None,
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,

@@ -85,7 +85,7 @@ class _MemorySink:
         backend.versions[entry.rollout_id] = backend.versions.get(entry.rollout_id, 0) + 1
         await backend.lineage.put(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         if rollout_id in self.backend.retired:
             raise TokenCaptureRetiredError("retired")
         self.backend.incomplete.add(rollout_id)
@@ -223,7 +223,7 @@ def test_kit_rejects_a_broken_backend(tmp_path):
 class _LateMarkSink(_MemorySink):
     """Lets a late ``mark_incomplete`` through after retire, which resurrects the rollout's capture state."""
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         self.backend.incomplete.add(rollout_id)
         self.backend.versions[rollout_id] = self.backend.versions.get(rollout_id, 0) + 1
 
@@ -318,10 +318,10 @@ class _IntentOnlySink:
     async def put(self, entry: TokenEntry) -> None:
         await self._store.put(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         await self._store.mark_incomplete(rollout_id, model_call_id)
 
-    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+    async def begin_call(self, rollout_id: str, model_call_id: str, *, identity=None) -> None:
         await self._store.begin_call(rollout_id, model_call_id)
 
     async def close(self) -> None:

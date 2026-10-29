@@ -1640,7 +1640,7 @@ def test_unobserved_dialect_under_capture_prefix_marks_incomplete(tmp_path):
 
 def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
     class _BrokenSink:
-        async def mark_incomplete(self, rollout_id, model_call_id=""):
+        async def mark_incomplete(self, rollout_id, model_call_id="", *, identity=None):
             raise RuntimeError("sink down")
 
     forwarded, sent = _run_capture_middleware_on(

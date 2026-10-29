@@ -1606,7 +1606,11 @@ async def test_a_failed_publication_poisons_the_call_and_sends_no_answer(tmp_pat
     assert isinstance(outcome, OSError)
     assert _answers(sent) == []
     assert ledger.export_rows("r") == [
-        {"model_call_id": contexts[0].model_call_id, "failure_reason": INVALID_COMMIT_COORDS_REASON}
+        {
+            "model_call_id": contexts[0].model_call_id,
+            "failure_reason": INVALID_COMMIT_COORDS_REASON,
+            **contexts[0].identity.columns(),
+        }
     ]
     assert not participant.gate.tickets
 

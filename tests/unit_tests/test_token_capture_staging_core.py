@@ -320,6 +320,36 @@ def _manifest_row() -> CallRecord:
     )
 
 
+def test_a_receipt_names_its_agent_instance_only_when_it_covers_one() -> None:
+    fields = dict(
+        capture_key="rollout-1",
+        terminal_model_call_id="call-1",
+        manifest=[_manifest_row()],
+        terminal_selection="declared",
+    )
+    episode = RolloutReceipt(**fields)
+    assert episode.agent_instance is None
+    payload = episode.model_dump(mode="json")
+    assert "agent_instance" not in payload
+    assert RolloutReceipt.model_validate(payload) == episode
+
+    judge = RolloutReceipt(**fields, agent_instance="judge.1")
+    assert RolloutReceipt.model_validate(judge.model_dump(mode="json")).agent_instance == "judge.1"
+    with pytest.raises(ValidationError):
+        RolloutReceipt(**fields, agent_instance="")
+
+
+def test_identity_is_not_part_of_the_manifest_row_digest_contract() -> None:
+    from nemo_gym.token_id_capture.records import ModelRef
+
+    row = _manifest_row()
+    named = row.model_copy(update={"agent_instance": "user", "agent_kind": "user", "model_ref": ModelRef(name="p")})
+    assert named.digest == row.digest
+    dumped = row.model_dump(mode="json")
+    assert not {"agent_instance", "agent_kind", "model_ref"} & dumped.keys()
+    assert CallRecord.model_validate(named.model_dump(mode="json")).model_ref == ModelRef(name="p")
+
+
 def test_stage_result_and_receipt_validate_identity() -> None:
     assert StageResult(ok=True, staging_key="backend/key").staging_key == "backend/key"
     with pytest.raises(ValidationError, match="requires an error"):

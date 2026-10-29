@@ -29,7 +29,7 @@ When ``put`` returns, the record must be durable and visible to every worker's l
 The harness can then send a continuation to any worker without racing publication of the previous call.
 A transport that returns before cross-client visibility can produce intermittent unresolved samples under load.
 
-A sink may additionally implement ``begin_call(rollout_id, model_call_id)``.
+A sink may additionally implement ``begin_call(rollout_id, model_call_id, *, identity=None)``.
 It is an optional extension and deliberately not part of the ``TokenSink`` protocol.
 ``begin_call`` durably records a pre-dispatch intent.
 An intent with no matching entry at freeze must mask the rollout.
@@ -59,7 +59,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, TypedDict, runtime_checkable
 
-from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
+from nemo_gym.token_id_capture.records import CallIdentity, EngineRefusalRecord, ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 
@@ -214,14 +214,17 @@ class CaptureLedger(LineageResolver, Protocol):
     Records must be visible to every serving worker before ``record`` returns.
 
     Framework-owned capture additionally requires ``begin_call(rollout_id,
-    model_call_id)`` and ``close_admissions(rollout_id)``. They share one atomic
+    model_call_id, *, identity=None)`` and ``close_admissions(rollout_id)``. They share one atomic
     admission boundary: close returns a manifest and rejects new calls, while
     existing intents may still commit. These extensions do not freeze writes.
 
-    ``refuse_call(rollout_id, model_call_id)`` optionally settles an intent after
+    ``refuse_call(rollout_id, model_call_id, *, identity=None)`` optionally settles an intent after
     the worker acknowledges a refusal before generation or staging. Such calls
     remain in the audit ledger but are excluded from the training manifest.
     An error status or message alone is not this acknowledgement.
+
+    Every write takes the call's ``identity`` keyword: the agent instance that made it and the model server
+    that served it. The ledger writes it onto the row, omitting the agent instance when none was named.
     """
 
     async def record(self, commit: CaptureLedgerCommit) -> None:
@@ -233,9 +236,12 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
+    async def record_failure(
+        self, capture_key: str, model_call_id: str, reason: str, *, identity: CallIdentity | None = None
+    ) -> None:
         """Record a call whose token capture did not complete.
 
+        A failure written without an identity inherits it from the call's intent row in the manifest.
         Failure rows do not participate in parent resolution.
         ``manifest`` includes them under ``failures`` so finalization rejects the rollout.
         """
@@ -310,8 +316,13 @@ class TokenSink(Protocol):
         """
         ...
 
-    async def mark_incomplete(self, capture_key: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(
+        self, capture_key: str, model_call_id: str = "", *, identity: CallIdentity | None = None
+    ) -> None:
         """Durably record that a call of this rollout failed to capture.
+
+        ``identity`` names the call's agent instance and model server. A mark with no ``model_call_id``
+        applies to the whole episode.
 
         The rollout is now missing a turn.
         A consumer must mask the sample instead of training on a chain with a hole.

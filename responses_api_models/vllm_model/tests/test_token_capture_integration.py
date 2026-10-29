@@ -368,7 +368,7 @@ class _ExternalSink:
     async def put(self, entry: TokenEntry) -> None:
         await self.backend.commit(entry)
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "", *, identity=None) -> None:
         self.backend.incomplete.add(rollout_id)
 
     async def close(self) -> None:
@@ -379,7 +379,7 @@ class _ExternalLineageStore:
     def __init__(self, backend: _ExternalBackend) -> None:
         self.backend = backend
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]):
+    async def resolve(self, rollout_id: str, request_items: list[dict], *, identity=None):
         return await self.backend.lineage.resolve(rollout_id, request_items)
 
     def is_process_shared(self) -> bool:

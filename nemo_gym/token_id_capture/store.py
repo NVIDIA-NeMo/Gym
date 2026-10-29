@@ -48,7 +48,7 @@ from nemo_gym.token_id_capture.protocols import (
     TokenCaptureRetiredError,
     TokenCaptureSnapshot,
 )
-from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
+from nemo_gym.token_id_capture.records import CallIdentity, EngineRefusalRecord, ParentResolutionStatus, TokenEntry
 
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,25 @@ def validate_rollout_ids(rollout_ids: Sequence[str]) -> list[str]:
     if isinstance(rollout_ids, str):
         raise TypeError(f"expected a sequence of rollout ids, got the string {rollout_ids!r}")
     return list(dict.fromkeys(validate_rollout_id(rollout_id) for rollout_id in rollout_ids))
+
+
+def _call_line(model_call_id: str, identity: CallIdentity | None) -> bytes:
+    """One intent or incomplete-mark line: the bare call id, or a JSON object when the call has an identity."""
+    columns = identity.columns() if identity is not None else {}
+    if not columns:
+        return model_call_id.encode("utf-8") + b"\n"
+    return orjson.dumps({"model_call_id": model_call_id, **columns}, option=orjson.OPT_SORT_KEYS) + b"\n"
+
+
+def _read_call_line(line: bytes) -> dict[str, Any]:
+    """Parse a line written by ``_call_line``. A call id is never a JSON object, so the two forms cannot collide."""
+    line = line.strip()
+    if line.startswith(b"{"):
+        row = orjson.loads(line)
+        if not isinstance(row, dict) or not isinstance(row.get("model_call_id"), str):
+            raise ValueError(f"invalid capture call line: {line!r}")
+        return row
+    return {"model_call_id": line.decode("utf-8")}
 
 
 class TokenCaptureStore:
@@ -227,7 +246,7 @@ class TokenCaptureStore:
         finally:
             os.close(descriptor)
 
-    def _mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    def _mark_incomplete(self, rollout_id: str, model_call_id: str = "", identity: CallIdentity | None = None) -> None:
         with self._locked(rollout_id):
             state = self._read_state(rollout_id)
             if state.get("retired", False):
@@ -235,15 +254,17 @@ class TokenCaptureStore:
             state["incomplete"] = True
             state["version"] = int(state.get("version", 0)) + 1
             self._write_state(rollout_id, state)
-            with self.incomplete_path_for(rollout_id).open("a", encoding="utf-8") as handle:
-                handle.write(f"{model_call_id}\n")
+            with self.incomplete_path_for(rollout_id).open("ab") as handle:
+                handle.write(_call_line(model_call_id, identity))
                 handle.flush()
                 os.fsync(handle.fileno())
             self._fsync_root()
 
-    async def mark_incomplete(self, capture_key: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(
+        self, capture_key: str, model_call_id: str = "", *, identity: CallIdentity | None = None
+    ) -> None:
         """Durably record that a call was lost."""
-        await asyncio.to_thread(self._mark_incomplete, capture_key, model_call_id)
+        await asyncio.to_thread(self._mark_incomplete, capture_key, model_call_id, identity)
 
     def is_incomplete(self, rollout_id: str) -> bool:
         with self._locked(rollout_id, shared=True):
@@ -299,7 +320,7 @@ class TokenCaptureStore:
         """
         await asyncio.to_thread(self.append, entry)
 
-    def _begin_call(self, rollout_id: str, model_call_id: str) -> None:
+    def _begin_call(self, rollout_id: str, model_call_id: str, identity: CallIdentity | None = None) -> None:
         """Durably record that a captured call is about to be dispatched.
 
         A lost entry leaves a dangling intent.
@@ -313,12 +334,12 @@ class TokenCaptureStore:
             if state.get("frozen", False):
                 raise TokenCaptureFrozenError(f"Token capture for rollout {rollout_id} is already frozen")
             with self.intents_path_for(rollout_id).open("ab") as handle:
-                handle.write(model_call_id.encode("utf-8") + b"\n")
+                handle.write(_call_line(model_call_id, identity))
                 handle.flush()
                 os.fsync(handle.fileno())
 
-    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
-        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
+    async def begin_call(self, rollout_id: str, model_call_id: str, *, identity: CallIdentity | None = None) -> None:
+        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id, identity)
 
     def _record_engine_refusal(
         self,
@@ -387,7 +408,7 @@ class TokenCaptureStore:
         # not lost.
         resolved = {entry.model_call_id for entry in entries}
         resolved.update(str(record["model_call_id"]) for record in state.get("engine_refusals") or [])
-        intents = [line.strip().decode("utf-8") for line in path.read_bytes().splitlines() if line.strip()]
+        intents = [_read_call_line(line)["model_call_id"] for line in path.read_bytes().splitlines() if line.strip()]
         return [call_id for call_id in intents if call_id not in resolved]
 
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:

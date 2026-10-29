@@ -194,3 +194,19 @@ def test_the_checkpoint_admission_reader_still_finds_the_capture_key_before_a_na
     match = _ROLLOUT_PREFIX.match("/ng-rollout/r-a1/ng-agent-instance/judge/training-token-capture/v1/responses")
 
     assert match is not None and match.group("capture_key") == "r-a1"
+
+
+@pytest.mark.parametrize(
+    "headers, expected",
+    [
+        ([(b"x-session-id", b"s-1")], "s-1"),
+        ([(b"X-Session-Id", b"s-1"), (b"x-session-id", b"s-1")], "s-1"),
+        ([(b"x-session-id", b"s-1"), (b"x-session-id", b"s-2")], None),
+        ([(b"x-session-id", b"")], None),
+        ([], None),
+    ],
+)
+def test_the_client_session_header_is_read_only_when_unambiguous(headers, expected):
+    from nemo_gym.correlation import client_session_id
+
+    assert client_session_id({"type": "http", "headers": headers}) == expected

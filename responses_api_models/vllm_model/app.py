@@ -668,7 +668,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ):
             refuse = getattr(context.lineage_store, "refuse_call", None)
             if refuse is not None:
-                await refuse(context.capture_key, context.model_call_id)
+                await refuse(context.capture_key, context.model_call_id, identity=context.identity)
                 context.refused = True
         if source_history or self.config.propagate_context_overflow_errors:
             code = _mark_propagated_overflow(error)
