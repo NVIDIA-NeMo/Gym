@@ -147,7 +147,7 @@ class _Episode:
     resources_session_id: str = field(default_factory=lambda: f"resources-session-{uuid4().hex}")
     resources_cookies: dict[str, str] = field(default_factory=dict)
     context: EpisodeContext | None = None
-    opening: NeMoGymResponseCreateParamsNonStreaming | None = None
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None
 
 
 def extract_sql(text: str) -> str | None:
@@ -201,7 +201,7 @@ class BirdInteractEnvironmentServer(
             ]
         )
 
-    async def opening_request(self, episode: _Episode) -> NeMoGymResponseCreateParamsNonStreaming:
+    async def responses_create_params(self, episode: _Episode) -> NeMoGymResponseCreateParamsNonStreaming:
         context = episode.context
         if self.config.mode == "c_interact":
             instructions = C_INTERACT_INSTRUCTIONS.format(question_budget=context.question_budget)
@@ -215,10 +215,10 @@ class BirdInteractEnvironmentServer(
             instructions = A_INTERACT_INSTRUCTIONS.format(coin_budget=context.coin_budget)
             message = f"Database: {context.database}\n\nMy request:\n{context.question}"
             tools = A_INTERACT_TOOLS
-        episode.opening = NeMoGymResponseCreateParamsNonStreaming(
+        episode.responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[{"role": "system", "content": instructions}, {"role": "user", "content": message}], tools=tools
         )
-        return episode.opening
+        return episode.responses_create_params
 
     async def next_user_turn(self, episode: _Episode, turn: TurnRecord) -> UserMessage | Stop:
         if self.config.mode == "a_interact":
@@ -243,7 +243,7 @@ class BirdInteractEnvironmentServer(
         verification = await self._call_resources(
             episode,
             "/verify",
-            BirdInteractVerifyRequest(responses_create_params=episode.opening, response=last_response),
+            BirdInteractVerifyRequest(responses_create_params=episode.responses_create_params, response=last_response),
             BirdInteractVerifyResponse,
             stage="verification",
         )

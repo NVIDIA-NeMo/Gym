@@ -152,7 +152,7 @@ class BaseUserSimulationEnvironmentServer(
 ):
     """Run a conversation in which the environment writes every user message.
 
-    ``run`` calls the hooks in this order: ``start_episode``, ``agent_access``, the agent seed, ``opening_request``,
+    ``run`` calls the hooks in this order: ``start_episode``, ``agent_access``, the agent seed, ``responses_create_params``,
     then one ``next_user_turn`` after each agent turn until it returns ``Stop`` or ``max_turns`` is reached, the
     agent close, and ``finish_episode``. Each activation sends only its new input, so with ``max_turns`` above 1
     the seed requires an agent that resumes its session; any other agent fails the episode at seed.
@@ -173,8 +173,11 @@ class BaseUserSimulationEnvironmentServer(
         return AgentAccess()
 
     @abstractmethod
-    async def opening_request(self, episode: EpisodeT) -> NeMoGymResponseCreateParamsNonStreaming:
-        """Return the first turn's request: the opening messages, and the tools and settings the session keeps."""
+    async def responses_create_params(self, episode: EpisodeT) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Return the first turn's request: the opening messages, and the tools and settings the session keeps.
+
+        It is the same object as a dataset row's ``responses_create_params``. Later turns send only a ``UserMessage``.
+        """
 
     @abstractmethod
     async def next_user_turn(self, episode: EpisodeT, turn: TurnRecord) -> UserMessage | Stop:
@@ -238,7 +241,7 @@ class BaseUserSimulationEnvironmentServer(
         interaction_deadline = (
             loop.time() + self.config.interaction_timeout_seconds if self.config.interaction_timeout_seconds else None
         )
-        params = await self.opening_request(episode)
+        params = await self.responses_create_params(episode)
         for turn in range(1, self.config.max_turns + 1):
             if interaction_deadline is not None and loop.time() >= interaction_deadline:
                 return "interaction_timeout"

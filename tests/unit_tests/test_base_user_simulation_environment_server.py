@@ -159,7 +159,7 @@ class _Server(BaseUserSimulationEnvironmentServer[_Request, _Response, _Episode]
     async def start_episode(self, request: _Request, cleanup: CleanupContext) -> _Episode:
         return _Episode(request=request, user_turns=list(self.script))
 
-    async def opening_request(self, episode: _Episode) -> NeMoGymResponseCreateParamsNonStreaming:
+    async def responses_create_params(self, episode: _Episode) -> NeMoGymResponseCreateParamsNonStreaming:
         return NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 {"role": "system", "content": "Answer briefly."},

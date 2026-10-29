@@ -35,7 +35,7 @@ class EpisodeContext(BaseModel):
 
 
 class BirdInteractSeedSessionResponse(ResourcesSeedSessionResponse):
-    """The seed reply, with the context that the Environment Server's opening request shows."""
+    """The seed reply, with the context for the Environment Server's ``responses_create_params``."""
 
     context: EpisodeContext
 

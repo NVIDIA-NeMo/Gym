@@ -21,7 +21,7 @@ The `bird_interact` Environment Server (`environment_servers/bird_interact`) run
 | c-Interact | The Environment Server. Each agent reply is a question (`/c_interact/ask`) or SQL (`/c_interact/submit`). | `/c_interact/ask`, `/c_interact/submit`, `/verify` |
 | a-Interact | The agent, in one turn. | Nine tools under `/a_interact/`: `ask`, `submit`, `execute`, `get_schema`, `get_all_column_meanings`, `get_column_meaning`, `get_all_external_knowledge_names`, `get_knowledge_definition`, `get_all_knowledge_definitions` |
 
-The seed reply carries the context for the Environment Server's opening request. In c-Interact it has the schema,
+The seed reply carries the context for the Environment Server's `responses_create_params`. In c-Interact it has the schema,
 the column meanings, the visible knowledge base and the question budget. In a-Interact it has only the database, the
 request and the BIRD-COIN budget, because the tools charge for the rest.
 
