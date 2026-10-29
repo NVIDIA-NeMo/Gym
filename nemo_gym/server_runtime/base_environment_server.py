@@ -8,7 +8,7 @@ import json
 import logging
 import re
 from abc import abstractmethod
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from time import perf_counter
@@ -281,6 +281,21 @@ def dependency_failure(
     # The dependency's error is this failure's explicit cause, whether or not the caller writes ``from``.
     handled.__cause__ = error
     return handled
+
+
+def require_distinct_agent_instances(agent_instances: Iterable[str | None]) -> None:
+    """Refuse, before seeding, an episode that would seed two agent sessions as the same agent instance.
+
+    Each agent instance of an episode has at most one session, so its model calls can be told apart.
+    Unnamed sessions are not checked.
+    """
+    seen: set[str] = set()
+    for agent_instance in agent_instances:
+        if agent_instance is None:
+            continue
+        if agent_instance in seen:
+            raise ValueError(f"agent instance {agent_instance!r} would be seeded twice in one episode")
+        seen.add(agent_instance)
 
 
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):
