@@ -41,10 +41,11 @@ retries on any criterion raises ``JudgeError`` for the *whole row*, which
 ``all_pass`` and ``mean_criterion_pass`` alike, not just the former. Given
 schema-constrained decoding, exhaustion should be rare.
 
-``reward`` is the fraction of criteria passed, matching
+By default, ``reward`` is the fraction of criteria passed, matching
 ``mean_criterion_pass`` (upstream: ``mean_criteria``). The strict response-level
 ``all_pass`` score (1.0 only when every criterion passes) is reported alongside
-it, and ``compute_metrics`` surfaces both.
+it, and ``compute_metrics`` surfaces both. Training can select ``strict_pass``
+or ``mixed`` reward without changing those reported metrics or judge calls.
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ import re
 from contextlib import asynccontextmanager, nullcontext
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -105,6 +106,10 @@ class GdpPdfConfig(BaseResourcesServerConfig):
     # per-session state, so `gym eval reverify` (re-judge existing rollouts
     # without re-running the policy model) is safe.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
+    # Training-only scalarization; criterion judgments and reported metrics stay unchanged.
+    reward_mode: Literal["mean_criteria", "strict_pass", "mixed"] = "mean_criteria"
+    mixed_reward_alpha: float = Field(default=0.8, ge=0.0, le=1.0)
 
     judge_model_server: ModelServerRef
     judge_chat_create_params: NeMoGymChatCompletionCreateParamsNonStreaming
@@ -389,17 +394,25 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         )
         return self._build_response(body, list(evaluations))
 
-    @staticmethod
-    def _build_response(body: GdpPdfVerifyRequest, evaluations: List[CriterionEvaluation]) -> GdpPdfVerifyResponse:
+    def _build_response(
+        self, body: GdpPdfVerifyRequest, evaluations: List[CriterionEvaluation]
+    ) -> GdpPdfVerifyResponse:
         num_passed = sum(1 for e in evaluations if e.passed)
         total = len(evaluations)
         mean_criterion_pass = num_passed / total
+        all_pass = float(num_passed == total)
+        reward = mean_criterion_pass
+        if self.config.reward_mode == "strict_pass":
+            reward = all_pass
+        elif self.config.reward_mode == "mixed":
+            alpha = self.config.mixed_reward_alpha
+            reward = alpha * all_pass + (1 - alpha) * mean_criterion_pass
         return GdpPdfVerifyResponse(
             **body.model_dump(),
-            reward=mean_criterion_pass,
+            reward=reward,
             num_criteria=total,
             num_criteria_passed=num_passed,
-            all_pass=1.0 if num_passed == total else 0.0,
+            all_pass=all_pass,
             mean_criterion_pass=mean_criterion_pass,
             criterion_evaluations=evaluations,
         )

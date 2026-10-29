@@ -332,7 +332,9 @@ class TestExtractGeneratedAnswer:
 
 class TestVerify:
     @pytest.mark.asyncio
-    async def test_all_criteria_pass_gives_reward_one(self, server: GdpPdfResourcesServer) -> None:
+    @pytest.mark.parametrize("reward_mode", ["mean_criteria", "strict_pass", "mixed"])
+    async def test_all_criteria_pass_gives_reward_one(self, server: GdpPdfResourcesServer, reward_mode: str) -> None:
+        server.config.reward_mode = reward_mode
         _mock_judge(server, _scored_content("1", "matches"))
         body = _verify_request(
             "The cap is $5M.",
@@ -350,9 +352,14 @@ class TestVerify:
         assert result.criterion_evaluations[0].rationale == "matches"
 
     @pytest.mark.asyncio
-    async def test_one_failing_criterion_uses_mean_reward_and_fails_all_pass(
-        self, server: GdpPdfResourcesServer
+    @pytest.mark.parametrize(
+        "reward_mode,expected_reward", [("mean_criteria", 1 / 3), ("strict_pass", 0), ("mixed", 1 / 6)]
+    )
+    async def test_partial_criteria_preserve_scores_across_reward_modes(
+        self, server: GdpPdfResourcesServer, reward_mode: str, expected_reward: float
     ) -> None:
+        server.config.reward_mode = reward_mode
+        server.config.mixed_reward_alpha = 0.5
         _mock_judge(server, _scored_content("1"), _scored_content("0"))
         body = _verify_request(
             "The cap is $5M.",
@@ -361,7 +368,7 @@ class TestVerify:
 
         result = await server.verify(_NO_SESSION, body)
 
-        assert result.reward == approx(1 / 3)
+        assert result.reward == approx(expected_reward)
         assert result.all_pass == 0.0
         assert result.num_criteria_passed == 1
         assert result.mean_criterion_pass == approx(1 / 3)
