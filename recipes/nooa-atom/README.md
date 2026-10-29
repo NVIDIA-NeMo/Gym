@@ -8,8 +8,9 @@ for a one-row smoke, a full evaluation, or a NeMo RL rollout environment.
 | `terminal-bench-2.1` | `nooa_atom.gym:AtomHarness`, `handle_batch` | Terminal-Bench 2.1, 89 tasks | `recipes/nooa-atom/run.sh terminal-bench-2.1` |
 | `swebench-pro` | `nooa_atom.gym:AtomHarness`, `handle_batch` | SWE-bench Pro, the 120-task roster in `swebench-pro-swe120.txt` | `recipes/nooa-atom/run.sh swebench-pro` |
 
-A recipe's `.setup.sh` runs after `gym eval prepare` and may pin a task repository (Terminal-Bench) or select the
-prepared rows of a hash-pinned roster into the file the recipe's dataset entry names (SWE-bench Pro).
+A recipe's `.setup.sh` runs after `gym eval prepare` and may pin a task repository (Terminal-Bench). A roster
+recipe (SWE-bench Pro) names `benchmarks/swebench/pro/prepare_roster.py` as its prepare script with the roster
+file and its sha256 in `prepare_script_args`.
 
 Every recipe file carries three pins: `gym_commit` (this checkout), `nooa_commit` (what
 `responses_api_agents/nooa_agent/requirements.txt` installs) and the task-set commit. `preflight.sh`
