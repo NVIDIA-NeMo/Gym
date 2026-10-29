@@ -521,17 +521,10 @@ class GdpPdfAgent(SimpleAgent):
         if not isinstance(result, dict) or not isinstance(result.get("content"), list):
             return super()._tool_result_messages(call, output)
         content = result["content"]
+        if any(part.get("type") == "input_image" for part in content):
+            return [NeMoGymFunctionCallOutput(type="function_call_output", call_id=call.call_id, output=content)]
         text = "\n".join(part["text"] for part in content if part.get("type") == "input_text")
-        images = any(part.get("type") == "input_image" for part in content)
-        messages = super()._tool_result_messages(call, "Python output follows." if images else text or "[No output]")
-        if images:
-            messages.append(
-                NeMoGymEasyInputMessage(
-                    role="user",
-                    content=[{"type": "input_text", "text": "Output from the preceding Python call:"}, *content],
-                )
-            )
-        return messages
+        return super()._tool_result_messages(call, text or "[No output]")
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         row = body.model_dump(exclude_unset=True)

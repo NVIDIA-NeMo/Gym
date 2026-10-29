@@ -69,11 +69,6 @@ from nemo_gym.openai_utils import (
 
 logger = logging.getLogger(__name__)
 
-# Chat tool messages carry text only; with `drop_unrepresentable_request_fields` an image a tool
-# returned becomes this text instead of failing the conversion. The wording is neutral on purpose:
-# it replaces part of the prompt, and it must not teach the model anything about its own inputs.
-_IMAGE_OUTPUT_PLACEHOLDER = "[image omitted from tool output]"
-
 # Responses reasoning fields that only select what the provider reports back (a reasoning
 # summary, under its current and its deprecated name), so a Chat Completions backend answers the
 # request faithfully without them. With `drop_unrepresentable_request_fields` these are removed
@@ -302,10 +297,9 @@ class ResponsesConverter(BaseModel):
         ``drop_unrepresentable_request_fields`` the reporting-only fields are removed from the
         request instead and the conversion proceeds: a non-empty ``include`` (every value; an
         empty one is already treated as absent), ``reasoning.summary`` and
-        ``reasoning.generate_summary``, and a message ``phase``. An image part in a tool's output
-        becomes the text placeholder ``_IMAGE_OUTPUT_PLACEHOLDER``, which does replace that part
-        of the prompt. Every other unrepresentable field, ``reasoning.context`` included, is still
-        refused.
+        ``reasoning.generate_summary``, and a message ``phase``. Text and image parts in tool
+        outputs are preserved regardless of this setting. Every other unrepresentable field,
+        ``reasoning.context`` included, is still refused.
         """
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
         if responses_create_params.get("include") == []:
@@ -377,17 +371,13 @@ class ResponsesConverter(BaseModel):
                 case "function_call":
                     self._format_function_call(m, state)
                 case "function_call_output":
-                    self._format_function_call_output(
-                        m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
-                    )
+                    self._format_function_call_output(m, state)
                 case "custom_tool_call" if self.custom_tool_strategy == "function_bridge":
                     self._format_custom_tool_call(m, state)
                 case "custom_tool_call_output" if self.custom_tool_strategy == "function_bridge":
                     # The wire shape matches a function result: a call_id plus a
                     # string or structured-content output.
-                    self._format_function_call_output(
-                        m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
-                    )
+                    self._format_function_call_output(m, state)
                 case _:
                     # This fires mid-rollout, on whichever model server downconverts.
                     # Most types that reach it are Responses-only by design.
@@ -542,13 +532,26 @@ class ResponsesConverter(BaseModel):
 
         return chat_completion_create_params
 
-    def _format_function_call_output(
-        self,
-        m: dict,
-        state: ResponsesConverterState,
-        *,
-        drop_unrepresentable_request_fields: bool = False,
-    ) -> None:
+    @staticmethod
+    def _input_image_to_chat_part(part: dict) -> dict:
+        """Use the same image representation for user messages and tool observations."""
+        image_url = part.get("image_url")
+        if image_url is None:
+            raise NotImplementedError(
+                "Responses input images referenced by file_id have no Chat Completions representation."
+            )
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url", "")
+        if not image_url:
+            raise ValueError(f"{part['type']} requires a non-empty image_url")
+        detail = part.get("detail", "auto")
+        if detail == "original":
+            raise NotImplementedError(
+                "Responses input image detail 'original' has no Chat Completions representation."
+            )
+        return {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
+
+    def _format_function_call_output(self, m: dict, state: ResponsesConverterState) -> None:
         state.flush_assistant()
 
         assert "call_id" in m
@@ -556,12 +559,7 @@ class ResponsesConverter(BaseModel):
         if isinstance(output, str):
             content = output
         elif isinstance(output, list):
-            # Chat tool messages carry text only, so every other part type fails the conversion.
-            # An image part is the one exception `drop_unrepresentable_request_fields` covers: the
-            # text placeholder keeps the position of the image in the tool's output.
-            representable_types = {"input_text"}
-            if drop_unrepresentable_request_fields:
-                representable_types.add("input_image")
+            representable_types = {"input_text", "input_image"}
             unsupported_types = sorted(
                 {part.get("type", "<missing>") for part in output if part.get("type") not in representable_types}
             )
@@ -572,17 +570,10 @@ class ResponsesConverter(BaseModel):
                     "Chat tool messages cannot represent content part type(s) "
                     f"{', '.join(repr(part_type) for part_type in unsupported_types)}"
                 )
-            if any(part["type"] == "input_image" for part in output):
-                # Debug, like the other drops: the conversion re-converts the whole transcript on
-                # every later turn, so one returned image would otherwise warn on every turn after it.
-                logger.debug(
-                    "Rendering the image output of call %r as a text placeholder: chat tool messages carry text only.",
-                    m["call_id"],
-                )
             content = [
                 {"type": "text", "text": part["text"]}
                 if part["type"] == "input_text"
-                else {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+                else self._input_image_to_chat_part(part)
                 for part in output
             ]
         else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
@@ -621,23 +612,7 @@ class ResponsesConverter(BaseModel):
                     case "input_text":
                         converted_parts.append({"type": "text", "text": part_param["text"]})
                     case "input_image":
-                        image_url = part_param.get("image_url")
-                        if image_url is None:
-                            raise NotImplementedError(
-                                "Responses input images referenced by file_id have no Chat Completions representation."
-                            )
-                        if isinstance(image_url, dict):
-                            image_url = image_url.get("url", "")
-                        if not image_url:
-                            raise ValueError(f"{part_param['type']} requires a non-empty image_url")
-                        detail = part_param.get("detail", "auto")
-                        if detail == "original":
-                            raise NotImplementedError(
-                                "Responses input image detail 'original' has no Chat Completions representation."
-                            )
-                        converted_parts.append(
-                            {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
-                        )
+                        converted_parts.append(self._input_image_to_chat_part(part_param))
                     case "input_video":
                         source_key = "video_url" if "video_url" in part_param else "video"
                         video_url = part_param[source_key]

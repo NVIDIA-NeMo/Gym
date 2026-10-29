@@ -376,9 +376,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "Chat Completions representation. Off, the conversion refuses the request, so the caller can "
             "route it to a server that serves Responses natively. On, the reporting-only fields, a "
             "non-empty `include` (every value), `reasoning.summary` and `reasoning.generate_summary`, and "
-            "a message `phase` are dropped and the request proceeds. An image part in a tool's output is "
-            "replaced with the text placeholder `[image omitted from tool output]`, so the model does not "
-            "see that image. Every other unrepresentable field, `reasoning.context` included, is still "
+            "a message `phase` are dropped and the request proceeds. Text and image parts in tool outputs "
+            "are preserved regardless of this setting. Every other unrepresentable field, `reasoning.context` included, is still "
             "refused. The setting has no effect when `is_responses_native` is on, because that path skips "
             "the conversion."
         ),

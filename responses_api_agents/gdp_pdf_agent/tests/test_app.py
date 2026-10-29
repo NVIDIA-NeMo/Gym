@@ -85,11 +85,36 @@ def _agent(**overrides) -> GdpPdfAgent:
 def test_python_observations_reach_the_model_without_an_image_cap():
     agent = _agent()
     call = NeMoGymResponseFunctionToolCall(type="function_call", call_id="cell", name="python", arguments="{}")
-    content = [{"type": "input_image", "image_url": "data:image/png;base64,aA==", "detail": "auto"} for _ in range(6)]
+    content = [{"type": "input_text", "text": "Rendered pages:"}]
+    content.extend(
+        {"type": "input_image", "image_url": "data:image/png;base64,aA==", "detail": "auto"} for _ in range(6)
+    )
+    content.append({"type": "input_text", "text": "Done."})
     messages = agent._tool_result_messages(call, json.dumps({"content": content}))
+    assert len(messages) == 1  # An observation must not become a new user turn.
     assert messages[0].call_id == "cell"
     assert messages[0].model_dump(exclude_unset=True)["type"] == "function_call_output"
-    assert sum(part["type"] == "input_image" for part in messages[1].content) == 6
+    assert messages[0].output == content
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("plain output", "plain output"),
+        (json.dumps({"content": []}), "[No output]"),
+        (
+            json.dumps(
+                {"content": [{"type": "input_text", "text": "first"}, {"type": "input_text", "text": "second"}]}
+            ),
+            "first\nsecond",
+        ),
+    ],
+)
+def test_python_text_observations_keep_the_existing_representation(output, expected):
+    call = NeMoGymResponseFunctionToolCall(call_id="cell", name="python", arguments="{}")
+    (message,) = _agent()._tool_result_messages(call, output)
+    assert message.call_id == "cell"
+    assert message.output == expected
 
 
 def test_python_budget_reserves_a_final_answer_at_the_step_or_token_limit():

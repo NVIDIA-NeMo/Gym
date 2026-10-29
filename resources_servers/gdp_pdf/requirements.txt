@@ -5,3 +5,5 @@ huggingface_hub
 # The python tool's kernel, pinned as in containers/Dockerfile; the tests run it through the local sandbox provider.
 ipykernel==6.30.1
 jupyter-client==8.6.3
+# The local sandbox image-display test uses the same Pillow library as the container.
+Pillow

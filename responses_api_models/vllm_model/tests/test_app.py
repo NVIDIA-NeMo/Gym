@@ -4380,6 +4380,45 @@ class TestVLLMConverter:
         assert response.status_code == 200, response.text
         assert captured_kwargs["messages"] == messages
 
+    def test_responses_tool_image_reaches_the_backend_with_reasoning_history(self) -> None:
+        client, captured_kwargs = self._chat_client_capturing_upstream()
+        response = client.post(
+            "/v1/responses",
+            json={
+                "input": [
+                    {"role": "user", "content": "Read the figure."},
+                    {
+                        "type": "reasoning",
+                        "id": "r1",
+                        "summary": [{"type": "summary_text", "text": "Inspect the figure first."}],
+                    },
+                    {"type": "function_call", "call_id": "c1", "name": "python", "arguments": "{}"},
+                    {
+                        "type": "function_call_output",
+                        "call_id": "c1",
+                        "output": [
+                            {"type": "input_text", "text": "Image loaded."},
+                            {"type": "input_image", "image_url": "data:image/png;base64,YWJj", "detail": "high"},
+                        ],
+                    },
+                ]
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        messages = captured_kwargs["messages"]
+        assert [m["role"] for m in messages] == ["user", "assistant", "tool"]
+        assert "Inspect the figure first." in messages[1]["content"]
+        assert messages[1]["tool_calls"][0]["id"] == "c1"
+        assert messages[2] == {
+            "role": "tool",
+            "tool_call_id": "c1",
+            "content": [
+                {"type": "text", "text": "Image loaded."},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "high"}},
+            ],
+        }
+
     def test_request_chat_template_kwargs_precedence(self, caplog):
         """Config baseline -> direct request field -> metadata override.
 
