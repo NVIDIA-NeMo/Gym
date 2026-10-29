@@ -168,6 +168,21 @@ class TestOpenAIUtils:
         logged = "Request kwargs:" in capsys.readouterr().out
         assert logged is debug_enabled
 
+    async def test_create_embeddings_posts_to_embeddings_url(self, monkeypatch) -> None:
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        response = SimpleNamespace(ok=True)
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr(client, "_request", request)
+        monkeypatch.setattr(client, "_raise_for_status", AsyncMock())
+        monkeypatch.setattr(openai_utils_module, "get_response_json", AsyncMock(return_value={"data": []}))
+
+        result = await client.create_embeddings(model="m", input="hi")
+
+        assert result == {"data": []}
+        request.assert_awaited_once_with(
+            method="POST", url="https://example.com/v1/embeddings", json={"model": "m", "input": "hi"}
+        )
+
     async def test_explicit_attempt_cap_reaches_low_level_transport(
         self,
         monkeypatch,
@@ -230,12 +245,14 @@ class TestOpenAIUtils:
         assert "X-Request-Id" not in captured["headers"]
 
     @pytest.mark.parametrize("internal", [False, True])
-    @pytest.mark.parametrize("status", [429, 500, 504])
+    @pytest.mark.parametrize("status", [429, 500, 503, 504])
+    @pytest.mark.parametrize("captured", [False, True])
     async def test_explicit_attempt_cap_has_no_exhausted_status_sleep(
         self,
         monkeypatch,
         internal,
         status,
+        captured,
     ) -> None:
         sleeps = []
         calls = 0
@@ -269,12 +286,12 @@ class TestOpenAIUtils:
         client = NeMoGymAsyncOpenAI(
             api_key="abc",
             base_url="https://api.openai.com/v1",
-            max_num_tries=1,
+            max_num_tries=None if captured else 1,
             internal=internal,
         )
 
         with pytest.raises(RuntimeError, match="rate limited"):
-            await client._request(method="POST", url="https://example.test")
+            await client._request(method="POST", url="https://example.test", _resend_after_disconnect=not captured)
 
         assert calls == 1
         assert sleeps == []

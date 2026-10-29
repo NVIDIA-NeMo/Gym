@@ -58,6 +58,8 @@ def test_scaffolds_and_validates_every_kind_and_profile(
     resources_source = tmp_path.joinpath("resources_servers/sample/app.py").read_text(encoding="utf-8")
     # Generated servers rely on the `ray_enabled = False` default instead of declaring it.
     assert "ray_enabled" not in resources_source
+    # Generated servers keep no state across requests, so they end with the module-level `app` several workers serve.
+    assert "app = SampleResourcesServer.run_webserver()" in resources_source
 
     benchmark_files = [asset / "prepare.py", asset / "prompt.yaml", asset / "data/source.jsonl"]
     assert all(path.is_file() for path in benchmark_files) is (kind == EnvironmentKind.BENCHMARK)
@@ -73,6 +75,7 @@ def test_scaffolds_and_validates_every_kind_and_profile(
         assert all(f"async def {extension}(" in agent_source for extension in extensions)
         assert all(f"super().{extension}(" in agent_source for extension in extensions)
         assert "ray_enabled" not in agent_source
+        assert "app = SampleAgent.run_webserver()" in agent_source
     assert (asset / "rollout_driver.py").is_file() is (profile == IntegrationProfile.EXTERNAL_ROLLOUT_DRIVER)
 
 
