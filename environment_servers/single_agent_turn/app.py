@@ -60,6 +60,7 @@ from nemo_gym.single_agent_turn_types import (
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
 )
+from nemo_gym.token_id_capture.delivery import TERMINAL_RESPONSE_ID_KEY
 from nemo_gym.tool_access import (
     DirectHTTPToolAccess,
     MCPStreamableHTTPConnection,
@@ -471,7 +472,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
             await raise_for_status(verify_http_response)
-            return SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
+            result = SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
+            explicit_terminal = (result.model_extra or {}).get(TERMINAL_RESPONSE_ID_KEY)
+            if not (isinstance(explicit_terminal, str) and explicit_terminal):
+                terminal = (agent_response.metadata or {}).get(TERMINAL_RESPONSE_ID_KEY)
+                if isinstance(terminal, str) and terminal:
+                    # Receipt consumers read the result-level declaration; a verifier may omit
+                    # response metadata. Keep an explicit verifier declaration authoritative.
+                    result = result.model_copy(update={TERMINAL_RESPONSE_ID_KEY: terminal})
+            return result
         except Exception as error:
             raise dependency_failure(
                 error,

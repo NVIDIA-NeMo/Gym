@@ -41,6 +41,7 @@ from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnResponse, SingleAgentTurnTaskInput
+from nemo_gym.token_id_capture.delivery import TERMINAL_RESPONSE_ID_KEY
 
 
 class _Cookie:
@@ -287,6 +288,83 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert client.calls[4][2]["cookies"] == {"session": "updated-cookie"}
     assert client.calls[5][2]["cookies"] == {"session": "updated-cookie"}
     assert resources_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)
+
+
+@pytest.mark.parametrize(
+    "verifier_fields",
+    [
+        {},
+        {TERMINAL_RESPONSE_ID_KEY: None},
+        {TERMINAL_RESPONSE_ID_KEY: ""},
+        {TERMINAL_RESPONSE_ID_KEY: 12},
+        {TERMINAL_RESPONSE_ID_KEY: False},
+    ],
+)
+async def test_terminal_declaration_survives_verifier_omitting_metadata(verifier_fields: dict[str, object]) -> None:
+    environment, client = _environment_server(token_capture=True)
+    agent_response = _agent_response().model_copy(update={"metadata": {TERMINAL_RESPONSE_ID_KEY: "root-terminal"}})
+    client.responses[2] = _Response(agent_response.model_dump(mode="json"))
+    verification = orjson.loads(client.responses[4].body)
+    verification.update(verifier_fields)
+    client.responses[4] = _Response(verification)
+
+    reply = await environment.run_request(_request())
+
+    assert reply.failure is None
+    result = reply.result.model_dump(mode="json")
+    assert result[TERMINAL_RESPONSE_ID_KEY] == "root-terminal"
+    assert result["response"]["metadata"] is None
+    assert result["reward"] == 1.0
+    assert result["benchmark_field"] == "preserved"
+    restored = SingleAgentTurnResponse.model_validate_json(reply.model_dump_json())
+    assert restored.result.model_dump()[TERMINAL_RESPONSE_ID_KEY] == "root-terminal"
+    assert client.calls[4][2]["json"]["response"]["metadata"][TERMINAL_RESPONSE_ID_KEY] == "root-terminal"
+    assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {TERMINAL_RESPONSE_ID_KEY: ""}, {"other": "value"}])
+async def test_missing_terminal_declaration_does_not_infer_response_id(metadata: dict[str, str] | None) -> None:
+    environment, client = _environment_server(token_capture=True)
+    agent_response = _agent_response().model_copy(update={"metadata": metadata})
+    client.responses[2] = _Response(agent_response.model_dump(mode="json"))
+
+    reply = await environment.run_request(_request())
+
+    assert reply.failure is None
+    assert TERMINAL_RESPONSE_ID_KEY not in reply.result.model_dump(mode="json")
+    assert reply.result.response.id == "response"
+
+
+@pytest.mark.parametrize("invalid_terminal", [12, False, ["root-terminal"]])
+async def test_non_string_agent_terminal_metadata_is_rejected(invalid_terminal: object) -> None:
+    environment, client = _environment_server(token_capture=True)
+    payload = _agent_response().model_dump(mode="json")
+    payload["metadata"] = {TERMINAL_RESPONSE_ID_KEY: invalid_terminal}
+    client.responses[2] = _Response(payload)
+    # Failed activation closes the agent and resources without calling the verifier.
+    client.responses.pop(4)
+
+    reply = await environment.run_request(_request())
+
+    assert reply.result is None
+    assert reply.failure.stage == "agent"
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert client.calls[-1][1] == "/close_session"
+
+
+@pytest.mark.parametrize("explicit_terminal", ["root-terminal", "verifier-terminal"])
+async def test_explicit_verifier_terminal_declaration_takes_precedence(explicit_terminal: str) -> None:
+    environment, client = _environment_server(token_capture=True)
+    agent_response = _agent_response().model_copy(update={"metadata": {TERMINAL_RESPONSE_ID_KEY: "root-terminal"}})
+    client.responses[2] = _Response(agent_response.model_dump(mode="json"))
+    verification = orjson.loads(client.responses[4].body)
+    verification[TERMINAL_RESPONSE_ID_KEY] = explicit_terminal
+    client.responses[4] = _Response(verification)
+
+    reply = await environment.run_request(_request())
+
+    assert reply.failure is None
+    assert reply.result.model_dump(mode="json")[TERMINAL_RESPONSE_ID_KEY] == explicit_terminal
 
 
 async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
