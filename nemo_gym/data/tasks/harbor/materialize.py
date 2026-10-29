@@ -247,7 +247,7 @@ def dataset_entry(taskset: str, rows_path: Path, dataset: GymDatasetConfig | Non
     the rows by it and the collector's run-level count would multiply on top, and the metrics sidecar beside
     the rows records the entry, so a count that moved with the command line would conflict run to run.
     ``[gym.defaults].num_repeats`` is the run config's top-level ``num_repeats`` instead (see
-    ``nemo_gym.data.tasks.harbor.cli.build_run``). A benchmark entry names no ``prepare_script``: the rows are
+    ``nemo_gym.data.tasks.harbor.prepare.build_run``). A benchmark entry names no ``prepare_script``: the rows are
     written by the preparation that generates this entry.
     """
     dataset = dataset or GymDatasetConfig()
