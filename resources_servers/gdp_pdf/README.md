@@ -222,6 +222,16 @@ PNG/JPEG images. There is no per-call image-count cap; images remain in the save
 starts at `/seed_session` and stops at `/verify` or `DELETE /python`. The agent releases it in a `finally`
 block, including when verification is deferred or generation fails; grading never reads it.
 
+Each worker shares one sandbox provider across its isolated sessions, so the provider's command
+concurrency limit applies to the whole worker. It does not limit live rollouts waiting for inference.
+`sandbox_config.resources.cpu` also sets library thread hints through Gym's `cpu_cap_env`; explicit
+`sandbox_config.env` values take precedence. Provider resource enforcement is configured separately.
+
+Python exceptions and cell timeouts are tool feedback. Provider/kernel-client failures invalidate the
+session: subsequent calls cannot replay the failed cell, and verification uses `lost_session_verification`
+to return `mask_sample=True`. Verification without a live tool session still supports saved-answer
+regrading. Failed kernel startup includes its stderr before the sandbox is removed.
+
 `--benchmark gdp_pdf/python` (`benchmarks/gdp_pdf/python.yaml`) runs the benchmark this way: its
 prepare script adds the tool to the rows. The initial prompt contains the question only; the model chooses
 what to read or render from `document.pdf`. The agent may take up to 50 model turns, including the final

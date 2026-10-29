@@ -632,24 +632,11 @@ class GdpPdfAgent(SimpleAgent):
                     limit, image_cap = _input_limit(error)
                     if limit is not None and delivery.adapt(limit, image_cap, min_dpi=self.config.min_dpi):
                         continue
-                    if error.status in (401, 403, 429):
-                        # Systemic (auth/rate-limit), not per-document -- every other row would
-                        # fail identically, so surface it loudly rather than silently zeroing
-                        # the whole run one row at a time.
+                    if limit is None or error.status in (401, 403, 429):
+                        # Only known, exhausted input limits are task failures. Infrastructure
+                        # and unclassified failures propagate to the caller's episode retry policy.
                         raise
-                    terminal_limit = limit or f"unclassified_http_{error.status}"
-                    model_response = _terminal_failure_response(self.config.model_server.name)
-                    break
-                except Exception as error:  # noqa: BLE001
-                    # A rare, per-document failure (e.g. an upstream multimodal-processor bug
-                    # unrelated to input size, observed in vLLM itself: "AssertionError: Expected
-                    # a cached item for mm_hash=..." and "Failed to apply NanoNemotronVLProcessor
-                    # on data=...") must not take the whole evaluation run down over one document.
-                    # Score this row as a zero attempt instead, same as a terminal input-limit.
-                    print(
-                        f"[gdp_pdf_agent] WARNING: unclassified failure on {manifest_relpath}: {error!r}", flush=True
-                    )
-                    terminal_limit = f"unclassified_{type(error).__name__}"
+                    terminal_limit = limit
                     model_response = _terminal_failure_response(self.config.model_server.name)
                     break
                 else:
@@ -684,21 +671,11 @@ class GdpPdfAgent(SimpleAgent):
                 verification_skipped=True,
             )
         else:
-            try:
-                verified = await self.server_client.post(
-                    server_name=self.config.resources_server.name, url_path="/verify", json=result, cookies=cookies
-                )
-                await raise_for_status(verified)
-                result = await get_response_json(verified)
-            except Exception as error:  # noqa: BLE001
-                # Same reasoning as the model-call retry loop above: a /verify-side failure
-                # (upstream judge outage, a malformed row tripping a resources-server bug, etc.)
-                # must not take the whole evaluation run down over one row either. Score it as
-                # a zero attempt and keep going -- the warning below is what makes a real
-                # verifier bug (as opposed to a one-off transient failure) visible for follow-up.
-                print(f"[gdp_pdf_agent] WARNING: /verify failed on {manifest_relpath}: {error!r}", flush=True)
-                terminal_limit = terminal_limit or f"verify_failed_{type(error).__name__}"
-                result["reward"] = 0.0
+            verified = await self.server_client.post(
+                server_name=self.config.resources_server.name, url_path="/verify", json=result, cookies=cookies
+            )
+            await raise_for_status(verified)
+            result = await get_response_json(verified)
 
         result["document_delivery"] = delivery.record(terminal_limit) | {"rejected_attempts": delivery.attempts}
         if pages_truncated:

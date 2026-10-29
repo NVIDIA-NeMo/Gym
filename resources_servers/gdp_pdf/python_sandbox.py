@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import contextlib
 import shlex
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException
 
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
-from nemo_gym.sandbox.utils import upload_text
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxProvider
+from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.utils import cpu_cap_env, upload_text
 
 
 KERNEL_SCRIPT = Path(__file__).with_name("ipython_kernel.py")
@@ -46,7 +47,7 @@ def _stdout(result: SandboxExecResult) -> str:
 
 
 async def start_python_sandbox(
-    sandbox_provider: str, config: PythonSandboxConfig, pdf: Path, *, task_id: str
+    sandbox_provider: str, config: PythonSandboxConfig, pdf: Path, *, task_id: str, provider: SandboxProvider
 ) -> AsyncSandbox:
     """Start a sandbox with ``pdf`` as ``document.pdf`` in its working directory and a ready IPython kernel."""
     global_config = get_global_config_dict()
@@ -58,12 +59,14 @@ async def start_python_sandbox(
         files={f"{config.workdir}/.ipython_kernel/{KERNEL_SCRIPT.name}": KERNEL_SCRIPT.read_text()},
         named_configs=global_config,
     )
+    spec = replace(spec, env={**cpu_cap_env(spec.resources.cpu), **spec.env})
 
     async def setup(sandbox: AsyncSandbox) -> None:
         await sandbox.upload(pdf, f"{config.workdir}/document.pdf")
         _stdout(await sandbox.exec(_kernel(config, "start"), timeout_s=120, preserve_background_services=True))
 
-    sandbox = AsyncSandbox(resolve_provider_config(sandbox_provider, global_config))
+    # The server owns the provider so its execution limit applies across sessions.
+    sandbox = AsyncSandbox(provider, owns_provider=False)
     return await sandbox.start_with_setup(spec, setup)
 
 

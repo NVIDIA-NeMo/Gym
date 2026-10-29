@@ -61,9 +61,9 @@ problem, the agent reacts and retries:
   answer, as long as images are actually part of the payload.
 - **Auth/rate-limit errors** (401/403/429) are systemic, not per-document, so they propagate
   instead of being retried — every other row would fail identically.
-- **Any other exception** (an unclassified HTTP error, or a non-HTTP exception like an upstream
-  library assertion) is treated as a terminal, per-document failure: the row scores 0 (an empty
-  answer earns no rubric credit) instead of crashing the whole evaluation run.
+- **Unclassified model errors and unsuccessful verification requests** propagate to the caller's
+  episode retry policy. They do not become zero rewards. Judge failures use Gym's shared
+  `judge_failsafe`, and its masked result passes through unchanged.
 
 When compositing is active, the agent adds a `document_delivery` notice to the model input stating
 how many labeled pages each image may contain. If the four-pages-per-image ceiling cannot fit every

@@ -554,6 +554,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             cookies=resources_server_cookies,
                             headers=dict(tool_access.headers),
                             _internal=True,
+                            # A disconnected tool may already have changed persistent state.
+                            _resend_after_disconnect=False,
                         )
                     else:
                         if in_session:
@@ -573,6 +575,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             url_path=f"{resources_prefix}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
+                            _resend_after_disconnect=False,
                         )
                     tool_output = (await api_response.content.read()).decode()
                     resources_server_cookies = dict(resources_server_cookies or {})

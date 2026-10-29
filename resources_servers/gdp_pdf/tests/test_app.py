@@ -16,6 +16,7 @@
 
 import json
 import os
+import signal
 import sys
 import time
 from decimal import Decimal
@@ -55,6 +56,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.server_utils import ServerClient
+from resources_servers.gdp_pdf import app as gdp_pdf_app
 from resources_servers.gdp_pdf import python_sandbox
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
@@ -581,7 +583,9 @@ def python_server(config: GdpPdfConfig, tmp_path: Path, monkeypatch) -> GdpPdfRe
             "python_timeout_s": 5,
         }
     )
-    return GdpPdfResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"sandbox": {"local": {}}}
+    return GdpPdfResourcesServer(config=config, server_client=client)
 
 
 def _seed(client: TestClient, source_pdf: str = "source.pdf"):
@@ -615,6 +619,33 @@ def _process_ended(pid: int) -> bool:
 
 
 class TestPythonTool:
+    def test_failed_execution_is_not_replayed_or_graded(
+        self, python_server: GdpPdfResourcesServer, python_client: TestClient, monkeypatch
+    ) -> None:
+        execute = AsyncMock(side_effect=RuntimeError("sandbox process died after starting the cell"))
+        monkeypatch.setattr(gdp_pdf_app, "run_python", execute)
+        _mock_judge(python_server, _scored_content("1"))
+        for _ in range(2):
+            failed = python_client.post("/python", json={"code": "counter += 1"})
+            assert failed.status_code == 404
+            assert failed.json()["detail"]["failure_kind"] == "session_lost"
+        assert execute.await_count == 1
+        verified = python_client.post("/verify", json=_verify_request("The cap is $5M.").model_dump(mode="json"))
+        assert verified.status_code == 200
+        assert verified.json()["mask_sample"] is True
+        assert verified.json()["failure_kind"] == "session_lost"
+        python_server.server_client.post.assert_not_called()
+
+    def test_python_mistake_remains_a_valid_attempt(
+        self, python_server: GdpPdfResourcesServer, python_client: TestClient
+    ) -> None:
+        assert "NameError" in _python(python_client, "unknown_variable")
+        _mock_judge(python_server, _scored_content("0"))
+        verified = python_client.post("/verify", json=_verify_request("Wrong answer.").model_dump(mode="json"))
+        assert verified.status_code == 200
+        assert verified.json()["reward"] == 0.0
+        assert not verified.json().get("mask_sample", False)
+
     def test_the_benchmark_rows_offer_the_tool_the_server_serves(self, python_server: GdpPdfResourcesServer) -> None:
         tool = harvest_tools(python_server.setup_webserver(), python_server)["python"].tool
         served = {
@@ -653,6 +684,16 @@ class TestPythonTool:
         assert output == "[The Python kernel was restarted; variables from earlier cells are gone.]\n"
         assert _python(python_client, "print(open('document.pdf', 'rb').read(4))") == "b'%PDF'\n"
         assert "NameError" in _python(python_client, "x")
+
+    def test_kernel_loss_does_not_execute_a_cell_in_a_new_session(self, python_client: TestClient, tmp_path) -> None:
+        sandbox = tmp_path / "sandbox"
+        pid = int((sandbox / ".ipython_kernel" / "kernel.pid").read_text())
+        os.killpg(pid, signal.SIGKILL)
+        response = python_client.post("/python", json={"code": "open('should-not-exist', 'w').write('ran')"})
+        assert response.status_code == 404
+        assert not (sandbox / "should-not-exist").exists()
+        verified = python_client.post("/verify", json=_verify_request("answer").model_dump(mode="json"))
+        assert verified.json()["mask_sample"] is True
 
     def test_long_output_is_truncated_in_the_sandbox(
         self, python_server: GdpPdfResourcesServer, python_client: TestClient

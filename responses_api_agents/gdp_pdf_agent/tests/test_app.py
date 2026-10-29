@@ -668,29 +668,21 @@ class TestRun:
         assert result.response.output == []
         assert result.failure_reason == "GDP.pdf terminal input limit: context"
 
-    @requires_example_manifest
-    async def test_unrelated_failure_is_not_retried_but_scores_zero(self) -> None:
-        # An unclassified, non-auth error (e.g. a rare vLLM-side multimodal-processor bug) must
-        # not take the whole evaluation run down over one document -- it becomes a graceful
-        # terminal failure instead of propagating, same as a terminal input-limit.
-        agent = _agent(strip_images_from_output=False)
-        agent.server_client.post = AsyncMock(
-            side_effect=lambda **kw: SimpleNamespace(
-                cookies={},
-                data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {},
-            )
-        )
+    @pytest.mark.parametrize("error", [_error("out of memory"), AssertionError("Expected a cached item")])
+    async def test_unclassified_failure_propagates_without_replaying(self, tmp_path, error) -> None:
+        manifest = tmp_path / "manifest.json"
+        manifest.write_text('{"source_dpi": 200, "pages": []}')
+        agent = _agent(documents_base_dir=str(tmp_path), dpi=200, strip_images_from_output=False)
+        agent.server_client.post = AsyncMock(return_value=SimpleNamespace(cookies={}))
         with (
-            patch.object(GdpPdfAgent, "_create_episode", side_effect=_error("out of memory")) as call,
+            patch.object(GdpPdfAgent, "_create_episode", side_effect=error) as call,
             patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
-            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
+            pytest.raises(type(error)),
         ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
+            await agent.run(SimpleNamespace(cookies={}), _run_request("manifest.json"))
         assert call.await_count == 1
-        assert result.reward == 0.0
-        assert result.response.output == []
-        assert result.failure_reason == "GDP.pdf terminal input limit: unclassified_http_500"
+        assert agent.server_client.post.await_count == 1  # seed only; no synthetic zero sent to verify
 
     async def test_auth_and_rate_limit_errors_still_raise(self) -> None:
         # These are systemic, not per-document -- every other row would fail identically, so
@@ -705,28 +697,6 @@ class TestRun:
         ):
             await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert call.await_count == 1
-
-    @requires_example_manifest
-    async def test_non_client_response_exceptions_also_score_zero(self) -> None:
-        # Any other exception type (not just ClientResponseError) must be equally contained --
-        # e.g. a JSON decode error or an assertion deep inside an upstream library.
-        agent = _agent(strip_images_from_output=False)
-        agent.server_client.post = AsyncMock(
-            side_effect=lambda **kw: SimpleNamespace(
-                cookies={},
-                data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {},
-            )
-        )
-        with (
-            patch.object(GdpPdfAgent, "_create_episode", side_effect=AssertionError("Expected a cached item")) as call,
-            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
-            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
-            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
-        ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
-        assert call.await_count == 1
-        assert result.reward == 0.0
-        assert result.failure_reason == "GDP.pdf terminal input limit: unclassified_AssertionError"
 
     @requires_example_manifest
     async def test_images_are_stripped_from_the_result_when_enabled(self) -> None:
@@ -748,11 +718,8 @@ class TestRun:
         # content blocks here beyond the call succeeding without image payloads surviving.
         assert result.reward == 1.0
 
-    @requires_example_manifest
-    async def test_verify_failure_scores_zero_instead_of_crashing(self) -> None:
-        # A /verify-side failure (judge outage, a resources-server bug on some row) must not
-        # take the whole evaluation run down either -- same containment as a model-call failure.
-        agent = _agent(strip_images_from_output=False)
+    async def test_verify_failure_propagates_for_episode_retry(self) -> None:
+        agent = _agent(include_text=False, include_images=False, strip_images_from_output=False)
 
         async def post(**kw):
             if kw["url_path"] == "/verify":
@@ -765,9 +732,26 @@ class TestRun:
             patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
         ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
-        assert result.reward == 0.0
-        assert "verify_failed" in result.failure_reason
+            with pytest.raises(ClientResponseError):
+                await agent.run(SimpleNamespace(cookies={}), _run_request())
+
+    async def test_masked_verification_survives_the_agent(self) -> None:
+        agent = _agent(include_text=False, include_images=False, strip_images_from_output=False)
+        agent.server_client.post = AsyncMock(
+            side_effect=lambda **kw: SimpleNamespace(
+                cookies={},
+                data=kw["json"] | {"reward": 0.0, "mask_sample": True, "failure_kind": "judge_failed"},
+            )
+        )
+        with (
+            patch.object(GdpPdfAgent, "_create_episode", new=AsyncMock(return_value=(_response(), None, {}, {}))),
+            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
+        ):
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request())
+        assert result.mask_sample is True
+        assert result.failure_kind == "judge_failed"
 
 
 class TestStripImageBlocks:

@@ -68,7 +68,17 @@ def start() -> BlockingKernelClient:
             start_new_session=True,
         )
     PID_FILE.write_text(str(kernel.pid))
-    return connect(START_TIMEOUT_S)
+    try:
+        return connect(START_TIMEOUT_S)
+    except (OSError, RuntimeError) as error:
+        # Setup destroys a failed sandbox. Preserve the kernel's own diagnostic before that happens.
+        stop()
+        kernel.wait()
+        with open(KERNEL_DIR / "kernel.log", "rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - 4000))
+            diagnostic = log.read().decode(errors="replace")
+        raise RuntimeError(f"{error}\nIPython kernel log:\n{diagnostic}") from error
 
 
 def stop() -> None:
@@ -88,12 +98,9 @@ def asked_to_exit(client: BlockingKernelClient, msg_id: str) -> bool:
 
 def run(timeout: float, max_chars: int) -> None:
     output, size, dropped, notes = [], 0, 0, []
-    try:
-        client = connect(IDLE_TIMEOUT_S)
-    except (OSError, RuntimeError):
-        stop()
-        client = start()
-        notes.append(RESTARTED)
+    # An unexpected loss between calls invalidates the episode. Only intentional exit() or a
+    # timed-out cell below resets the kernel with explicit model-visible feedback.
+    client = connect(IDLE_TIMEOUT_S)
     try:
         msg_id = client.execute(CELL_FILE.read_text(), allow_stdin=False)
         deadline = time.monotonic() + timeout

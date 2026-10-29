@@ -378,6 +378,7 @@ class TestApp:
             cookies={"session_id": "seeded-resource-cookie"},
             headers={"X-Scoped-Access": "token"},
             _internal=True,
+            _resend_after_disconnect=False,
         )
         assert [item.kwargs["server_name"] for item in server_client.post.await_args_list] == ["model", "model"]
 
@@ -3022,7 +3023,17 @@ async def test_a_restored_session_s_direct_http_tool_calls_reach_the_restored_re
     server_client.post = AsyncMock(side_effect=[_mock_response(_TOOL_CALL_RESPONSE), _mock_response(_FINAL_RESPONSE)])
     paths: list[str] = []
 
-    async def resources_request(*, method: str, url: str, json: Any, cookies: Any, headers: Any, _internal: bool):
+    async def resources_request(
+        *,
+        method: str,
+        url: str,
+        json: Any,
+        cookies: Any,
+        headers: Any,
+        _internal: bool,
+        _resend_after_disconnect: bool,
+    ):
+        assert _resend_after_disconnect is False
         path = url.removeprefix("http://resources:8000")
         paths.append(path)
         fresh.cookies.clear()

@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from contextlib import asynccontextmanager, nullcontext
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -74,6 +75,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
@@ -83,7 +85,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.gdp_pdf.python_sandbox import (
@@ -93,6 +96,9 @@ from resources_servers.gdp_pdf.python_sandbox import (
     stop_python_sandbox,
 )
 from resources_servers.gdp_pdf.verifier_fixture import create_server, invoke
+
+
+LOG = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +291,14 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             self._judge_prompt = f.read().strip()
 
         self._python_sandboxes: dict[str, AsyncSandbox] = {}
+        self._python_failures: dict[str, str] = {}
+        self._sandbox_provider = (
+            create_provider(
+                resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
+            )
+            if self.config.sandbox_provider
+            else None
+        )
 
     # -------------------------------------------------------------------------
     # Optional python tool
@@ -307,6 +321,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             finally:
                 for session_id in list(self._python_sandboxes):
                     await self._stop_python_sandbox(session_id)
+                await self._sandbox_provider.aclose()
 
         app.router.lifespan_context = lifespan
         return app
@@ -317,13 +332,19 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         if not self.config.sandbox_provider or isinstance(body, ResourcesSeedSessionRequest):
             return await super().seed_session(body)
         session_id = request.session[SESSION_ID_KEY]
+        if session_id in self._python_failures:
+            raise ResourcesSessionLostError(self._python_failures[session_id])
         if session_id not in self._python_sandboxes:  # a repeated seed keeps the rollout's sandbox
             meta = body.verifier_metadata or {}
             pdf = Path(self.config.documents_base_dir) / str(meta.get("source_pdf") or "")
             if not pdf.is_file():
                 raise ResourcesSeedRejectedError(f"The python tool needs the task's source PDF, but {pdf} is missing")
             self._python_sandboxes[session_id] = await start_python_sandbox(
-                self.config.sandbox_provider, self.config.sandbox_config, pdf, task_id=str(meta.get("task_id"))
+                self.config.sandbox_provider,
+                self.config.sandbox_config,
+                pdf,
+                task_id=str(meta.get("task_id")),
+                provider=self._sandbox_provider,
             )
         return BaseSeedSessionResponse()
 
@@ -333,21 +354,33 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         Use fitz (PyMuPDF) or pdfplumber to read it, and IPython.display.display to inspect images.
         Printed text and displayed PNG/JPEG images are returned. Variables persist between calls.
         """
-        sandbox = self._python_sandboxes.get(request.session.get(SESSION_ID_KEY))
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id in self._python_failures:
+            raise ResourcesSessionLostError(self._python_failures[session_id])
+        sandbox = self._python_sandboxes.get(session_id)
         if sandbox is None:
-            raise ResourcesSessionLostError("This rollout has no Python sandbox")
-        output = await run_python(
-            sandbox,
-            self.config.sandbox_config,
-            body.code,
-            timeout_s=self.config.python_timeout_s,
-            max_chars=self.config.python_max_output_chars,
-        )
-        return JSONResponse(json.loads(output))
+            self._python_failures[session_id] = "This rollout has no Python sandbox"
+            raise ResourcesSessionLostError(self._python_failures[session_id])
+        try:
+            output = await run_python(
+                sandbox,
+                self.config.sandbox_config,
+                body.code,
+                timeout_s=self.config.python_timeout_s,
+                max_chars=self.config.python_max_output_chars,
+            )
+            return JSONResponse(json.loads(output))
+        except Exception as error:
+            # Cell exceptions are successful tool observations. A failed transport/kernel client leaves
+            # execution state unknown; do not replay the cell or reward this incomplete episode.
+            LOG.exception("GDP.pdf Python session failed: %s", session_id)
+            self._python_failures[session_id] = "Python sandbox execution failed; episode state is inconclusive"
+            raise ResourcesSessionLostError(self._python_failures[session_id]) from error
 
     async def release_python_session(self, request: Request) -> dict[str, bool]:
         """Release the rollout sandbox, including when grading is deferred or generation fails."""
         await self._stop_python_sandbox(request.session.get(SESSION_ID_KEY))
+        self._python_failures.pop(request.session.get(SESSION_ID_KEY), None)
         return {"released": request.session.get(SESSION_ID_KEY) not in self._python_sandboxes}
 
     async def _stop_python_sandbox(self, session_id: Optional[str]) -> None:
@@ -358,7 +391,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             await stop_python_sandbox(sandbox, self.config.sandbox_config)
         except Exception as e:  # noqa: BLE001
             # Kept so the shutdown sweep tries again; grading never depends on the sandbox.
-            print(f"[gdp_pdf] could not stop the Python sandbox: {e!r}", flush=True)
+            LOG.warning("Could not stop GDP.pdf Python sandbox: %r", e)
             return
         del self._python_sandboxes[session_id]
 
@@ -369,6 +402,9 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: GdpPdfVerifyRequest) -> GdpPdfVerifyResponse:
         # The rollout is over: release its python sandbox, if any, before grading (which never reads it).
         await self._stop_python_sandbox(request.session.get(SESSION_ID_KEY))
+        failure = self._python_failures.get(request.session.get(SESSION_ID_KEY))
+        if failure:
+            return GdpPdfVerifyResponse(**(body.model_dump() | lost_session_verification(failure)))
 
         meta = body.verifier_metadata or {}
         criteria = meta.get("criteria") or []
