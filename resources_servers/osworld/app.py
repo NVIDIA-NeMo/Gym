@@ -160,20 +160,25 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 osworld_score=result.score,
                 mask_sample=False,
             )
+        # The request accepts extra fields, so the failure fields replace any it carries rather than repeat them.
         except SessionNotFoundError:
             return OSWorldVerifyResponse(
-                **body.model_dump(),
-                osworld_score=0.0,
-                **lost_session_verification(f"OSWorld session {session_id} was not found at verify"),
+                **{
+                    **body.model_dump(),
+                    "osworld_score": 0.0,
+                    **lost_session_verification(f"OSWorld session {session_id} was not found at verify"),
+                }
             )
         except Exception as error:
             return OSWorldVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                osworld_score=0.0,
-                mask_sample=True,
-                failure_kind=VERIFIER_ERROR,
-                failure_reason=f"OSWorld evaluation raised {type(error).__name__}: {str(error)[-2000:]}",
+                **{
+                    **body.model_dump(),
+                    "reward": 0.0,
+                    "osworld_score": 0.0,
+                    "mask_sample": True,
+                    "failure_kind": VERIFIER_ERROR,
+                    "failure_reason": f"OSWorld evaluation raised {type(error).__name__}: {str(error)[-2000:]}",
+                }
             )
         finally:
             await self._manager.close_session(session_id)
