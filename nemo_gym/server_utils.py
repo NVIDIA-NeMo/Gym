@@ -810,9 +810,9 @@ async def _request_with_retries(
                 response = await client.request(method=method, url=url, **kwargs)
                 if (
                     _read_body
-                    and response.ok
                     and _resend_after_disconnect
                     and (_max_num_tries is not None or _max_connection_retries is not None)
+                    and response.ok
                 ):
                     # A success body cut off mid-read is retried below within the caller's bound. Without one, each
                     # resend would start another episode, and an error reply is the caller's to read in full: such a
