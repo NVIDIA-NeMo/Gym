@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import Request
 
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 
 
@@ -55,8 +57,12 @@ async def test_invalid_runtime_preserves_output_and_confirmed_close(setup, runti
 async def test_unconfirmed_receipt_skips_runtime_and_distinguishes_terminal_failure(setup, invalid):
     state, sandbox, payload = await session(setup)
     sandbox.result.update(invalid)
-    with pytest.raises(RuntimeError):
+    negative_receipt = invalid["cleanup_confirmed"] is False
+    # A negative receipt is the harness boundary's failure; a malformed one stays an unknown RuntimeError.
+    with pytest.raises(NgFailureEvent if negative_receipt else RuntimeError) as raised:
         await state.execute(payload, timeout=5, close_timeout=1)
+    if negative_receipt:
+        assert is_harness_termination_failure(raised.value)
     assert state.session.cleanup is None
     assert state.runtime_info is None
     if invalid["cleanup_confirmed"] is False:

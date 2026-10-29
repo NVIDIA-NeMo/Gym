@@ -9,7 +9,9 @@ import pytest
 
 from nemo_gym.agent_utils import supervisor_client
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
@@ -202,10 +204,12 @@ async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session)
 
 async def test_rearm_rejects_unconfirmed_termination(session, receipt_reader):
     receipt_reader.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
-    with pytest.raises(RuntimeError, match="termination was not confirmed"):
+    with pytest.raises(NgFailureEvent, match="termination was not confirmed") as raised:
         await execute(session)
-    with pytest.raises(RuntimeError, match="termination was not confirmed"):
+    assert is_harness_termination_failure(raised.value)
+    with pytest.raises(NgFailureEvent, match="termination was not confirmed") as raised:
         await session.begin_activation(session_dir="/session/activation-2", timeout=1)
+    assert is_harness_termination_failure(raised.value)
     assert session.session_dir == "/session"
     await session.close(timeout=1)
 
@@ -369,8 +373,9 @@ async def test_terminal_negative_receipt_skips_capture_but_releases_session(sess
     receipt = RECEIPT | {"cleanup_confirmed": False, "error": "Harness process group has not terminated"}
     receipt_reader.return_value = json.dumps(receipt)
     collector = AsyncMock()
-    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
+    with pytest.raises(NgFailureEvent, match="harness termination was not confirmed") as raised:
         await execute(session, collect=collector)
+    assert is_harness_termination_failure(raised.value)
     assert session.cleanup is None
     assert session.termination_error.receipt == receipt
     await session.close(timeout=1)

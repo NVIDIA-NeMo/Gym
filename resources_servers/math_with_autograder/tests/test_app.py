@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pytest import approx, fixture, raises
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
+from nemo_gym.judge import is_judge_failure
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -35,6 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.math_with_autograder.app import (
     MathWithAutograderResourcesServer,
     MathWithAutograderResourcesServerConfig,
@@ -319,5 +320,6 @@ class TestJudgeFailureInheritance:
             question="What is 2+2?",
             expected_answer="4",
         )
-        with raises(JudgeError, match="judge down"):
+        with raises(NgFailureEvent, match="judge down") as raised:
             await server.verify(request)
+        assert is_judge_failure(raised.value)
