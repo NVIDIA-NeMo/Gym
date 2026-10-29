@@ -29,7 +29,7 @@ def _use_model_server(base_url: str) -> None:
     """Point every model client Hermes builds in this process at the Gym Model Server.
 
     The root agent and its iteration-limit summary share one client, delegated children inherit the
-    parent's base URL, and auxiliary clients such as context compression read ``OPENAI_BASE_URL``.
+    parent's base URL. Compression's auxiliary client is configured in the episode's config.yaml.
     """
     os.environ["OPENAI_BASE_URL"] = base_url
     os.environ["OPENAI_API_KEY"] = _MODEL_API_KEY
@@ -62,7 +62,16 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     # harness imports, including sibling modules that may import Hermes transitively; preserve the task's HOME.
     hermes_home = session_dir / "hermes-home"
     hermes_home.mkdir(parents=True, exist_ok=True)
-    (hermes_home / "config.yaml").write_text(payload["config_yaml"])
+    import yaml
+
+    config = yaml.safe_load(payload["config_yaml"]) or {}
+    config.setdefault("auxiliary", {})["compression"] = {
+        "provider": "custom",
+        "base_url": payload["model_base_url"],
+        "api_key": _MODEL_API_KEY,
+        "model": payload["model"],
+    }
+    (hermes_home / "config.yaml").write_text(yaml.safe_dump(config))
     os.environ["HERMES_HOME"] = str(hermes_home)
     os.environ["TERMINAL_ENV"] = "local"
     os.environ["TERMINAL_TIMEOUT"] = str(payload["terminal_timeout"])
@@ -165,7 +174,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
             result[field] = count
     return {
         "observations": observer.finish(result, error),
-        "result": result,
+        "result": observer.restore_messages(result),
         "runtime": runtime,
     }
 
