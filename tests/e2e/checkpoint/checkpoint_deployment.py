@@ -172,6 +172,10 @@ class Deployment:
       base, whose sessions each own a sandbox in the fake sandbox backend, which outlives a Gym crash like the
       inference backend does. ``sandbox_sessions_legacy`` runs the same pairing through the flat-row
       ``single_agent_turn_legacy``. With ``sandbox_snapshots=False`` the sandbox provider cannot snapshot.
+    - ``harness_sessions``: ``single_agent_turn`` over the fake harness agent, which runs a harness under the real
+      process supervisor in a sandbox the workspace owner server lends. Sandboxes are directories on this machine
+      (``local_sandbox``); ``harness`` sets the fake agent's and owner's options (``steps``, ``fail_pauses``,
+      ``finish_on_park``, ``verify_delay_s``). ``harness_sessions_legacy`` runs it through ``single_agent_turn_legacy``.
 
     With ``inference_url``,
     the policy model serves from that endpoint and the fake backend's control routes are unavailable.
@@ -193,6 +197,7 @@ class Deployment:
         server_workers: int = 1,
         resources_mcp: bool = False,
         sandbox_snapshots: bool = True,
+        harness: Optional[dict[str, Any]] = None,
         extra_config: Optional[dict[str, Any]] = None,
     ) -> None:
         self.topology = topology
@@ -205,6 +210,7 @@ class Deployment:
         self.backend_port = free_port()
         self.sandbox_port = free_port()
         self.sandbox_snapshots = sandbox_snapshots
+        self.harness = dict(harness or {})
         # An external OpenAI-compatible endpoint (a real vLLM server) replaces the fake backend.
         self.inference_url = inference_url or f"http://127.0.0.1:{self.backend_port}/v1"
         self.model_name = model_name
@@ -249,6 +255,9 @@ class Deployment:
             # as a production server's ``sandbox_provider`` names one.
             provider = "fake_remote" if self.sandbox_snapshots else "fake_remote_plain"
             config["sandbox"] = {provider: {"base_url": f"http://127.0.0.1:{self.sandbox_port}"}}
+        if self.topology in ("harness_sessions", "harness_sessions_legacy"):
+            provider = "local_dir" if self.sandbox_snapshots else "local_dir_plain"
+            config["sandbox"] = {provider: {"base_dir": str(self.work_dir / "sandboxes")}}
         if token_capture:
             config["token_id_capture"] = {
                 "enabled": True,
@@ -297,6 +306,18 @@ class Deployment:
                 expose_tools_over_mcp=self.resources_mcp,
             )
             add("resources", "resources_servers/example_session_state_mgmt", resources)
+        elif self.topology in ("harness_sessions", "harness_sessions_legacy"):
+            resources = _server(
+                "resources_servers",
+                "example_session_state_mgmt",
+                domain="agent",
+                verified=False,
+                description="harness workspace",
+                sandbox_provider="sandbox",
+                sandbox_checkpoint={"snapshot_retry_delay_s": 0},
+                verify_delay_s=self.harness.get("verify_delay_s", 0.0),
+            )
+            add("resources", str(HERE / "workspace_owner_server"), resources)
         elif self.uses_sandboxes:
             resources = _server(
                 "resources_servers",
@@ -323,17 +344,36 @@ class Deployment:
             )
             add("resources", "resources_servers/example_single_tool_call", resources)
 
-        agent = _server(
-            "responses_api_agents",
-            "simple_agent",
-            model_server=_ref("responses_api_models", "policy_model"),
-            resources_server=_ref("resources_servers", "resources"),
-        )
-        add("agent", "responses_api_agents/simple_agent", agent)
+        if self.topology in ("harness_sessions", "harness_sessions_legacy"):
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                **{key: value for key, value in self.harness.items() if key != "verify_delay_s"},
+            )
+            add("agent", str(HERE / "fake_harness_agent"), agent)
+        else:
+            agent = _server(
+                "responses_api_agents",
+                "simple_agent",
+                model_server=_ref("responses_api_models", "policy_model"),
+                resources_server=_ref("resources_servers", "resources"),
+            )
+            add("agent", "responses_api_agents/simple_agent", agent)
 
-        if self.topology in ("sessions", "slow", "mixed", "sandbox_sessions", "sandbox_sessions_legacy"):
+        if self.topology in (
+            "sessions",
+            "slow",
+            "mixed",
+            "sandbox_sessions",
+            "sandbox_sessions_legacy",
+            "harness_sessions",
+            "harness_sessions_legacy",
+        ):
             implementation = (
-                "single_agent_turn_legacy" if self.topology == "sandbox_sessions_legacy" else "single_agent_turn"
+                "single_agent_turn_legacy"
+                if self.topology in ("sandbox_sessions_legacy", "harness_sessions_legacy")
+                else "single_agent_turn"
             )
             environment = _server(
                 "environment_servers",
@@ -683,6 +723,28 @@ def notes_row(rollout_id: str, attempt: int = 0) -> dict:
         "responses_create_params": {"input": [{"role": "user", "content": "take notes"}], "tools": [NOTES_TOOL]},
         "expected_notes": ["one", "two"],
         "task_id": "notes",
+        "_ng_rollout_id": rollout_id,
+        "_ng_attempt_index": attempt,
+    }
+
+
+def harness_episode(rollout_id: str, attempt: int = 0, steps: int = 4) -> dict:
+    """A ``single_agent_turn`` episode whose harness writes ``steps`` lines; verify expects every one of them."""
+    return {
+        "episode_id": {"rollout_id": rollout_id, "attempt": attempt},
+        "task": {
+            "task_id": {"taskset": "harness:e2e", "task_id": "steps"},
+            "task_input": {"responses_create_params": {"input": "do the steps"}, "task_data": {"steps": steps}},
+        },
+    }
+
+
+def harness_row(rollout_id: str, attempt: int = 0, steps: int = 4) -> dict:
+    """The same task as a flat dataset row, for ``single_agent_turn_legacy``."""
+    return {
+        "responses_create_params": {"input": "do the steps"},
+        "steps": steps,
+        "task_id": "steps",
         "_ng_rollout_id": rollout_id,
         "_ng_attempt_index": attempt,
     }

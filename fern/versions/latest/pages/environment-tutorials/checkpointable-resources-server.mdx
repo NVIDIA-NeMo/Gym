@@ -1,0 +1,93 @@
+---
+title: "Make a Resources Server Checkpointable"
+description: "Own each session's sandbox on the sandbox owner base so partial-rollout checkpoints snapshot it and a restore forks it."
+position: 7
+---
+
+A partial-rollout checkpoint lets a training run stop and later continue its unfinished rollouts instead of starting
+them over. Each server takes part for the state it owns. This page is for a resources server whose sessions own a
+**sandbox** that an agent works in, as SWE-bench's does. A server whose session state is a small JSON object declares
+`checkpoint_mode = "exported"` and implements `export_session_states` and `restore_session_states` directly; see
+`resources_servers/example_session_state_mgmt`.
+
+## The sandbox owner base
+
+Subclass `SandboxOwnerResourcesServer` from `nemo_gym.sandbox_owner` and configure it with `SandboxOwnerConfig`
+(`sandbox_provider` names the top-level sandbox block). The base gives you:
+
+| Piece | What it does |
+| --- | --- |
+| `seed_task_sandbox_session(request, body, setup)` | The typed Environment Server seed. Runs `setup` once, lends the session's `main` sandbox in the reply's `sandbox_access`, refuses a seed that names the session with another episode or task (409) or after its close, and answers an identical retry with the same sandbox. |
+| `start_session_sandbox(session_id, spec, setup, *, name="main")` | Starts one sandbox of the session on the shared provider and runs your task setup in it. `setup` returns `SessionSetup(workdir, data)`. A failed setup stops the sandbox and tracks nothing. |
+| `session_data(session_id)` / `update_session_data(...)` | JSON the session needs for grading, such as the commit the agent started from. It is exported and restored with the sandboxes. |
+| `capture_once(session_id, name, capture, *, release_sandbox_after=False)` | Captures the artifact you grade (a patch, a tarball, an answer file) once per session, stores it in the session's data, and returns the stored result on every later call. With `release_sandbox_after`, the sandboxes stop once it is stored. |
+| `/close_session` | The typed close: stops the session's sandboxes, forgets the session, and fences a late seed. |
+| Checkpoint hooks | Export snapshots every live sandbox of each session; restore forks them all or none; release deletes the snapshots of checkpoints the controller no longer keeps; retire stops the sandboxes. |
+| Lifecycle | Shutdown stops every live sandbox. A session nobody closed is released after its lifetime from its latest seed (the sandbox `ttl_s`, else 24 hours). |
+
+```python
+class MyServer(SandboxOwnerResourcesServer):
+    config: MyConfig  # subclasses SandboxOwnerConfig
+    checkpoint_verify = "replay"  # verify grades what capture_once captured
+
+    async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
+        return await self.seed_task_sandbox_session(request, body, self._set_up)
+
+    async def _set_up(self, session_id: str, body: ResourcesSeedSessionRequest) -> None:
+        task = MyTask.model_validate(body.task_data)  # raise ResourcesSeedRejectedError for bad input
+
+        async def setup(sandbox: AsyncSandbox) -> SessionSetup:
+            await sandbox.exec(task.setup_command)
+            head = (await sandbox.exec("git rev-parse HEAD")).stdout.strip()
+            return SessionSetup(workdir="/testbed", data={"seed_head": head})
+
+        await self.start_session_sandbox(session_id, self._spec(task), setup)
+
+    async def verify(self, request: Request, body: MyVerifyRequest) -> BaseVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        patch = await self.capture_once(
+            session_id, "patch", lambda: self._extract(session_id), release_sandbox_after=True
+        )
+        return await self._grade_in_a_fresh_sandbox(body, patch)
+```
+
+## What a checkpoint holds
+
+A commit snapshots each live sandbox through the provider and indexes the snapshot under
+`<checkpoint.state_dir>/<server>/snapshots/<checkpoint id>/`. The snapshot is the restore point: a restore forks it
+into a new sandbox, whatever happened to the original since. The snapshot keeps **files, not processes**.
+
+- **Grade an artifact, not a live sandbox.** Capture it with `capture_once` and declare `checkpoint_verify = "replay"`:
+  a checkpoint does not wait for grading, and a `/verify` that runs again after a restore grades the same artifact.
+  A session past its capture exports its data alone; the restore grades again from the saved artifact.
+- **In-place graders** that need processes the agent started declare `restore_policy = "before_agent_close"`. The seed
+  reply says so, and the Environment Server makes the episode a restart once its agent has closed, instead of
+  continuing it in a fork that has none of those processes.
+- After a restore, the Environment Server seeds the session again under the replacement attempt. The base answers with
+  the forked sandbox and does not run your setup again.
+
+## Requirements
+
+- A sandbox provider that can snapshot (`SupportsSandboxSnapshot`; OpenSandbox today). On any other provider the server
+  reports `restart_only`, says so on its seed reply, and its episodes start over after a crash.
+- `checkpoint.state_dir`: a directory every restart of the run can read, outside anything the controller deletes. The
+  server refuses to start with checkpointing on and no `state_dir`.
+- The controller calls `release(kept)` after each checkpoint it saves, and `release([])` at the end of a run that
+  will not be resumed. A job that ended for good without that final release leaves its last snapshots. Their names
+  start with `ng-<run id>-`, where the run id is the content of `<state_dir>/run_id`; on OpenSandbox, delete them with
+  `python -m nemo_gym.sandbox.providers.opensandbox.snapshots --connection-config env.yaml --name-prefix "ng-$(cat <state_dir>/run_id)-" --reap`
+  (without `--reap` it only lists them).
+
+## Check it
+
+`nemo_gym.testing.checkpoint_conformance.check_sandbox_owner` drives your server through its real routes against an
+in-process provider with durable snapshots: seed, retry and conflicts, commit, restore into a fork, the replacement
+attempt's seed, `capture_once`, release (including snapshots a crashed process left), close, shutdown, and
+`restart_only` on a provider that cannot snapshot.
+
+```python
+async def test_my_server_conforms(tmp_path):
+    await check_sandbox_owner(make_server, typed_seed(), tmp_path / "state", capture=capture_patch)
+```
+
+`resources_servers/swebench/tests/test_checkpoint.py` is a complete example.
