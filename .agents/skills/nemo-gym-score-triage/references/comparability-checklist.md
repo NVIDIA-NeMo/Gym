@@ -1,6 +1,6 @@
 # Comparability Checklist
 
-Each row is something that changes a score. Before comparing two numbers, check that both sides match on every row. When a reference does not publish a setting, write it down as unknown instead of assuming it matches.
+Each row of the table below is one factor that can change a score by itself, even with the same model. Before comparing two numbers, check that both sides match on every row. When a reference does not publish a setting, write it down as unknown instead of assuming it matches.
 
 | Factor | Why it moves the score | Where to check in a Gym run |
 |---|---|---|
