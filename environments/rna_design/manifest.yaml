@@ -17,7 +17,6 @@ reward:
   - 1.0
   higher_is_better: true
 determinism: stochastic
-config_path: claude_code.yaml
 resources_server: rna_design
 agent_server: harness_agent
 datasets:
