@@ -24,9 +24,10 @@ from typing import Any, Dict, List, Mapping, Optional
 from resources_servers.vision2code.rubrics import (
     SCORE_MAX,
     SCORE_MIN,
-    _coerce_decimal_score,
+    _comparison_content,
+    _render_failure_result,
     _round_tenth,
-    encode_image_to_data_url,
+    _score_categories,
 )
 
 
@@ -103,6 +104,7 @@ def build_generic_rater_user_content(
     metadata: Optional[Mapping[str, Any]] = None,
     dataset_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
+    """Build the generic judge prompt with reference and candidate images."""
     metadata_payload = dict(metadata or {})
     prompt_text = (
         "Evaluate the candidate recreation against the reference image using this rubric.\n\n"
@@ -130,19 +132,9 @@ def build_generic_rater_user_content(
         "- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
     )
 
-    return [
-        {"type": "text", "text": "Reference image:"},
-        {
-            "type": "image_url",
-            "image_url": {"url": encode_image_to_data_url(source_image_path)},
-        },
-        {"type": "text", "text": "Candidate rendered image:"},
-        {
-            "type": "image_url",
-            "image_url": {"url": encode_image_to_data_url(rendered_image_path)},
-        },
-        {"type": "text", "text": prompt_text},
-    ]
+    return _comparison_content(
+        source_image_path=source_image_path, rendered_image_path=rendered_image_path, prompt_text=prompt_text
+    )
 
 
 def aggregate_generic_rating(
@@ -156,33 +148,8 @@ def aggregate_generic_rating(
     reference_image_path: str = "",
     candidate_image_path: str = "",
 ) -> Dict[str, Any]:
-    scores_obj = parsed.get("category_scores")
-    if not isinstance(scores_obj, dict):
-        scores_obj = parsed.get("subscores")
-    rationales_obj = parsed.get("rationales")
-    if not isinstance(scores_obj, dict):
-        raise ValueError("Response is missing a 'category_scores' object.")
-    if not isinstance(rationales_obj, dict):
-        raise ValueError("Response is missing a 'rationales' object.")
-
-    category_results: Dict[str, Any] = {}
-    raw_score = 0.0
-
-    for category in GENERIC_RUBRIC["categories"]:
-        category_id = str(category["id"])
-        score = _coerce_decimal_score(scores_obj.get(category_id), category_id)
-        rationale = str(rationales_obj.get(category_id, "")).strip()
-        weighted = score * float(category["weight"])
-        raw_score += weighted
-        category_results[category_id] = {
-            "label": category["label"],
-            "description": category["description"],
-            "weight": category["weight"],
-            "score_0_to_5": score,
-            "weighted_score_0_to_5": round(weighted, 4),
-            "rationale": rationale,
-            "is_critical": False,
-        }
+    """Average the four generic category scores without dataset caps."""
+    category_results, raw_score = _score_categories(parsed, categories=GENERIC_RUBRIC["categories"], critical_count=0)
 
     strengths = [str(item).strip() for item in parsed.get("strengths", []) if str(item).strip()]
     issues = [str(item).strip() for item in parsed.get("issues", []) if str(item).strip()]
@@ -230,36 +197,19 @@ def build_generic_render_failure_rating(
     candidate_image_path: str = "",
     candidate_inspection: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    category_scores: Dict[str, Any] = {}
-    for category in GENERIC_RUBRIC["categories"]:
-        category_scores[str(category["id"])] = {
-            "label": category["label"],
-            "description": category["description"],
-            "weight": category["weight"],
-            "score_0_to_5": 0.0,
-            "weighted_score_0_to_5": 0.0,
-            "rationale": f"Candidate image unavailable because generation or render failed: {status}",
-            "is_critical": False,
-        }
-
+    """Return a zero-score generic result for a failed render."""
     return {
+        **_render_failure_result(
+            status,
+            categories=GENERIC_RUBRIC["categories"],
+            critical_count=0,
+            execution_error_present=execution_error_present,
+            reference_image_path=reference_image_path,
+            candidate_image_path=candidate_image_path,
+            candidate_inspection=candidate_inspection,
+        ),
         "rubric_version": GENERIC_RUBRIC_VERSION,
         "rubric_dataset": "generic",
         "source_dataset": dataset_name or dict(metadata or {}).get("dataset", ""),
-        "status": "render_failed",
-        "execution_status": "render_failed",
-        "execution_detail": status,
-        "execution_error_present": execution_error_present,
-        "reference_image_path": reference_image_path,
-        "candidate_image_path": candidate_image_path,
-        "candidate_inspection": dict(candidate_inspection or {}),
-        "category_scores": category_scores,
-        "raw_score_0_to_5": 0.0,
-        "raw_visual_score_0_to_5": 0.0,
-        "provisional_rating_0_to_5": 0.0,
         "applied_caps": [],
-        "final_rating_0_to_5": 0.0,
-        "strengths": [],
-        "issues": [f"Render failed before visual evaluation: {status}"],
-        "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating.",
     }

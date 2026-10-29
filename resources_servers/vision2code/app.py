@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Single-turn reference image → Python → Enroot render → rubric reward."""
+"""Stateless verification of reference image → Python → Enroot render → rubric reward."""
 
 import asyncio
 import hashlib
@@ -42,7 +42,7 @@ class Vision2CodeConfig(BaseResourcesServerConfig):
     sandbox_image: str
     sandbox_provider: dict[str, dict] = Field(default_factory=lambda: {"enroot": {}})
     execution_timeout: float = Field(default=60, gt=0)
-    render_concurrency: int = Field(default=4, ge=1)
+    render_concurrency: int = Field(default=8, ge=1)
     reward_power: float = Field(default=2.0, ge=1, allow_inf_nan=False)
     use_blended_reward: bool = Field(
         default=False,
@@ -155,23 +155,13 @@ class Vision2CodeServer(SimpleResourcesServer):
                     source.save(source_path, format="PNG")
             result.artifacts["source_image"] = str(source_path)
             stage = "render"
-            provider = {
-                "enroot": {
-                    **self.config.sandbox_provider["enroot"],
-                    "create": {
-                        **self.config.sandbox_provider["enroot"].get("create", {}),
-                        "mount_point": "/workspace",
-                    },
-                    "probe": {"command": "test -d /workspace", "expected_stdout": None},
-                }
-            }
             async with self._render_slots:
                 result.render = await render(
                     code=response_text(body.response),
                     width=ref.width,
                     height=ref.height,
                     image=self.config.sandbox_image,
-                    provider=provider,
+                    provider=self.config.sandbox_provider,
                     artifact_dir=directory,
                     timeout=self.config.execution_timeout,
                 )

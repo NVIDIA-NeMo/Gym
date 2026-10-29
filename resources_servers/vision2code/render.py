@@ -87,7 +87,7 @@ async def finish_task(task: asyncio.Task[T]) -> T:
 
 
 async def render(
-    *, code: str, width: int, height: int, image: str, provider: dict, artifact_dir: Path, timeout: float
+    *, code: str, width: int, height: int, image: str, provider: dict[str, dict], artifact_dir: Path, timeout: float
 ) -> RenderResult:
     """Render and download before stopping, persisting diagnostics on every path."""
     result = RenderResult()
@@ -111,7 +111,13 @@ async def render(
         provider = {
             "enroot": {
                 **provider["enroot"],
-                "create": {**provider["enroot"].get("create", {}), "rw": False, "bypass_entrypoint": False},
+                "create": {
+                    **provider["enroot"].get("create", {}),
+                    "mount_point": "/workspace",
+                    "rw": False,
+                    "bypass_entrypoint": False,
+                },
+                "probe": {"command": "test -d /workspace", "expected_stdout": None},
             }
         }
         previous = {key: os.environ.get(key) for key in environment}
@@ -132,10 +138,8 @@ async def render(
         result.timings["startup_s"] = time.perf_counter() - started
         await sandbox.upload(code_path, "/workspace/code.py")
         await sandbox.upload(Path(__file__).with_name("launcher.py"), "/workspace/launcher.py")
-        probe = await sandbox.exec(ISOLATED + UNSHARE + "/bin/true", timeout_s=15)
-        result.diagnostics["isolation_probe"] = asdict(probe)
-        if probe.error_type or probe.return_code:
-            raise InfrastructureError("Network/PID isolation probe failed; no code was executed")
+        # This also probes network/PID namespace creation: a failed unshare never
+        # reaches Python. A separate /bin/true probe would repeat the same exec.
         mount_check = (
             "import json; "
             "mounts=[line.split()[4] for line in open('/proc/self/mountinfo')]; "
@@ -151,7 +155,7 @@ async def render(
         )
         result.diagnostics["mount_probe"] = asdict(mounts)
         if mounts.error_type or mounts.return_code:
-            raise InfrastructureError("Unexpected host mounts or failed mount inspection; no code was executed")
+            raise InfrastructureError("Isolation or mount inspection failed; no code was executed")
         command = (
             ISOLATED
             + f"OUTPUT_PATH=/workspace/output.png TARGET_WIDTH={width} TARGET_HEIGHT={height} "

@@ -969,6 +969,18 @@ def encode_image_to_data_url(image_path: Path) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def _comparison_content(
+    *, source_image_path: Path, rendered_image_path: Path, prompt_text: str
+) -> List[Dict[str, Any]]:
+    return [
+        {"type": "text", "text": "Reference image:"},
+        {"type": "image_url", "image_url": {"url": encode_image_to_data_url(source_image_path)}},
+        {"type": "text", "text": "Candidate rendered image:"},
+        {"type": "image_url", "image_url": {"url": encode_image_to_data_url(rendered_image_path)}},
+        {"type": "text", "text": prompt_text},
+    ]
+
+
 def rubric_markdown(rubric: Mapping[str, Any]) -> str:
     lines = [f"Dataset: {rubric['dataset']}"]
     for category in rubric["categories"]:
@@ -983,8 +995,8 @@ def build_rater_user_content(
     metadata: Optional[Mapping[str, Any]] = None,
     dataset_name: str,
 ) -> List[Dict[str, Any]]:
-    resolved_dataset = dataset_name
-    rubric = DATASET_RUBRICS[resolved_dataset]
+    """Build the dataset judge prompt with reference and candidate images."""
+    rubric = DATASET_RUBRICS[dataset_name]
     metadata_payload = dict(metadata or {})
     prompt_notes = "\n".join(f"- {note}" for note in rubric.get("prompt_notes", []))
     revision_note = f"Dataset rubric revision: {rubric['revision']}\n" if "revision" in rubric else ""
@@ -992,7 +1004,7 @@ def build_rater_user_content(
         "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\n"
         f"Rubric version: {RUBRIC_VERSION}\n"
         f"{revision_note}"
-        f"Rubric dataset: {resolved_dataset}\n"
+        f"Rubric dataset: {dataset_name}\n"
         f"Scoring guidance: {rubric['guidance']}\n\n"
         "Dataset-specific notes:\n"
         f"{prompt_notes}\n\n"
@@ -1020,19 +1032,9 @@ def build_rater_user_content(
         "- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
     )
 
-    return [
-        {"type": "text", "text": "Reference image:"},
-        {
-            "type": "image_url",
-            "image_url": {"url": encode_image_to_data_url(source_image_path)},
-        },
-        {"type": "text", "text": "Candidate rendered image:"},
-        {
-            "type": "image_url",
-            "image_url": {"url": encode_image_to_data_url(rendered_image_path)},
-        },
-        {"type": "text", "text": prompt_text},
-    ]
+    return _comparison_content(
+        source_image_path=source_image_path, rendered_image_path=rendered_image_path, prompt_text=prompt_text
+    )
 
 
 def strip_thinking_content(text: str) -> str:
@@ -1121,9 +1123,7 @@ def inspect_candidate_image(image_path: Path) -> Dict[str, Any]:
             scoring_checks = [check for check in checks if check != "mostly_empty_canvas"]
             return {
                 "candidate_readable": True,
-                # Sparse diagrams legitimately use very little of a white canvas.
-                # Preserve the signal for diagnostics, but do not classify it as a
-                # blank render unless another genuine degeneracy check also fires.
+                # Whitespace alone is diagnostic; sparse diagrams can be valid.
                 "is_blank_or_degenerate": bool(scoring_checks),
                 "checks_triggered": checks,
                 "width": width,
@@ -1252,19 +1252,10 @@ def apply_rating_caps(
     }
 
 
-def aggregate_rating_v2(
-    parsed: Dict[str, Any],
-    *,
-    dataset_name: str,
-    execution_status: str = "ok",
-    execution_error_present: bool = False,
-    candidate_inspection: Optional[Mapping[str, Any]] = None,
-    reference_image_path: str = "",
-    candidate_image_path: str = "",
-    rubric_version: str = RUBRIC_VERSION,
-) -> Dict[str, Any]:
-    resolved_dataset = dataset_name
-    rubric = DATASET_RUBRICS[resolved_dataset]
+def _score_categories(
+    parsed: Dict[str, Any], *, categories: Sequence[Mapping[str, Any]], critical_count: int
+) -> tuple[Dict[str, Any], float]:
+    """Validate judge scores and accumulate their weighted category results."""
     scores_obj = parsed.get("category_scores")
     if not isinstance(scores_obj, dict):
         scores_obj = parsed.get("subscores")
@@ -1276,11 +1267,9 @@ def aggregate_rating_v2(
 
     category_results: Dict[str, Any] = {}
     raw_score = 0.0
-
-    for idx, category in enumerate(rubric["categories"]):
+    for idx, category in enumerate(categories):
         category_id = category["id"]
         score = _coerce_decimal_score(scores_obj.get(category_id), category_id)
-        rationale = str(rationales_obj.get(category_id, "")).strip()
         weighted = score * float(category["weight"])
         raw_score += weighted
         category_results[category_id] = {
@@ -1289,9 +1278,26 @@ def aggregate_rating_v2(
             "weight": category["weight"],
             "score_0_to_5": score,
             "weighted_score_0_to_5": round(weighted, 4),
-            "rationale": rationale,
-            "is_critical": idx < 2,
+            "rationale": str(rationales_obj.get(category_id, "")).strip(),
+            "is_critical": idx < critical_count,
         }
+    return category_results, raw_score
+
+
+def aggregate_rating_v2(
+    parsed: Dict[str, Any],
+    *,
+    dataset_name: str,
+    execution_status: str = "ok",
+    execution_error_present: bool = False,
+    candidate_inspection: Optional[Mapping[str, Any]] = None,
+    reference_image_path: str = "",
+    candidate_image_path: str = "",
+    rubric_version: str = RUBRIC_VERSION,
+) -> Dict[str, Any]:
+    """Aggregate dataset scores with critical-category and image-degeneracy caps."""
+    rubric = DATASET_RUBRICS[dataset_name]
+    category_results, raw_score = _score_categories(parsed, categories=rubric["categories"], critical_count=2)
 
     strengths = [str(item).strip() for item in parsed.get("strengths", []) if str(item).strip()]
     issues = [str(item).strip() for item in parsed.get("issues", []) if str(item).strip()]
@@ -1314,7 +1320,7 @@ def aggregate_rating_v2(
 
     return {
         "rubric_version": rubric_version,
-        "rubric_dataset": resolved_dataset,
+        "rubric_dataset": dataset_name,
         **({"rubric_revision": rubric["revision"]} if "revision" in rubric else {}),
         "status": "ok" if execution_status == "ok" else "render_failed",
         "execution_status": execution_status,
@@ -1335,19 +1341,18 @@ def aggregate_rating_v2(
     }
 
 
-def build_render_failure_rating(
+def _render_failure_result(
     status: str,
     *,
-    dataset_name: str,
+    categories: Sequence[Mapping[str, Any]],
+    critical_count: int,
     execution_error_present: bool = True,
     reference_image_path: str = "",
     candidate_image_path: str = "",
     candidate_inspection: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
-    resolved_dataset = dataset_name
-    rubric = DATASET_RUBRICS[resolved_dataset]
     category_scores: Dict[str, Any] = {}
-    for idx, category in enumerate(rubric["categories"]):
+    for idx, category in enumerate(categories):
         category_scores[category["id"]] = {
             "label": category["label"],
             "description": category["description"],
@@ -1355,21 +1360,10 @@ def build_render_failure_rating(
             "score_0_to_5": 0.0,
             "weighted_score_0_to_5": 0.0,
             "rationale": f"Candidate image unavailable because generation or render failed: {status}",
-            "is_critical": idx < 2,
+            "is_critical": idx < critical_count,
         }
 
-    applied_caps = [
-        {
-            "type": "execution_failure",
-            "cap_to": 0.0,
-            "reason": f"Execution did not produce a valid render: {status}",
-            "changed_final_rating": True,
-        }
-    ]
     return {
-        "rubric_version": RUBRIC_VERSION,
-        "rubric_dataset": resolved_dataset,
-        **({"rubric_revision": rubric["revision"]} if "revision" in rubric else {}),
         "status": "render_failed",
         "execution_status": "render_failed",
         "execution_detail": status,
@@ -1381,9 +1375,43 @@ def build_render_failure_rating(
         "raw_score_0_to_5": 0.0,
         "raw_visual_score_0_to_5": 0.0,
         "provisional_rating_0_to_5": 0.0,
-        "applied_caps": applied_caps,
         "final_rating_0_to_5": 0.0,
         "strengths": [],
         "issues": [f"Render failed before visual evaluation: {status}"],
         "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating.",
+    }
+
+
+def build_render_failure_rating(
+    status: str,
+    *,
+    dataset_name: str,
+    execution_error_present: bool = True,
+    reference_image_path: str = "",
+    candidate_image_path: str = "",
+    candidate_inspection: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return zero category scores and an execution-failure cap."""
+    rubric = DATASET_RUBRICS[dataset_name]
+    return {
+        **_render_failure_result(
+            status,
+            categories=rubric["categories"],
+            critical_count=2,
+            execution_error_present=execution_error_present,
+            reference_image_path=reference_image_path,
+            candidate_image_path=candidate_image_path,
+            candidate_inspection=candidate_inspection,
+        ),
+        "rubric_version": RUBRIC_VERSION,
+        "rubric_dataset": dataset_name,
+        **({"rubric_revision": rubric["revision"]} if "revision" in rubric else {}),
+        "applied_caps": [
+            {
+                "type": "execution_failure",
+                "cap_to": 0.0,
+                "reason": f"Execution did not produce a valid render: {status}",
+                "changed_final_rating": True,
+            }
+        ],
     }

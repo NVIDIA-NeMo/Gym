@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Fail-closed isolation smoke; run inside the intended Slurm worker allocation."""
+"""Fail-closed isolation smoke on the worker that will execute generated code."""
 
 import argparse
 import asyncio
@@ -42,18 +42,12 @@ im.save(OUTPUT_PATH)
 
 async def main_async(args: argparse.Namespace) -> None:
     forbidden = [str(Path.home()), str(Path.cwd()), "/root/.aws", "/root/.ssh", *args.forbid_path]
-    provider = {
-        "enroot": {
-            "create": {"mount_point": "/workspace"},
-            "probe": {"command": "test -d /workspace", "expected_stdout": None},
-        }
-    }
     result = await render(
         code=isolation_code(forbidden),
         width=80,
         height=60,
         image=str(args.image.resolve()),
-        provider=provider,
+        provider={"enroot": {}},
         artifact_dir=args.artifacts.resolve(),
         timeout=60,
     )
@@ -62,8 +56,8 @@ async def main_async(args: argparse.Namespace) -> None:
     report["image"] = str(args.image.resolve())
     (args.artifacts / "isolation.json").write_text(json.dumps(report, indent=2))
     print(json.dumps(report, indent=2))
-    if result.status != "ok" or not report["slurm_job_id"]:
-        raise SystemExit("Isolation smoke did not pass inside a Slurm allocation")
+    if result.status != "ok":
+        raise SystemExit("Isolation smoke did not pass on this worker")
 
 
 def main() -> None:
