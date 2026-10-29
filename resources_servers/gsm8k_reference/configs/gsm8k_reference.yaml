@@ -13,6 +13,7 @@ gsm8k_reference_simple_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
+      max_steps: 1
       resources_server:
         type: resources_servers
         name: gsm8k_reference
@@ -23,4 +24,12 @@ gsm8k_reference_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/gsm8k_reference/data/example.jsonl
-          license: MIT
+          license: Apache-2.0
+
+gsm8k_reference_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: gsm8k_reference_simple_agent

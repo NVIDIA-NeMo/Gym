@@ -125,3 +125,39 @@ def test_reference_metrics_do_not_vote_using_a_different_extractor() -> None:
     assert metrics["pass@1/flexible_extract"] == 50.0
     assert metrics["pass@1/strict_match"] == 0.0
     assert not any("majority@" in key for key in metrics)
+
+
+@pytest.mark.asyncio
+async def test_only_final_message_is_scored_with_unicode_separators() -> None:
+    request = _request("ಉತ್ತರ\u2028#### 1,234\u2029")
+    response = request.response.model_dump()
+    response["output"].insert(
+        0,
+        {
+            "id": "reasoning",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Maybe #### 999"}],
+        },
+    )
+    request.response = NeMoGymResponse.model_validate(response)
+    result = await _server().verify(request)
+    assert result.strict_prediction == result.flexible_prediction == "1,234"
+    assert result.reward == 1.0
+
+
+@pytest.mark.asyncio
+async def test_empty_final_answer_scores_zero() -> None:
+    result = await _server().verify(_request(""))
+    assert result.reward == result.strict_match == result.flexible_extract == 0.0
+
+
+def test_empty_metrics_and_key_metric_selection() -> None:
+    assert _server().compute_metrics([]) == {}
+    metrics = {
+        "mean/input_tokens": 100,
+        "mean/output_tokens": 250,
+        "pass@1[avg-of-1]/strict_match": 75.0,
+        "pass@1[avg-of-1]/flexible_extract": 80.0,
+        "unrelated": 1.0,
+    }
+    assert _server().get_key_metrics(metrics) == {key: value for key, value in metrics.items() if key != "unrelated"}

@@ -1,132 +1,130 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Prepare the 5-shot Indic GSM8K text-completion benchmark."""
+"""Prepare ai4bharat/indic-gsm8k for zero-shot chat evaluation in NeMo Gym."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
-import random
+import re
 import uuid
 from pathlib import Path
 
-from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 
 
-BENCHMARK_DIR = Path(__file__).parent
-OUTPUT_FPATH = BENCHMARK_DIR / "data" / "indic_gsm8k_benchmark.jsonl"
-SOURCE_ID = "anushakamathofficial/indic_GSM8K_v5"
-SOURCE_REVISION = "f778a10d5d7f4d976574c7296b2e8ce89c30a38d"
-SOURCE_SPLIT = "test"
-FEWSHOT_SEED = 42
-NUM_FEWSHOT = 5
-MAX_OUTPUT_TOKENS = 4096
-
+SOURCE_ID = "ai4bharat/indic-gsm8k"
+SOURCE_REVISION = "e21f3ff7e9fe703a7f4faeefdba27801be278eb5"
+SOURCE_FILE = "test.parquet"
+SOURCE_SHA256 = "c3ee9883b5afac206456a1ac19d568536e3b6c920f8ea0c57457dda08c50c101"
 LANGUAGES = {
-    "hi": "Hindi",
-    "bn": "Bengali",
-    "ur": "Urdu",
-    "ta": "Tamil",
-    "ne": "Nepali",
-    "mr": "Marathi",
-    "ml": "Malayalam",
-    "te": "Telugu",
-    "pa": "Punjabi",
-    "gu": "Gujarati",
-    "kn": "Kannada",
-    "or": "Odia",
     "as": "Assamese",
+    "bn": "Bengali",
+    "gu": "Gujarati",
+    "hi": "Hindi",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "ne": "Nepali",
+    "or": "Odia",
+    "pa": "Punjabi",
     "sa": "Sanskrit",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "ur": "Urdu",
 }
+DEFAULT_LANGUAGES = ("bn", "gu", "hi", "kn", "mr", "ml", "ne", "or", "pa", "ta", "te", "ur")
+OUTPUT_FPATH = Path(__file__).parent / "data/indic_gsm8k_benchmark.jsonl"
+OUTPUT_TOKENS = 120000
+FINAL_ANSWER = re.compile(r"####\s+(-?[0-9][0-9,.]*)\s*$")
 
 
-def _question(row: dict) -> str:
-    question = row.get("question")
-    if not isinstance(question, str):
-        raise ValueError("Every source row must contain a string question")
-    return question.strip()
-
-
-def _answer(row: dict) -> str:
-    answer = row.get("answer")
-    if not isinstance(answer, str):
-        raise ValueError("Every source row must contain a string answer")
-    return answer
-
-
-def render_prompt(rows: list[dict], row_index: int, rng: random.Random) -> str:
-    """Render lm-eval's default same-split 5-shot context for one row."""
-    current = rows[row_index]
-    sampled = [rows[index] for index in rng.sample(range(len(rows)), NUM_FEWSHOT + 1)]
-    demos = [row for row in sampled if row != current][:NUM_FEWSHOT]
-
-    context = "".join(f"Question: {_question(row)}\nAnswer: {_answer(row)}\n\n" for row in demos)
-    return f"{context}Question: {_question(current)}\nAnswer:"
-
-
-def _to_row(source_row: dict, language_code: str, row_index: int, prompt: str) -> dict:
-    source_key = f"{SOURCE_ID}@{SOURCE_REVISION}:{language_code}:{SOURCE_SPLIT}:{row_index}"
-    return {
-        "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, source_key)),
-        "question": _question(source_row),
-        "prompt": prompt,
-        "expected_answer": _answer(source_row),
-        "language": LANGUAGES[language_code],
-        "language_code": language_code,
-        "subset_for_metrics": language_code,
-        "judge_pass_stage": source_row.get("judge_pass_stage"),
-        "source_index": row_index,
-        "responses_create_params": {
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "temperature": 0.0,
-        },
-    }
+def build_rows(source: list[dict], *, languages: list[str] | None = None, source_sha256: str) -> list[dict]:
+    """Expand translated questions while retaining original numeric answer keys."""
+    selected = list(DEFAULT_LANGUAGES) if languages is None else languages
+    if not isinstance(selected, list) or not selected or len(set(selected)) != len(selected):
+        raise ValueError("languages must be a nonempty list of unique language codes")
+    if set(selected) - LANGUAGES.keys():
+        raise ValueError("Unsupported language code")
+    if not source:
+        raise ValueError("Source dataset must not be empty")
+    output, seen = [], set()
+    for index, row in enumerate(source):
+        source_id = row.get("id")
+        if not isinstance(source_id, str) or not source_id or source_id in seen:
+            raise ValueError(f"Missing or duplicate source id at row {index}")
+        seen.add(source_id)
+        reference = row.get("answer")
+        match = FINAL_ANSWER.search(reference) if isinstance(reference, str) else None
+        if not match:
+            raise ValueError(f"Missing original numeric answer at row {index}")
+        for code in selected:
+            question = row.get(f"question_{LANGUAGES[code]}_translation")
+            if not isinstance(question, str) or not question.strip():
+                raise ValueError(f"Missing translated question: row={index}, language={code}")
+            output.append(
+                {
+                    "uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, f"indic-gsm8k:{source_sha256}:{source_id}:{code}")),
+                    "source_id": source_id,
+                    "source_index": index,
+                    "source_sha256": source_sha256,
+                    "source_repository": SOURCE_ID,
+                    "source_revision": SOURCE_REVISION,
+                    "question": question,
+                    # Original answer keys are authoritative; translated worked solutions can differ.
+                    "expected_answer": reference,
+                    "language": LANGUAGES[code],
+                    "language_code": code,
+                    "subset_for_metrics": code,
+                    "responses_create_params": {"max_output_tokens": OUTPUT_TOKENS},
+                }
+            )
+    return output
 
 
 def prepare(
-    languages: list[str] | None = None,
-    output_fpath: Path = OUTPUT_FPATH,
+    *, source: Path | str | None = None, output: Path | str = OUTPUT_FPATH, languages: list[str] | None = None
 ) -> Path:
-    selected_languages = list(LANGUAGES) if languages is None else languages
-    if (
-        isinstance(selected_languages, str)
-        or not selected_languages
-        or len(set(selected_languages)) != len(selected_languages)
-    ):
-        raise ValueError("languages must contain unique language codes")
-    unknown = sorted(set(selected_languages) - LANGUAGES.keys())
-    if unknown:
-        raise ValueError(f"Unsupported languages: {', '.join(unknown)}")
+    """Download the pinned HF test split or use an identical local Parquet file."""
+    import pyarrow.parquet as pq
 
-    output_fpath.parent.mkdir(parents=True, exist_ok=True)
-    prepared_rows = []
-    for language_code in selected_languages:
-        dataset = load_dataset(
-            SOURCE_ID,
-            language_code,
-            split=SOURCE_SPLIT,
-            revision=SOURCE_REVISION,
-            token=True,
+    if source is None:
+        source = hf_hub_download(
+            repo_id=SOURCE_ID, filename=SOURCE_FILE, repo_type="dataset", revision=SOURCE_REVISION
         )
-        rows = [dict(row) for row in dataset]
-        if len(rows) < NUM_FEWSHOT + 1:
-            raise ValueError(f"Language {language_code} has fewer than {NUM_FEWSHOT + 1} rows")
+    source, output = Path(source), Path(output)
+    checksum = hashlib.sha256(source.read_bytes()).hexdigest()
+    if checksum != SOURCE_SHA256:
+        raise ValueError(f"Source checksum differs from {SOURCE_ID}@{SOURCE_REVISION}: {source}")
+    rows = build_rows(pq.read_table(source).to_pylist(), languages=languages, source_sha256=checksum)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_suffix(".tmp")
+    temporary.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    temporary.replace(output)
+    print(f"Wrote {len(rows)} zero-shot chat tasks from {source} (sha256={checksum})")
+    return output
 
-        rng = random.Random(FEWSHOT_SEED)
-        for row_index, source_row in enumerate(rows):
-            prompt = render_prompt(rows, row_index, rng)
-            prepared = _to_row(source_row, language_code, row_index, prompt)
-            prepared_rows.append(prepared)
 
-    output_fpath.write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in prepared_rows), encoding="utf-8"
-    )
-    print(f"Wrote {len(prepared_rows)} problems to {output_fpath}")
-    return output_fpath
+def is_prepared_data_current(fpath: Path) -> bool:
+    """Let Gym refresh a cached dataset when its source or generation limit differs."""
+    try:
+        with Path(fpath).open(encoding="utf-8") as stream:
+            row = json.loads(next(stream))
+        return (
+            row.get("source_repository") == SOURCE_ID
+            and row.get("source_revision") == SOURCE_REVISION
+            and row.get("source_sha256") == SOURCE_SHA256
+            and row.get("responses_create_params", {}).get("max_output_tokens") == OUTPUT_TOKENS
+        )
+    except (OSError, StopIteration, json.JSONDecodeError, AttributeError):
+        return False
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--languages", nargs="+", choices=LANGUAGES, default=list(LANGUAGES))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", type=Path, help="Local copy of the pinned HF test.parquet; otherwise download it")
+    parser.add_argument("--output", type=Path, default=OUTPUT_FPATH)
+    parser.add_argument("--languages", nargs="+", choices=LANGUAGES)
     args = parser.parse_args()
-    prepare(args.languages)
+    prepare(source=args.source, output=args.output, languages=args.languages)

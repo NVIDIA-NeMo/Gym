@@ -1,112 +1,157 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
-import random
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.indic.gsm8k import prepare as prepare_module
 
 
-def _rows(language_code: str) -> list[dict]:
-    return [
-        {
-            "question": f"  {language_code} question {index}?  ",
-            "answer": f"work {index} #### {index}",
-            "judge_pass_stage": "synthetic",
-        }
-        for index in range(8)
+def source_row() -> dict:
+    return {
+        "id": "one",
+        "question": "English question",
+        "answer": "Original work\n#### 18",
+        "answer_Hindi_translation": "bad translation #### 99",
+        **{
+            f"question_{name}_translation": f"{name} question\u2028line two"
+            for name in prepare_module.LANGUAGES.values()
+        },
+    }
+
+
+def test_translations_and_original_answers_without_demos() -> None:
+    rows = prepare_module.build_rows([source_row()], languages=["hi", "ta"], source_sha256="abc")
+    assert [r["question"] for r in rows] == ["Hindi question\u2028line two", "Tamil question\u2028line two"]
+    assert all(r["expected_answer"] == "Original work\n#### 18" for r in rows)
+    assert all(r["responses_create_params"] == {"max_output_tokens": 120000} for r in rows)
+    assert rows[0]["uuid"] != rows[1]["uuid"]
+    assert "prompt" not in rows[0]
+
+
+def test_default_languages_and_stable_source_identity() -> None:
+    rows = prepare_module.build_rows([source_row()], source_sha256="abc")
+    assert [r["language_code"] for r in rows] == [
+        "bn",
+        "gu",
+        "hi",
+        "kn",
+        "mr",
+        "ml",
+        "ne",
+        "or",
+        "pa",
+        "ta",
+        "te",
+        "ur",
     ]
+    assert rows == prepare_module.build_rows([source_row()], source_sha256="abc")
+    changed = prepare_module.build_rows([source_row()], source_sha256="different")
+    assert rows[0]["uuid"] != changed[0]["uuid"]
+    assert all(r["source_repository"] == "ai4bharat/indic-gsm8k" for r in rows)
 
 
-def test_render_prompt_matches_reference_sampling_and_format() -> None:
-    rows = _rows("hi")
-    rng = random.Random(prepare_module.FEWSHOT_SEED)
-    expected_rng = random.Random(prepare_module.FEWSHOT_SEED)
-    sampled_indices = expected_rng.sample(range(len(rows)), prepare_module.NUM_FEWSHOT + 1)
-    demo_indices = [index for index in sampled_indices if index != 0][: prepare_module.NUM_FEWSHOT]
-
-    prompt = prepare_module.render_prompt(rows, 0, rng)
-    expected = "".join(
-        f"Question: hi question {index}?\nAnswer: work {index} #### {index}\n\n" for index in demo_indices
-    )
-    expected += "Question: hi question 0?\nAnswer:"
-
-    assert prompt == expected
-    assert "\\n" not in prompt
+@pytest.mark.parametrize("change", [{"question_Hindi_translation": ""}, {"answer": "no final"}, {"id": None}])
+def test_invalid_source_data(change: dict) -> None:
+    with pytest.raises(ValueError):
+        prepare_module.build_rows([{**source_row(), **change}], languages=["hi"], source_sha256="abc")
 
 
-def test_prepare_pins_source_and_resets_rng_per_language(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("rows", [[], [source_row(), source_row()]])
+def test_empty_or_duplicate_source(rows: list[dict]) -> None:
+    with pytest.raises(ValueError):
+        prepare_module.build_rows(rows, languages=["hi"], source_sha256="abc")
+
+
+@pytest.mark.parametrize("languages", [[], ["hi", "hi"], "hi", ["unknown"]])
+def test_invalid_language_selection(languages: object) -> None:
+    with pytest.raises(ValueError):
+        prepare_module.build_rows([source_row()], languages=languages, source_sha256="abc")
+
+
+@pytest.fixture
+def parquet_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    source = tmp_path / "test.parquet"
+    pq.write_table(pa.Table.from_pylist([source_row()]), source)
+    monkeypatch.setattr(prepare_module, "SOURCE_SHA256", hashlib.sha256(source.read_bytes()).hexdigest())
+    return source
+
+
+def test_downloads_pinned_hf_source(parquet_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 
-    def fake_load_dataset(source_id, language_code, *, split, revision, token):
-        calls.append((source_id, language_code, split, revision, token))
-        return _rows(language_code)
+    def download(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return str(parquet_source)
 
-    monkeypatch.setattr(prepare_module, "load_dataset", fake_load_dataset)
-    output = tmp_path / "prepared.jsonl"
-    prepare_module.prepare(["hi", "ta"], output)
-
-    prepared = [json.loads(line) for line in output.read_text().splitlines()]
-    assert len(prepared) == 16
+    monkeypatch.setattr(prepare_module, "hf_hub_download", download)
+    output = prepare_module.prepare(output=tmp_path / "out.jsonl", languages=["hi"])
     assert calls == [
-        (
-            prepare_module.SOURCE_ID,
-            "hi",
-            prepare_module.SOURCE_SPLIT,
-            prepare_module.SOURCE_REVISION,
-            True,
-        ),
-        (
-            prepare_module.SOURCE_ID,
-            "ta",
-            prepare_module.SOURCE_SPLIT,
-            prepare_module.SOURCE_REVISION,
-            True,
-        ),
+        {
+            "repo_id": "ai4bharat/indic-gsm8k",
+            "filename": "test.parquet",
+            "repo_type": "dataset",
+            "revision": "e21f3ff7e9fe703a7f4faeefdba27801be278eb5",
+        }
     ]
-    assert prepared[0]["prompt"].replace("hi", "ta") == prepared[8]["prompt"]
-    assert prepared[0]["responses_create_params"] == {
-        "max_output_tokens": 4096,
-        "temperature": 0.0,
-    }
-    assert prepared[0]["subset_for_metrics"] == "hi"
-    assert prepared[8]["subset_for_metrics"] == "ta"
+    # Read physical JSONL records; U+2028 inside question text is not a record boundary.
+    with output.open(encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream]
+    assert len(rows) == 1
+    assert rows[0]["question"] == "Hindi question\u2028line two"
+    assert prepare_module.is_prepared_data_current(output)
 
 
-def test_config_disables_chat_template_and_pins_generation() -> None:
-    repo_root = Path(__file__).parents[4]
-    benchmark_config = OmegaConf.load(repo_root / "benchmarks/indic/gsm8k/config.yaml")
-    resolved = OmegaConf.create()
-    for config_path in benchmark_config.pop("config_paths"):
-        resolved = OmegaConf.merge(resolved, OmegaConf.load(repo_root / config_path))
-    resolved = OmegaConf.merge(resolved, benchmark_config)
+def test_local_copy_does_not_download(parquet_source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_download(**kwargs: object) -> str:
+        pytest.fail("Local preparation must not access the Hub")
 
-    model = resolved.policy_model.responses_api_models.vllm_model
-    assert model.use_completions_api is True
-    assert model.get("render_chat_template", False) is False
-    assert model.sampling_overrides.temperature == 0.0
-    assert list(model.sampling_overrides.stop) == ["Question:", "</s>", "<|im_end|>"]
+    monkeypatch.setattr(prepare_module, "hf_hub_download", unexpected_download)
+    output = prepare_module.prepare(
+        source=str(parquet_source), output=str(tmp_path / "out.jsonl"), languages=["as", "sa"]
+    )
+    with output.open() as stream:
+        assert [json.loads(line)["language_code"] for line in stream] == ["as", "sa"]
 
 
-@pytest.mark.parametrize("languages", [[], ["hi", "hi"], "hi"])
-def test_prepare_rejects_invalid_language_selection(languages, tmp_path) -> None:
-    with pytest.raises(ValueError, match="unique language codes"):
-        prepare_module.prepare(languages, tmp_path / "out.jsonl")
+def test_changed_source_preserves_output(parquet_source: Path, tmp_path: Path) -> None:
+    output = tmp_path / "out.jsonl"
+    output.write_text("previous complete data\n")
+    parquet_source.write_bytes(b"different dataset")
+    with pytest.raises(ValueError, match="checksum differs"):
+        prepare_module.prepare(source=parquet_source, output=output)
+    assert output.read_text() == "previous complete data\n"
 
 
-def test_failed_language_download_preserves_existing_output(monkeypatch, tmp_path) -> None:
-    def load(source_id, language_code, **kwargs):
-        if language_code == "ta":
-            raise RuntimeError("download failed")
-        return _rows(language_code)
+@pytest.mark.parametrize("content", ["", "invalid json\n", "null\n", "{}\n"])
+def test_rejects_stale_cached_data(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "out.jsonl"
+    path.write_text(content)
+    assert not prepare_module.is_prepared_data_current(path)
 
-    monkeypatch.setattr(prepare_module, "load_dataset", load)
-    output = tmp_path / "prepared.jsonl"
-    output.write_text("previous complete dataset\n")
-    with pytest.raises(RuntimeError, match="download failed"):
-        prepare_module.prepare(["hi", "ta"], output)
-    assert output.read_text() == "previous complete dataset\n"
+
+def test_missing_cached_data(tmp_path: Path) -> None:
+    assert not prepare_module.is_prepared_data_current(tmp_path / "missing.jsonl")
+
+
+def test_chat_config_routes_environment_agent_and_verifier() -> None:
+    root = Path(__file__).parents[4]
+    config = OmegaConf.load(root / "benchmarks/indic/gsm8k/config.yaml")
+    resources = OmegaConf.load(root / "resources_servers/gsm8k_reference/configs/gsm8k_reference.yaml")
+    model = config.policy_model.responses_api_models.vllm_model
+    assert model.use_completions_api is False
+    assert model.chat_template_kwargs.enable_thinking is True
+    assert not model.get("sampling_overrides")
+    environment = config.indic_gsm8k_environment_server.environment_servers.legacy_agent
+    assert environment.agent_server.name == "indic_gsm8k_simple_agent"
+    assert (
+        config.indic_gsm8k_simple_agent.responses_api_agents.simple_agent.resources_server.name
+        == "indic_gsm8k_resources_server"
+    )
+    assert resources.gsm8k_reference_simple_agent.responses_api_agents.simple_agent.max_steps == 1
