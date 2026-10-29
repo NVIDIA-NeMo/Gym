@@ -28,7 +28,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1417,8 +1417,18 @@ class SharedRolloutCollectionConfig(
             raise ValueError("environment_server_routes are required when environment_routing_mode=taskset")
         return self
 
-    def check_completion(self, *, expected: int, results: List[Dict[str, Any]]) -> None:
-        """Reject incomplete submitted runs after saving their partial artifacts."""
+    def check_completion(
+        self,
+        *,
+        expected: int,
+        results: List[Dict[str, Any]],
+        final_zero_rows: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        """Reject incomplete submitted runs after saving their partial artifacts.
+
+        ``final_zero_rows`` are failure rows that settle their rollout as a scored zero (see
+        ``_final_zero_failure_rows``): resume does not run them again, so they are completed samples.
+        """
         if not self.require_complete:
             return
         completed = len(
@@ -1426,6 +1436,11 @@ class SharedRolloutCollectionConfig(
                 (r.get("stage_index"), r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
                 for r in results
                 if r.get(NG_FAILURE_CLASS_KEY) is None and not r.get(NG_NO_PERSIST_KEY)
+            }
+            | {
+                (r.get("stage_index"), r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+                for r in final_zero_rows
+                if r.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
             }
         )
         if completed < expected:
@@ -2434,6 +2449,24 @@ def _failure_rows_counted_as_zero(
         _counted_failure_row(row)
         for key, row in latest_by_key.items()
         if key not in scored_keys and _counts_as_zero(row, wanted)
+    ]
+
+
+def _final_zero_failure_rows(
+    failures_fpaths: List[Path], scored_keys: set, *, retry_terminal_timeouts: bool
+) -> List[Dict[str, Any]]:
+    """The latest failure rows that settle their rollout as a scored zero: final, and marked by their producer.
+
+    Resume does not run such a rollout again and the metrics count it as 0, so its work is done. A row counted only
+    because ``count_failure_classes_as_zero`` names its class is not settled: that option scores the metrics, and
+    resume may still run the rollout.
+    """
+    return [
+        row
+        for key, row in _latest_failure_rows(failures_fpaths).items()
+        if key not in scored_keys
+        and row.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
+        and is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts)
     ]
 
 
@@ -4235,7 +4268,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 print(format_health_report(health_result))
                 export_run_health_timeouts(health_result)
 
-        config.check_completion(expected=expected_rollouts, results=persisted_results)
+        final_zero_rows = (
+            await asyncio.to_thread(
+                _final_zero_failure_rows,
+                [failures_fpath],
+                persisted_success_keys,
+                retry_terminal_timeouts=config.retry_terminal_timeouts,
+            )
+            if config.require_complete
+            else []
+        )
+        config.check_completion(expected=expected_rollouts, results=persisted_results, final_zero_rows=final_zero_rows)
         return results
 
     async def _call_aggregate_metrics(
