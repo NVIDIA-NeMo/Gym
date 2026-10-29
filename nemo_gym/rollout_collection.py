@@ -260,6 +260,22 @@ def is_unstarted_rollout_row(row: Mapping[str, Any]) -> bool:
     return is_omitted_rollout_row(row) and bool(row.get(NG_DISPATCH_DRAINED_KEY))
 
 
+# Set only on the omitted-rollout row that keeps the evidence of a failed /run with route_failures_to_sidecar off.
+NG_UNROUTED_RUN_ERROR_KEY = "_ng_unrouted_run_error"
+
+
+def is_non_superseding_rollout_row(row: Mapping[str, Any]) -> bool:
+    """Whether readers skip a sidecar row before they pick a rollout's latest attempt.
+
+    A row never started is no execution. A failed /run kept as evidence with routing off is no new outcome: the
+    attempt it records stands no more than before it was kept, so an older failure still stands and a later attempt
+    still replaces it. An interrupted ``record_omitted_rollouts`` row is neither and still hides older failures.
+    """
+    return is_unstarted_rollout_row(row) or (
+        is_omitted_rollout_row(row) and row.get(NG_UNROUTED_RUN_ERROR_KEY) is True
+    )
+
+
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 # Set by the producer of a final failure row that must be counted as a zero in the metrics, whatever
 # count_failure_classes_as_zero names (a rollout the evaluated model failed, for example).
@@ -2398,7 +2414,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
 
     An interrupted attempt that ``record_omitted_rollouts`` recorded is the rollout's latest execution but no
     failure: it hides any older failure, so the rollout is left out here and is missing. A row the dispatch budget
-    never started is no execution and is skipped.
+    never started, and the evidence of a failed /run with routing off, are skipped (``is_non_superseding_rollout_row``).
     """
     latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
     for fpath in failures_fpaths:
@@ -2410,7 +2426,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if is_unstarted_rollout_row(row):
+                if is_non_superseding_rollout_row(row):
                     continue
                 latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
     return {key: row for key, row in latest_by_key.items() if not is_omitted_rollout_row(row)}
@@ -2644,7 +2660,7 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if is_unstarted_rollout_row(row):
+                if is_non_superseding_rollout_row(row):
                     continue
                 latest[identity(row)] = row
                 if is_omitted_rollout_row(row):
@@ -3887,7 +3903,7 @@ class RolloutCollectionHelper(BaseModel):
                     # report are kept as an omitted-rollout row first: no reader counts it as a failure, an attempt
                     # or a score, so resume still runs the rollout and no denominator shrinks unasked.
                     write_started = perf_counter()
-                    omitted_bytes = orjson.dumps(omitted_rollout_record(result))
+                    omitted_bytes = orjson.dumps(omitted_rollout_record(result) | {NG_UNROUTED_RUN_ERROR_KEY: True})
                     failures_file.write(omitted_bytes + b"\n")
                     failures_file.flush()
                     _record_output_write(write_started, omitted_bytes)

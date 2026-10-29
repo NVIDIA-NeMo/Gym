@@ -23,7 +23,9 @@ resume attempt count are unchanged and resume still runs the rollout. When reade
 latest attempt, an interrupted one counts and hides older failures; one never started is skipped.
 
 A failed agent ``/run`` that ends the run because ``route_failures_to_sidecar`` is off gets the same row, whatever
-``record_omitted_rollouts`` says: its reply was lost, so the rollout produced no result.
+``record_omitted_rollouts`` says: its reply was lost, so the rollout produced no result. That row also carries
+``_ng_unrouted_run_error``: it is evidence, not a new execution, so readers skip it before they pick the latest
+attempt. An older failure of the rollout still stands, and a later attempt still replaces it.
 """
 
 from typing import Any, Dict, Mapping
