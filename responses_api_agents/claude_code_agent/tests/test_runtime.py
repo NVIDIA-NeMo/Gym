@@ -164,7 +164,7 @@ async def test_corrupted_compressed_host_cache_is_rebuilt(tmp_path, monkeypatch)
 @pytest.mark.asyncio
 async def test_bounded_upload_reassembles_bytes_and_removes_parts(tmp_path):
     archive = tmp_path / "source.gz"
-    data = bytes(range(256)) * (1024 * 24 + 7)
+    data = bytes(range(256)) * (1024 * 80 + 7)
     archive.write_bytes(data)
     directory = tmp_path / "remote session"
     directory.mkdir()
@@ -188,7 +188,7 @@ async def test_bounded_upload_reassembles_bytes_and_removes_parts(tmp_path):
     destination = await runtime._upload_archive(sandbox, archive, str(directory), 60)
     assert Path(destination).read_bytes() == data
     assert not list(directory.glob("*.part"))
-    assert max(sizes) <= 1024 * 1024 and sum(sizes) == len(data)
+    assert max(sizes) <= runtime._UPLOAD_CHUNK_BYTES and sum(sizes) == len(data)
     assert 1 <= maximum <= 4
 
 
@@ -271,7 +271,7 @@ async def test_host_cache_rejects_previously_shared_write_access(tmp_path, monke
 @pytest.mark.asyncio
 async def test_concurrent_seeds_bound_staged_chunks_and_uploads_across_sandboxes(tmp_path):
     archive = tmp_path / "source.gz"
-    data = bytes(range(256)) * (1024 * 24 + 7)
+    data = bytes(range(256)) * (1024 * 80 + 7)
     archive.write_bytes(data)
     release = asyncio.Event()
     full = asyncio.Event()
@@ -306,7 +306,7 @@ async def test_concurrent_seeds_bound_staged_chunks_and_uploads_across_sandboxes
         await asyncio.wait_for(full.wait(), timeout=5)
         # Paused transfers keep their source files: a full per-seed split would exceed this bound.
         assert (
-            sum(path.stat().st_size for directory in staging for path in directory.glob("*.part")) <= 4 * 1024 * 1024
+            sum(path.stat().st_size for directory in staging for path in directory.glob("*.part")) <= 32 * 1024 * 1024
         )
         release.set()
         destinations = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
@@ -321,7 +321,7 @@ async def test_concurrent_seeds_bound_staged_chunks_and_uploads_across_sandboxes
 @pytest.mark.asyncio
 async def test_failed_upload_releases_slots_for_later_seeds(tmp_path):
     archive = tmp_path / "source.gz"
-    archive.write_bytes(b"x" * 5 * 1024 * 1024)
+    archive.write_bytes(b"x" * 40 * 1024 * 1024)
     upload = AsyncMock(side_effect=RuntimeError("transfer failed"))
     with pytest.raises(ExceptionGroup, match="TaskGroup"):
         await runtime._upload_archive(SimpleNamespace(upload=upload), archive, "/remote", 60)

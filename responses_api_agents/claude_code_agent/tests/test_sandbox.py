@@ -703,3 +703,27 @@ def test_training_command_presets_title_to_prevent_background_model_call(skills_
     else:
         assert command[command.index("--name") + 1] == "Gym rollout"
         assert command.index("--name") < command.index("--")
+
+
+@pytest.mark.asyncio
+async def test_seed_admits_whole_setup_before_starting_install_deadline(monkeypatch):
+    from responses_api_agents.claude_code_agent import runtime
+
+    monkeypatch.setattr(runtime, "_RUNTIME_SETUP_SLOTS", asyncio.Semaphore(1))
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock())
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: object())
+    active = maximum = 0
+
+    async def install(*args, **kwargs):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.03)
+        active -= 1
+
+    monkeypatch.setattr(app, "install_sandbox_runtime", install)
+    instance = agent(sandbox_install_timeout_seconds=0.1, sandbox_install_queue_timeout_seconds=2)
+    states = await asyncio.gather(*(instance._seed_agent_session_state(seed()) for _ in range(8)))
+    assert len(states) == 8 and maximum == 1
+    assert runtime._RUNTIME_SETUP_SLOTS._value == 1

@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 import stat
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from shlex import quote
 from tempfile import TemporaryDirectory
@@ -26,6 +28,19 @@ _CACHE_LOCKS: dict[Path, asyncio.Lock] = {}
 _HASH_LOCKS: dict[Path, asyncio.Lock] = {}
 _VERIFIED: dict[Path, tuple[tuple[int, ...], str]] = {}
 _UPLOAD_SLOTS = asyncio.Semaphore(4)
+_RUNTIME_SETUP_SLOTS = asyncio.Semaphore(4)
+_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+@asynccontextmanager
+async def runtime_setup_admission(*, timeout: float) -> AsyncIterator[None]:
+    """Bound cold setups; queue time has its own deadline and consumes no install budget."""
+    async with asyncio.timeout(timeout):
+        await _RUNTIME_SETUP_SLOTS.acquire()
+    try:
+        yield
+    finally:
+        _RUNTIME_SETUP_SLOTS.release()
 
 
 def _private_directory(path: Path) -> None:
@@ -178,7 +193,7 @@ async def _upload_archive(sandbox: AsyncSandbox, archive: Path, directory: str, 
                 while True:
                     await _UPLOAD_SLOTS.acquire()
                     try:
-                        data = await asyncio.to_thread(source.read, 1024 * 1024)
+                        data = await asyncio.to_thread(source.read, _UPLOAD_CHUNK_BYTES)
                         if not data:
                             _UPLOAD_SLOTS.release()
                             break
