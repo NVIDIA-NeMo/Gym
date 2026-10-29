@@ -17,7 +17,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from nemo_gym.token_id_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
 from nemo_gym.token_id_capture.staging.records import RolloutManifest, RolloutRemoval
@@ -34,7 +34,12 @@ class LedgerBatchRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    rollout_ids: list[str] = Field(min_length=1, max_length=MAX_LEDGER_BATCH)
+    # ``rollout_ids`` is the field's earlier name, accepted for one release.
+    capture_keys: list[str] = Field(
+        min_length=1,
+        max_length=MAX_LEDGER_BATCH,
+        validation_alias=AliasChoices("capture_keys", "rollout_ids"),
+    )
 
 
 def install_rollout_control_routes(
@@ -65,14 +70,14 @@ def install_rollout_control_routes(
         if reason is not None:
             raise HTTPException(status_code=409, detail=reason)
 
-    @router.get("/rollouts/{rollout_id}/manifest")
+    @router.get("/rollouts/{capture_key}/manifest")
     async def rollout_manifest(
-        rollout_id: str,
+        capture_key: str,
         authorization: str | None = Header(default=None),
     ) -> dict:
         check_auth(authorization)
         try:
-            return await lineage_store.manifest(rollout_id)
+            return await lineage_store.manifest(capture_key)
         except RolloutRetiredError as error:
             # Gone, not empty: an empty manifest would read as a rollout that made no calls.
             raise HTTPException(status_code=410, detail=str(error)) from error
@@ -87,7 +92,7 @@ def install_rollout_control_routes(
         check_auth(authorization)
         check_removal()
         try:
-            return await lineage_store.retire(body.rollout_ids)
+            return await lineage_store.retire(body.capture_keys)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -99,7 +104,7 @@ def install_rollout_control_routes(
         check_auth(authorization)
         check_removal()
         try:
-            return await lineage_store.delete(body.rollout_ids)
+            return await lineage_store.delete(body.capture_keys)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -139,43 +144,43 @@ class RolloutControlClient:
         self._headers = {"Authorization": f"Bearer {auth_token}"}
         self._request_timeout_s = request_timeout_s
 
-    async def manifest(self, rollout_id: str) -> RolloutManifest:
+    async def manifest(self, capture_key: str) -> RolloutManifest:
         """Fetch a rollout's manifest. A retired rollout raises ``RolloutRetiredError``."""
         from nemo_gym.token_id_capture.store import validate_rollout_id
 
         # Validate before building the URL: dot segments are normalized, so "../rollouts/r1" would fetch r1.
-        validate_rollout_id(rollout_id)
-        response = await self._request("GET", f"/rollouts/{rollout_id}/manifest")
+        validate_rollout_id(capture_key)
+        response = await self._request("GET", f"/rollouts/{capture_key}/manifest")
         if response.status == 410:
-            raise RolloutRetiredError(f"rollout {rollout_id} is retired: {await response.text()}")
+            raise RolloutRetiredError(f"rollout {capture_key} is retired: {await response.text()}")
         if response.status != 200:
             raise RuntimeError(
-                f"rollout {rollout_id} manifest fetch failed: HTTP {response.status} {await response.text()}"
+                f"rollout {capture_key} manifest fetch failed: HTTP {response.status} {await response.text()}"
             )
         manifest = RolloutManifest.model_validate(await response.json())
-        if manifest.capture_key != rollout_id:
-            raise ValueError(f"asked for the manifest of rollout {rollout_id} but got rollout {manifest.capture_key}")
+        if manifest.capture_key != capture_key:
+            raise ValueError(f"asked for the manifest of rollout {capture_key} but got rollout {manifest.capture_key}")
         return manifest
 
-    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemoval:
+    async def retire(self, capture_keys: Sequence[str]) -> RolloutRemoval:
         """Retire ledgers; see ``CaptureLedger.retire``. Retrying after a failure is safe."""
-        return await self._remove("retire", rollout_ids)
+        return await self._remove("retire", capture_keys)
 
-    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemoval:
+    async def delete(self, capture_keys: Sequence[str]) -> RolloutRemoval:
         """Delete ledgers and their fences; see ``CaptureLedger.delete``. Retrying after a failure is safe."""
-        return await self._remove("delete", rollout_ids)
+        return await self._remove("delete", capture_keys)
 
-    async def _remove(self, action: str, rollout_ids: Sequence[str]) -> RolloutRemoval:
+    async def _remove(self, action: str, capture_keys: Sequence[str]) -> RolloutRemoval:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
         # Validate and deduplicate the whole list before the first request. Batch by batch, a bare string
         # would become one-character IDs, an invalid ID in a later batch would fail after earlier batches
         # had changed state, and an ID repeated across batches would be reported both removed and absent.
-        rollout_ids = validate_rollout_ids(rollout_ids)
+        capture_keys = validate_rollout_ids(capture_keys)
         result = RolloutRemoval()
-        for start in range(0, len(rollout_ids), MAX_LEDGER_BATCH):
-            batch = rollout_ids[start : start + MAX_LEDGER_BATCH]
-            response = await self._request("POST", f"/rollouts/{action}", json={"rollout_ids": batch})
+        for start in range(0, len(capture_keys), MAX_LEDGER_BATCH):
+            batch = capture_keys[start : start + MAX_LEDGER_BATCH]
+            response = await self._request("POST", f"/rollouts/{action}", json={"capture_keys": batch})
             if response.status != 200:
                 raise RuntimeError(
                     f"{action} of {len(batch)} rollout ledgers failed: HTTP {response.status} {await response.text()}"

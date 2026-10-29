@@ -37,7 +37,7 @@ HANDLER_CLASSES = pytest.mark.parametrize(
 
 def _root_context(store: InMemoryLineageStore) -> CaptureContext:
     return CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="c1",
         token_sink=None,
         lineage_store=store,
@@ -255,7 +255,7 @@ async def test_only_framework_capture_persists_selection_and_validation_evidence
         assert context.committed
         await store.close()
         reopened = FileLineageStore(tmp_path)
-        row = (await reopened.manifest(context.rollout_id))["records"][0]
+        row = (await reopened.manifest(context.capture_key))["records"][0]
         assert bool(row["output_items"]) is framework
         assert row["response_status"] == ("completed" if framework else None)
         assert bool(row["last_output_item"]) is framework

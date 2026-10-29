@@ -45,7 +45,7 @@ async def _record_failure(ledger, rollout_id: str) -> None:
 async def test_retire_route_removes_ledgers_and_fences_them(client, ledger, tmp_path):
     await _record_failure(ledger, "r1")
 
-    response = client.post(RETIRE, json={"rollout_ids": ["r1", "r2"]}, headers=AUTH)
+    response = client.post(RETIRE, json={"capture_keys": ["r1", "r2"]}, headers=AUTH)
 
     assert response.status_code == 200
     assert response.json() == {"removed": ["r1"], "absent": ["r2"]}
@@ -58,28 +58,39 @@ async def test_retire_route_removes_ledgers_and_fences_them(client, ledger, tmp_
 @pytest.mark.asyncio
 async def test_delete_route_removes_the_fence(client, ledger):
     await _record_failure(ledger, "r1")
-    client.post(RETIRE, json={"rollout_ids": ["r1"]}, headers=AUTH)
+    client.post(RETIRE, json={"capture_keys": ["r1"]}, headers=AUTH)
 
-    response = client.post(DELETE, json={"rollout_ids": ["r1"]}, headers=AUTH)
+    response = client.post(DELETE, json={"capture_keys": ["r1"]}, headers=AUTH)
 
     assert response.status_code == 200
     await _record_failure(ledger, "r1")
     assert await ledger.has_rows("r1")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["capture_keys", "rollout_ids"])
+async def test_retire_route_accepts_the_earlier_body_field_name(client, ledger, field):
+    await _record_failure(ledger, "r1")
+
+    response = client.post(RETIRE, json={field: ["r1"]}, headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json() == {"removed": ["r1"], "absent": []}
+
+
 @pytest.mark.parametrize("route", [RETIRE, DELETE])
 def test_ledger_routes_require_the_bearer_token(client, route):
     for headers in ({}, {"Authorization": "Bearer wrong"}):
-        assert client.post(route, json={"rollout_ids": ["r1"]}, headers=headers).status_code == 401
+        assert client.post(route, json={"capture_keys": ["r1"]}, headers=headers).status_code == 401
 
 
 @pytest.mark.parametrize("route", [RETIRE, DELETE])
 @pytest.mark.parametrize(
     "body",
     [
-        {"rollout_ids": []},
-        {"rollout_ids": [f"r{index}" for index in range(control_routes.MAX_LEDGER_BATCH + 1)]},
-        {"rollout_ids": ["r1"], "unknown": True},
+        {"capture_keys": []},
+        {"capture_keys": [f"r{index}" for index in range(control_routes.MAX_LEDGER_BATCH + 1)]},
+        {"capture_keys": ["r1"], "unknown": True},
     ],
 )
 def test_ledger_routes_reject_malformed_batches(client, route, body):
@@ -90,7 +101,7 @@ def test_ledger_routes_reject_malformed_batches(client, route, body):
 @pytest.mark.parametrize("route", [RETIRE, DELETE])
 async def test_ledger_routes_reject_an_invalid_rollout_id_without_changing_anything(client, ledger, route):
     await _record_failure(ledger, "r1")
-    response = client.post(route, json={"rollout_ids": ["r1", "a/b"]}, headers=AUTH)
+    response = client.post(route, json={"capture_keys": ["r1", "a/b"]}, headers=AUTH)
     assert response.status_code == 400
     assert await ledger.has_rows("r1")
 
@@ -116,7 +127,7 @@ async def test_client_splits_large_batches(monkeypatch, action):
     async def fake_request(method, path, **kwargs):
         body = kwargs["json"]
         calls.append((method, path, body))
-        return _Response(200, {"removed": body["rollout_ids"][:1], "absent": body["rollout_ids"][1:]})
+        return _Response(200, {"removed": body["capture_keys"][:1], "absent": body["capture_keys"][1:]})
 
     client = RolloutControlClient("http://model", auth_token=TOKEN, request_timeout_s=1.0)
     monkeypatch.setattr(client, "_request", fake_request)
@@ -124,8 +135,8 @@ async def test_client_splits_large_batches(monkeypatch, action):
     result = await getattr(client, action)(["r1", "r2", "r3"])
 
     assert calls == [
-        ("POST", f"/rollouts/{action}", {"rollout_ids": ["r1", "r2"]}),
-        ("POST", f"/rollouts/{action}", {"rollout_ids": ["r3"]}),
+        ("POST", f"/rollouts/{action}", {"capture_keys": ["r1", "r2"]}),
+        ("POST", f"/rollouts/{action}", {"capture_keys": ["r3"]}),
     ]
     assert result.removed == ["r1", "r3"]
     assert result.absent == ["r2"]
@@ -193,7 +204,7 @@ async def test_client_reports_an_id_repeated_across_batches_once(client, ledger,
 @pytest.mark.asyncio
 async def test_manifest_route_reports_a_retired_rollout_as_gone(client, ledger, monkeypatch):
     await _record_failure(ledger, "r1")
-    client.post(RETIRE, json={"rollout_ids": ["r1"]}, headers=AUTH)
+    client.post(RETIRE, json={"capture_keys": ["r1"]}, headers=AUTH)
 
     response = client.get(f"{CONTROL_ROUTE_PREFIX}/rollouts/r1/manifest", headers=AUTH)
 
@@ -203,7 +214,7 @@ async def test_manifest_route_reports_a_retired_rollout_as_gone(client, ledger, 
 @pytest.mark.asyncio
 async def test_client_reports_a_retired_manifest_with_the_typed_error(client, ledger, monkeypatch):
     await _record_failure(ledger, "r1")
-    client.post(RETIRE, json={"rollout_ids": ["r1"]}, headers=AUTH)
+    client.post(RETIRE, json={"capture_keys": ["r1"]}, headers=AUTH)
 
     with pytest.raises(RolloutRetiredError):
         await _client_over(client, monkeypatch).manifest("r1")
