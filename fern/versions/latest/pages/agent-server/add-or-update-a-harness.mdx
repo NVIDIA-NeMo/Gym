@@ -43,6 +43,8 @@ An adapter can stop at any level below. Each level adds work and enables a speci
 | Environment tools and task sandboxes | The same agent runs against environment-provided tools and sandboxes, across benchmarks. | Map tool grants and `SandboxAccess` into the harness's configuration. See [Integration contracts](#integration-contracts). | A second pairing that works through configuration changes alone. |
 | Training | Exact token IDs and log probabilities for policy optimization. | Send every model call that can return policy-generated text through the training-capture route. See [Route every model call through the Model Server](#route-every-model-call-through-the-model-server). | `_ng_token_capture` metrics on the collected rollouts, with `mask_sample` absent or `false`. |
 
+An adapter that stops at Evaluation returns no invocation or turn records, so its rollouts are `unobserved` in [rollout health](/main/evaluation/rollout-health) and fail the evidence check. That is expected at that level. Its close still returns an `AgentObservationBundle` whose gaps name the missing evidence.
+
 ### What you write
 
 An adapter supplies the knowledge that is specific to the harness or framework:
@@ -265,6 +267,31 @@ The current adapters support the following tool sources:
 When a tool belongs to the task, prefer a Resources Server tool grant over a built-in harness tool. Different agents can then share one implementation, and the adapter works across environments without benchmark-specific changes. Use built-in harness tools for behavior that belongs to the harness, such as its shell or file editor. See [Tools in Agent vs. Resources Server](/main/agent-server/integrate-existing-agents#tools-in-agent-vs-resources-server).
 
 Document the supported tool sources, the model API, and the rejected options in the adapter's README.
+
+#### MCP grant integration
+
+With `resources_tool_transports: [mcp]`, an episode's `tool_accesses` can contain a grant like this:
+
+```json
+{
+  "kind": "mcp",
+  "name": "task_tools",
+  "required": true,
+  "connection": {
+    "transport": "streamable_http",
+    "url": "http://resources:8080/mcp",
+    "headers": {"Authorization": "Bearer <episode-tool-token>"}
+  }
+}
+```
+
+Map the grant from `effective_tool_accesses(body)` into the pinned harness's remote MCP client configuration. Preserve the supplied URL and headers: they carry the episode's tool access, so a static URL or interactive login is not a substitute. Keep credentials out of diagnostics. Check server and tool names for collisions after any renaming the harness applies, including names from its static MCP configuration.
+
+Accepting the seed or writing that configuration does not prove the harness consumes the grant. If the runtime has a required-server setting that stops the run before inference when a server does not connect, use it. If the runtime only logs an MCP failure and continues, add a bounded check that connects and lists the server's tools without inference, such as a preflight during seed. When enforcement depends on a plugin or hook that the runtime skips silently if it fails to load, have it write a record that it ran, and fail the activation when that record is missing. Some runtimes apply one MCP timeout to both connecting and each tool call; there, a timeout sized for connecting also cuts long tool calls short.
+
+MCP access and sandbox access are separate capabilities. A Resources Server can grant MCP tools without returning `sandbox_access`. An adapter that needs a sandbox must then use a configured agent-owned provider or reject the unsupported seed explicitly. Adding a provider does not add MCP or `direct_http` support. Close disconnects MCP clients; it stops an agent-owned sandbox and leaves a borrowed sandbox to its owner.
+
+Validate grant support with an authenticated MCP fixture and a real harness run: confirm tool discovery, an actual tool call, and the tool result reaching the model. Also test unavailable required servers (no inference or gradable answer), optional-server failure, name collisions, cleanup, and, when enforcement depends on a plugin or hook, a run where it does not load. For a sandboxed adapter, exercise both borrowed and agent-owned sandboxes when both are supported. State which transports the adapter consumes; a successful sandbox-only rollout with `resources_tool_transports: []` does not establish MCP support.
 
 ## Configure the adapter
 
@@ -589,6 +616,10 @@ Some frameworks change their behavior based on a model or runtime profile. For e
 
 Return a `NeMoGymResponse` with text, reasoning, tool calls and results, usage, and status where available. Collect [rollout evidence](/main/observability/rollout-evidence#add-evidence-to-a-custom-agent): tool timing, model-call references, aggregated usage, and explicit evidence gaps.
 
+Set the response status by the harness's own rule for a failed run, read from its source at the pinned version. An error that the harness ignores or recovers from, such as a subagent's error or a failed model call followed by a successful one, must not fail a run that finished.
+
+Report aggregate usage only when every model call has a usage record. Collect model-call references from every record the harness writes, such as its event log and its telemetry, because each can miss calls the other has. When a call has no usage record, leave usage unknown and record an `ObservationGap` instead of reporting a subtotal.
+
 When a harness item has no exact Responses API equivalent, decide whether to convert it, drop it, or keep it only as an artifact. Record anything that is lost as an `ObservationGap` with a specific code, and never drop tool calls or their results. Keep the harness's raw output and execution artifacts, including the ones available after a failure.
 
 ### Keep execution health separate from reward
@@ -745,6 +776,8 @@ python scripts/run_harness_conformance.py \
 
 The runner uses scripted model replies and real local tools, then runs the evidence checker automatically. Review `conformance_report.md`, fix missing or inconsistent evidence, and rerun. The P0 gate passes only when every applicable P0 check passes, including ownership and call-to-step attribution. TE labels group results; they do not grant exemptions.
 
+The scripted replies call the shell tool that the harness lists in its model request's `tools`, so the probes apply only to a harness that offers the model a shell tool through function calling. The runner recognizes a fixed set of shell-tool names and argument shapes; the [runner guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/scripts/harness_conformance/README.md) says how to extend it for a different shell tool. An adapter without a shell tool, such as a framework adapter that runs only its own tools inside the Agent Server, or a harness that runs commands it reads from the model's text, cannot run them. Say so in the PR, and validate the adapter with its session tests, a real pairing, and the saved-rollout inspection below.
+
 Also check saved rollouts from each target sandbox pairing:
 
 ```bash
@@ -764,10 +797,22 @@ Record evidence conformance and sandbox lifecycle validation separately, because
 - **Process termination.** Use real Linux processes. Cover tool commands in the harness group, with grandchildren, under a harness that exits on `SIGTERM` and one that must be killed, for both a deadline and a close. A tool in the harness group, or in its own session while the harness still runs, must not change the task after a confirmed receipt, and a detached service must survive. Check that every harness process shares the supervised process group, and that a zombie does not block confirmation. Read the process state from `/proc/<pid>/stat`, because `os.kill(pid, 0)` also succeeds for a zombie. Run the `sandbox`-marked tests with the local provider, which exposes a surviving process that holds the exec output pipe open.
 - **Test hygiene.** Bound every wait in lifecycle tests, for example with `asyncio.wait_for()`, so that a regression fails instead of hanging. Check that each new regression test fails when you revert the fix it covers.
 - **Task environment.** Confirm that tool shells keep the task's `HOME` and `XDG_*` directories, and that files a tool writes under `~` are visible to verification.
-- **Real smoke test.** Run a real model on a real task with tools and verification. Confirm that the harness runs in the sandbox, that the agent closes before verification, and that the sandbox owner cleans it up. Inspect failures, traces, artifacts, and grading coverage.
+- **Real smoke test.** Run a real model on a real task with tools and verification. Confirm that the harness runs in the sandbox, that the agent closes before verification, and that the sandbox owner cleans it up. Inspect failures, traces, artifacts, and grading coverage. To collect rows you prepared as the benchmark's README shows, start the servers with `gym env start --config <run.yaml>`, then run `gym eval run --no-serve --config <run.yaml> --input <tasks.jsonl> --output <run_dir>/rollouts.jsonl`. Without `--no-serve`, `gym eval run` accepts only the prepared dataset of the requested split. A configuration that resolves and validates can still fail when its servers start, so start them before you claim a pairing works.
 - **Composition.** Show a second compatible pairing that works through configuration changes alone. Record versions and unsupported combinations.
 - **Upgrades.** Compare the same harness before and after the upgrade with a fixed model, tasks, prompts, sampling parameters, limits, images, verifier, and concurrency. Compare scores and failures. Different harnesses do not need to score the same.
 - **Isolation.** Run concurrent sessions with different configurations and credentials, and check that no setting, credential, or file from one session reaches another.
 - **Scale.** Measure setup time, memory, process count, and close latency before you scale up. Validate [training support](/main/tutorials/training-tutorials/external-agent-harnesses) separately from inference.
 
 In the PR, include the commands, versions, evidence, limitations, tests, and pre-commit results.
+
+### Terminal-Bench 2.1 full evaluation
+
+Before merging a new harness or a harness upgrade that claims Terminal-Bench 2.1 support, run the complete benchmark task set at a pinned revision with a real model. This applies at every capability level, including Evaluation. Small-sample smoke runs and scripted conformance probes do not satisfy this requirement.
+
+Use the [benchmark's configuration and sandbox ownership](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/README.md), with golden-patch mode disabled. Include every task with 8 repeats (`num_repeats: 8`, as the benchmark's [OpenCode configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/opencode.yaml) sets); the README's run configuration declares none, so set it yourself. Remove smoke-only task filters and limits. Record the following in the PR:
+
+- The Gym commit, benchmark revision, harness and model versions, sandbox provider and images, resolved configuration, sampling settings, budgets, timeouts, repeats, and evaluation commands.
+- The expected, attempted, graded, and missing task/repeat counts; aggregate score and its denominator; per-task rewards; and all failed or incomplete evaluations. Keep infrastructure failures separate from valid zero rewards, and explain exclusions and retries. Missing task/repeat outcomes mean the results are incomplete.
+- Links to the retained rollouts, verifier outputs, failure sidecars, and `quality_summary.json`. Include the saved-rollout evidence-check result: from Observability up it must pass; at Evaluation, record the failure and the gaps declared by the close bundle.
+
+For an upgrade, provide full before/after results with the same model, tasks, prompts, sampling, limits, images, verifier, and concurrency. Every task must be accounted for; the harness does not have to solve every task.

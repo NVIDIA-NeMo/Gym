@@ -455,6 +455,50 @@ async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):
     assert invocation.conversation[-1].content[0].text == "Fixed"
 
 
+async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, tmp_path):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    export = json.loads(sandbox.events)
+    export["messages"][-1]["parts"].append(
+        {
+            "type": "tool",
+            "callID": "running-shell",
+            "tool": "bash",
+            "state": {"status": "running", "input": {"command": "sleep 60"}, "metadata": {"output": "started"}},
+        }
+    )
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+
+    async def stop_requested():
+        # The process supervisor reports a requested stop as a forced exit, not as a timeout.
+        sandbox.result["return_code"] = 241
+        sandbox.exited.set()
+        await asyncio.sleep(0)
+
+    sandbox.request_stop.side_effect = stop_requested
+    request, session_id, task = await activate(agent, sandbox)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    records = closed.agent_observations.records
+    agent_sandbox = next(record for record in records if record.kind == "sandbox")
+    assert (agent_sandbox.outcome, agent_sandbox.error_type, agent_sandbox.exit_code) == (
+        "cancelled",
+        "cancelled",
+        241,
+    )
+    tools = {record.tool_call_id: record for record in records if record.kind == "tool_call"}
+    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("cancelled", "invocation_cancelled")
+    assert tools["tool-1"].status != "cancelled"
+    invocation = next(record for record in records if record.kind == "agent_invocation")
+    assert {"type": "function_call_output", "call_id": "running-shell", "output": "started"}.items() <= next(
+        item.model_dump()
+        for item in invocation.conversation
+        if getattr(item, "call_id", None) == "running-shell" and item.type == "function_call_output"
+    ).items()
+
+
 async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
