@@ -125,6 +125,15 @@ class HarborVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+class HarborVerifierSetupError(RuntimeError):
+    """Harbor could not move the verifier's files to or from the sandbox, so the trial was never measured.
+
+    ``/run`` fails with it instead of returning a reward of 0: the collector then records the rollout as a failed
+    ``/run`` (a failures-sidecar row with ``route_failures_to_sidecar``, otherwise the end of the run), so an
+    infrastructure failure is not scored as a model failure.
+    """
+
+
 def _find_trial_dir_with_result(job_dir: Path) -> Optional[Path]:
     if not job_dir.exists():
         return None
@@ -317,6 +326,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 input_messages = []
                 usage = None
                 reward = 0.0
+
+            setup_failure = HarborAgentUtils.verifier_setup_failure(trial_result)
+            if setup_failure is not None:
+                raise HarborVerifierSetupError(f"{instance_id}: {setup_failure}")
 
             response = HarborAgentUtils.get_default_response_object()
             response["model"] = policy_model_name

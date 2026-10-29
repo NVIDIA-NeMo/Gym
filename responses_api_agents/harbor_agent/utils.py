@@ -28,6 +28,11 @@ from nemo_gym.openai_utils import (
 )
 
 
+# Harbor's verifier raises these when uploading the tests to the sandbox, or downloading the verifier's output from
+# it, fails; the verifier then reports no result.
+VERIFIER_SETUP_EXCEPTIONS = frozenset({"AddTestsDirError", "DownloadVerifierDirError"})
+
+
 @dataclass
 class HarborAgentUtils:
     @staticmethod
@@ -87,6 +92,22 @@ class HarborAgentUtils:
             "safety_identifier": None,
             "store": True,
         }
+
+    @staticmethod
+    def verifier_setup_failure(trial_result: Optional[Dict[str, Any]]) -> Optional[str]:
+        """``"<exception type>: <message>"`` when Harbor could not move the verifier's files to or from the
+        sandbox (``harbor.verifier.verifier``) and the trial has no verifier result, else ``None``.
+
+        Such a trial was never measured, so its missing reward is not a 0 the model earned. A verifier that ran and
+        failed (a timeout, no reward file) and an agent timeout are not setup failures and stay scored zeros.
+        """
+        if not trial_result or trial_result.get("verifier_result") is not None:
+            return None
+        exception_info = trial_result.get("exception_info") or {}
+        exception_type = exception_info.get("exception_type")
+        if exception_type not in VERIFIER_SETUP_EXCEPTIONS:
+            return None
+        return f"{exception_type}: {exception_info.get('exception_message') or ''}"
 
     @staticmethod
     def extract_reward(verifier_result: Optional[Dict[str, Any]]) -> float:
