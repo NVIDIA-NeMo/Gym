@@ -1076,7 +1076,7 @@ class TestBenchmarkLifecycle:
         config.tool_servers = [ResourcesServerRef(type="resources_servers", name="tavily")]
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.sandbox_server_url", lambda _, **kwargs: "http://10.0.0.3:63123"
+            "nemo_gym.agents.agent_tools.sandbox_server_url", lambda _, **kwargs: "http://10.0.0.3:63123"
         )
         monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
         request = MagicMock(cookies={"session": "original"})

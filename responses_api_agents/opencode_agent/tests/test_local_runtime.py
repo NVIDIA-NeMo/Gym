@@ -11,7 +11,7 @@ from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
-from nemo_gym.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY
+from nemo_gym.agents.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage

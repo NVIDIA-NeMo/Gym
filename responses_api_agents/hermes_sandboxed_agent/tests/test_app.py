@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.agent_utils.supervisor_client import DEFAULT_CLEANUP_TIMEOUT
+from nemo_gym.agents import DEFAULT_CLEANUP_TIMEOUT
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult

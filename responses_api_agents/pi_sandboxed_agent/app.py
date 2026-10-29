@@ -32,7 +32,14 @@ from fastapi import Request
 from openai.types.responses.response import IncompleteDetails
 from pydantic import Field
 
-from nemo_gym.base_responses_api_agent import Body, SimpleResponsesAPIAgent
+from nemo_gym.agents import (
+    Body,
+    SimpleResponsesAPIAgent,
+    restricted_network_policy,
+    sandbox_server_url,
+    seed_mcp_servers,
+    verify_agent_response,
+)
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
@@ -44,12 +51,6 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
-)
-from nemo_gym.sandbox.agent_tools import (
-    restricted_network_policy,
-    sandbox_server_url,
-    seed_mcp_servers,
-    verify_agent_response,
 )
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint

@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 from pydantic import ConfigDict
 from starlette.testclient import TestClient
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import ServerClient, get_response_json
 from nemo_gym.config import BaseServerConfig
 from nemo_gym.core import current_rollout_id, maybe_rollout_id_from_run_body

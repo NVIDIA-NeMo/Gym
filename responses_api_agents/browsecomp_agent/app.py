@@ -25,12 +25,8 @@ import aiohttp
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     AggregateMetrics,

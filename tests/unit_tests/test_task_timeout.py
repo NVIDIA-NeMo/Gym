@@ -3,7 +3,7 @@
 
 import pytest
 
-from nemo_gym.agent_utils.task_timeout import resolve_agent_timeout
+from nemo_gym.agents import resolve_agent_timeout
 
 
 @pytest.mark.parametrize(

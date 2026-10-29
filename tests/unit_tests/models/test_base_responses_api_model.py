@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+from nemo_gym.agents import SimpleResponsesAPIAgent
 from nemo_gym.client import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
@@ -981,7 +981,7 @@ def test_leading_rollout_prefix_round_trips_with_server_parser():
 
 
 def test_base_agent_resolve_model_base_url(monkeypatch):
-    import nemo_gym.base_responses_api_agent as base_agent
+    import nemo_gym.agents.base_responses_api_agent as base_agent
 
     monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, _name: {"host": "h", "port": 1})
     agent = SimpleNamespace(
@@ -1003,7 +1003,7 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
 
 
 def _make_base_agent(global_config, *, token_id_capture=False):
-    from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
+    from nemo_gym.agents import BaseResponsesAPIAgentConfig
 
     class _Agent(SimpleResponsesAPIAgent):
         async def responses(self, body=...):

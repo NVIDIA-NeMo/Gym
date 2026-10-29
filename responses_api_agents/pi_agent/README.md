@@ -177,7 +177,7 @@ Services must use task-owned files rather than the temporary agent session direc
 The supervisor and the runner above Pi are bash scripts, so a task agent's
 `pkill -f python3`, `pkill python3` or `killall python3` does not end Pi.
 
-Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+Harness execution uses `nemo_gym.agents.utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session
 uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or

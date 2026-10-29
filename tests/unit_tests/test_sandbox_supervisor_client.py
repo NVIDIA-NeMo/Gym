@@ -14,17 +14,15 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agent_utils.supervisor_client import (
+from nemo_gym.agents import SUPERVISOR_FILE, SUPERVISOR_SCRIPT, exec_timeout
+from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_PHASE_COUNT,
     CLEANUP_RECEIPT_FILE,
     LAUNCH_CLAIM_FILE,
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
-    SUPERVISOR_FILE,
     SUPERVISOR_PID_FILE,
-    SUPERVISOR_SCRIPT,
     HarnessTerminationError,
-    exec_timeout,
     parse_cleanup_receipt,
     stop_and_confirm_cleanup,
     supervised_launch_command,

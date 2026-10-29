@@ -12,8 +12,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.agent_utils import uv_bootstrap
-from nemo_gym.agent_utils.uv_bootstrap import (
+from nemo_gym.agents import uv_for_sandbox
+from nemo_gym.agents.utils import uv_bootstrap
+from nemo_gym.agents.utils.uv_bootstrap import (
     _PLATFORM_PROBE,
     _download_uv,
     _host_uv_runs_in,
@@ -21,7 +22,6 @@ from nemo_gym.agent_utils.uv_bootstrap import (
     _probe_sandbox_platform,
     _SandboxPlatform,
     _uv_release_target,
-    uv_for_sandbox,
 )
 
 

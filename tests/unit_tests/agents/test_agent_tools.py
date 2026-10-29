@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.agents import agent_tools
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.sandbox import agent_tools
 from nemo_gym.server_runtime import BaseRunRequest
 
 

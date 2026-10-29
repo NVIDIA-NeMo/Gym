@@ -14,8 +14,7 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.agent_activation_types import AgentContinuationRequirements
-from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
+from nemo_gym.agents import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest, AgentContinuationRequirements
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.snapshot import snapshot
@@ -209,7 +208,7 @@ def test_close_retains_recovered_activation_once(setup, tmp_path, monkeypatch, p
             earlier = roots(state.observations.model_dump(mode="json"))[0]
         index = 2 if prior_success else 1
         stop = AsyncMock(side_effect=[RuntimeError("temporary receipt unavailable"), dict(sandbox.result)])
-        monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+        monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
         capture = AsyncMock(wraps=state.collect_artifacts)
         state.collect_artifacts = capture
         assert activate(client, index).status_code == 500
@@ -266,7 +265,7 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
     body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
     await agent.seed_agent_session(request, body)
     stop = AsyncMock(side_effect=[asyncio.CancelledError(), dict(sandbox.result)])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     with pytest.raises(asyncio.CancelledError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     stop.assert_awaited_once()
@@ -299,7 +298,7 @@ async def test_close_without_recovered_root_preserves_activation(
     request = Request({**request.scope, "headers": [(AGENT_ACTIVATION_HEADER.encode(), str(index).encode())]})
     error = asyncio.CancelledError() if cancelled else RuntimeError("temporary receipt unavailable")
     stop = AsyncMock(side_effect=[error, dict(sandbox.result)])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="next task"))
     retained = state.observations.model_dump(mode="json")

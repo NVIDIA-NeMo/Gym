@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_SCRIPT, shell_assignments
+from nemo_gym.agents import HARNESS_RUNNER_SCRIPT, shell_assignments
 
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")

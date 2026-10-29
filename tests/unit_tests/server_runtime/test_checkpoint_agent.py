@@ -14,7 +14,7 @@ import pytest
 from fastapi import Body, FastAPI
 from pydantic import JsonValue
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,

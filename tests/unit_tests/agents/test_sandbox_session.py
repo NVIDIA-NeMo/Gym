@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agent_utils import supervisor_client
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession, shell_assignments
+from nemo_gym.agents import SandboxCommand, SandboxSession, shell_assignments
+from nemo_gym.agents.utils import supervisor_client
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
 
@@ -162,7 +162,7 @@ async def test_cancellation_during_normal_finalization_waits_for_evidence(sessio
 async def test_failed_normal_finalization_waits_for_explicit_close_retry(session, monkeypatch):
     failure = RuntimeError("launch outcome is unknown")
     stop = AsyncMock(side_effect=[failure, RECEIPT])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     collector = AsyncMock(return_value="recovered transcript")
 
     with pytest.raises(RuntimeError, match="launch outcome is unknown") as error:
@@ -475,7 +475,7 @@ async def test_bootstrap_failure_preserves_stderr_and_still_releases(session, re
 async def test_session_uploads_supervisor_before_launch(session):
     from pathlib import Path
 
-    from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE, SUPERVISOR_SCRIPT
+    from nemo_gym.agents import SUPERVISOR_FILE, SUPERVISOR_SCRIPT
 
     events = []
 
@@ -565,7 +565,7 @@ async def test_cancelled_close_stays_closing_and_can_retry(session):
 
 
 async def test_failure_log_is_read_before_session_release(session, monkeypatch):
-    from nemo_gym.agent_utils import sandbox_session
+    from nemo_gym.agents.utils import sandbox_session
 
     async def read_log(sandbox, *, path):
         sandbox.disconnect.assert_not_awaited()
@@ -585,7 +585,7 @@ async def test_failure_log_is_read_before_session_release(session, monkeypatch):
 
 
 async def test_missing_failure_log_does_not_mask_capture_failure(session, monkeypatch):
-    from nemo_gym.agent_utils import sandbox_session
+    from nemo_gym.agents.utils import sandbox_session
 
     monkeypatch.setattr(sandbox_session, "read_text", AsyncMock(side_effect=OSError("download failed")))
 

@@ -16,13 +16,8 @@
 import pytest
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.skills import (
-    _resolve_under_cwd_or_install,
-    hash_skill_dir,
-    load_skill_directory,
-    parse_skill_md,
-    stage_skills,
-)
+from nemo_gym.agents import stage_skills
+from nemo_gym.agents.skills import _resolve_under_cwd_or_install, hash_skill_dir, load_skill_directory, parse_skill_md
 
 
 def _write_skill(skills_dir, name, description="A skill.", version=None, body="# Body\n"):

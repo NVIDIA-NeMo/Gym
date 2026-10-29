@@ -25,7 +25,7 @@ from shlex import join, quote
 
 import pytest
 
-from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT, exec_timeout
+from nemo_gym.agents import SUPERVISOR_SCRIPT, exec_timeout
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider
 from nemo_gym.sandbox.providers.local import LocalProvider
 

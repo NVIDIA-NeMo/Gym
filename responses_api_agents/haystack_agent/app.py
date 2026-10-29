@@ -31,11 +31,7 @@ from haystack import Pipeline, logging
 from haystack.tools import Toolset, flatten_tools_or_toolsets, warm_up_tools
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     AggregateMetrics,

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentCloseSessionResponse
+from nemo_gym.agents import AgentCloseSessionRequest, AgentCloseSessionResponse
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import DirectHTTPToolAccess

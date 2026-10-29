@@ -65,7 +65,7 @@ jobs:
           files: |
             nemo_gym/server_runtime/request_handling/session_routing.py
             nemo_gym/server_runtime/server_utils.py
-            nemo_gym/base_responses_api_agent.py
+            nemo_gym/agents/base_responses_api_agent.py
             nemo_gym/server_runtime/base_resources_server.py
             nemo_gym/server_runtime/mcp_auto_exposure.py
             tests/e2e/session_routing/**

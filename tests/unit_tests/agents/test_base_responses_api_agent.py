@@ -19,14 +19,12 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgent,
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
-    ModelEndpoint,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
-    is_loopback_host,
 )
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgent, ModelEndpoint, is_loopback_host
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 
@@ -205,7 +203,7 @@ class TestAssertModelUrlReachableFromSandbox:
         assert "reachable model URL" in str(excinfo.value)
 
     def test_loopback_on_docker_warns_and_passes(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_agent"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):
             assert_model_url_reachable_from_sandbox("http://127.0.0.1:8000/v1", provider_name="docker")
         warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
         assert len(warnings) == 1
@@ -214,7 +212,7 @@ class TestAssertModelUrlReachableFromSandbox:
 
     def test_loopback_on_host_local_provider_passes_silently(self, caplog: pytest.LogCaptureFixture) -> None:
         # The ``local`` provider runs on the host itself, so loopback is the host.
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_agent"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):
             assert_model_url_reachable_from_sandbox("http://127.0.0.1:8000/v1", provider_name="local")
         assert not caplog.records
 
@@ -229,7 +227,7 @@ class TestAssertModelUrlReachableFromSandbox:
     )
     @pytest.mark.parametrize("provider_name", ["opensandbox", "docker", None])
     def test_non_loopback_passes(self, url: str, provider_name: str | None, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.base_responses_api_agent"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):
             assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
         assert not caplog.records
 

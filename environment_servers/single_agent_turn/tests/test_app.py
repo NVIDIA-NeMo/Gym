@@ -23,8 +23,13 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnResult,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionRequest,
+    AgentOutcome,
+    AgentOutcomePolicyConfig,
+    AgentSeedSessionRequest,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
     AgentServerRef,
@@ -1474,7 +1479,7 @@ def test_invalid_agent_policy_config_rejected(config: dict) -> None:
 async def _assert_classified_agent_failure_policy(
     outcome: dict, verifiable: bool, retryable: bool, *, config: dict | None = None
 ) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 
     environment, client = _environment_server()
     if config is not None:
@@ -1538,7 +1543,7 @@ async def test_nonfailed_outcomes_still_reach_verification(status: str | None) -
 
 @pytest.mark.parametrize("action", ["fail", "retry"])
 async def test_incomplete_context_limit_verifies_partial_work(action: str) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 
     environment, client = _environment_server()
     environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(default_action=action)
@@ -1566,7 +1571,7 @@ async def test_incomplete_context_limit_verifies_partial_work(action: str) -> No
 
 @pytest.mark.parametrize("raw", ["not valid JSON", '{"failure_kind":"unregistered_error"}'])
 async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) -> None:
-    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+    from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 
     environment, client = _environment_server()
     response = _agent_response().model_dump(mode="json")

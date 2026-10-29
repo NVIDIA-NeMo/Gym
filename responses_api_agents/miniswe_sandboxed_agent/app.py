@@ -19,7 +19,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, field_validator
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,

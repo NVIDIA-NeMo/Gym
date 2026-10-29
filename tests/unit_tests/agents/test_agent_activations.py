@@ -11,18 +11,19 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, PrivateAttr, TypeAdapter
 
-from nemo_gym.agent_activation_types import AgentContinuationCapabilities, AgentContinuationRequirements
-from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentContinuationCapabilities,
+    AgentContinuationRequirements,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.trajectory import AgentInvocation, TrajectoryRecord, TrajectoryTurn

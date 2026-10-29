@@ -37,10 +37,7 @@ import ray
 from fastapi import Body
 from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     NeMoGymResponse,

@@ -62,7 +62,7 @@ An adapter supplies the knowledge that is specific to the harness or framework:
 | `SimpleResponsesAPIAgent` | The HTTP endpoints, the [agent-session contract](#agent-server-and-environment-server), rollout URL helpers such as `base_url_for_run()`, `resolve_model_base_url()`, and `model_endpoint()`, and the partial-rollout checkpoint hooks. An adapter that does not declare `checkpoint_mode = "exported"` restarts unfinished rollouts from their input, and its checkpoint status reports `mode: restart_only` so a training framework can tell before any checkpoint. |
 | Model Server | Provider normalization, rollout-prefixed routing, [model-call capture](/main/model-server/model-call-capture), and [training-token capture](/main/tutorials/training-tutorials/external-agent-harnesses). |
 | `nemo_gym.sandbox` | Sandbox providers, `AsyncSandbox`, and text file transfer. |
-| `nemo_gym.agent_utils` | Supervised harness execution in a task sandbox: launch, termination, artifact capture, and release. See the `agent_utils` section below. |
+| `nemo_gym.agents.utils` | Supervised harness execution in a task sandbox: launch, termination, artifact capture, and release. See the `agent_utils` section below. |
 | `nemo_gym.trajectory.trajectory_record` | The observation schemas. Rollout collection joins agent observations with captured model calls. |
 | Harness Conformance | Scripted probes and an evidence checker for trajectory evidence. |
 
@@ -173,7 +173,7 @@ The Environment Server drives an agent session through three HTTP endpoints. `Si
 
 `AgentSeedSessionRequest` carries `agent_session_id`, `episode_id`, `task_id`, `tool_accesses`, and an optional `sandbox_access`. `AgentCloseSessionResponse` returns `agent_observations`, an optional `trajectory` (the harness's own turns, which the Environment Server forwards as `ng_trajectory` on the result and on a failure row alike), and an optional `resources_cookies` jar.
 
-The base class in [`nemo_gym/base_responses_api_agent.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_agent.py) enforces the seed, cookie, and close rules below. The adapter implements the activation rules in `responses()`, as Hermes, Pi, Codex, OpenCode, and OpenClaw do. Every adapter must preserve all of them:
+The base class in [`nemo_gym/agents/base_responses_api_agent.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agents/base_responses_api_agent.py) enforces the seed, cookie, and close rules below. The adapter implements the activation rules in `responses()`, as Hermes, Pi, Codex, OpenCode, and OpenClaw do. Every adapter must preserve all of them:
 
 - **Idempotent seed.** A repeated seed with the same ID and an identical body returns the existing session. A different body for the same ID returns HTTP 409. Agent sessions require `num_workers: 1`, because session state lives in one process.
 - **Cookie binding.** Seed stores `agent_session_id` in the Agent Server's signed session cookie. Activation and close requests with a mismatched cookie return HTTP 409. After close, the cookie stays set, so a stale activation cannot fall back to the sessionless host path.
@@ -340,7 +340,7 @@ When the Resources Server supplies a sandbox, propagate setup and connection fai
 
 ## Build the adapter with `agent_utils`
 
-The [`nemo_gym/agent_utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/agent_utils) package implements the sandbox execution lifecycle that Hermes, Pi, Codex, OpenCode, and OpenClaw share. The adapter provides the harness-specific parts: runtime installation, input staging, the harness command, and output parsing. `agent_utils` launches, supervises, stops, and cleans up the harness process.
+The [`nemo_gym/agents/utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym/agents/utils) package implements the sandbox execution lifecycle that Hermes, Pi, Codex, OpenCode, and OpenClaw share. The adapter provides the harness-specific parts: runtime installation, input staging, the harness command, and output parsing. `agent_utils` launches, supervises, stops, and cleans up the harness process.
 
 ### Code layout
 
@@ -540,7 +540,7 @@ All control files live under `session_dir`, and their names are defined in `supe
 | `cleanup.json` | The supervisor records here whether the harness process group terminated. If a stop wins the launch claim, the stop shell writes the same receipt shape with `return_code: null` and `timed_out: false`. |
 | `output.log` | The launch shell redirects supervisor and harness diagnostics here. Task output is a separate, adapter-owned artifact. |
 
-To migrate an adapter that launches the process supervisor itself, such as `hermes_sandboxed_agent`, move launch, termination, collection, and release into `SandboxSession`. Receipt types and timeout helpers that used to live in `process_supervisor.py` are now in `nemo_gym.agent_utils.supervisor_client`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
+To migrate an adapter that launches the process supervisor itself, such as `hermes_sandboxed_agent`, move launch, termination, collection, and release into `SandboxSession`. Receipt types and timeout helpers that used to live in `process_supervisor.py` are now in `nemo_gym.agents.utils.supervisor_client`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
 
 Out-of-tree adapters written for the Python supervisor also need these changes:
 
@@ -550,7 +550,7 @@ Out-of-tree adapters written for the Python supervisor also need these changes:
 
 ## Prepare the runtime during session setup
 
-Implement the [agent-session API](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_agent.py) on the supplied `SandboxAccess`:
+Implement the [agent-session API](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agents/base_responses_api_agent.py) on the supplied `SandboxAccess`:
 
 - Pin the harness version and the task image digest. Check the image's runtime, utilities, certificates, platform, and permissions.
 - Install the harness in the supplied sandbox during seed, before activation. Do not also install it on the Agent Server host unless the host path uses it. Check bootstrap dependencies, and keep failed commands, exit codes, and stderr.

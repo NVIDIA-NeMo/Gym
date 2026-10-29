@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -150,7 +150,7 @@ async def test_failed_close_retains_state_and_can_retry(agent):
 
 async def test_retry_window_begins_after_cleanup_and_is_not_extended(agent, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     seed = _seed()
     request = SimpleNamespace(session={})
@@ -255,7 +255,7 @@ async def test_request_and_close_response_cannot_mutate_stored_binding(agent):
 
 async def test_close_receipt_expiry_does_not_expire_active_sessions(agent, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     seed = _seed()
     await agent.seed_agent_session(SimpleNamespace(session={}), seed)
     state = agent._require_agent_session(seed.agent_session_id)
@@ -274,7 +274,7 @@ def test_retry_window_must_be_positive_and_finite(window):
 
 async def _fail_seed_and_let_its_window_pass(agent, monkeypatch, seed):
     clock = [0.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
 
     async def initialize(body):
         raise AgentSessionSetupError(AgentSessionState(request=body), error=RuntimeError("partial setup"))

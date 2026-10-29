@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT
+from nemo_gym.agents import SUPERVISOR_SCRIPT
 
 
 SUPERVISOR = str(SUPERVISOR_SCRIPT)

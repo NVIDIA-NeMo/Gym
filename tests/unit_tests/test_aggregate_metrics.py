@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,

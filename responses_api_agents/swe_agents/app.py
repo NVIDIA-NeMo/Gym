@@ -47,11 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,

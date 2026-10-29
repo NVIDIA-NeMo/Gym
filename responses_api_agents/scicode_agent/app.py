@@ -42,11 +42,7 @@ from step_utils import (
     process_problem_steps,
 )
 
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import raise_for_status
 from nemo_gym.config import (
     ROLLOUT_INDEX_KEY_NAME,

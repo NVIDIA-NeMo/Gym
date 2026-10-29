@@ -11,14 +11,12 @@ from shlex import quote
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand
-from nemo_gym.agent_utils.supervisor_client import (
+from nemo_gym.agents import SUPERVISOR_FILE, SUPERVISOR_SCRIPT, SandboxCommand
+from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
     LAUNCH_CLAIM_FILE,
     RUNNER_INTERPRETER,
-    SUPERVISOR_FILE,
     SUPERVISOR_PID_FILE,
-    SUPERVISOR_SCRIPT,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,

@@ -39,10 +39,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import Body, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (

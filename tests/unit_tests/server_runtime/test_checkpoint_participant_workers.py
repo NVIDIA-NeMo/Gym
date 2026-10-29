@@ -25,14 +25,14 @@ from pydantic import Field, JsonValue
 
 import nemo_gym.server_runtime._checkpoint.participant_workers as participant_workers_module
 import nemo_gym.server_runtime._checkpoint.workers as workers_module
-from nemo_gym.base_responses_api_agent import (
-    AGENT_SESSION_COOKIE_KEY,
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
 from nemo_gym.server_runtime import RestoredAgentSession

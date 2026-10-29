@@ -21,8 +21,8 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents.utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import SandboxStatus
@@ -1503,7 +1503,7 @@ def test_close_retry_and_stale_activation_do_not_run_host_codex(setup):
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: 100.0)
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: 100.0)
     with TestClient(agent.setup_webserver()) as client:
 
         def seed_and_close(index):
@@ -1533,7 +1533,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
 async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1559,7 +1559,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
 async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1600,7 +1600,7 @@ async def test_concurrent_closes_share_receipt(setup):
 async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
@@ -1891,7 +1891,7 @@ async def _local_exec(command, **kwargs):
 
 async def test_session_rollouts_are_copied_to_the_logs_dir(tmp_path):
     """Codex's session rollouts (per-call token counts) survive the session directory, as Harbor keeps them."""
-    from nemo_gym.agent_utils.sandbox_session import SandboxSession
+    from nemo_gym.agents import SandboxSession
     from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 
     def state(directory, logs_dir):
@@ -2068,7 +2068,7 @@ async def test_cookie_less_close_cleans_lost_seed_response(setup):
 async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     body = seed()
     close = AgentCloseSessionRequest(**close_body(body.agent_session_id))
@@ -2126,7 +2126,7 @@ async def test_caller_identifier_is_not_a_filesystem_path(setup):
 
 
 async def test_session_lifecycle_uses_shared_bookkeeping(setup):
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+    from nemo_gym.agents import SimpleResponsesAPIAgent
 
     agent, sandbox = setup
     assert type(agent).close_agent_session is SimpleResponsesAPIAgent.close_agent_session
@@ -3290,7 +3290,7 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
 
 @pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
 def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
@@ -3362,7 +3362,7 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
     ],
 )
 def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected):
-    from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
+    from nemo_gym.agents import OutcomeAction, agent_outcome_policy
     from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
