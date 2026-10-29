@@ -68,6 +68,12 @@ excluded from quality metrics. Set an approved judge model and endpoint through
 `AGENTIC_IF_JUDGE_API_KEY`. The reasoning setting is medium. A model or settings
 change defines a separate run.
 
+The provider schema leaves `support_quote` as text because structured-output
+providers may reject quoted or multiline enum literals. The exact allowed-quote
+enum remains in the local bounded schema and is enforced before accepting any
+grade. Both schemas and the request are bound to the private judge cache; this
+transport adaptation does not change the frozen prompt, criteria or validator.
+
 The default `adaptive_first_complete_v1` protocol uses temperature 0.7, streaming,
 and these (seed, maximum-output-token) attempts:
 `(17,32768), (17,65536), (17,131072), (29,131072), (43,131072)`.
@@ -220,7 +226,8 @@ start the native profile's servers with the same private dataset configuration,
 then aggregate through its standard environment route:
 
 ```bash
-gym env start --config benchmarks/agentic_if_realworld/native.yaml --model-type vllm_model
+gym env start --config benchmarks/agentic_if_realworld/native.yaml --model-type vllm_model \
+  --model policy --model-url http://localhost:8000/v1
 # In another terminal with the same private data/judge environment:
 gym eval aggregate --config benchmarks/agentic_if_realworld/native.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml \

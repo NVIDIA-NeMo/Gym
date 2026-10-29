@@ -21,7 +21,7 @@ ROOT = Path(__file__).parent
 DEFAULT_JUDGE_MODEL = "judge-model"
 DEFAULT_DATA_DIR = Path.home() / ".cache/nemo-gym/agentic_if_realworld/1.0.0"
 BASE_INPUT_STRINGS = judge.input_strings
-TRANSPORT_VERSION = "exact-payload-binding-enum-transport-v1"
+TRANSPORT_VERSION = "exact-payload-binding-enum-transport-v2"
 PHASES = ((17, 32768), (17, 65536), (17, 131072), (29, 131072), (43, 131072))
 
 
@@ -129,6 +129,7 @@ judge.input_strings = input_strings
 
 
 def provider_schema(canonical: dict) -> dict:
+    """Adapt provider grammar; exact support-quote membership remains locally enforced."""
     result = copy.deepcopy(canonical)
 
     def visit(node):
@@ -143,6 +144,8 @@ def provider_schema(canonical: dict) -> dict:
                 visit(value)
 
     visit(result)
+    # Arbitrary evidence text can contain characters unsupported in provider enum grammars.
+    result["properties"]["constraints"]["items"]["properties"]["support_quote"].pop("enum", None)
     return result
 
 

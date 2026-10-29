@@ -6,9 +6,20 @@ import json
 import multiprocessing
 from unittest.mock import patch
 
+import jsonschema
 import pytest
 
-from resources_servers.agentic_if_realworld.benchmark.core import ROOT, Dataset, digest, judge, read, write
+from resources_servers.agentic_if_realworld.benchmark.core import (
+    HISTORY_MARKER,
+    ROOT,
+    Dataset,
+    bounded_schema,
+    digest,
+    judge,
+    provider_schema,
+    read,
+    write,
+)
 from resources_servers.agentic_if_realworld.benchmark.scoring import score
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create, review
 from resources_servers.agentic_if_realworld.benchmark.transport import (
@@ -219,7 +230,7 @@ def test_changing_judge_model_preserves_and_separates_cached_grades(judge_payloa
 
 
 @pytest.mark.parametrize(
-    "damage", ["raw", "receipt", "reward", "mask", "payload", "schema", "missing", "policy_prompt"]
+    "damage", ["raw", "receipt", "reward", "mask", "payload", "schema", "provider_schema", "missing", "policy_prompt"]
 )
 def test_cached_judge_grade_revalidates_authoritative_receipts(judge_payload, tmp_path, monkeypatch, damage):
     calls = []
@@ -256,12 +267,64 @@ def test_cached_judge_grade_revalidates_authoritative_receipts(judge_payload, tm
             "receipt": "attempt0.json",
             "payload": "payload.json",
             "schema": "transport_schema.json",
+            "provider_schema": "provider_schema.json",
         }
         path = next(work.glob(names[damage]))
         path.write_text("changed")
     with pytest.raises(ValueError):
         asyncio.run(score(judge_payload, **kwargs, cached_only=True))
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("quote", ['Return exactly "OK."', "Return exactly OK.\nDo not explain."])
+def test_provider_grammar_compatibility_preserves_strict_local_support_quotes(
+    judge_payload, tmp_path, monkeypatch, quote
+):
+    payload = copy.deepcopy(judge_payload)
+    wrapper = payload["input_request"]["messages"][0]
+    prefix = wrapper["content"].split(HISTORY_MARKER, 1)[0]
+    wrapper["content"] = prefix + HISTORY_MARKER + json.dumps([{"role": "user", "content": quote}])
+    payload["input_sha256"] = judge.sha(payload["input_request"])
+    payload["inference_binding"]["input_sha256"] = payload["input_sha256"]
+    payload["constraints"][0]["support_quotes"] = [quote]
+    payload["constraint_contract_sha256"] = judge.contract_sha(payload["constraints"])
+    judge.validate_payload(payload)
+    local_schema = bounded_schema(provider_schema(read(ROOT / "policy/judge_output.schema.json")), payload)
+    original_schema = copy.deepcopy(local_schema)
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(kwargs["json"])
+        wire_schema = kwargs["json"]["response_format"]["json_schema"]["schema"]
+        support = wire_schema["properties"]["constraints"]["items"]["properties"]["support_quote"]
+        if any('"' in value or "\n" in value for value in support.get("enum", [])):
+            return Response(400, {"error": "Synthetic provider rejects quote/newline enum literals"})
+        checked = review(payload)
+        if len(calls) == 1:
+            checked["constraints"][0]["support_quote"] = "Invented instruction absent from the frozen input"
+            jsonschema.validate(checked, wire_schema)
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(checked, local_schema)
+        return Response(200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(checked)}}]})
+
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    kwargs = {
+        "directory": tmp_path / "receipts",
+        "endpoint": "http://synthetic.invalid",
+        "policy_prompt": SYNTHETIC_PROMPT,
+        "key_env": "SYNTHETIC",
+    }
+    result = asyncio.run(score(payload, **kwargs))
+    assert result["item_verdict"] == "pass" and len(calls) == 2
+    work = next((kwargs["directory"] / "judges").iterdir())
+    assert read(work / "transport_schema.json") == local_schema == original_schema
+    expected_wire = copy.deepcopy(local_schema)
+    expected_wire["properties"]["constraints"]["items"]["properties"]["support_quote"].pop("enum")
+    assert read(work / "provider_schema.json") == expected_wire
+    assert calls[0]["response_format"]["json_schema"]["schema"] == expected_wire
+    assert read(work / "attempt0.json")["request_sha256"] == judge.sha(calls[0])
+    assert asyncio.run(score(payload, **kwargs, cached_only=True)) == result and len(calls) == 2
 
 
 def test_judge_receipts_reject_git_checkout_before_writing(judge_payload, tmp_path, monkeypatch):

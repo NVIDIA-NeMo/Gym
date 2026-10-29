@@ -17,6 +17,7 @@ import jsonschema
 from .core import (
     DEFAULT_JUDGE_MODEL,
     ROOT,
+    TRANSPORT_VERSION,
     bounded_schema,
     digest,
     judge,
@@ -83,6 +84,7 @@ async def score(
     validate_judge_config(endpoint, model)
     judge.validate_payload(payload)
     schema = bounded_schema(provider_schema(read(ROOT / "policy/judge_output.schema.json")), payload)
+    wire_schema = provider_schema(schema)
     body = {
         "model": model,
         "reasoning_effort": reasoning,
@@ -97,11 +99,19 @@ async def score(
             "json_schema": {
                 "name": "agentic_if_strict_review",
                 "strict": True,
-                "schema": schema,
+                "schema": wire_schema,
             },
         },
     }
-    identity = judge.sha({"payload": payload, "request": body, "endpoint": endpoint})
+    identity = judge.sha(
+        {
+            "payload": payload,
+            "request": body,
+            "endpoint": endpoint,
+            "validation_schema": schema,
+            "transport_version": TRANSPORT_VERSION,
+        }
+    )
     work = directory / "judges" / identity
     if cached_only and not (work / "result.json").is_file():
         raise ValueError("Saved judge result missing; cached-only verification cannot dispatch")
@@ -109,7 +119,11 @@ async def score(
         return unscored(payload["item_id"], "judge_cache_validated_without_scoring")
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     async with _cache_lock(work):
-        for name, expected in [("payload.json", payload), ("transport_schema.json", schema)]:
+        for name, expected in [
+            ("payload.json", payload),
+            ("transport_schema.json", schema),
+            ("provider_schema.json", wire_schema),
+        ]:
             if (work / name).exists() and read(work / name) != expected:
                 raise ValueError("Saved pending judge payload or schema changed")
         receipt_paths = sorted(work.glob("attempt*.json"), key=lambda path: int(path.stem.removeprefix("attempt")))
@@ -128,6 +142,7 @@ async def score(
                 cached["payload_sha256"] != judge.sha(payload)
                 or read(work / "payload.json") != payload
                 or read(work / "transport_schema.json") != schema
+                or read(work / "provider_schema.json") != wire_schema
             ):
                 raise ValueError("Cached judge payload changed")
             name = cached["receipt_name"]
@@ -155,6 +170,7 @@ async def score(
             return unscored(payload["item_id"], "judge_cache_validated_without_scoring")
         write(work / "payload.json", payload)
         write(work / "transport_schema.json", schema)
+        write(work / "provider_schema.json", wire_schema)
         delivered_reviews = 0
         # At most two 2xx review deliveries; transport-only failures end this invocation.
         for attempt in range(len(receipts) + 2):
