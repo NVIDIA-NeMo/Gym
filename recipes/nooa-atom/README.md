@@ -7,6 +7,7 @@ for a one-row smoke, a full evaluation, or a NeMo RL rollout environment.
 |---|---|---|---|
 | `terminal-bench-2.1` | `nooa_atom.gym:AtomHarness`, `handle_batch` | Terminal-Bench 2.1, 89 tasks | `recipes/nooa-atom/run.sh terminal-bench-2.1` |
 | `swebench-pro` | `nooa_atom.gym:AtomHarness`, `handle_batch` | SWE-bench Pro, the 120-task roster in `swebench-pro-swe120.txt` | `recipes/nooa-atom/run.sh swebench-pro` |
+| `gdpval` | `nooa_atom.gym:AtomHarness`, `handle_batch` | GDPval, 220 tasks, rubric mode with a judge panel (needs JUDGE_API_KEY, HF_TOKEN, TAVILY_API_KEY, GDPVAL_SANDBOX_IMAGE, PERSIST_DELIVERABLES_DIR) | `recipes/nooa-atom/run.sh gdpval` |
 
 A recipe's `.setup.sh` runs after `gym eval prepare` and may pin a task repository (Terminal-Bench). A roster
 recipe (SWE-bench Pro) names `benchmarks/swebench/pro/prepare_roster.py` as its prepare script with the roster

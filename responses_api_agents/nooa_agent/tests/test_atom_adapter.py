@@ -199,7 +199,8 @@ async def test_atom_root_and_child_sessions_route_through_gym(tmp_path: Path, mo
 
 
 @pytest.mark.parametrize(
-    "config_path", ["benchmarks/terminal_bench_2_1/atom.yaml", "benchmarks/swebench/pro/atom.yaml"]
+    "config_path",
+    ["benchmarks/terminal_bench_2_1/atom.yaml", "benchmarks/swebench/pro/atom.yaml", "benchmarks/gdpval/atom.yaml"],
 )
 def test_atom_benchmark_configs_route_every_benchmark_dataset_to_atom(
     config_path: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
