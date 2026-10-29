@@ -152,6 +152,14 @@ def _knights_knaves_entry() -> tuple[dict, str, str]:
     return entry, gold, wrong
 
 
+def _rotate_matrix_entry() -> tuple[dict, str]:
+    """A fixed rotate_matrix entry: its gold answer is a grid of newline-separated rows, scored by exact match."""
+    entry = reasoning_gym.create_dataset("rotate_matrix", size=1, seed=42)[0]
+    gold = entry["answer"]
+    assert "\n" in gold
+    return entry, gold
+
+
 def _message(index: int, text: str) -> dict:
     return {
         "id": f"msg_{index}",
@@ -311,6 +319,26 @@ class TestAnswerExtraction:
         assert result.extracted_answer == gold, label
         assert result.reward == 1.0, label
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "label, build",
+        [
+            ("boxed_rows", lambda gold: f"\\boxed{{{gold}}}"),
+            (
+                "boxed_rows_indented_block",
+                lambda gold: "\\boxed{\n" + "\n".join("    " + row for row in gold.splitlines()) + "\n}",
+            ),
+            ("boxed_rows_latex_spaces", lambda gold: "\\boxed{" + gold.replace(" ", "\\ ") + "}"),
+        ],
+    )
+    async def test_boxed_grid_answers_keep_their_rows(self, server, label, build):
+        # rotate_matrix, binary_matrix and pool_matrix oracles are newline-separated rows scored by exact match, so
+        # the box normalization must collapse whitespace within a row and never across rows.
+        entry, gold = _rotate_matrix_entry()
+        result = await server.verify(_verify_request(entry, [_message(0, build(gold))]))
+        assert result.extracted_answer == gold, label
+        assert result.reward == 1.0, label
+
     def test_last_balanced_box_wins_and_latex_text_is_normalized(self, server):
         extract = server._extract_answer_from_response
         gold = "Zoey is a fool, and Riley is a sage."
@@ -330,4 +358,7 @@ class TestAnswerExtraction:
         assert extract(response_of("\\boxed{\\textbf{\\text{" + gold + "}}}")) == gold
         assert extract(response_of("\\boxed{x} then \\boxed{\\mathrm{" + gold + "}}")) == gold
         assert extract(response_of("\\boxed{unbalanced", gold)) == gold
+        # \, is a space between words but a thousands separator between digits.
+        assert extract(response_of("\\boxed{" + gold.replace(" ", "\\,") + "}")) == gold
+        assert extract(response_of("\\boxed{1\\,000}")) == "1000"
         assert extract(response_of("first message", "", "   ")) == "first message"
