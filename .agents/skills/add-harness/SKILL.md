@@ -58,7 +58,7 @@ Before moving on, confirm each of these in the code:
 
 Cover the behaviors in [Runtime and compatibility](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#runtime-and-compatibility) that apply to your execution model. At minimum:
 
-- Each unsupported seed returns a final 422. Use `nemo_gym.testing.agent_session_conformance.check_agent_seed_rejected`, as `responses_api_agents/hermes_agent/tests/test_app.py` does.
+- Each unsupported seed returns a final 422. Use `nemo_gym.agents.testing.agent_session_conformance.check_agent_seed_rejected`, as `responses_api_agents/hermes_agent/tests/test_app.py` does.
 - For MCP support, cover authenticated discovery and tool calls, required-server failure before inference, optional-server failure, name collisions, and cleanup. If enforcement depends on a plugin or hook, test a run where it does not load. Test each supported sandbox ownership path; a sandbox-only smoke does not validate MCP grants.
 - An activation runs the harness once. An activation for an unknown or closed session returns 409; a request with no session cookie takes the host path, if the adapter has one.
 - Close returns observations or gaps, and returns `resources_cookies` only when the session holds a Resources cookie jar.
