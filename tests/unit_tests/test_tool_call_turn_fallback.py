@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tool argument rewrites may not hide other changes to the captured model turn."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -287,3 +288,109 @@ def test_terminal_tool_fallback_preserves_finish_reason_identity(unique_tool_id,
     assert result.model_call_id == ("b" if unique_tool_id or response_identifies_call else "a")
     assert result.method == ("response_id" if response_identifies_call else "content_tool_ids")
     assert result.finish_reason_resolved is (unique_tool_id or response_identifies_call)
+
+
+_OPENCODE_ERROR = (
+    "Model tried to call unavailable tool 'mkdir'. Available tools: bash, edit, glob, grep, invalid, read, task, "
+    "todowrite, write."
+)
+
+
+def _unavailable_tool_turn() -> list[dict]:
+    return [_message("I will create the directory."), _tool("t1", "mkdir", '{"path":"/testbed/new"}')]
+
+
+def _opencode_echo(arguments: str | None = None) -> list[dict]:
+    """The turn as OpenCode echoes it: the unavailable call becomes a call to its own ``invalid`` tool."""
+    if arguments is None:
+        arguments = json.dumps({"tool": "mkdir", "error": _OPENCODE_ERROR})
+    return [_message("I will create the directory."), _tool("t1", "invalid", arguments)]
+
+
+def _as_chat(turn: list[dict]) -> list[dict]:
+    return [
+        {
+            "role": "assistant",
+            "content": turn[0]["content"],
+            "tool_calls": [
+                {"id": t["call_id"], "type": "function", "function": {"name": t["name"], "arguments": t["arguments"]}}
+                for t in turn[1:]
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("dialect", ["responses", "chat"])
+@pytest.mark.parametrize("index_path", ["record", "add_entry", "terminal"])
+def test_opencode_unavailable_tool_rewrite_resolves_the_served_call(dialect: str, index_path: str) -> None:
+    ctx = [{"role": "user", "content": "fix it"}]
+    served = _unavailable_tool_turn()
+    echoed = _opencode_echo()
+    if dialect == "chat":
+        served, echoed = _as_chat(served), _as_chat(echoed)
+    if index_path == "terminal":
+        result = resolve_terminal([_entry(served)], {"id": "harness", "output": ctx + echoed})
+        assert result.model_call_id == "served"
+        assert result.method == "content_tool_ids"
+        return
+    lineage = RolloutLineage()
+    if index_path == "record":
+        lineage.record("served", ctx + served, [1, 2, 3], "digest", context_len=len(ctx))
+    else:
+        lineage.add_entry(_entry(served))
+    result = lineage.resolve(ctx + echoed + [{"type": "function_call_output", "call_id": "t1", "output": "error"}])
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.match.model_call_id == "served"
+    assert result.reason == "tool_call_turn"
+
+
+def test_opencode_rewrite_still_tells_tool_names_apart() -> None:
+    # Per-response IDs: both answers to the same request use ``t1``. Only the name tells them apart,
+    # and the rewrite must restore it rather than ignore it.
+    ctx = [{"role": "user", "content": "fix it"}]
+    lineage = RolloutLineage()
+    lineage.record("served", ctx + _unavailable_tool_turn(), [1, 2, 3], "digest", context_len=len(ctx))
+    sibling = [_message("I will create the directory."), _tool("t1", "bash", '{"command":"mkdir new"}')]
+    lineage.record("sibling", ctx + sibling, [1, 2, 4], "other-digest", context_len=len(ctx))
+    result = lineage.resolve(ctx + _opencode_echo())
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.match.model_call_id == "served"
+    unserved = lineage.resolve(ctx + _opencode_echo(json.dumps({"tool": "read", "error": _OPENCODE_ERROR})))
+    assert unserved.status == ParentResolutionStatus.UNRESOLVED
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        json.dumps({"tool": "mkdir", "error": _OPENCODE_ERROR, "extra": 1}),
+        json.dumps({"tool": "mkdir"}),
+        json.dumps({"tool": "", "error": _OPENCODE_ERROR}),
+        json.dumps({"tool": ["mkdir"], "error": _OPENCODE_ERROR}),
+        json.dumps(["mkdir", _OPENCODE_ERROR]),
+        "mkdir: unavailable",
+    ],
+)
+@pytest.mark.parametrize("index_path", ["record", "terminal"])
+def test_other_invalid_tool_shapes_keep_their_name(arguments: str, index_path: str) -> None:
+    ctx = [{"role": "user", "content": "fix it"}]
+    echoed = _opencode_echo(arguments)
+    if index_path == "terminal":
+        assert (
+            resolve_terminal(
+                [_entry(_unavailable_tool_turn())], {"id": "harness", "output": ctx + echoed}
+            ).model_call_id
+            is None
+        )
+        return
+    lineage = RolloutLineage()
+    lineage.record("served", ctx + _unavailable_tool_turn(), [1, 2, 3], "digest", context_len=len(ctx))
+    assert lineage.resolve(ctx + echoed).status == ParentResolutionStatus.UNRESOLVED
+
+
+def test_only_opencodes_invalid_tool_name_is_rewritten() -> None:
+    ctx = [{"role": "user", "content": "fix it"}]
+    lineage = RolloutLineage()
+    lineage.record("served", ctx + _unavailable_tool_turn(), [1, 2, 3], "digest", context_len=len(ctx))
+    echoed = _opencode_echo()
+    echoed[1]["name"] = "Invalid"
+    assert lineage.resolve(ctx + echoed).status == ParentResolutionStatus.UNRESOLVED
