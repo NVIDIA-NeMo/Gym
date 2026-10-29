@@ -220,3 +220,33 @@ exist; the sandbox owner supplies mounts or image contents.
 `dummy_model` compatibility alias. Benchmarks can set the native ID to retain
 family-specific prompts, tools and defaults behind a Gym model route; the route
 still controls the actual provider/model. Native ID changes can affect scores.
+
+## Partial-rollout checkpoints
+
+With checkpointing on (a top-level `checkpoint:` block), a one-activation session in a sandbox the agent borrows takes
+part in partial-rollout checkpoints (`checkpoint_mode = "exported"`):
+
+- **At a checkpoint** OpenCode is paused in place: the process supervisor stops every process of the launch with
+  `SIGSTOP` and continues them with `SIGCONT` once the checkpoint resumes, so OpenCode carries on as if its model call
+  were slow. Nothing is copied at the pause; the resources server snapshots the sandbox.
+- **If the pause is not confirmed** (for example a process stuck in disk I/O), OpenCode is stopped and relaunched after
+  the checkpoint in a new `launch-K` directory under the session root.
+- **After a crash** the restore forks the sandbox snapshot; the Environment Server seeds the session again and the agent
+  re-binds to the fork. The re-sent activation either gives the reply it already gave, or relaunches OpenCode.
+- **A relaunch resumes the saved conversation** when it starts with the task's prompt and the model answered at least
+  once: `resume_opencode.sh` starts `opencode serve` and re-posts the last user message with empty `parts`, so no turn is
+  added. Otherwise OpenCode starts the task afresh from its original prompt in a fresh data directory, and the reason is
+  logged.
+
+Sessions the agent cannot capture restart after a crash instead: a sandbox the agent owns, and multi-turn continuation
+sessions.
+
+Settings:
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on the sandbox's snapshotted disk; the saved conversation lives here. |
+| `checkpoint_pause_allowance_seconds` | `3600` | Time a launch may spend paused in all. It extends the provider's command deadline; a longer pause fails the launch. Cover the longest commit. |
+
+The controller's `control_timeout` must cover the pause: a prepare waits until every running OpenCode is paused (up to
+about 45 s for the supervisor to confirm).
