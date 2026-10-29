@@ -150,7 +150,7 @@ def aggregate_welch(
     weights: Sequence[float] | None = None,
     confidence_level: float = 0.90,
 ) -> WelchResult:
-    """Estimate a weighted fixed-suite gap with Welch–Satterthwaite uncertainty.
+    """Estimate a weighted candidate-minus-baseline delta with Welch–Satterthwaite uncertainty.
 
     For each cell, ``a = w²s_C²/n_C`` and ``b = w²s_B²/n_B``. Total
     variance is ``V = sum(a + b)``, and effective degrees of freedom are

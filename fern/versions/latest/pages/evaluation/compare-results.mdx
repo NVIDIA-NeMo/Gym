@@ -136,7 +136,7 @@ For every metric value in a repeat, Gym calculates:
 normalized = 100 * (raw - low) / (high - low)
 ```
 
-For a lower-is-better metric, it then uses `100 - normalized`, so positive candidate-minus-baseline gaps consistently favor the candidate. For example, accuracy `0.8` with bounds `[0,1]` becomes `80`; an error rate `0.2` with the same bounds and `higher_is_better: false` also becomes `80`.
+For a lower-is-better metric, it then uses `100 - normalized`, so positive candidate-minus-baseline deltas consistently favor the candidate. For example, accuracy `0.8` with bounds `[0,1]` becomes `80`; an error rate `0.2` with the same bounds and `higher_is_better: false` also becomes `80`.
 
 Aggregation proceeds in this order:
 
@@ -151,7 +151,13 @@ For a sparse matrix, a model with more included benchmarks contributes more cell
 
 ## Understand the confidence interval
 
-Suite comparison uses an **unpaired Welch interval for a fixed-suite mean gap**. Each cell's estimated gap is the candidate mean minus the baseline mean. Its estimated variance is the sum of each side's sample variance divided by that side's repeat count. The aggregate adds these variances using squared cell weights and uses Welch–Satterthwaite effective degrees of freedom for its Student-t interval.
+Suite comparison uses an **unpaired Welch interval for a fixed-suite mean delta**. Each cell's estimated delta is:
+
+```text
+delta = candidate_mean - baseline_mean
+```
+
+Its estimated variance is the sum of each side's sample variance divided by that side's repeat count. The aggregate adds these variances using squared cell weights and uses Welch–Satterthwaite effective degrees of freedom for its Student-t interval.
 
 The numerical method, including normalization and metric averaging, is isolated in `nemo_gym/comparison/statistics/unpaired_welch_fixed_suite.py`. The [NIST two-sample t-test reference](https://www.itl.nist.gov/div898/handbook/eda/section3/eda353.htm) and [coverage-factor guidance](https://www.nist.gov/pml/nist-technical-note-1297/nist-tn-1297-appendix-b-coverage-factors) describe the independent-sample and effective-degrees-of-freedom calculations.
 
@@ -159,7 +165,7 @@ The numerical method, including normalization and metric averaging, is isolated 
 The interval quantifies repeat uncertainty for the fixed selected benchmarks, models, and task sets. It assumes independent repeats within each side, independent baseline/candidate collections, and independent cell estimates. It does not include uncertainty from sampling different benchmarks or models. Shared conditions or genuinely paired samples can require covariance terms beyond this method.
 </Note>
 
-A positive gap favors the candidate. An interval containing zero does not demonstrate a change at the selected confidence level; it also does not prove equivalence or an acceptable regression margin. Inspect individual benchmark results alongside the aggregate, because positive and negative gaps can cancel.
+A positive delta favors the candidate. An interval containing zero does not demonstrate a change at the selected confidence level; it also does not prove equivalence or an acceptable regression margin. Inspect individual benchmark results alongside the aggregate, because positive and negative deltas can cancel.
 
 Confidence intervals are not clipped to the score bounds. A constant-score cell retains its weight; when total empirical variance is zero, suite comparison reports the point estimate and zero SE with an unavailable interval and degrees of freedom.
 
@@ -177,7 +183,7 @@ Recorded task sets must agree across repeats and sides. When materialized inputs
 
 | File | Contents |
 | --- | --- |
-| `suite_compare_report.md` | Per-model and overall gaps, intervals, effective membership, metric scales, source runs, and coverage notes. |
-| `suite_compare_report.json` | Schema version `"2"`: raw/scaled repeat metrics, composite scores, repeat counts, means, variances, SE, effective degrees of freedom, variance contributions, and provenance. |
+| `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, and coverage notes. |
+| `suite_compare_report.json` | Schema version `"2"`: raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, and provenance. |
 
 Use `--report-format md`, `json`, or `both` (default). After quantifying the differences, use [Diagnose Results](/evaluation/diagnose-results) to investigate task-level causes and possible improvements.

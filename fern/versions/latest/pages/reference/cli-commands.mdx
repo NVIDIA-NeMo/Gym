@@ -1171,7 +1171,7 @@ If a run was collected with `--disable-aggregation` it has no `*_aggregate_metri
 
 ### `gym eval compare-suite`
 
-Compare baseline and candidate runs across several benchmarks for each model, and across a declared set of model–benchmark pairs. This command normalizes selected metrics, weights benchmarks equally, and calculates unpaired Welch confidence intervals with a default confidence level of 90%.
+Compare candidate and baseline runs across several benchmarks for each model, and across a declared set of model–benchmark pairs. This command normalizes selected metrics, weights benchmarks equally, and reports `delta = candidate - baseline` with unpaired Welch confidence intervals at a default confidence level of 90%.
 
 ```bash
 gym eval compare-suite \
