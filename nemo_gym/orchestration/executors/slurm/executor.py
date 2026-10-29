@@ -40,6 +40,7 @@ from nemo_gym.orchestration.api import (
     VllmPDServiceConfig,
 )
 from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.executors.capabilities import Resubmittable
 from nemo_gym.orchestration.executors.connection import (
     Connection,
     get_connection,
@@ -134,7 +135,7 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
-class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor):
+class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
     Every service and the driver are launched via `srun --container-image` so they
