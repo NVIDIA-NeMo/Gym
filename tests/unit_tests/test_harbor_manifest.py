@@ -44,6 +44,7 @@ from nemo_gym.tasks.harbor.task import MAX_DISCOVERY_DEPTH, iter_task_folders, l
 from tests.unit_tests.test_harbor_tasks import (  # noqa: F401  (fixtures)
     commit_repo,
     fake_registry,
+    no_real_registry,
     registry_dataset,
     registry_repo,
     write_task,

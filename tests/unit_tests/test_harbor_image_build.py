@@ -467,7 +467,11 @@ class TestPrepareBuilds:
         assert arm_image not in (tmp_path / "out" / "ds" / "tasks.jsonl").read_text()
         assert arm_image not in prepared.images
         assert f"Skipping a: recorded image {arm_image} cannot be used: it is linux/arm64" in capsys.readouterr().out
-        # The same record serves a run that asks for its platform.
+        # The same record serves a run that asks for its platform. That run records base images for arm64 too, and
+        # the recorded ubuntu is amd64, which prepare would resolve again over the network; record it as arm64.
+        configs = json.loads((folder / IMAGE_CONFIGS_FILE).read_text())
+        configs["ubuntu:24.04"] = {**UBUNTU_RECORD, "image": "ubuntu:24.04", "architecture": "arm64"}
+        (folder / IMAGE_CONFIGS_FILE).write_text(json.dumps(configs))
         prepared = prepare_target(
             str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False, platform="linux/arm64")
         )
