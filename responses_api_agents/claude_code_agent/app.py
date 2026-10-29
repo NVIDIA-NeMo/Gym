@@ -276,6 +276,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.bare and not skills_active:
             cmd.append("--bare")
+        if not self.config.auto_compaction:
+            # A preset name suppresses the CLI's background session-title model call.
+            cmd += ["--name", "Gym rollout"]
         cmd += ["--model", model]
         effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
         if effective_mcp_config:

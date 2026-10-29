@@ -642,6 +642,8 @@ async def test_training_controls_stage_anthropic_sampling_route(monkeypatch, tmp
     instance._validate_sandbox_request(body)
     await instance._sandbox_response(state, body, prompt="Fix", system=None)
     payload = execute.await_args.args[0]
+    command = payload["command"]
+    assert command[command.index("--name") + 1] == "Gym rollout"
 
     async def echo(request):
         return JSONResponse({"path": request.url.path, "body": await request.json()})
@@ -687,3 +689,17 @@ async def test_settings_cannot_redirect_sampled_model_calls(monkeypatch, tmp_pat
             state, NeMoGymResponseCreateParamsNonStreaming(input="Fix", temperature=0.3), prompt="Fix", system=None
         )
     execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("skills_active", [False, True])
+@pytest.mark.parametrize("auto_compaction", [False, True])
+def test_training_command_presets_title_to_prevent_background_model_call(skills_active, auto_compaction):
+    instance = agent(auto_compaction=auto_compaction)
+    command = instance._build_command(
+        "model", "Task text must not become the session title", skills_active=skills_active
+    )
+    if auto_compaction:
+        assert "--name" not in command
+    else:
+        assert command[command.index("--name") + 1] == "Gym rollout"
+        assert command.index("--name") < command.index("--")
