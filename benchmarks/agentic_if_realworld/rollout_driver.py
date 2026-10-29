@@ -53,13 +53,19 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         raise ValueError("Frozen benchmark prohibits repeats, fan-out, or prompt/sampling overrides")
     resource = global_config_dict["agentic_if_realworld_resources"]["resources_servers"]["agentic_if_realworld"]
     model = global_config_dict["policy_model"]["responses_api_models"]["agentic_if_text"]
+    reasoning_effort = model.get("reasoning_effort")
+    if reasoning_effort not in (None, "max"):
+        raise ValueError("Policy reasoning effort must be null or max")
     dataset = Dataset(resource["dataset_dir"], synthetic=resource["synthetic"])
     if not dataset.synthetic:
         source_preflight(resource["split_registry_path"], resource["ground_truth_path"], directory=dataset.directory)
     directory = private_path(Path(resource["receipt_dir"]))
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     settings = {
-        "policy": {k: model[k] for k in ["endpoint", "model", "api_key_env"]},
+        "policy": {
+            **{k: model[k] for k in ["endpoint", "model", "api_key_env"]},
+            "reasoning_effort": reasoning_effort,
+        },
         "judge": {
             k: resource[k]
             for k in [
@@ -70,7 +76,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
             ]
         },
         "policy_assets": dataset.pin["policy_assets"],
-        "profile": "adaptive_first_complete_v1",
+        "profile": "adaptive_first_complete_max_effort_v1" if reasoning_effort else "adaptive_first_complete_v1",
         "response_source": resource.get("response_source", "raw_receipt"),
         "runtime": runtime_identity(),
         "observability": {

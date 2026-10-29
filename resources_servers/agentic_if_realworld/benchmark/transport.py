@@ -138,6 +138,10 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
             if digest(Path(raw["path"])) != raw["sha256"]:
                 raise ValueError("Saved raw transport changed")
         return prior
+    # A missing key is a configuration error: fail before a receipt exists, so no attempt is spent.
+    key = os.environ.get(key_env)
+    if not key:
+        raise ValueError(f"{key_env} is not set; nothing was sent")
     record = {
         "status": "started",
         "request_body": body,
@@ -157,7 +161,7 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
                 "POST",
                 endpoint,
                 json=body,
-                headers={"Authorization": "Bearer " + os.environ[key_env]},
+                headers={"Authorization": "Bearer " + key},
                 timeout=ClientTimeout(total=7200, connect=60, sock_read=900),
                 _max_num_tries=1,
                 _resend_after_disconnect=False,

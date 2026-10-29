@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Strict one-message SSE model bridge; rejects executable actions before the agent sees them."""
 
+import os
 import re
 from pathlib import Path
+from typing import Literal
+
+from fastapi import FastAPI
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -15,6 +19,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_if_realworld.benchmark.core import PHASES, captured_context, judge, write
 from resources_servers.agentic_if_realworld.benchmark.transport import delivered, wire_call
 
@@ -24,10 +29,17 @@ class TextModelConfig(BaseResponsesAPIModelConfig):
     model: str
     receipt_dir: str
     api_key_env: str = "AGENTIC_IF_POLICY_API_KEY"
+    reasoning_effort: Literal["max"] | None = None
 
 
 class TextModel(SimpleResponsesAPIModel):
     config: TextModelConfig
+
+    def setup_webserver(self) -> FastAPI:
+        # Fail at startup, before the driver journals any attempt; a dry run returns before this.
+        if not os.environ.get(self.config.api_key_env):
+            raise ValueError(f"{self.config.api_key_env} is not set")
+        return super().setup_webserver()
 
     async def chat_completions(self, body: NeMoGymChatCompletionCreateParamsNonStreaming) -> NeMoGymChatCompletion:
         raise ValueError("Use the single-turn Responses interface")
@@ -61,6 +73,8 @@ class TextModel(SimpleResponsesAPIModel):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self.config.reasoning_effort is not None:
+            upstream["chat_template_kwargs"] = {"reasoning_effort": self.config.reasoning_effort}
         path = Path(self.config.receipt_dir) / "model" / (receipt_id + ".json")
         receipt = await wire_call(
             upstream,
@@ -127,3 +141,5 @@ class TextModel(SimpleResponsesAPIModel):
 
 if __name__ == "__main__":
     TextModel.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = TextModel.run_webserver()  # noqa: F401

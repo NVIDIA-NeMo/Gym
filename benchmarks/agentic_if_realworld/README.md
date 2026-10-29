@@ -76,6 +76,17 @@ of its grade. Judge recovery never regenerates that answer. Two judge attempts
 are allowed across resumes, with bounded transport retries and the existing
 timeouts. After both attempts are exhausted, unresolved scoring stays unscored.
 
+For a vLLM-backed model requiring maximum reasoning effort, set
+`policy_model.responses_api_models.agentic_if_text.reasoning_effort=max` in the
+run configuration. The adapter sends `chat_template_kwargs.reasoning_effort: max`,
+using the same wire field as Gym's vLLM adapter. This selects the distinct
+`adaptive_first_complete_max_effort_v1` profile. The default `null` omits that
+field and retains the original request. Temperature 0.7, the delivery schedule,
+wrapper, criteria and judge settings stay unchanged. Use a new run directory;
+resuming across these effort settings is rejected. This parameter requires an
+endpoint that honors vLLM chat-template kwargs; an endpoint accepting the JSON
+alone does not establish that it applied maximum effort.
+
 Every run fingerprints model settings, source bytes and dependencies. Resume
 requires matching settings and rejects ambiguous in-flight receipts. A rejected
 resume preserves the saved output and reports. Use a new run directory for changed

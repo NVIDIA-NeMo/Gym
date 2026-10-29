@@ -274,6 +274,20 @@ def test_judge_receipts_reject_git_checkout_before_writing(judge_payload, tmp_pa
     assert not (checkout / "receipts").exists()
 
 
+def test_missing_key_fails_before_any_receipt(tmp_path, monkeypatch):
+    monkeypatch.delenv("SYNTHETIC_MISSING_KEY", raising=False)
+    monkeypatch.setattr(server_utils, "request", lambda *args, **kwargs: pytest.fail("No network call allowed"))
+    path = tmp_path / "receipt.json"
+    with pytest.raises(ValueError, match="SYNTHETIC_MISSING_KEY is not set"):
+        asyncio.run(
+            wire_call(
+                {"model": "synthetic"}, endpoint="http://synthetic.invalid", key_env="SYNTHETIC_MISSING_KEY", path=path
+            )
+        )
+    # No receipt and no raw attempt: a later call with the key starts from a clean attempt.
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_cached_transport_rejects_changed_request_body(tmp_path, monkeypatch):
     body = {"model": "synthetic-judge"}
     endpoint = "http://synthetic.invalid"

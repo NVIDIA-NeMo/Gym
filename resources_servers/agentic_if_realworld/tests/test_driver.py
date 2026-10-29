@@ -41,8 +41,9 @@ from responses_api_agents.simple_agent.tests.test_app import _make_agent, _mock_
         (1, False, False, False, True),
     ],
 )
+@pytest.mark.parametrize("reasoning_effort", [None, "max"])
 def test_adaptive_capture_selected_parameters_and_resume(
-    tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple
+    tmp_path, monkeypatch, complete_stage, fail_last_dispatch, interrupted, fresh_resume, multiple, reasoning_effort
 ):
     create(tmp_path / "data", examples=interrupted or multiple)
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
@@ -236,6 +237,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
                     "endpoint": "http://synthetic.invalid",
                     "model": "synthetic-policy",
                     "api_key_env": "SYNTHETIC",
+                    "reasoning_effort": reasoning_effort,
                 }
             }
         },
@@ -402,6 +404,12 @@ def test_adaptive_capture_selected_parameters_and_resume(
     assert settings["policy_api_key"] == "synthetic-secret-never-save"
     assert "synthetic-secret-never-save" not in snapshot_path.read_text()
     assert snapshot.policy_model.responses_api_models.agentic_if_text.model == "synthetic-policy"
+    assert snapshot.policy_model.responses_api_models.agentic_if_text.reasoning_effort == reasoning_effort
+    run_settings = core.read(tmp_path / "out.run.json")["settings"]
+    assert run_settings["policy"]["reasoning_effort"] == reasoning_effort
+    assert run_settings["profile"] == (
+        "adaptive_first_complete_max_effort_v1" if reasoning_effort else "adaptive_first_complete_v1"
+    )
     assert snapshot.observability_enabled is True and snapshot_path.stat().st_mode & 0o077 == 0
     snapshot_bytes = snapshot_path.read_bytes()
     last_stage = complete_stage if complete_stage is not None else len(core.PHASES) - 1
@@ -440,6 +448,14 @@ def test_adaptive_capture_selected_parameters_and_resume(
     assert all(core.digest(path) == digest for path, digest in before.items())
     assert core.read(tmp_path / "out.jsonl").get("response") == record.get("response")
     artifacts = {path: path.read_bytes() for path in artifacts}
+    model_settings = settings["policy_model"]["responses_api_models"]["agentic_if_text"]
+    model_settings["reasoning_effort"] = "max" if reasoning_effort is None else None
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        asyncio.run(rollout_driver.run_rollout_collection(config, settings))
+    assert all(path.read_bytes() == saved for path, saved in artifacts.items())
+    assert len(calls) == last_stage + 1 and len(judge_calls) == int(complete_stage is not None)
+    assert all(core.digest(path) == digest for path, digest in before.items())
+    model_settings["reasoning_effort"] = reasoning_effort
     preserved_inventory = inventory_path.with_suffix(".saved")
     inventory_path.rename(preserved_inventory)
     try:

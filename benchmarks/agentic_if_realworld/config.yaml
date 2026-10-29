@@ -25,3 +25,4 @@ policy_model:
       model: ${policy_model_name}
       receipt_dir: ${agentic_if_realworld_resources.resources_servers.agentic_if_realworld.receipt_dir}
       api_key_env: AGENTIC_IF_POLICY_API_KEY
+      reasoning_effort: null

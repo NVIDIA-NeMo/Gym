@@ -7,6 +7,7 @@ from typing import ClassVar, Literal
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_if_realworld.benchmark.core import (
     DEFAULT_JUDGE_MODEL,
     judge,
@@ -101,3 +102,5 @@ class ResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = ResourcesServer.run_webserver()  # noqa: F401
