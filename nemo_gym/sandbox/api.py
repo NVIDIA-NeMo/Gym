@@ -432,6 +432,11 @@ class AsyncSandbox:
         """The provider's id for this sandbox, or None before it has started or connected."""
         return _sandbox_id(self._handle)
 
+    @property
+    def provider_name(self) -> str:
+        """The name of this sandbox's runtime provider."""
+        return self._provider.name
+
     def _telemetry_provider_name(self) -> str:
         """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
         return getattr(self._provider, "name", type(self._provider).__name__)

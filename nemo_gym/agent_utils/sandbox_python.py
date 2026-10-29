@@ -321,9 +321,15 @@ class SandboxPythonRuntime:
                 except BaseException:
                     await _discard(sandbox, setup)
                     raise
-                # From here the installer's EXIT trap owns the setup directory, even if this call stops waiting.
                 command = shlex.join(["bash", f"{setup}/{_INSTALLER.name}", self.directory, setup, self.import_check])
-                result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
+                try:
+                    result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
+                finally:
+                    # LocalProvider kills the process group on timeout/cancellation, so the installer's EXIT
+                    # trap cannot run. Once exec unwinds, no installer remains to use this setup directory.
+                    # Other providers may leave a remote exec running; its EXIT trap still owns the directory.
+                    if sandbox.provider_name == "local":
+                        await _discard(sandbox, setup)
         except TimeoutError as error:
             raise TimeoutError(
                 f"Installing the {self.harness} Python runtime took longer than {timeout_s} s"

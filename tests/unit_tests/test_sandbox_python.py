@@ -564,3 +564,85 @@ async def test_a_seed_that_times_out_during_upload_removes_its_setup_directory(t
 
     assert os.listdir(runtime.directory) == []
     assert not await runtime.is_installed(task.sandbox)
+
+
+@pytest.mark.sandbox
+@pytest.mark.parametrize("interruption", ["timeout", "cancel"])
+async def test_an_interrupted_local_installer_removes_its_setup_and_preserves_the_runtime(task, interruption) -> None:
+    runtime = _runtime(task)
+    assert task.sandbox.provider_name == "local"
+    await runtime.install(task.sandbox, timeout_s=60)
+    accepted = Path(runtime.directory) / "python/ACCEPTED"
+    accepted.touch()
+    workdir, home = _tree(task.workdir), _tree(task.home)
+
+    for attempt in range(2):
+        checking = task.root / f"checking-{attempt}"
+        stalled = _runtime(
+            task,
+            import_check=f"import pathlib, time; pathlib.Path({str(checking)!r}).touch(); time.sleep(60)",
+        )
+        install = asyncio.create_task(stalled.install(task.sandbox, timeout_s=2 if interruption == "timeout" else 60))
+        try:
+            await _until(checking.exists)
+            # The archives have been extracted and the fresh interpreter has entered its import check.
+            assert list(Path(runtime.directory).glob(".setup-*"))
+            if interruption == "cancel":
+                install.cancel()
+            with pytest.raises(TimeoutError if interruption == "timeout" else asyncio.CancelledError):
+                await install
+        finally:
+            if not install.done():
+                install.cancel()
+            await asyncio.gather(install, return_exceptions=True)
+
+        assert sorted(os.listdir(runtime.directory)) == ["home", "python"]
+        assert accepted.exists()
+        assert (_tree(task.workdir), _tree(task.home)) == (workdir, home)
+
+    await runtime.install(task.sandbox, timeout_s=60)
+    assert await runtime.is_installed(task.sandbox)
+    assert accepted.exists()
+    assert sorted(os.listdir(runtime.directory)) == ["home", "python"]
+
+
+@pytest.mark.sandbox
+async def test_a_remote_installer_keeps_its_setup_when_the_caller_times_out(task, monkeypatch) -> None:
+    # Model Docker's contract: cancelling the waiter does not terminate the command in the sandbox.
+    monkeypatch.setattr(task.sandbox._provider, "name", "docker")
+    execute = task.sandbox.exec
+    remote = None
+
+    async def detached(command: str, **kwargs) -> SandboxExecResult:
+        nonlocal remote
+        if shlex.split(command)[0] == "bash":
+            remote = asyncio.create_task(execute(command, **{**kwargs, "timeout_s": 60}))
+            return await asyncio.shield(remote)
+        return await execute(command, **kwargs)
+
+    monkeypatch.setattr(task.sandbox, "exec", detached)
+    checking, gate = task.root / "checking", task.root / "gate"
+    runtime = _runtime(
+        task,
+        import_check=(
+            f"import pathlib, time; pathlib.Path({str(checking)!r}).touch(); "
+            f"\nwhile not pathlib.Path({str(gate)!r}).exists(): time.sleep(0.02)"
+        ),
+    )
+    try:
+        with pytest.raises(TimeoutError, match="Installing the fake Python runtime"):
+            await runtime.install(task.sandbox, timeout_s=2)
+        assert checking.exists()
+        assert remote is not None and not remote.done()
+        (setup,) = Path(runtime.directory).glob(".setup-*")
+        assert (setup / "python/bin/python3").exists()
+        assert (setup / "python.tar.gz").exists()
+        assert (setup / "site-packages.tar.gz").exists()
+    finally:
+        gate.touch()
+        if remote is not None:
+            result = await asyncio.wait_for(remote, timeout=30)
+
+    assert result.return_code == 0 and result.error_type is None
+    assert await runtime.is_installed(task.sandbox)
+    assert sorted(os.listdir(runtime.directory)) == ["home", "python"]

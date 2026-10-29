@@ -344,7 +344,7 @@ The [`nemo_gym/agent_utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_g
 
 ### Code layout
 
-Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `sandbox.py` runs on the Agent Server. Inside the sandbox, the shared `harness_runner.sh` starts the harness CLI. A harness that is itself a Python program runs an adapter-specific `sandbox_runner.py` shim with a Python runtime that does not come from the task image: one that the Agent Server builds and uploads with `SandboxPythonRuntime`, as Hermes and Stirrup do, or a runtime prepared outside the task container and mounted read-only, as `hermes_sandboxed_agent` does.
+Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `sandbox.py` runs on the Agent Server. Inside the sandbox, the shared `harness_runner.sh` starts the harness CLI. A harness that is itself a Python program runs an adapter-specific `sandbox_runner.py` shim with a Python runtime that the Agent Server builds and uploads with `SandboxPythonRuntime`, as Hermes and Stirrup do. `hermes_sandboxed_agent` is being deprecated; use `hermes_agent` for new development and as the integration reference.
 
 | Adapter file | Responsibility |
 | --- | --- |
@@ -433,7 +433,7 @@ Keep harness-specific response parsing and model and tool behavior in the adapte
 **1. Define the session state.** Subclass `AgentSessionState` and compose a `SandboxSession`. Implement two hooks:
 
 - `stage_activation` uploads the activation input and returns `SandboxCommand(argv=...)`. Install the runtime earlier, during seed. A CLI harness runs through the shared bash runner, whose name never mentions python, so a `pkill -f python3` in the task cannot stop it.
-- `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness. Bound the size of what it downloads: trim large logs inside the sandbox first and keep the tail with a truncation marker. For example, the older `hermes_sandboxed_agent`, which calls the process supervisor directly, keeps the last 1 MiB of its runner log; apply the same bound in `collect`.
+- `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness. Bound the size of what it downloads: trim large logs inside the sandbox first and keep the tail with a truncation marker, for example the last 1 MiB of a runner log.
 
 ```python
 @dataclass
@@ -539,7 +539,7 @@ All control files live under `session_dir`, and their names are defined in `supe
 | `cleanup.json` | The supervisor records here whether the harness process group terminated. If a stop wins the launch claim, the stop shell writes the same receipt shape with `return_code: null` and `timed_out: false`. |
 | `output.log` | The launch shell redirects supervisor and harness diagnostics here. Task output is a separate, adapter-owned artifact. |
 
-To migrate an adapter that launches the process supervisor itself, such as `hermes_sandboxed_agent`, move launch, termination, collection, and release into `SandboxSession`. Receipt types and timeout helpers that used to live in `process_supervisor.py` are now in `nemo_gym.agent_utils.supervisor_client`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
+To migrate an adapter that launches the process supervisor itself, move launch, termination, collection, and release into `SandboxSession`. For Hermes, use the existing `hermes_agent` integration; `hermes_sandboxed_agent` is being deprecated and should not receive new integration work. Receipt types and timeout helpers that used to live in `process_supervisor.py` are now in `nemo_gym.agent_utils.supervisor_client`. Update the imports, hook arguments, control-file assumptions, test doubles, and tests together. The adapter imports these modules at startup, so a stale import also breaks host calls.
 
 Out-of-tree adapters written for the Python supervisor also need these changes:
 
@@ -576,7 +576,7 @@ A harness that is itself a Python program needs a Python runtime that the adapte
 
 The proposed shared installer must not depend on system package managers or root access. Not all existing adapter installers meet this goal yet. Until they migrate, document the supported images and any remaining prerequisites.
 
-For a Python harness, build the runtime on the Agent Server with [`SandboxPythonRuntime`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agent_utils/sandbox_python.py), as the [Hermes seed](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_agent/sandbox.py) does, or prepare the runtime outside the task container and mount it read-only, as [`hermes_sandboxed_agent/prepare_runtime.sh`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_sandboxed_agent/prepare_runtime.sh) does. With `SandboxPythonRuntime`, the sandbox needs x86_64 or aarch64 Linux with glibc 2.17 or newer or musl, `bash`, `tar` with gzip, and space under `/tmp`, but no network access. The Agent Server needs `uv` and access to the package index and the python-build-standalone releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply. Every dependency except a direct-URL requirement must publish a wheel for the sandbox's platform, so a harness's dependencies can narrow these platforms: Stirrup's need glibc 2.28 or newer and do not support musl.
+For a Python harness, build the runtime on the Agent Server with [`SandboxPythonRuntime`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/agent_utils/sandbox_python.py), as the [Hermes seed](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_agent/sandbox.py) does. The sandbox needs x86_64 or aarch64 Linux with glibc 2.17 or newer or musl, `bash`, `tar` with gzip, and space under `/tmp`, but no network access. The Agent Server needs `uv` and access to the package index and the python-build-standalone releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply. Every dependency except a direct-URL requirement must publish a wheel for the sandbox's platform, so a harness's dependencies can narrow these platforms: Stirrup's need glibc 2.28 or newer and do not support musl.
 
 <Note>
 The [shared installation proposal](https://github.com/NVIDIA-NeMo/Gym/pull/3961#issuecomment-6003983236) would add an Agent Server helper, `harness_install.py`, with `ensure_harness_installed(...)`. It would detect the platform, reuse or stage verified artifacts, run the adapter's installer at seed, and return the runtime location. Neither the helper nor its package location exists yet.
