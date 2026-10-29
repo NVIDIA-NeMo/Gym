@@ -208,6 +208,7 @@ All score aggregates include the existing tiebreaker. `/verify` returns:
 | `genrm_parse_failure_rate_per_group` | Fraction of final comparison verdicts that failed overall parsing. |
 | `genrm_rubric_parse_failure_rate_per_group` | Fraction that failed rubric parsing; zero in overall mode. |
 | `genrm_failed_comparison_rate_per_group` | Fraction of the group's comparisons dropped after judge failures; see [Failed comparisons](#failed-comparisons). |
+| `genrm_masked_rollout_rate_per_group` | Fraction of the group's members masked because none of their comparisons succeeded. |
 | `reasoning_text`, `answer_text` | Reasoning and final answer extracted from the rollout. |
 
 ### Token-usage metrics
@@ -395,8 +396,8 @@ deadline. The supplied YAML uses 16 members, so it requires 16 slots and enough 
 
 If D never arrives, the server fails the group and releases A, B, and C without rewards. Judge HTTP errors,
 connection failures, expired request deadlines, or exhausted retries for empty/unsuccessful judge responses
-fail that comparison, which is dropped; the group fails only when a member is left without a successful
-comparison (see [Failed comparisons](#failed-comparisons)). Each comparison shares one `genrm_parse_retries` budget across malformed/empty/truncated
+fail that comparison, which is dropped; only a member left without a successful comparison is masked
+(see [Failed comparisons](#failed-comparisons)). Each comparison shares one `genrm_parse_retries` budget across malformed/empty/truncated
 answers, HTTP 408, 429, or 5xx responses, and interrupted response bodies, with
 `genrm_parse_retry_sleep_s` between attempts. The default
 budget permits four attempts in total, not four attempts for each failure type. Other HTTP errors fail
@@ -458,8 +459,8 @@ restart the entire cohort.
 
 ### Failed comparisons
 
-A failed comparison is dropped instead of failing the group. The group fails only when a member is left
-without a successful comparison. With 16 members and a long judge answer, one comparison that exhausts
+A failed comparison is dropped instead of failing the group. Only a member left without a successful comparison
+is masked; the other members are scored. With 16 members and a long judge answer, one comparison that exhausts
 `max_output_tokens` on every attempt then costs two members one comparison each, instead of masking all 16.
 There is no configuration key for this.
 
@@ -471,22 +472,28 @@ There is no configuration key for this.
     deadline. Both default to 1,800 seconds, so by default the group deadline wins and the group fails.
 
   A completed but malformed answer keeps the default-score fallback. An error outside the judge request
-  still fails a `/verify` group with HTTP 503. `cohort_evaluation_timeout_s` still bounds the whole group.
-- **Scoring:** while every member keeps at least one successful comparison, each member is scored from the
-  comparisons it has left, and nothing is masked. Under `circular`, a member that lost one of its two
-  comparisons is scored from the other. In `fixed_baseline` mode, a member is scored from its remaining judge
-  passes against the baseline. Bonuses and length and style adjustments apply as usual.
-- **When the group fails:** as soon as a member has no comparison left that could still succeed, the group
-  fails as a judge failure, and the comparisons still running are cancelled. Every member is then masked
-  through the failsafe described above. Under `circular`, only two failures next to each other, such as
-  (4, 5) and (5, 6), leave a member uncovered. If the judge is down, the group fails as soon as one member's
-  comparisons have all failed, without waiting for the rest.
+  still fails a `/verify` group with HTTP 503, and the comparisons still running are cancelled.
+  `cohort_evaluation_timeout_s` still bounds the whole group.
+- **Scoring:** each member is scored from the comparisons it has left. Under `circular`, a member that lost one
+  of its two comparisons is scored from the other. In `fixed_baseline` mode, a member is scored from its
+  remaining judge passes against the baseline. Bonuses and length and style adjustments apply as usual, over
+  the scored members only.
+- **Masking one member:** a member whose comparisons all failed has no score. It alone is masked through the
+  failsafe described above (reward 0.0, `mask_sample`, `failure_kind: judge_failed`); its siblings keep their
+  scores. Under `circular`, two failures next to each other, such as (4, 5) and (5, 6), leave member 5
+  uncovered. When every member is uncovered, for example when the judge is down, the whole group fails as a
+  judge failure. The server waits for every comparison to finish or fail, within the group deadline.
+- **Consumer requirement:** the masked member's reward is a placeholder. A trainer must keep it out of the
+  group's baseline and normalization. In NeMo RL, set `grpo.masked_reward_policy` to `exclude_infra`
+  (`judge_failed` is not a policy failure kind) or to `exclude`. Under `include`, the placeholder 0.0 still
+  counts in the group mean and std, and it shifts the advantages of the member's siblings.
 - **Reporting:**
-  - `/verify` reports `genrm_failed_comparison_rate_per_group` on each member, and `/compare` reports it in
-    `metrics`.
-  - `/compare` leaves dropped comparisons out of `comparison_results`.
+  - `/verify` reports `genrm_failed_comparison_rate_per_group` and `genrm_masked_rollout_rate_per_group` on
+    each scored member, and `/compare` reports them in `metrics`.
+  - `/compare` leaves dropped comparisons out of `comparison_results`. It has no per-response mask, so it
+    returns HTTP 503 when a response keeps no comparison.
   - Token-usage metrics count completed comparisons only.
-  - Each dropped comparison is logged with its failure.
+  - Each dropped comparison is logged when it fails, and each masked member is logged with its reason.
 - **Trade-off:** the two members next to a dropped comparison are scored from fewer comparisons, so their
   scores are noisier. The dropped comparison showed one of them as `response_1` and the other as
   `response_2`, so a judge that favors one position now moves their two scores in opposite directions.

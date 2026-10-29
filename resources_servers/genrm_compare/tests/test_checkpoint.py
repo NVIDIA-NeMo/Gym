@@ -203,6 +203,40 @@ async def test_a_cohort_scored_after_a_dropped_comparison_restores_its_rewards(c
     await restored.aclose()
 
 
+async def test_a_member_masked_alone_gets_its_judge_failure_back_after_a_restore(config):
+    """Only the member with no successful comparison is masked; a restore keeps it masked and its sibling scored."""
+    config.num_rollouts_per_prompt = 3
+    sessions = [f"session-{index}" for index in range(3)]
+
+    def judge(*_args, pair_idx, **_kwargs):
+        if 1 in pair_idx:
+            raise JudgeError("judge is down for rollout 1")
+        return comparison_result(5.0, 1.0)
+
+    server, participant = participant_server(config, judge=AsyncMock(side_effect=judge))
+    for index, session_id in enumerate(sessions):
+        participant.seeded(session_id, EpisodeId(rollout_id=f"group_g{index}"))
+    outcomes = await asyncio.gather(
+        *(verify_as(server, sessions[index], member(index)) for index in range(3)), return_exceptions=True
+    )
+    assert isinstance(outcomes[1], JudgeError) and not isinstance(outcomes[2], JudgeError)
+    participant.ended(sessions[0])
+    records = await participant.export(None)
+    states = {record.session_id: record.state for record in records}
+    assert states[sessions[1]]["masked_alone"] is True
+    assert states[sessions[1]]["judge_failure"] == str(outcomes[1])
+    assert "masked_alone" not in states[sessions[2]] and states[sessions[2]]["result"]["reward"] == outcomes[2].reward
+    await server.aclose()
+
+    restored, _ = await restore(config, records)
+    with pytest.raises(JudgeError, match="rollout_index=1 has no successful comparison"):
+        await asyncio.wait_for(verify_as(restored, sessions[1], member(1)), timeout=0.5)
+    replayed = await asyncio.wait_for(verify_as(restored, sessions[2], member(2)), timeout=0.5)
+    assert replayed.reward == outcomes[2].reward
+    restored._run_single_comparison.assert_not_awaited()
+    await restored.aclose()
+
+
 @pytest.mark.parametrize("judge_fails", [False, True], ids=["reward", "judge_failure"])
 async def test_outcomes_are_held_while_a_checkpoint_is_open(config, judge_fails):
     """An outcome published after this server exported would let one member record it while its siblings could not."""

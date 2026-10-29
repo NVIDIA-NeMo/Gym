@@ -246,10 +246,15 @@ async def test_failed_comparisons_through_run(services, monkeypatch, failing_pai
     results = await asyncio.gather(*(run(services, i) for i in range(16)))
 
     if len(failing_pairs) == 2:
-        # Rollout 1 lost both comparisons, so the whole group is masked as a judge failure.
-        for status, body in results:
-            assert_judge_failure(status, body, "rollout_index=1 has no successful comparison")
-            assert "judge unavailable for this pair" in body["failure_reason"]
+        # Rollout 1 lost both comparisons, so only rollout 1 is masked as a judge failure.
+        status, body = results[1]
+        assert_judge_failure(status, body, "rollout_index=1 has no successful comparison")
+        assert "judge unavailable for this pair" in body["failure_reason"]
+        # Rollout 0 keeps only its 2 from (15, 0), rollout 2 only its 4 from (2, 3); the others keep both.
+        assert [body["reward"] for _, body in results[:1] + results[2:]] == [2.0, 4.0] + [3.0] * 13
+        for status, body in results[:1] + results[2:]:
+            assert status == 200 and not body["mask_sample"] and body.get("failure_kind") is None
+            assert body["genrm_masked_rollout_rate_per_group"] == 1 / 16
         return
     # Every rollout scores 4 as response_1 and 2 as response_2. Without (0, 1), rollout 0 keeps only its 2
     # from (15, 0) and rollout 1 only its 4 from (1, 2); the others keep both comparisons.
