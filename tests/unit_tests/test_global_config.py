@@ -2589,8 +2589,13 @@ class TestConfigLoadErrors:
 
         assert missing_path in str(error.value)
 
-    @mark.parametrize("resources_server", ["reasoning_gym", "tavily_search"])
-    def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
+    @mark.parametrize(
+        ("resources_server", "resources_instance"),
+        [("reasoning_gym", "reasoning_gym"), ("tavily_search", "tavily_search_resources_server")],
+    )
+    def test_langchain_deepagents_configs_have_environment_servers(
+        self, resources_server: str, resources_instance: str
+    ) -> None:
         agent_name = f"{resources_server}_langchain_deepagents_agent_model_server"
         config_path = (
             Path(__file__).resolve().parents[2]
@@ -2620,9 +2625,13 @@ class TestConfigLoadErrors:
             )
         )
 
-        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["legacy_agent"]
+        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         assert environment["entrypoint"] == "app.py"
         assert environment["agent_server"] == {"type": "responses_api_agents", "name": agent_name}
+        # single_agent_turn_legacy requires the Resources Server it seeds and verifies against.
+        assert environment["resources_server"] == {"type": "resources_servers", "name": resources_instance}
+        # The deepagents graph runs only its own tools, so the session sends it no grant.
+        assert environment["resources_tool_transports"] == []
 
     def test_multi_agent_environment_server_satisfies_agent_routing(self) -> None:
         parser = GlobalConfigDictParser()
@@ -3474,9 +3483,17 @@ class TestComposeUnboundAgent:
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
         }
 
-    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent"])
-    def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
+    @mark.parametrize(
+        ("harness_type", "transports"),
+        [("hermes_agent", ["mcp"]), ("opencode_agent", ["mcp"]), ("langchain_deepagents_agent", [])],
+    )
+    def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(
+        self, harness_type: str, transports: list[str]
+    ) -> None:
         config = self._session_environment_config(harness_type)
+        config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"][
+            "resources_tool_transports"
+        ] = transports
         server_before = OmegaConf.to_container(
             config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         )
@@ -3489,12 +3506,14 @@ class TestComposeUnboundAgent:
         assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
 
     def test_agent_session_agent_types_match_the_agent_apps(self) -> None:
-        """Every agent app that seeds agent sessions is listed, and nothing else is."""
+        """Every agent app that implements session seeding is listed, and nothing else is."""
         agents_root = Path(nemo_gym.global_config.__file__).parents[1] / "responses_api_agents"
+        # SimpleAgent subclasses can customize seeding through _new_session_state while inheriting the endpoint.
+        seed_hooks = ("def _seed_agent_session_state(", "def _new_session_state(")
         implementing = {
             app.parent.name
             for app in agents_root.glob("*/app.py")
-            if "def _seed_agent_session_state(" in app.read_text(encoding="utf-8")
+            if any(hook in app.read_text(encoding="utf-8") for hook in seed_hooks)
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES

@@ -85,6 +85,24 @@ gym eval run --no-serve --agent reasoning_gym_langchain_deepagents_agent_model_s
 Expect `mean/reward: 1.0` over those 5 rows — `reasoning_gym` scores deterministically by extracting the
 `<answer>` tag, so there's no judge noise in the number.
 
+## Environment Server and agent sessions
+
+Both bundled configs run this agent behind `single_agent_turn_legacy`, so the commands above are unchanged.
+The Environment Server seeds the resources server, opens an agent session, runs the graph once, closes the
+session, and then calls `/verify`. The agent's side of that contract:
+
+- **Seed** refuses a sandbox and any *required* tool grant with HTTP 422, because the graph runs only its own
+  tools; an optional grant is skipped. Keep `resources_tool_transports: []`, including on a
+  `single_agent_turn_legacy` Environment Server you swap this agent into with `--agent-type`.
+- **Close** returns no resources cookie jar, so `/verify` receives the seed's cookies unchanged. It returns an
+  observation bundle with the gaps `agent_transcript_unavailable` and `model_call_ownership_unavailable`
+  (see [Open gaps](#open-gapslimitations)).
+- **`execute_tools: false`** is rejected when the config loads: the graph always runs its own tools.
+- **Checkpointing** restarts an unfinished rollout from its input. The graph's state lives inside one
+  `ainvoke()` call and cannot be exported.
+- **`skip_verification: true`** skips `/verify` on the session path, including the Tavily judge. Set it on the
+  Environment Server, or on the agent when the Environment Server leaves it unset.
+
 ## Tool ownership: agent vs. resources server
 
 In this implementation, tools belong to the agent in the agent server, not the resources server. A subclass
@@ -201,7 +219,7 @@ request - it gets the compacted version.
   (per-tool-call/model-call observability) — `responses()` always takes the plain `graph.ainvoke()` path.
   Reward/pass-fail scoring is unaffected either way (`verify` only reads `body.response.output_text`);
   what's missing is only the rich per-call detail Gym's own rollout-collection pipeline can attach to a
-  trajectory.
+  trajectory. On the session path, close reports this as observation gaps instead of returning nothing.
 
 - **Context-overflow errors don't reach deepagents' own retry path.** When the Model Server rejects a
   request for exceeding the model's real context window, `raise_for_status()` raises an aiohttp
