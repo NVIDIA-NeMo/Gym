@@ -66,15 +66,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
-    AgentEpisode,
-    AgentInvocation,
-    AgentObservationBundle,
-    ObservationGap,
-    SandboxObservation,
-    ToolCallObservation,
-    TrajectoryRecord,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -82,6 +73,15 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
+)
+from nemo_gym.trajectory import (
+    AgentEpisode,
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    SandboxObservation,
+    ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.artifacts import (

@@ -39,7 +39,6 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -48,6 +47,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
+from nemo_gym.trajectory import SandboxObservation
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,

@@ -89,7 +89,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/mcp_auto_exposure.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/orchestration/ @nvidia-nemo/gym_core
 # suggest: /nemo_gym/rollout_correlation.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/rollout_observability.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/trajectory/trajectory_record.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/utils/decorators.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/utils/path_utils.py @nvidia-nemo/gym_core
 # suggest: /tests/ @nvidia-nemo/gym_core

@@ -29,7 +29,7 @@ from nemo_gym.tool_access import DirectHTTPToolAccess
 
 
 if TYPE_CHECKING:
-    from nemo_gym.rollout_observability import TrajectoryToolCall
+    from nemo_gym.trajectory import TrajectoryToolCall
     from responses_api_agents.nooa_agent.observability import GymTraceHooks
 
 

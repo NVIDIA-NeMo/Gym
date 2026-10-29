@@ -62,15 +62,6 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
-    AgentEpisode,
-    AgentInvocation,
-    AgentObservationBundle,
-    ContextCompactionObservation,
-    ModelCallRef,
-    ObservationGap,
-    ToolCallObservation,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -80,6 +71,15 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.tool_access import MCPToolAccess, ToolAccess
+from nemo_gym.trajectory import (
+    AgentEpisode,
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+)
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 

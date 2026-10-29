@@ -68,15 +68,6 @@ from nemo_gym.core import (
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
-    AgentEpisode,
-    AgentInvocation,
-    AgentObservationBundle,
-    ContextCompactionObservation,
-    ModelCallRef,
-    ObservationGap,
-    ToolCallObservation,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -85,6 +76,15 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
 )
 from nemo_gym.tool_access import MCPToolAccess
+from nemo_gym.trajectory import (
+    AgentEpisode,
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+)
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession

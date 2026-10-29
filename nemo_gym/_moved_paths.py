@@ -67,6 +67,11 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.rollout_observability": MovedPath(new="nemo_gym.trajectory.trajectory_record", since="0.8.0"),
+    "nemo_gym.atif_export": MovedPath(new="nemo_gym.trajectory.atif_export", since="0.8.0"),
+    "nemo_gym.atif_reverification": MovedPath(new="nemo_gym.trajectory.atif_reverification", since="0.8.0"),
+    "nemo_gym.atif_json": MovedPath(new="nemo_gym.trajectory.atif_json", since="0.8.0"),
+    "nemo_gym.atif_v1_7": MovedPath(new="nemo_gym.trajectory.atif_v1_7", since="0.8.0"),
     "nemo_gym.profiling": MovedPath(new="nemo_gym.telemetry.profiling", since="0.8.0"),
     "nemo_gym.failure_kinds": MovedPath(new="nemo_gym.core.failure_kinds", since="0.8.0"),
     "nemo_gym.config_types": MovedPath(new="nemo_gym.config.config_types", since="0.8.0"),
