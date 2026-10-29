@@ -62,6 +62,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.orchestration.jobs import LogSource
 
 
 _SCRIPT_TEMPLATE = """\
@@ -170,6 +171,24 @@ def _resolve_env(env: dict[str, str]) -> str:
     return f"env {pairs} "
 
 
+# Every srun step of a job writes one log per job, in the job directory. This is the one place that
+# layout is written down: the `--output` flags in the job script and the LogSource entries planned
+# for the record both come from `log_path`, so the two cannot disagree.
+LOG_DIR = "logs"
+DRIVER_STEP = "driver"
+# Left in a planned LogSource: the scheduler's job id is not known until the job is queued.
+JOB_ID_PLACEHOLDER = "{job_id}"
+_RUNTIME_JOB_ID = "$SLURM_JOB_ID"
+
+
+def log_path(step: str, job_id: str) -> str:
+    """The log of srun step `step` in job `job_id`, relative to the job directory.
+
+    A resumed job keeps the job directory and gets a new job id, so it keeps the previous job's logs.
+    """
+    return f"{LOG_DIR}/{step}-{job_id}.log"
+
+
 def _render_service_command(
     name: str,
     container: str | None,
@@ -220,7 +239,7 @@ def _render_service_command(
     return (
         f"# service: {name}\n"
         f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}"
-        f" --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
+        f" --output={log_path(name, _RUNTIME_JOB_ID)} {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -990,6 +1009,22 @@ def _with_resume_flag(run: dict[str, Any], resumable: bool) -> dict[str, Any]:
     return run
 
 
+def planned_log_sources(config: SubmitConfig, compute: SlurmComputeConfig) -> list[LogSource]:
+    """The logs `build_sbatch_script` makes a job write: the driver's, then one per service step.
+
+    Steps are named as the script names them: the telemetry collector when it is on, a ray service's
+    head and each of its worker steps, and every other service, including a vllm_pd service's tiers
+    and router, by its name in `deployed_services`. Locations keep the job id placeholder.
+    """
+    steps = [COLLECTOR_SERVICE_NAME] if otel_active(config) else []
+    for name, service in config.deployed_services.items():
+        steps += _ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name]
+    return [
+        LogSource(name=DRIVER_STEP, kind="driver", location=log_path(DRIVER_STEP, JOB_ID_PLACEHOLDER)),
+        *(LogSource(name=step, kind="service", location=log_path(step, JOB_ID_PLACEHOLDER)) for step in steps),
+    ]
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -1168,7 +1203,7 @@ def build_sbatch_script(
     driver_srun = (
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
+        f"--output={log_path(DRIVER_STEP, _RUNTIME_JOB_ID)} {entrypoint}"
     )
     # Every service step but the collector, whose loss costs telemetry, not the run.
     watched = [
