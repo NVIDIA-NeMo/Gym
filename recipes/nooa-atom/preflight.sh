@@ -141,7 +141,11 @@ import json, sys
 row = json.loads(open(sys.argv[1]).readline())
 resp = row.get("response") or {}
 md = resp.get("metadata") or {}
-print("preflight row:", {"status": resp.get("status"), "reward": row.get("reward"),
-      "harness_execution": md.get("harness_execution"), "terminal_response_id": bool(md.get("terminal_response_id"))})
+obs = row.get("ng_agent_observations") or {}
+records = obs.get("records") or []
+print("preflight row:", {"task": row.get("task_name"), "status": resp.get("status"), "reward": row.get("reward"),
+      "evaluation_completed": row.get("evaluation_completed"), "mask_sample": row.get("mask_sample"),
+      "agent_invocations": sum(1 for r in records if r.get("kind") == "agent_invocation"),
+      "tool_calls": sum(1 for r in records if r.get("kind") == "tool_call"), "elapsed_s": round(row.get("_ng_elapsed_s") or 0)})
 EOF
 echo "preflight: OK"
