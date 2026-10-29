@@ -67,7 +67,9 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.correlation import (
     AGENT_INSTANCE_PATH_SEGMENT,
+    CorrelationContext,
     CorrelationPathError,
+    parse_path,
     resolve,
     validate_agent_instance,
 )
@@ -1621,25 +1623,42 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         return self._token_id_capture_enabled() and not skips_token_capture(body)
 
+    @staticmethod
+    def inbound_correlation(request: Optional[Request]) -> Optional[CorrelationContext]:
+        """The correlation an inbound request's path carries, read through ``nemo_gym.core.correlation``.
+
+        A request the server received carries its ASGI scope. A stand-in request without one is read from its
+        URL path, and then from a ``rollout_id`` path parameter.
+        """
+        scope = getattr(request, "scope", None)
+        if isinstance(scope, dict) and isinstance(scope.get("path"), str):
+            resolved = resolve(scope)
+        else:
+            path = getattr(getattr(request, "url", None), "path", None)
+            resolved = parse_path(path) if isinstance(path, str) else None
+        if resolved is not None:
+            return resolved[0]
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        return CorrelationContext(capture_key=rollout_id) if isinstance(rollout_id, str) else None
+
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
         """Carry an inbound capture path and sampling segment onto a downstream URL path.
 
-        Prefixed self-calls expose the rollout id as a path parameter.
-        Training-capture requests preserve their dedicated path segment.
+        The inbound path's capture key and training tag carry over, read through ``nemo_gym.core.correlation``.
+        Its agent instance name wins; otherwise the name of the session the activation runs for.
         A request that arrived with a sampling segment passes it on after the rollout prefix.
         Unprefixed requests remain unchanged.
         """
-        path_params = getattr(request, "path_params", None)
-        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
-        request_path = getattr(getattr(request, "url", None), "path", "")
-        token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
-        # The agent instance of a named session's activation, set while the activation runs.
-        agent_instance = current_agent_instance()
-        return (
-            f"{rollout_path_prefix(rollout_id, token_capture=token_capture, agent_instance=agent_instance)}"
-            f"{model_sampling_path_segment(current_model_sampling_segment())}"
-            f"{url_path}"
-        )
+        context = self.inbound_correlation(request)
+        prefix = ""
+        if context is not None and context.capture_key is not None:
+            prefix = rollout_path_prefix(
+                context.capture_key,
+                token_capture=context.token_capture,
+                agent_instance=context.agent_instance or current_agent_instance(),
+            )
+        return f"{prefix}{model_sampling_path_segment(current_model_sampling_segment())}{url_path}"
 
     def resolve_model_base_url(
         self,

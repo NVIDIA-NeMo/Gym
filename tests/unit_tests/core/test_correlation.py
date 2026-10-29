@@ -238,12 +238,26 @@ def test_resolve_leaves_the_state_of_an_unprefixed_request_untouched():
     assert "state" not in scope
 
 
-def test_the_checkpoint_admission_reader_still_finds_the_capture_key_before_a_name():
-    from nemo_gym.models._checkpoint import _ROLLOUT_PREFIX
+@pytest.mark.parametrize("key", [".hidden", "a b", "a:b", "ä"])
+def test_a_capture_key_follows_the_rollout_id_rule(key):
+    with pytest.raises(CorrelationPathError, match="invalid capture key"):
+        parse_path(f"/ng-rollout/{key}/v1/responses")
 
-    match = _ROLLOUT_PREFIX.match("/ng-rollout/r-a1/ng-agent-instance/judge/training-token-capture/v1/responses")
 
-    assert match is not None and match.group("capture_key") == "r-a1"
+async def test_resources_servers_strip_a_whole_prefix_and_see_its_rollout():
+    from nemo_gym.core.episode_context import current_rollout_id
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+
+    seen = {}
+
+    async def app(scope, receive, send):
+        seen["path"] = scope["path"]
+        seen["rollout_id"] = current_rollout_id()
+
+    path = "/ng-rollout/r-a1/ng-agent-instance/judge/verify"
+    await RolloutContextMiddleware(app)({"type": "http", "path": path, "raw_path": path.encode()}, None, None)
+
+    assert seen == {"path": "/verify", "rollout_id": "r-a1"}
 
 
 def test_a_trailing_newline_is_not_part_of_a_valid_name_or_traceparent():

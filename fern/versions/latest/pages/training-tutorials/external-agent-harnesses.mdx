@@ -169,7 +169,7 @@ An episode can have several agent instances calling model servers: an assistant,
 /ng-rollout/<capture key>[/ng-agent-instance/<name>][/training-token-capture][/ng-trace/<traceparent>]/v1/...
 ```
 
-The segments appear in exactly this order. A name is `<agent kind>[.<n>]` in lowercase letters, digits, `_` and `-`, for example `assistant`, `judge`, `user` or `debater.1`. When an episode runs several agent instances of one kind, each gets its own `<kind>.<n>`. A name may not be a segment literal (`ng-rollout`, `ng-agent-instance`, `training-token-capture`, `ng-trace`) or `v1`. A model server answers a malformed prefix (segments out of order, an invalid name) with HTTP 400.
+The segments appear in exactly this order. A name is `<agent kind>[.<n>]` in lowercase letters, digits, `_` and `-`, for example `assistant`, `judge`, `user` or `debater.1`. When an episode runs several agent instances of one kind, each gets its own `<kind>.<n>`. A name may not be a segment literal (`ng-rollout`, `ng-agent-instance`, `training-token-capture`, `ng-trace`) or `v1`. A model server answers a malformed prefix (segments out of order, an invalid name) with HTTP 404.
 
 An agent's own `/run` names no agent instance, so single-agent episodes keep the URLs above. In a multi-agent episode every agent instance is named, including the assistant. Parent links, retry grouping and terminal calls never cross agent instances or model servers, and one agent instance's capture failure never masks another's sample.
 
