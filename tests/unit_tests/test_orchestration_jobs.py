@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import json
 import logging
 import os
@@ -32,9 +33,11 @@ from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     SCHEMA_VERSION,
+    BenchmarkInfo,
     BenchmarkJob,
     Failure,
     FailureCategory,
+    JobInfo,
     JobRef,
     JobState,
     JobStatus,
@@ -566,3 +569,31 @@ def test_a_record_without_log_sources_has_none_to_list():
 def test_log_sources_of_an_unknown_benchmark_name_the_known_ones():
     with pytest.raises(ValueError, match="has no benchmark 'nope'; it has: gsm8k"):
         KubernetesExecutor().log_sources(_record(), "nope")
+
+
+def test_cancelling_a_whole_submission_needs_its_id_typed_as_a_keyword():
+    confirm = inspect.signature(BaseExecutor.cancel_submission).parameters["confirm"]
+
+    assert confirm.kind is inspect.Parameter.KEYWORD_ONLY
+    assert confirm.default is inspect.Parameter.empty
+
+
+def test_a_job_info_says_why_the_config_is_missing_and_survives_json():
+    info = JobInfo(
+        record=_with_log_sources(_record()),
+        benchmarks=[
+            BenchmarkInfo(
+                benchmark="gsm8k",
+                job_dir="/jobs/x/gsm8k",
+                job_ids=["12345", "12400"],
+                log_sources=[_log_source()],
+            )
+        ],
+        config_unavailable="the run directory is not readable",
+    )
+
+    restored = JobInfo.model_validate_json(info.model_dump_json())
+
+    assert restored == info
+    assert restored.config is None
+    assert restored.benchmarks[0].job_ids == ["12345", "12400"]

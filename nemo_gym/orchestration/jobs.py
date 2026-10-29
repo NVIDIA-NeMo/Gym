@@ -364,6 +364,29 @@ class SubmissionStatus(BaseModel):
     counts: dict[JobState, int]
 
 
+class BenchmarkInfo(BaseModel):
+    """Where one benchmark's job lives and what it writes: its directory, the job ids observed for it
+    (the whole chain when a run was resumed), and the logs it was set up to write."""
+
+    benchmark: str
+    job_dir: str
+    job_ids: list[str] = []
+    log_sources: list[LogSource] = []
+
+
+class JobInfo(BaseModel):
+    """A description of one submission and where its parts are, with no live state.
+
+    `config` is the resolved config the submission was made with, or None when the executor
+    cannot read it, in which case `config_unavailable` says why.
+    """
+
+    record: SubmissionRecord
+    benchmarks: list[BenchmarkInfo]
+    config: dict[str, object] | None = None
+    config_unavailable: str | None = None
+
+
 # One benchmark's job: the submission's id and the benchmark's name.
 JobKey = tuple[str, str]
 
