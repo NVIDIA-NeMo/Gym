@@ -100,8 +100,30 @@ for path, value in missing:
     print(f"missing: {path} = {value}", file=sys.stderr)
 sys.exit(1 if missing else 0)
 EOF
-grep -q "agent_class: nooa_atom.gym:AtomHarness" "$OUT/resolved.yaml" || fail 4 "resolved config does not run AtomHarness"
-grep -q "runtime_wheelhouse_required: true" "$OUT/resolved.yaml" || fail 4 "resolved config does not require the offline runtime"
+# Follow the route structurally: the benchmark's taskset -> environment -> its agent server must be Atom with the
+# offline runtime required. A grep would also match an override of a block that nothing references.
+python - "$OUT/resolved.yaml" <<'EOF' || fail 4 "the agent the environment routes to is not the Atom configuration this recipe expects"
+import sys, yaml
+cfg = yaml.safe_load(open(sys.argv[1]))
+routes = cfg.get("environment_server_routes") or {}
+problems = []
+for taskset, env_name in routes.items():
+    env = next(iter((cfg.get(env_name) or {}).get("environment_servers", {}).values()), {})
+    agent_name = (env.get("agent_server") or {}).get("name")
+    agent = next(iter((cfg.get(agent_name) or {}).get("responses_api_agents", {}).values()), {})
+    nooa = agent.get("nooa") or {}
+    if nooa.get("agent_class") != "nooa_atom.gym:AtomHarness":
+        problems.append(f"{taskset} -> {env_name} -> {agent_name}: nooa.agent_class = {nooa.get('agent_class')!r}")
+    for key in ("runtime_wheelhouse_required", "trace_jsonl"):
+        if agent.get(key) is not True:
+            problems.append(f"{taskset} -> {env_name} -> {agent_name}: {key} = {agent.get(key)!r}, want true")
+    print(f"route {taskset} -> {env_name} -> {agent_name}: {nooa.get('agent_class')}")
+if not routes:
+    problems.append("no environment_server_routes in the resolved config")
+for problem in problems:
+    print("route check:", problem, file=sys.stderr)
+sys.exit(1 if problems else 0)
+EOF
 sha256sum "$OUT/resolved.yaml" | tee "$OUT/resolved.sha256"
 
 # 4b. Warm the per-server venvs now, where the network is, so the run itself installs nothing.

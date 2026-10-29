@@ -41,8 +41,9 @@ benchmark_config:
   - benchmarks/terminal_bench_2_1/atom.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
-# The controller-prepared offline NOOA runtime. Required: a task sandbox never installs from the network.
-terminal_bench_2_1_nooa_agent:
+# The agent instance the Terminal-Bench environment routes to (see benchmarks/terminal_bench_2_1/nooa.yaml).
+# The controller-prepared offline NOOA runtime is required: a task sandbox never installs from the network.
+agent:
   responses_api_agents:
     nooa_agent:
       runtime_wheelhouse: ${oc.env:NOOA_RUNTIME_WHEELHOUSE}
