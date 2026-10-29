@@ -158,6 +158,16 @@ for dependency updates and offline validation.
 The Dockerfile pins downloads and image digests, and package locks pin transitive
 dependencies. Builds need network access; sandbox startup performs no package installs.
 
+For `benchmarks/hle_diamond/opencode_reference.yaml` build the reference image instead
+(`OPENCODE_REFERENCE_SANDBOX_IMAGE`): upstream's Python 3.11.16 with its twelve pinned packages, a
+shell and the same OpenCode 1.17.11 install, nothing else. See the
+[reference image README](hle_reference_image/README.md) for the protocol source and verification.
+
+```bash
+docker build --platform linux/amd64 -t gym-opencode-hle-reference:local \
+  responses_api_agents/opencode_sandboxed_agent/hle_reference_image
+```
+
 Pi adds Node 22.23.2 and Pi 0.85.1 in a small layer:
 
 ```bash
