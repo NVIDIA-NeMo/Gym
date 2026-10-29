@@ -24,12 +24,12 @@ import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
-import nemo_gym.exporters.isolated as isolated
-from nemo_gym.exporters import load_run_exporter_class
-from nemo_gym.exporters.base import ExportState
-from nemo_gym.exporters.evalrdl import EvalRDLExportConfig, EvalRDLExporter
-from nemo_gym.exporters.isolated import ensure_exporter_environment
-from nemo_gym.run_artifacts import RunArtifacts
+import nemo_gym.artifacts.exporters.isolated as isolated
+from nemo_gym.artifacts.exporters import load_run_exporter_class
+from nemo_gym.artifacts.exporters.base import ExportState
+from nemo_gym.artifacts.exporters.evalrdl import EvalRDLExportConfig, EvalRDLExporter
+from nemo_gym.artifacts.exporters.isolated import ensure_exporter_environment
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
 
 
 # A stand-in for the `evalrdl` SDK with the same names and signatures, driven by environment variables. The worker

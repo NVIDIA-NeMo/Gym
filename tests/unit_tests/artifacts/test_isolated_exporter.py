@@ -21,16 +21,16 @@ import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
-import nemo_gym.exporters.isolated as isolated
-from nemo_gym.config.config_types import RunExportConfig
-from nemo_gym.exporters.base import ExportState
-from nemo_gym.exporters.isolated import (
+import nemo_gym.artifacts.exporters.isolated as isolated
+from nemo_gym.artifacts.exporters.base import ExportState
+from nemo_gym.artifacts.exporters.isolated import (
     ExportPreparationError,
     IsolatedExporter,
     ensure_exporter_environment,
     exporter_venv_path,
 )
-from nemo_gym.run_artifacts import RunArtifacts
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
+from nemo_gym.config.config_types import RunExportConfig
 
 
 needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="uv is required to build the exporter environment")

@@ -16,11 +16,11 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.artifacts.exporters import load_run_exporter_class
+from nemo_gym.artifacts.exporters.atif import AtifExporter
+from nemo_gym.artifacts.exporters.base import ExportResult, ExportState
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.exporters import load_run_exporter_class
-from nemo_gym.exporters.atif import AtifExporter
-from nemo_gym.exporters.base import ExportResult, ExportState
-from nemo_gym.run_artifacts import RunArtifacts
 from nemo_gym.trajectory.atif_export import ExportAtifConfig
 
 
@@ -91,7 +91,7 @@ def test_atif_exporter_reports_an_unusable_output_location_as_a_failed_result(tm
 def test_atif_exporter_reports_a_permission_error_as_failed_but_lets_a_bug_propagate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym.exporters.atif as atif_module
+    import nemo_gym.artifacts.exporters.atif as atif_module
 
     exporter = AtifExporter(_atif_config(tmp_path, tmp_path / "atif"))
 

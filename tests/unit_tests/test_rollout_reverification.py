@@ -23,6 +23,7 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
@@ -32,7 +33,7 @@ from nemo_gym.config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,

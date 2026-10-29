@@ -25,6 +25,7 @@ import aiohttp
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -50,7 +51,6 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from responses_api_models.vllm_model.app import VLLMConverter
 
 

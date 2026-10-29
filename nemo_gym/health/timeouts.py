@@ -474,7 +474,7 @@ def export_run_health_timeouts(health: "HealthCheckResult") -> None:
     in reading the section or in exporting it, is logged and never stops the run.
     """
     # Imported here: health-check workers load this module and need none of the exporters.
-    from nemo_gym.exporters import export_metrics
+    from nemo_gym.artifacts.exporters import export_metrics
 
     try:
         export_metrics(export_keys(health.summary["run"]["stats"]["timeouts"]))

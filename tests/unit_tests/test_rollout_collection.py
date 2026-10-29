@@ -46,6 +46,8 @@ import nemo_gym.batch_status
 import nemo_gym.rollout_collection
 import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
+from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.artifacts.rollout_rows import _rollout_for_export
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.client import ServerClient
@@ -72,12 +74,9 @@ from nemo_gym.rollout_collection import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_DATASET_DIGEST_KEY,
     NG_DIGEST_KEY,
-    NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
-    NG_FAILURE_CLASS_KEY,
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
-    NG_NO_PERSIST_KEY,
     NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
     NG_RESULT_TYPE_KEY,
@@ -104,7 +103,6 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
     _masking_step_metrics,
     _missing_rollout_rows_counted_as_zero,
-    _rollout_for_export,
     _rollout_order_key,
     _rollout_request_debug_summary,
     _round_robin_by_agent,

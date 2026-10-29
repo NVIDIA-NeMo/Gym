@@ -67,6 +67,10 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.resolved_config": MovedPath(new="nemo_gym.artifacts.resolved_config", since="0.8.0"),
+    "nemo_gym.run_artifacts": MovedPath(new="nemo_gym.artifacts.run_artifacts", since="0.8.0"),
+    "nemo_gym.run_exporter_registry": MovedPath(new="nemo_gym.artifacts.exporter_registry", since="0.8.0"),
+    "nemo_gym.exporters": MovedPath(new="nemo_gym.artifacts.exporters", since="0.8.0"),
     "nemo_gym.reward_profile": MovedPath(new="nemo_gym.metrics.reward_profile", since="0.8.0"),
     "nemo_gym.metrics_config": MovedPath(new="nemo_gym.metrics.metrics_config", since="0.8.0"),
     "nemo_gym.judge": MovedPath(new="nemo_gym.verification.judge", since="0.8.0"),
@@ -325,6 +329,26 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.core.episode", "0.8.0", "_CAPTURE_KEY_ATTEMPT"),
         # Moved, and still imported by episode_types for its own use.
         **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId TaskId"),
+    },
+    "nemo_gym.rollout_collection": {
+        **_names("nemo_gym.artifacts.rollout_rows", "0.8.0", "_MODEL_CALL_PAYLOAD_KEYS"),
+        # Moved, and still imported by rollout_collection for its own use.
+        **_names(
+            "nemo_gym.artifacts.rollout_rows",
+            "0.8.0",
+            "NG_DISPATCH_DRAINED_KEY NG_FAILURE_CLASS_KEY NG_NO_PERSIST_KEY _rollout_for_export _strip_capture_payloads",
+        ),
+    },
+    "nemo_gym.health.types": {
+        **_names(
+            "nemo_gym.artifacts.run_files",
+            "0.8.0",
+            "QUALITY_SUMMARY_FILENAME QUALITY_SUMMARY_SOURCES_KEY ROLLOUT_VERDICTS_FILENAME",
+        ),
+    },
+    "nemo_gym.batch_status": {
+        # Moved, and still imported by batch_status for its own use.
+        **_names("nemo_gym.artifacts.run_files", "0.8.0", "AGGREGATION_ERROR_KEY"),
     },
 }
 

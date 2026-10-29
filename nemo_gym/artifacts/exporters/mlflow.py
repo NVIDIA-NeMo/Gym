@@ -35,9 +35,9 @@ from mlflow.utils.validation import (
 )
 from omegaconf import DictConfig, OmegaConf
 
+from nemo_gym.artifacts.exporters.base import BaseExporter
 from nemo_gym.config.config_types import MLFlowConfig
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.exporters.base import BaseExporter
 
 
 logger = logging.getLogger(__name__)
@@ -293,6 +293,6 @@ def _landed(rollout: dict[str, Any]) -> bool:
     """Whether the rollout landed in the output: a failed attempt carries its failure class, and a no-persist one is
     written nowhere."""
     # Imported here: rollout collection imports the exporters.
-    from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+    from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 
     return rollout.get(NG_FAILURE_CLASS_KEY) is None and not rollout.get(NG_NO_PERSIST_KEY)
