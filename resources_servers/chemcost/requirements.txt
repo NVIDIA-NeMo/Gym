@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+# The authors' tools, answer parser and CTA@k rule (MIT). Pinned: the open-source release that matches
+# YoungerWu/ChemCost@8af73ec. Another revision can change a tool result or a score.
+chemcost @ git+https://github.com/HeinzVonHank/ChemCost.git@d7de381d782835e51840d7d371586d3648836cfd  # pragma: allowlist secret

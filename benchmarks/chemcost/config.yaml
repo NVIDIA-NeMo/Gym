@@ -1,0 +1,30 @@
+# ChemCost (YoungerWu/ChemCost @ 8af73ec), all 1,427 reactions: 1,359 single-step and 68 multi-step routes.
+# See resources_servers/chemcost/README.md for the task, the tools, the metric and the published numbers.
+config_paths:
+  - resources_servers/chemcost/configs/chemcost.yaml
+
+chemcost_chemcost_resources_server:
+  _inherit_from: chemcost
+
+chemcost_chemcost_simple_agent:
+  _inherit_from: chemcost_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: chemcost_chemcost_resources_server
+      datasets:
+      - name: chemcost
+        type: benchmark
+        jsonl_fpath: benchmarks/chemcost/data/chemcost_benchmark.jsonl
+        prepare_script: benchmarks/chemcost/prepare.py
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+        prompt_config: null
+        # The authors report one run per model.
+        num_repeats: 1
+
+chemcost_chemcost_environment_server:
+  _inherit_from: chemcost_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: chemcost_chemcost_simple_agent
