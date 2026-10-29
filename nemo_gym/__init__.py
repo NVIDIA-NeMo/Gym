@@ -22,6 +22,12 @@ from typing import Callable, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+# Old import paths of code moved by the package reorganization keep working; see nemo_gym/_moved_paths.py.
+from nemo_gym._moved_paths import install_moved_module_finder  # noqa: E402
+
+
+install_moved_module_finder()
+
 # /path/to/dir/Gym (PARENT_DIR)
 # |- cache (CACHE_DIR)
 # |- results (RESULTS_DIR)
