@@ -376,7 +376,9 @@ async def test_profile_runs_published_compose_isolation_through_the_sandbox_adap
     environment = benchmark_config().terminal_bench_science.resources_servers.terminal_bench_4.environment
     source = yaml.safe_load(COMPOSE_FILES[task])
     with pytest.raises(NotImplementedError):
-        AsyncSandboxCompose._validate(SimpleNamespace(document=source))
+        # The adapter's field check reads the deployment platform and the per-service providers before it refuses
+        # `build:`; a bare fake has neither.
+        AsyncSandboxCompose._validate(SimpleNamespace(document=source, platform="linux/amd64", service_providers={}))
     images = {name: f"registry/{name}" for name in source["services"] if name != "main"}
     records = json.loads((BENCHMARK_DIR / "compose-images.json").read_text())
     document = resolve_compose(
@@ -666,6 +668,20 @@ async def test_finalize_session_runs_the_verifier_with_the_profile_timeout(
     [
         ({"tbsci_verifier_timeout_overrides": {"finite-free-stamp": 1800}}, "verifier_timeout_overrides"),
         ({"tbsci_task_images": {"symbolic-regresion": {"agent": "registry.invalid/sr"}}}, "task_images.by_task"),
+        (
+            {
+                "terminal_bench_science": {
+                    "resources_servers": {
+                        "terminal_bench_4": {
+                            "environment": {
+                                "compose_service_overrides": {"protein-active-learnin": {"submission": {"user": None}}}
+                            }
+                        }
+                    }
+                }
+            },
+            "compose_service_overrides",
+        ),
     ],
 )
 def test_per_task_settings_must_name_manifest_tasks(tmp_path, monkeypatch, override, setting):

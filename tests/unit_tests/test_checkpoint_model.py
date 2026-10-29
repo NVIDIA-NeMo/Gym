@@ -37,11 +37,12 @@ from nemo_gym._checkpoint.model import (
 from nemo_gym.base_responses_api_model import _CaptureMiddleware
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.responses_streaming import synthesize_responses_keepalive_sse
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.protocols import RolloutRetiredError
+from nemo_gym.token_id_capture.protocols import CaptureAdmissionError, RolloutRetiredError
 from nemo_gym.token_id_capture.records import ParentResolutionStatus
 from nemo_gym.token_id_capture.sink import NG_COMMIT_COORDS_FIELD, CaptureContext, current_capture_context
 from nemo_gym.token_id_capture.staging.records import (
@@ -416,6 +417,7 @@ def _restore_request(checkpoint_id: str, checkpoint_dir: Path, episode_ids: list
 async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path: Path) -> None:
     ledger, _, controller = await _ledger_participant(tmp_path / "before")
     await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    await ledger.close_admissions("r")
     await controller.prepare(CheckpointRequest(**control()))
     commit = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
     # A row written after the cut belongs to an execution the restore replaces.
@@ -433,7 +435,27 @@ async def test_restored_ledger_lets_the_next_attempt_resolve_its_parent(tmp_path
     # The replaced attempt is refused until the controller forgets the rollout.
     assert restored.retired.marks() == {"r": 0}
     # The carried-over call stays staged under the attempt that made it.
-    assert [record.capture_key for record in manifest.records] == ["r"]
+    assert [record.source_capture_key for record in manifest.records] == ["r"]
+    assert not any(row.get("admissions_closed") for row in restored_ledger.export_rows("r-a1"))
+    await restored_ledger.begin_call("r-a1", "next")
+    assert (await restored_ledger.manifest("r-a1"))["pending_call_ids"] == ["next"]
+    with pytest.raises(CaptureAdmissionError, match="closed"):
+        await ledger.begin_call("r", "still-closed")
+
+
+async def test_restore_reopens_closed_admissions_from_older_checkpoint_rows(tmp_path: Path) -> None:
+    ledger = FileLineageStore(tmp_path / "live")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r"))
+    await ledger.close_admissions("r")
+    record = ModelRecord(episode_id=EpisodeId(rollout_id="r"), rows=ledger.export_rows("r"))
+    restored = FileLineageStore(tmp_path / "restored")
+    import_model_records(restored, [record])
+    await restored.begin_call("r-a1", "next")
+    manifest = RolloutManifest.model_validate(await restored.manifest("r-a1"))
+    assert [row.model_call_id for row in manifest.records] == ["c1"]
+    assert manifest.pending_call_ids == ["next"] and not manifest.failures
+    with pytest.raises(CaptureAdmissionError, match="closed"):
+        await ledger.begin_call("r", "still-closed")
 
 
 async def test_model_commit_requires_the_continued_episodes(tmp_path: Path) -> None:
@@ -520,7 +542,7 @@ async def test_undelivered_call_is_cut_and_continued_by_the_reissued_call(tmp_pa
     restored_controller = ParticipantControlPlane(restored, instance_name="policy", lease_grace_seconds=60)
     await restored_controller.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
     await restored_controller.resume(CheckpointRequest(**control("r1")))
-    admission = CaptureAdmission(rollout_id="r-a1", model_call_id="c3", mode="text")
+    admission = CaptureAdmission(capture_key="r-a1", model_call_id="c3", mode="text")
     other_request = CaptureContext(rollout_id="r-a1", model_call_id="c3", token_sink=None, request_items=[USER_3])
     reissued = CaptureContext(
         rollout_id="r-a1", model_call_id="c3", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
@@ -645,7 +667,7 @@ async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
         app = _captured_app(participant, None, release)
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
             responses.append((await client.post("/ng-rollout/r/v1/chat/completions")).json())
-    admission = CaptureAdmission(rollout_id="r", model_call_id="c9", mode="text")
+    admission = CaptureAdmission(capture_key="r", model_call_id="c9", mode="text")
     context = CaptureContext(
         rollout_id="r", model_call_id="c9", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
     )
@@ -699,7 +721,7 @@ async def test_a_newer_cut_replaces_the_restored_cut_a_resumed_call_keeps_for_it
     participant = PolicyModelParticipant(FileLineageStore(tmp_path / "ledger"), cut_requester=request_cut)
     controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
     participant._restored_cuts["r-a1"] = restored_cut
-    admission = CaptureAdmission(rollout_id="r-a1", model_call_id="c3", mode="text")
+    admission = CaptureAdmission(capture_key="r-a1", model_call_id="c3", mode="text")
     # The resumed call re-issues the cut request and continues the restored cut.
     _held_call(participant, "r-a1", "c3", request_items)
     [resumed] = participant.gate.tickets
@@ -753,7 +775,7 @@ async def test_a_constrained_call_is_not_cut_and_never_continues_a_restored_cut(
     report = participant.readiness()
 
     participant._restored_cuts["s"] = restored = participant.gate.snapshot().cuts[0].record.model_copy()
-    admission = CaptureAdmission(rollout_id="s", model_call_id="c9", mode="text")
+    admission = CaptureAdmission(capture_key="s", model_call_id="c9", mode="text")
     context = CaptureContext(rollout_id="s", model_call_id="c9", token_sink=None, request_items=[USER_1])
     attached = participant.gate.admission_hook(constrained)(context, admission).generation_cut
 
@@ -855,7 +877,7 @@ async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -
     loop_thread = threading.get_ident()
     assert source.threads and loop_thread not in source.threads
     assert target.threads and loop_thread not in target.threads
-    assert target.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1", "capture_key": "r"}]
+    assert target.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1", "source_capture_key": "r"}]
 
 
 def test_a_batched_ledger_import_syncs_the_directory_per_batch(
@@ -895,7 +917,7 @@ def test_restoring_a_checkpoint_again_after_its_replacement_made_a_call_continue
     import_model_records(FileLineageStore(tmp_path), [record])
 
     # Only the checkpointed call, stamped with the attempt that staged it.
-    assert FileLineageStore(tmp_path).export_rows("roll-1-a1") == [{**row, "capture_key": "roll-1"}]
+    assert FileLineageStore(tmp_path).export_rows("roll-1-a1") == [{**row, "source_capture_key": "roll-1"}]
 
 
 async def test_a_ledger_import_deletes_dead_executions_and_fences_of_the_target_and_later_attempts(
@@ -1060,11 +1082,11 @@ def test_a_chain_of_restores_keeps_each_row_staged_under_its_own_attempt() -> No
         ],
     )
 
-    assert ledger.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1", "capture_key": "r"}, failure]
+    assert ledger.rows["r-a1"] == [{"model_call_id": "c1", "staging_key": "r/c1", "source_capture_key": "r"}, failure]
     assert ledger.rows["r-a2"] == [
-        {"model_call_id": "c1", "staging_key": "r/c1", "capture_key": "r"},
+        {"model_call_id": "c1", "staging_key": "r/c1", "source_capture_key": "r"},
         failure,
-        {"model_call_id": "c2", "staging_key": "r-a1/c2", "capture_key": "r-a1"},
+        {"model_call_id": "c2", "staging_key": "r-a1/c2", "source_capture_key": "r-a1"},
     ]
 
 
@@ -1367,6 +1389,15 @@ async def test_a_retried_retire_waits_for_a_cancelled_call_s_cleanup_without_can
     assert not participant.gate.tickets
 
 
+# What a Responses stream with ``stream_keepalive_s`` sends while generation still runs, one event per chunk.
+RESPONSES_LIFECYCLE_EVENTS = tuple(
+    event.encode() for event in synthesize_responses_keepalive_sse("resp_r", include_created=True)
+)
+RESPONSE_COMPLETED_EVENT = (
+    b'event: response.completed\ndata: {"type": "response.completed", "response": {"id": "resp_r"}}\n\n'
+)
+
+
 def _staged_call(
     gate: PolicyGate,
     ledger: FileLineageStore,
@@ -1375,23 +1406,27 @@ def _staged_call(
     contexts: Optional[list[CaptureContext]] = None,
     finalized: Optional[asyncio.Event] = None,
     answer: Optional[asyncio.Event] = None,
+    lifecycle: Optional[asyncio.Event] = None,
 ) -> asyncio.Task:
     """A policy call of rollout r through the gate and the model server's capture middleware.
 
     Its worker staged the tokens, so the call finalizes its capture before it responds.
     It then sends headers and a keep-alive comment, and its answer once ``answer`` is set.
+    With ``lifecycle``, the call instead opens its stream with Responses lifecycle events, as
+    ``stream_keepalive_s`` does before generation finishes, and finalizes its capture and sends
+    its terminal event once ``lifecycle`` is set.
     """
 
     async def app(scope, receive, send):
         context = current_capture_context()
         context.request_items = [USER_1, ASSISTANT_1, USER_2]
         context.capture_admission = CaptureAdmission(
-            rollout_id=context.rollout_id, model_call_id=context.model_call_id, mode="text"
+            capture_key=context.rollout_id, model_call_id=context.model_call_id, mode="text"
         )
         if contexts is not None:
             contexts.append(context)
         coords = CommitCoords(
-            rollout_id=context.rollout_id,
+            capture_key=context.rollout_id,
             model_call_id=context.model_call_id,
             prev_len=0,
             weight_version=1,
@@ -1408,11 +1443,21 @@ def _staged_call(
             "choices": [{"message": {"role": "assistant", "content": "done"}}],
             NG_COMMIT_COORDS_FIELD: coords.model_dump(mode="json"),
         }
+        if lifecycle is not None:
+            await send(
+                {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]}
+            )
+            for event in RESPONSES_LIFECYCLE_EVENTS:
+                await send({"type": "http.response.body", "body": event, "more_body": True})
+            await lifecycle.wait()
         handler = VLLMWorkerCaptureHandler()
         handler.prepare_response(payload)
         await handler.finalize_response(payload)
         if finalized is not None:
             finalized.set()
+        if lifecycle is not None:
+            await send({"type": "http.response.body", "body": RESPONSE_COMPLETED_EVENT, "more_body": False})
+            return
         await send(
             {"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/event-stream")]}
         )
@@ -1478,6 +1523,48 @@ async def test_a_call_s_ledger_row_is_published_at_its_first_answer_chunk_not_at
     assert [row["model_call_id"] for row in ledger.export_rows("r")] == [contexts[0].model_call_id]
     assert contexts[0].committed
     assert _answers(sent) == [b'data: {"answer":"done"}\n\n']
+
+
+async def test_responses_lifecycle_events_are_liveness_not_the_answer(tmp_path: Path) -> None:
+    """``stream_keepalive_s`` opens a Responses stream long before generation finishes.
+
+    Its ``response.created`` and ``response.in_progress`` events start no answer: a checkpoint holds the call
+    instead of waiting for it, and the call's ledger row is published before its terminal event leaves.
+    """
+    ledger = FileLineageStore(tmp_path / "ledger")
+    participant = PolicyModelParticipant(ledger)
+    controller = ParticipantControlPlane(participant, instance_name="policy", lease_grace_seconds=60)
+    sent, contexts, lifecycle = [], [], asyncio.Event()
+    delivering = watch_delivery(participant.gate)
+    sent_at_publication = []
+    publish = participant.gate.publish
+
+    async def recording_publish(ticket) -> None:
+        sent_at_publication.append(len(sent))
+        await publish(ticket)
+
+    participant.gate.publish = recording_publish
+    call = _staged_call(participant.gate, ledger, sent, contexts=contexts, lifecycle=lifecycle)
+    try:
+        await wait_until(lambda: len(sent) == 1 + len(RESPONSES_LIFECYCLE_EVENTS))
+        assert not delivering.is_set()
+        prepared = await asyncio.wait_for(controller.prepare(CheckpointRequest(**control())), timeout=5)
+        assert prepared["phase"] == "prepared"
+        assert prepared["report"]["counts"]["held"] == 1
+        lifecycle.set()
+        await asyncio.wait_for(delivering.wait(), timeout=5)
+        assert len(sent) == 1 + len(RESPONSES_LIFECYCLE_EVENTS), "the terminal event waits for resume"
+        await controller.resume(CheckpointRequest(**control()))
+        await asyncio.wait_for(call, timeout=5)
+    finally:
+        await controller.resume(CheckpointRequest(**control()))
+        call.cancel()
+        await asyncio.gather(call, return_exceptions=True)
+
+    assert [message.get("body") for message in sent[1:]] == [*RESPONSES_LIFECYCLE_EVENTS, RESPONSE_COMPLETED_EVENT]
+    assert sent_at_publication == [1 + len(RESPONSES_LIFECYCLE_EVENTS)], "published before the terminal event"
+    assert [row["model_call_id"] for row in ledger.export_rows("r")] == [contexts[0].model_call_id]
+    assert contexts[0].committed
 
 
 async def test_a_call_that_leaves_before_its_response_starts_leaves_no_row_and_is_not_poisoned(tmp_path: Path) -> None:

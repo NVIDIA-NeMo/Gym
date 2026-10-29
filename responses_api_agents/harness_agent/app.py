@@ -30,7 +30,12 @@ from fastapi import Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse, ResourcesCloseSessionRequest
+from nemo_gym.base_resources_server import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -43,10 +48,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
 
 
 LOG = logging.getLogger(__name__)
@@ -146,6 +152,9 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     setup_commands: list[str] = Field(default_factory=list)
     sandbox_python: str = "python3"
     gym_source: str = "auto"
+    # When the resources server serves its tools over MCP, hand them to the in-box agent. The box reaches the
+    # server at its configured host, so Gym must bind a host the sandbox can reach (use_absolute_ip).
+    forward_mcp_tools: bool = False
 
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
@@ -240,7 +249,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             base_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
             base = base_url
         prefix = _RUN_CONTEXT.get().get("url_prefix") or self.url_path_for_request("", request)
-        return f"{base.rstrip('/')}{prefix}"
+        # The harness inside the sandbox sends no traceparent; the URL names this run's span instead.
+        return f"{base.rstrip('/')}{prefix}{trace_context_path_segment()}"
 
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
@@ -285,6 +295,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             }
             token = _RUN_CONTEXT.set(run_context)
             try:
+                if self.config.forward_mcp_tools:
+                    run_context["mcp"] = self._mcp_server_entry(seed)
                 agent_resp = await self.responses(request, body.responses_create_params)
                 agent_resp_json = agent_resp.model_dump(mode="json")
                 verify_resp = await self.server_client.post(
@@ -330,6 +342,23 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(resp)
         except Exception:
             LOG.warning("could not close the resources session of a failed run", exc_info=True)
+
+    def _mcp_server_entry(self, seed: dict) -> dict[str, Any]:
+        """This rollout's MCP server for the in-box agent, from the /seed_session response."""
+        metadata = seed.get(NEMO_GYM_MCP_METADATA_KEY)
+        if not isinstance(metadata, dict) or not metadata.get("headers"):
+            raise ValueError(
+                f"forward_mcp_tools needs {self.config.resources_server.name} to serve its tools over MCP"
+            )
+        url = sandbox_server_url(self.config.resources_server.name, require_reachable=True)
+        name = str(metadata.get("server_name") or self.config.resources_server.name)
+        return {
+            name: {
+                "type": metadata.get("transport") or "http",
+                "url": f"{url}/{str(metadata.get('url_path') or '/mcp').lstrip('/')}",
+                "headers": {str(k): str(v) for k, v in metadata["headers"].items()},
+            }
+        }
 
     async def _grade_in_box(self, handle, grade_spec: dict) -> float:
         return await stage_and_run_eval(
@@ -455,10 +484,18 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         files = {
             "/work/model_url.txt": model_url,
             "/work/request.json": agent_body.model_dump_json(),
-            "/work/agent_config.json": json.dumps(agent_config),
-            "/work/runner_config.json": json.dumps(runner_config),
             "/work/runner.py": runner_script,
         }
+        if mcp := _RUN_CONTEXT.get().get("mcp"):
+            # Only Claude Code takes an MCP config file. The session token in it is per rollout.
+            if self.config.agent != "claude_code":
+                raise ValueError(f"forward_mcp_tools supports agent claude_code, not {self.config.agent}")
+            if agent_config.get("mcp_config"):
+                raise ValueError("forward_mcp_tools would replace agent_kwargs.mcp_config; set only one of them")
+            files["/work/mcp.json"] = json.dumps({"mcpServers": mcp})
+            agent_config["mcp_config"] = "__WORK_DIR__/mcp.json"
+        files["/work/agent_config.json"] = json.dumps(agent_config)
+        files["/work/runner_config.json"] = json.dumps(runner_config)
         handle = await self._provision_box(image, files, model_url)
         try:
             work_dir = self._box_path(handle, "/work")

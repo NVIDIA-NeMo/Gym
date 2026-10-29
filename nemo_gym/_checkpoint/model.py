@@ -69,6 +69,7 @@ from nemo_gym._checkpoint.telemetry import checkpoint_span
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.episode_types import EpisodeId
+from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.external_capture import publish_deferred_commit
@@ -637,7 +638,17 @@ def export_model_records(
     records = []
     for episode_id in episode_ids:
         key = episode_id.capture_key
-        rows = [row for row in ledger.export_rows(key) if row.get("model_call_id") not in undelivered]
+        # Admission intents belong to the live attempt, not to its delivered history.
+        # A restored attempt reissues undelivered calls with new IDs; carrying their
+        # intents over would leave captures pending forever, including across servers.
+        # Closure also belongs to the old attempt; the replacement must admit new calls.
+        rows = [
+            row
+            for row in ledger.export_rows(key)
+            if not row.get("intent")
+            and not row.get("admissions_closed")
+            and row.get("model_call_id") not in undelivered
+        ]
         cuts = list(cuts_by_key.get(key, []))
         # A restored cut that no re-issued call has consumed yet is still this episode's prefix,
         # unless a newer call of the episode was cut since.
@@ -724,7 +735,7 @@ def import_model_records(
     if records and ledger is None:
         raise ControlError("checkpoint holds capture-ledger rows but this model server has no capture ledger")
     targets = [
-        (record, next_attempt(record.episode_id).capture_key, _with_capture_key(record.rows, record.episode_id))
+        (record, next_attempt(record.episode_id).capture_key, _with_source_capture_key(record.rows, record.episode_id))
         for record in records
     ]
     for record, _, _ in targets:
@@ -742,17 +753,19 @@ def import_model_records(
     return {target: record.generation_cuts[0] for record, target, _ in targets if record.generation_cuts}
 
 
-def _with_capture_key(rows: list[dict[str, Any]], episode_id: EpisodeId) -> list[dict[str, Any]]:
+def _with_source_capture_key(rows: list[dict[str, Any]], episode_id: EpisodeId) -> list[dict[str, Any]]:
     """Stamp each staged row with the capture key it was staged under.
 
     A row a restore already carried over keeps its stamp,
     so a chain of restores still names the attempt that staged the call.
     """
     return [
-        {**row, "capture_key": episode_id.capture_key}
-        if row.get("staging_key") is not None and row.get("capture_key") is None
+        {**row, "source_capture_key": episode_id.capture_key}
+        if row.get("staging_key") is not None and row.get("source_capture_key") is None
         else row
         for row in rows
+        # Also reopen records exported by versions that retained this live-attempt marker.
+        if not row.get("admissions_closed")
     ]
 
 
@@ -760,6 +773,7 @@ class PolicyModelParticipant(CheckpointParticipant):
     """The participant of a policy model server that runs in one process."""
 
     kind = "model"
+    mode = "exported"
     record_model = ModelRecord
 
     def __init__(
@@ -912,12 +926,12 @@ class PolicyAdmissionMiddleware:
                 )
             elif message["type"] == "http.response.body" and not ticket.response_started:
                 body = message.get("body", b"")
-                # Headers and liveness comments can precede backend completion.
+                # Headers and liveness (comments, or Responses lifecycle events) can precede backend completion.
                 # Treating them as delivered output would make prepare wait on a call whose terminal token write is
-                # blocked by the framework's snapshot fence.
+                # blocked by the framework's snapshot fence, and would skip publishing the row deferred later.
                 # Gate only the first answer chunk; after it starts,
                 # all remaining chunks must drain even while admission is closed.
-                if body and not (event_stream and body == SSE_KEEPALIVE):
+                if body and not (event_stream and (body == SSE_KEEPALIVE or is_responses_lifecycle_chunk(body))):
                     await self.gate.deliver_response(ticket)
                     # Before the answer leaves: a row exists for every answer a client receives.
                     await self.gate.publish(ticket)

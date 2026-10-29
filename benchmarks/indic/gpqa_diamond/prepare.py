@@ -109,6 +109,7 @@ def build_rows(
                         f"indic-gpqa-diamond/{language}/{record_ids[index]}",
                     )
                 ),
+                "task_id": f"{language}/{record_ids[index]}",
                 "metadata": {
                     "benchmark": "indic/gpqa_diamond",
                     "language": language,

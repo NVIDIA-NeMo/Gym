@@ -2,9 +2,10 @@ environment_server_routes:
   "nemo_user_sim:example": nemo_user_sim_environment
   "nemo_user_sim:validation": nemo_user_sim_environment
 
-user_model_base_url: ${policy_base_url}
-user_model_api_key: ${policy_api_key}
-user_model_name: ${policy_model_name}
+# The simulated user runs on its own model, separate from the evaluated policy, so these have no default.
+user_model_base_url: ???
+user_model_api_key: ???
+user_model_name: ???
 user_model_uses_reasoning_parser: false
 
 support_model_base_url: ${policy_base_url}
