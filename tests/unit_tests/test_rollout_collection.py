@@ -2149,6 +2149,35 @@ class TestRolloutCollection:
         assert pickle.loads(pickle.dumps(result)) == result
         assert orjson.loads(orjson.dumps(result)) == result
 
+    async def test_a_local_run_records_its_service_declaration_as_unavailable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """No `gym eval submit` placement: the run folder says so instead of holding no declaration."""
+        monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, {"reward": 1.0})
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(tmp_path / "results" / "rollouts.jsonl"),
+            disable_health_check=True,
+        )
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        declaration = orjson.loads((tmp_path / "results" / "rollouts_service_declaration.json").read_bytes())
+        assert declaration["status"] == "unavailable"
+        assert "not placed by `gym eval submit`" in declaration["reason"]
+        assert declaration["services"] == [] and declaration["gpus"] == []
+
     @pytest.mark.parametrize("require_complete", [False, True])
     async def test_run_from_config_routes_agent_failure_to_sidecar_and_out_of_metrics(
         self,

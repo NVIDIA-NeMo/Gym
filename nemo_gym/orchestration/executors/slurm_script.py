@@ -24,6 +24,7 @@ from nemo_gym.gitlab_utils import gitlab_storage_extras
 from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
+    BaseModelServiceConfig,
     BenchmarkRunConfig,
     NodePool,
     RayServiceConfig,
@@ -61,7 +62,9 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
 )
+from nemo_gym.orchestration.executors.service_declaration import declared_service, render_declaration_writer
 from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.path_utils import service_declaration_path_for
 
 
 _SCRIPT_TEMPLATE = """\
@@ -875,6 +878,58 @@ def _service_nodelist(service: ServiceConfig, driver_node: int | None, total_nod
     return None
 
 
+def _service_node_indices(
+    service: ServiceConfig, compute: SlurmComputeConfig, driver_node: int | None, total_nodes: int
+) -> list[int]:
+    """The allocation nodes a service's step runs on, as _service_nodelist and _srun_nodes place it."""
+    if service.node_pool is not None:
+        start, count = _pool_offsets(compute)[service.node_pool]
+        return list(range(start, start + count))
+    if _vllm_spans_multiple_nodes(service, total_nodes):
+        return list(range(total_nodes))
+    return [driver_node if driver_node is not None else 0]
+
+
+def _render_service_declaration(
+    config: SubmitConfig,
+    compute: SlurmComputeConfig,
+    benchmark_name: str,
+    remote_bench_dir: Path,
+    rollouts_fpath: Path,
+    *,
+    is_multi_node: bool,
+    driver_node: int | None,
+) -> str:
+    """The job-start step that writes which model service runs on which node and GPUs (see service_declaration)."""
+    total_nodes, _ = _node_totals(compute)
+    gpus_per_node_values = [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+    services = [
+        declared_service(
+            name,
+            service,
+            component=config.otel.component,
+            node_indices=_service_node_indices(service, compute, driver_node, total_nodes),
+            service_nodes=_service_nodes(service, compute, total_nodes),
+            ray_serve=isinstance(service, VllmServiceConfig)
+            and effective_ray_serve(service, _build_nodes(service, compute, total_nodes), gpus_per_node_values),
+        )
+        for name, service in config.deployed_services.items()
+        if isinstance(service, BaseModelServiceConfig)
+    ]
+    if not services:
+        return ""
+    # A job that places nothing runs everything on its one node: the batch host.
+    placed = _places_services(config, is_multi_node)
+    return render_declaration_writer(
+        services,
+        hosts={i: f"${{gym_nodes[{i}]}}" for i in range(total_nodes)} if placed else {0: "$SLURMD_NODENAME"},
+        pin_nodes=placed,
+        run_id=remote_bench_dir.parent.name,
+        benchmark=benchmark_name,
+        declaration_path=service_declaration_path_for(rollouts_fpath),
+    )
+
+
 def _build_nodes(service: ServiceConfig, compute: SlurmComputeConfig, total_nodes: int) -> int:
     """Nodes the service command is written for; a per-node server is a single-node command."""
     if isinstance(service, (VllmPDTierConfig, VllmNodeServiceConfig)) and service.server_per_node:
@@ -1008,6 +1063,9 @@ def build_sbatch_script(
         pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
     ]
 
+    driver_node = _driver_node(config, compute) if is_multi_node else None
+    # ABSOLUTE, not relative: see output_path below.
+    rollouts_fpath = remote_bench_dir / "artifacts" / "rollouts.jsonl"
     ray_prelude = "\n".join(
         block
         for block in (
@@ -1016,6 +1074,15 @@ def build_sbatch_script(
             else "",
             _render_pool_nodes(config, compute, is_multi_node),
             _render_ray_head_addresses(config, compute),
+            _render_service_declaration(
+                config,
+                compute,
+                benchmark_name,
+                remote_bench_dir,
+                rollouts_fpath,
+                is_multi_node=is_multi_node,
+                driver_node=driver_node,
+            ),
         )
         if block
     )
@@ -1024,7 +1091,6 @@ def build_sbatch_script(
     observed = otel_active(config)
     instrumented = gym_telemetry_active(config)
 
-    driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
         (
             [_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node, driver_node=driver_node)]
@@ -1105,7 +1171,7 @@ def build_sbatch_script(
     # checkout instead of the job directory -- the run completes, exits 0, and
     # leaves nothing behind. Making the OUTPUT absolute is what keeps artifacts
     # in the job directory without constraining cwd.
-    output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
+    output_path = f"+output_jsonl_fpath={rollouts_fpath}"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     driver_env = dict(config.driver.env)

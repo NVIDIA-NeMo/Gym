@@ -247,6 +247,48 @@ def test_collector_scrapes_every_model_service_on_localhost():
     assert by_job["gym-vllm/policy"]["scrape_interval"] == "15s"
 
 
+_PD = {
+    "type": "vllm_pd",
+    "container": "vllm:latest",
+    "model": "m",
+    "prefill": {"node_pool": "prefill"},
+    "decode": {"node_pool": "decode"},
+}
+
+
+@pytest.mark.parametrize(
+    "services, pools, expected",
+    [
+        pytest.param(
+            {"policy": {"type": "vllm", "container": "vllm:latest", "model": "m"}},
+            {},
+            {"gym-vllm/policy": {"gym_service": "policy"}},
+            id="plain_service_has_no_pool_role",
+        ),
+        pytest.param(
+            {"policy": _PD},
+            {"prefill": {"partition": "batch"}, "decode": {"partition": "batch"}},
+            {
+                "gym-vllm/policy-prefill": {"gym_service": "policy-prefill", "gym_pool_role": "prefill"},
+                "gym-vllm/policy-decode": {"gym_service": "policy-decode", "gym_pool_role": "decode"},
+                "gym-vllm/policy": {"gym_service": "policy", "gym_pool_role": "router"},
+            },
+            id="prefill_decode_tiers_and_router_carry_their_role",
+        ),
+    ],
+)
+def test_engine_series_carry_the_declared_service_name_and_role(services, pools, expected):
+    """The job name and `gym_service` match the service's entry in the run's service declaration."""
+    config = _config(
+        services=services, compute={"cluster-a": {"type": "slurm", "account": "acct", "node_pools": pools}}
+    )
+    scrapes = _rendered(config)["receivers"]["prometheus"]["config"]["scrape_configs"]
+    engine = {
+        s["job_name"]: s["static_configs"][0]["labels"] for s in scrapes if s["job_name"] not in ("dcgm", "node")
+    }
+    assert engine == expected
+
+
 def test_scraped_engine_display_name_is_component_slash_service():
     """The scrape job name becomes the engine's `service.name.override`; the docs promise this shape."""
     jobs = {s["job_name"] for s in _rendered()["receivers"]["prometheus"]["config"]["scrape_configs"]}
