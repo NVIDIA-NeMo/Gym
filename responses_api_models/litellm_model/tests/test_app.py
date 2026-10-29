@@ -277,9 +277,43 @@ def _mock_health_response(payload=None, status: int = 200):
     mock_resp = MagicMock()
     mock_resp.status = status
     mock_resp.ok = status < 400
+    mock_resp.headers = {}
     if payload is None:
         payload = {"litellm_version": "1.83.0"}
     mock_resp.json = AsyncMock(return_value=payload)
+    return mock_resp
+
+
+# Header sets observed on a LiteLLM 1.106.2 proxy with a route-scoped virtual key when the model
+# rejected the one-token probe with a 400 (model-side BadRequestError). The chat-completion error
+# path drops ``x-litellm-version``; the Responses API error path keeps it.
+_CHAT_COMPLETIONS_ERROR_HEADERS = {
+    "x-litellm-call-id": "0b1c8d3e-aaaa-bbbb-cccc-000000000001",
+    "x-litellm-response-cost": "0.0",
+    "x-litellm-key-max-budget": "100.0",
+    "x-litellm-key-spend": "0.0",
+    "x-litellm-timeout": "600.0",
+}
+_RESPONSES_API_ERROR_HEADERS = {
+    "x-litellm-call-id": "0b1c8d3e-aaaa-bbbb-cccc-000000000002",
+    "x-litellm-model-id": "0123456789abcdef",
+    "x-litellm-version": "1.106.2",
+    "x-litellm-response-cost": "0.0",
+    "x-litellm-key-max-budget": "100.0",
+    "x-litellm-key-spend": "0.0",
+    "x-litellm-timeout": "600.0",
+}
+
+
+def _mock_probe_response(version=None, status: int = 200, headers=None):
+    mock_resp = MagicMock()
+    mock_resp.status = status
+    mock_resp.ok = status < 400
+    if headers is not None:
+        mock_resp.headers = dict(headers)
+    else:
+        mock_resp.headers = {} if version is None else {"x-litellm-version": version}
+    mock_resp.json = AsyncMock(return_value={"object": "response", "output": []})
     return mock_resp
 
 
@@ -348,6 +382,87 @@ class TestVersionCheck:
             with patch("responses_api_models.litellm_model.app.request", new=_hang_request):
                 with pytest.raises(RuntimeError, match="Could not verify"):
                     await server._check_proxy_version()
+
+    async def test_forbidden_health_route_falls_back_to_probe_header(self) -> None:
+        """A route-scoped key gets 403 on the health route; a one-token POST /v1/responses header is used instead."""
+        server = _make_server()
+        responses = [_mock_health_response({"detail": "not allowed"}, status=403), _mock_probe_response("1.105.1")]
+        with patch("responses_api_models.litellm_model.app.request", side_effect=responses) as mock_request:
+            await server._check_proxy_version()
+
+        assert mock_request.await_count == 2
+        health_call, probe_call = mock_request.await_args_list
+        assert probe_call.args[:2] == ("POST", "https://litellm.example.com/v1/responses")
+        assert probe_call.kwargs["headers"] == health_call.kwargs["headers"]
+        assert probe_call.kwargs["json"] == {"model": "dummy_model", "input": "ping", "max_output_tokens": 1}
+
+    async def test_probe_error_headers_from_responses_api_keep_the_version(self) -> None:
+        """A model-side 400 on POST /v1/responses answers with the real Responses-API error header set.
+
+        Observed on LiteLLM 1.106.2: the Responses API exception path still passes the version, so the
+        error response carries ``x-litellm-version`` and the check passes.
+        """
+        server = _make_server()
+        responses = [
+            _mock_health_response(status=403),
+            _mock_probe_response(status=400, headers=_RESPONSES_API_ERROR_HEADERS),
+        ]
+        with patch("responses_api_models.litellm_model.app.request", side_effect=responses) as mock_request:
+            await server._check_proxy_version()
+
+        assert mock_request.await_count == 2
+        assert mock_request.await_args_list[1].args[:2] == ("POST", "https://litellm.example.com/v1/responses")
+
+    async def test_probe_error_headers_from_chat_completions_fail_closed(self) -> None:
+        """A model-side 400 carrying only the chat-completions error header set has no version and fails closed.
+
+        Observed on LiteLLM 1.106.2: the chat-completion exception path omits ``x-litellm-version``. This is
+        why the probe does not use ``/v1/chat/completions``; if it ever answered this way, startup must block.
+        """
+        server = _make_server()
+        responses = [
+            _mock_health_response(status=403),
+            _mock_probe_response(status=400, headers=_CHAT_COMPLETIONS_ERROR_HEADERS),
+        ]
+        with patch("responses_api_models.litellm_model.app.request", side_effect=responses):
+            with pytest.raises(RuntimeError, match="no x-litellm-version header"):
+                await server._check_proxy_version()
+
+    async def test_forbidden_health_route_old_header_version_blocks_startup(self) -> None:
+        """The header fallback enforces the same minimum as the health route."""
+        server = _make_server()
+        responses = [_mock_health_response(status=403), _mock_probe_response("1.82.9")]
+        with patch("responses_api_models.litellm_model.app.request", side_effect=responses):
+            with pytest.raises(RuntimeError, match="minimum safe version 1.83.0"):
+                await server._check_proxy_version()
+
+    async def test_forbidden_health_route_missing_header_blocks_startup(self) -> None:
+        """No x-litellm-version header on the probe response fails closed."""
+        server = _make_server()
+        responses = [_mock_health_response(status=403), _mock_probe_response()]
+        with patch("responses_api_models.litellm_model.app.request", side_effect=responses):
+            with pytest.raises(RuntimeError, match="no x-litellm-version header"):
+                await server._check_proxy_version()
+
+    async def test_forbidden_health_route_probe_transport_error_blocks_startup(self) -> None:
+        """A probe that cannot be delivered fails closed."""
+        server = _make_server()
+        responses = [_mock_health_response(status=403), OSError("connection reset")]
+        with patch("responses_api_models.litellm_model.app.request", side_effect=responses) as mock_request:
+            with pytest.raises(RuntimeError, match="Could not verify"):
+                await server._check_proxy_version()
+
+        assert mock_request.await_count == 2
+
+    async def test_non_auth_health_error_does_not_fall_back(self) -> None:
+        """Only 401/403 trigger the probe fallback; other health failures fail closed immediately."""
+        server = _make_server()
+        mock_resp = _mock_health_response({"error": "boom"}, status=500)
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp) as mock_request:
+            with pytest.raises(RuntimeError, match="Could not verify"):
+                await server._check_proxy_version()
+
+        mock_request.assert_awaited_once()
 
     async def test_lifespan_runs_version_check(self) -> None:
         """Startup hook blocks the webserver before serving requests."""

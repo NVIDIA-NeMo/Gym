@@ -5,7 +5,6 @@ import os
 import shlex
 import shutil
 import subprocess
-import sys
 
 import pytest
 
@@ -13,13 +12,13 @@ from responses_api_agents.opencode_agent.app import _sandbox_prepare_command
 
 
 @pytest.mark.parametrize("package_manager", ["apk", "apt-get"])
-@pytest.mark.parametrize("missing", [(), ("bash",), ("python3",), ("python3", "bash")])
+@pytest.mark.parametrize("missing", [(), ("bash",)])
 @pytest.mark.parametrize("failure", [None, "nonroot", "install", "unavailable"])
 def test_posix_bootstrap_installs_only_missing_prerequisites(tmp_path, package_manager, missing, failure):
     """Exercise the actual preparation through sh without invoking a host package manager."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    binaries = {"python3": sys.executable, "bash": shutil.which("bash"), "mkdir": shutil.which("mkdir")}
+    binaries = {"bash": shutil.which("bash"), "mkdir": shutil.which("mkdir")}
     assert all(binaries.values())
     for name, executable in binaries.items():
         if name not in missing:
@@ -33,7 +32,7 @@ def test_posix_bootstrap_installs_only_missing_prerequisites(tmp_path, package_m
         '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_ROOT/packages.log"\n'
         + ("exit 100\n" if failure == "install" else "")
         + 'for name in "$@"; do\n'
-        + f'case "$name" in\n python3) ln -s {shlex.quote(sys.executable)} "$TEST_ROOT/bin/python3" ;;\n'
+        + 'case "$name" in\n'
         + f' bash) ln -s {shlex.quote(binaries["bash"])} "$TEST_ROOT/bin/bash" ;;\n'
         + "esac\ndone\n"
     )

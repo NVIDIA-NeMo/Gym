@@ -50,6 +50,13 @@ gym eval health-check results/my-run \
 A relative `--rollouts-file` path resolves under the run directory. An absolute path is used as written. Reports from the
 standalone command are always written in the run directory.
 
+When `gym eval aggregate` merges shards into `rollouts.jsonl`, it lists them in `rollouts_sources.json`, and the check
+reads those shards with the failure sidecars and materialized inputs beside them, as the aggregation did: the merged
+file has none of its own. A single run merged onto itself needs no list, and drops one an earlier aggregation into it left. A run that writes to the merged file, such as a resumed `gym eval run`, drops the list with the first row it writes; one that writes none, such as a resume with nothing left to run, keeps it. The check fails if a shard is gone, or if a
+shard or the merged file changed since the aggregation; rerun `gym eval aggregate` then. A `--rollouts-file` path is
+checked alone, without the list, so a merged file with another name is checked without its shards' failures and
+inventories: recheck its shards one by one instead.
+
 Refer to the [`gym eval` CLI reference](/main/reference/cli-commands#gym-eval-health-check) for all flags.
 
 ## Required Evidence
@@ -60,13 +67,15 @@ model-call evidence, explicit model-call references, and observation gaps produc
 [trajectory capability matrix](/main/reference/trajectory-capabilities) for measured harness conformance and
 [model-call capture](/main/model-server/model-call-capture) for collection configuration.
 
-The health checks runner does not reopen raw model-call capture files, inspect `ng_model_call_capture`, or reconstruct turns from an
-agent-specific response. A custom rollout driver receives the same behavior as a built-in driver: checks run when it writes a
+The integrity checks do not reopen raw model-call capture files, inspect `ng_model_call_capture`, or reconstruct turns from an
+agent-specific response. The timeout statistics are separate: their time split reads each row's `ng_model_call_capture`, and
+the capture file of a rollout that failed without a row when collection supplies its capture dir or a recheck passes
+`--model-call-capture-dir`. A custom rollout driver receives the same behavior as a built-in driver: checks run when it writes a
 valid `ng_trajectory`, and checks that need missing evidence are unobserved.
 
 <Note>
-This single-source rule makes health results reproducible after capture files move and prevents two observability representations
-from disagreeing. Rollouts collected before `ng_trajectory` was introduced can still be parsed, but trajectory-dependent checks
+This single-source rule makes the integrity verdicts reproducible after capture files move and prevents two observability
+representations from disagreeing. Moving or omitting the capture files can change only `run.stats.timeouts.time_split`. Rollouts collected before `ng_trajectory` was introduced can still be parsed, but trajectory-dependent checks
 are unobserved instead of being evaluated from inferred historical formats.
 </Note>
 
@@ -96,14 +105,14 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | --- | --- | --- |
 | `check_execution_error` | Rollout | Another health check raises an unexpected exception while evaluating the record. The failed check is also marked unobserved, and remaining checks continue. |
 | `record_unreadable` | Rollout | A non-empty JSONL line is not a JSON object, or its `ng_trajectory` cannot be parsed as a `TrajectoryRecord`. |
-| `rollout_duplicate_identity` | Rollout | More than one input record has the same `_ng_task_index` and `_ng_rollout_index`. Every duplicated record receives the finding. |
+| `rollout_duplicate_identity` | Rollout | More than one record in the same input file has the same `_ng_task_index` and `_ng_rollout_index`. Each input numbers its rollouts on its own, so runs merged from different environment servers can reuse indices. Every duplicated record receives the finding. |
 | `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but no turn contains any of the following: (1) non-empty answer or reasoning content, (2) a tool call, or (3) a model-call reference. |
-| `rollout_ended_on_failed_model_call` | Rollout | A model's own last call in the rollout has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. Read from the captured calls directly rather than through a reference, because a failed call carries no response ID to be referenced by. Judged per model and in `started_at` order, so a call to a different model landing later does not mask the failure, and a failure the client retried successfully produces no finding. One finding per model. When a chain mixes failures and successes and carries no timestamps it cannot be ordered, and no finding is produced. |
+| `rollout_ended_on_failed_model_call` | Rollout | A model's own last call in the rollout has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. A last call the upstream rejected because the context was full (an upstream `400` recorded with `error_category` or `local_response_reason` `context_length_exceeded`) produces no finding: the rollout ended on the model's own context overflow, which is scored like any other answer. This holds only once the model has answered earlier in the same conversation: a successful call to the same model whose request opens the same way, with the same `instructions`, `system` prompt, or first item of `messages` or `input` (a plain-text `input` as a whole), and that no captured session tells apart: calls of two different sessions are two conversations, while activations of one harness session are one. A success in another conversation, such as a user simulator served by the same model server, does not count, and a call whose request was not captured belongs to no conversation. An overflow before any such answer means the request never fit the deployment (a prompt or output budget too large for it), and is flagged like any other failed call. Read from the captured calls directly rather than through a reference, because a failed call carries no response ID to be referenced by. Judged per model and in `started_at` order, so a call to a different model landing later does not mask the failure, and a failure the client retried successfully produces no finding. One finding per model. When a chain mixes failures and successes and carries no timestamps it cannot be ordered, and no finding is produced; a chain of only failures is flagged either way. |
 | `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of invocation- or turn-owned policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |
-| `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` does not contain any of the following: (1) non-empty answer content, (2) non-empty reasoning content, or (3) a tool call. |
+| `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` does not contain any of the following: (1) non-empty answer content, (2) non-empty reasoning content, or (3) a tool call. A turn whose own model calls end on one the upstream rejected because the context was full (the last in `started_at` order, or every one when they carry no timestamps) is not hollow when another check accounts for that overflow: an answer from the same model in the same conversation excuses it, and `rollout_ended_on_failed_model_call` flags a request that never fit. When neither applies, as for calls without timestamps that mix in another conversation's answer, the empty turn is still flagged. Each of the turn's model-call references must resolve to exactly one captured call, and the exemption is not applied when a `model_calls_unavailable`, `model_call_capture_incomplete`, `model_call_capture_records_unreadable`, or `model_call_capture_unreadable` gap leaves that check unobserved. |
 | `trajectory_capture_mismatch` | Trajectory and model calls | An explicit turn- or invocation-to-model-call reference resolves to zero or multiple model calls, or `ng_trajectory.gaps` records an unmatched, ambiguous, or conflicting reference. |
 | `model_call_missing_token_counts` | Policy-model call | On an exactly bound policy-model call, `token_stats.prompt_tokens` or `token_stats.completion_tokens` is omitted or set to `null`. A value of zero counts as present. A failed call that produced no generation, such as a cancelled call or an HTTP error reply, is skipped: it has no tokens to account for. |
-| `model_call_runaway_generation` | Policy-model call | An exactly bound policy-model call ended with `finish_reason: length` and its saved response contains no answer or reasoning content. |
+| `model_call_runaway_generation` | Policy-model call | An exactly bound policy-model call ended with `finish_reason: length` and its saved response holds no answer and no tool call. Reasoning alone does not count. |
 | `model_call_zero_completion_tokens` | Policy-model call | An exactly bound policy-model call reports zero completion tokens. A failed call that produced no generation is skipped. |
 | `task_consistently_unhealthy` | Task | At least two repeats are computable and every computable repeat is unhealthy. Unobserved repeats do not prevent the flag. |
 | `task_no_successful_model_calls` | Task | Every repeat has at least one turn-to-model-call reference, every turn reference resolves to exactly one captured call, and none of those turn-bound calls completed successfully. |
@@ -165,10 +174,10 @@ evaluate; the gap does not suppress evidence of failed calls or hollow turns.
 
 ### Length-Limited Responses
 
-`model_call_runaway_generation` needs one provider-independent definition of an empty saved response. The check recognizes
-non-empty text, content, output text, answer, encrypted reasoning content, reasoning, or reasoning summaries in OpenAI Responses,
-Chat Completions, and Messages-style responses. If any supported content is present, a length-limited response is not classified
-as an empty runaway generation.
+`model_call_runaway_generation` needs one provider-independent definition of a response the agent can act on. The check
+looks for output text, a message with text or a refusal, or a tool call, in OpenAI Responses, Chat Completions and
+Messages-style responses. Reasoning alone, encrypted or summarized, is not something to act on: a call that reasoned until its
+output limit without an answer or a tool call is a runaway generation, even when a later call recovers.
 
 ## How Health Checks Interpret Existing Observation Gaps
 
@@ -218,6 +227,7 @@ This abridged example omits the other check-coverage entries and zero-valued iss
 {
   "run": {
     "ignored_checks": [],
+    "rollouts": ["rollouts.jsonl"],
     "artifacts": {
       "records": 100,
       "captures": 98,
@@ -273,9 +283,16 @@ This abridged example omits the other check-coverage entries and zero-valued iss
 `run.issues` counts individual findings, not distinct affected rollouts or tasks. It contains every registered check ID, including
 IDs whose count is zero. `run.artifacts.coverage` reports how often each check was evaluated, unobserved, or explicitly ignored.
 
-`run.artifacts.captures` counts rollout trajectories that contain model-call evidence; health does not count or reopen raw
-capture files. Raw statistics under `run.stats` describe all model calls stored in `ng_trajectory`, including unreferenced
-auxiliary calls. Checks with a policy-model subject evaluate only exactly bound calls.
+`run.rollouts` names the rollout file(s) the report was computed from, relative to the report's own folder (the shards, for a
+file `gym eval aggregate` merged). The two reports keep one name per folder whatever the rollout file is called, so this says
+whose they are when several runs write to one folder; the Harbor run summary links a report only when it names that run's file.
+
+`run.artifacts.captures` counts rollout trajectories that contain model-call evidence; the integrity checks do not count or
+reopen raw capture files. Raw statistics under `run.stats` describe all model calls stored in `ng_trajectory`, including
+unreferenced auxiliary calls, except `run.stats.timeouts`, whose time split reads the captured calls themselves. Checks with a policy-model subject evaluate only exactly bound calls.
+`model_call_errors.ended_on_error` counts rollouts that `rollout_ended_on_failed_model_call` would flag. It leaves out a
+rollout whose model-call capture gaps leave that check unobserved, and one that ended on a context-length overflow after
+the model answered in the same conversation.
 `model_call_errors.usage_unknown` counts failed calls that returned no finished response and carry no token counts. The
 token checks skip these calls, so any tokens the server spent on them before a cancellation or timeout are counted only here,
 as a number of calls.
@@ -289,6 +306,93 @@ as a number of calls.
 - `limits`: the limits the run was judged by (`max_not_final_failure_fraction`, `max_final_failure_fraction`, null for no limit) and, in `source`, where each limit came from: `config` for the run's own settings, `persisted` when `gym eval health-check` reused it, `override` when its own limit flag replaced it. A flag value of `none` removes the limit, recorded as null with `override`.
 
 `expected`, `missing` and `healthy` are null without an inventory. The summary is also written when collection fails or Slurm stops the job with SIGTERM.
+
+### Timeouts
+
+`run.stats.timeouts` counts the rollouts that ran out of time. It reads each rollout's final record: its row in the
+rollout file, or the last failure row of a rollout that never landed. `gym eval health-check` recomputes it from the
+same files, and from the run's model-call captures when given `--model-call-capture-dir` (see `time_split`). A
+recheck of a directory `gym eval aggregate` merged shards into reads the shards listed in `rollouts_sources.json`,
+with their failure rows, so it counts the same timeouts as the aggregation; a `--rollouts-file` path is counted alone.
+It is a report only and changes no score or verdict.
+
+Scope of this section:
+
+- Coverage is partial. Only the components listed below record timeout evidence. A rollout stopped by any other
+  limit, or by a component that records none of these fields, is counted in `failed_without_signal` if it failed, and
+  not at all if it landed.
+- It counts final outcomes. A rollout that timed out and then landed on a retry counts by its landed row, so the
+  earlier timed-out attempt is not counted.
+- Saved observability that keeps every failure event of a rollout, including attempts followed by a successful retry,
+  is follow-up work. These counts report final outcomes only and do not need to match it.
+
+A rollout counts as timed out on one of two kinds of evidence:
+
+1. `typed`: a timeout record in the row's `timeouts` list. The component that enforces a limit attaches it to the
+   row; the operation records in `ng_trajectory` have no field for it. Each record has `event_id`, `limit`,
+   `enforcer`, `evidence` (`internal` or `external`), `configured_s`, `elapsed_s` and `fired_at`. A record listed
+   twice counts once by its `event_id`. An entry that is not a valid record is not evidence and is counted in
+   `invalid_events`. A typed record wins over a legacy signal.
+2. `legacy`: a field that a Gym component sets today when its own deadline fires. `by_limit` names it:
+
+   | Signal | Set by |
+   |---|---|
+   | `_ng_failure_class=agent_timeout` | GDPval |
+   | `_ng_failure_class=timeout_exceeded` | PinchBench |
+   | `_ng_failure_message=Episode timed out` | an environment server's episode deadline |
+   | `agent_timed_out` | the Codex agent |
+   | `agent_timeout_error` | the Harbor agent |
+   | `eval_timed_out` | SWE-bench Pro's verification |
+   | `timed_out` | BrowseComp's per-rollout limit (`rollout_timeout_s`) |
+   | `termination.reason=timeout` | Terminal-Bench's agent termination record |
+
+How long a rollout took never makes it count as timed out. A failed rollout with no evidence is counted in
+`failed_without_signal`: it is not known to be a timeout, and not known not to be.
+
+```json
+"timeouts": {
+  "rollouts": 200,
+  "timed_out": 12,
+  "by_evidence": {"typed": 8, "legacy": 4},
+  "by_limit": {"default_episode_timeout_seconds": 8, "_ng_failure_class=timeout_exceeded": 4},
+  "by_enforcer": {"gym.environment_server": 8},
+  "events": 8,
+  "invalid_events": 0,
+  "failed_without_signal": 3,
+  "elapsed_s": {"p50": 1790.2, "p95": 1801.4},
+  "time_split": {
+    "rollouts_with_captures": 11,
+    "policy_model": 0.62,
+    "other_model": 0.04,
+    "tool": 0.21,
+    "untracked": 0.13,
+    "policy_output_tokens_per_s": {"p50": 41.3, "p5": 12.9},
+    "policy_calls_per_rollout": {"p50": 37.0, "p95": 64.0}
+  }
+}
+```
+
+`elapsed_s` is the `/run` wall clock that `gym eval run` stamps on each row as `_ng_elapsed_s`. `time_split` shows
+where the time of the timed-out rollouts went. It covers the timed-out rollouts that have both that stamp and a whole
+capture of their model calls. A rollout that failed without a row has no capture on it, so the check reads its capture
+file from the run's capture dir: collection passes its `model_call_capture_dir`, a recheck needs
+`--model-call-capture-dir` and without it warns when the run has failed rollouts and timed-out rollouts left out of the
+split, and `gym eval aggregate` does not read capture files yet. A capture with a write still pending, a failed write
+or an unreadable record leaves its rollout out. Each share is the time spent in one kind of call over their summed
+elapsed time: policy-model calls, other models' calls (a judge or a user simulator) and tool calls. `untracked` is the time in which none of these calls ran, such as setup or verification.
+Overlapping calls count once, also across kinds for `untracked`, so the shares can add up to more than the rest when,
+for example, a tool calls the policy model. A rollout's busy time is capped at its elapsed time. A share is null when
+one of those rollouts does not measure that kind of time: a call without timing or one that ends before it starts,
+calls of which one reports only its duration and so cannot be placed against the others, or a trajectory without
+tool timing. Collection marks a row whose agent sent no valid trajectory or observations with a
+`tool_timing_unavailable` gap, so its tool time is unknown rather than zero; so does an `agent_artifact_unavailable`
+gap, which an agent reports when it could not read its own transcript. `policy_output_tokens_per_s` is end to end, so
+it includes queue and prefill time, and a call that produced no output counts at zero.
+
+When an exporter is configured, `gym eval run` and `gym eval aggregate` also send this section's numbers as flat keys,
+such as `health/timeouts/timed_out` and `health/timeouts/by_evidence/typed`. A null value is not sent. A limit or
+enforcer that only an earlier failed attempt named is sent as 0, so a resumed tracking run does not keep its old
+count. A failed export is logged and does not stop the run.
 
 A run stopped by SIGTERM gets a provisional summary: the run accounting in `run.artifacts`, with `partial: true`, and no `run.verdicts` or `rollout_verdicts.jsonl`. It evaluates only `run_excessive_failures`, which needs no rollouts, and lists every other check in `run.artifacts.not_evaluated`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary; it judges the run by the limits the provisional summary recorded. A stopped run exits with status 143, or with status 1 (`EVAL FAILED`) when `require_complete` is on, which is the default under `gym eval submit`.
 
