@@ -113,6 +113,7 @@ def test_invalid_policy_terminal_requires_unique_root_and_its_last_response(
         ModelCallRef(model_call_id="last-call", response_id=last_response),
     ]
     records = [AgentInvocation(invocation_id=f"root-{i}", model_calls=calls) for i in range(root_count)]
+    records.append(AgentInvocation(invocation_id="empty-completed", status="completed"))
     records.append(
         AgentInvocation(
             invocation_id="child",

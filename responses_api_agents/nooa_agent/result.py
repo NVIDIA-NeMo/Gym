@@ -60,13 +60,10 @@ def finalize_run_result(run_result: NOOARunResult) -> tuple[NeMoGymResponse, Age
         # Policy exhaustion has no entrypoint return to synthesize. Bind its
         # partial response to the last served root call, never a child's output
         # or an earlier call when the final call lacks a response identity.
-        all_roots = [
-            record
-            for record in run_result.episode.observations.records
-            if isinstance(record, AgentInvocation) and record.parent_invocation_id is None
-        ]
-        if len(all_roots) == 1 and all_roots[0].model_calls:
-            policy_terminal = all_roots[0].model_calls[-1].response_id
+        # NOOA may also report completed invocations with no inference. They
+        # carry no served response and do not compete for capture ownership.
+        if len(roots) == 1:
+            policy_terminal = roots[0].model_calls[-1].response_id
             if policy_terminal:
                 verify_response = verify_response.model_copy(
                     update={"metadata": {**(verify_response.metadata or {}), "terminal_response_id": policy_terminal}}
