@@ -112,31 +112,51 @@ class RemoteEnvironment(DockerEnvironment):
 
     async def _container_tar(self, arguments: list[str], archive: BinaryIO, *, upload: bool) -> None:
         """Stream files without Docker cp preserving unmapped host UIDs."""
-        result = await self._run_docker_compose_command(["ps", "-q", "main"])
-        container_id = (result.stdout or "").strip()
-        if not container_id or len(container_id.splitlines()) != 1:
-            raise RuntimeError("Expected one running Harbor main container for file transfer")
-        process = await asyncio.create_subprocess_exec(
-            "docker",
-            "exec",
-            "--interactive",
-            "--user",
-            "0",
-            container_id,
-            "tar",
-            *arguments,
-            stdin=archive if upload else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL if upload else archive,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            _, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            process.kill()
-            await process.wait()
-            raise
-        if process.returncode != 0:
-            raise RuntimeError(f"Harbor file transfer failed: {stderr.decode(errors='replace')}")
+        for attempt in range(6):
+            if upload:
+                archive.seek(0)
+            else:
+                archive.seek(0)
+                archive.truncate(0)
+
+            result = await self._run_docker_compose_command(["ps", "-q", "main"])
+            container_id = (result.stdout or "").strip()
+            if not container_id or len(container_id.splitlines()) != 1:
+                raise RuntimeError("Expected one running Harbor main container for file transfer")
+            process = await asyncio.create_subprocess_exec(
+                "docker",
+                "exec",
+                "--interactive",
+                "--user",
+                "0",
+                container_id,
+                "tar",
+                *arguments,
+                stdin=archive if upload else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL if upload else archive,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                process.kill()
+                await process.wait()
+                raise
+            if process.returncode == 0:
+                return
+
+            detail = stderr.decode(errors="replace")
+            transient_api_error = "unable to upgrade to tcp, received 500" in detail
+            if not transient_api_error or attempt == 5:
+                raise RuntimeError(f"Harbor file transfer failed: {detail}")
+            delay = min(2**attempt, 10)
+            self.logger.warning(
+                "Retrying transient Harbor file-transfer API failure (%s/5) in %ss: %s",
+                attempt + 1,
+                delay,
+                detail.strip(),
+            )
+            await asyncio.sleep(delay)
 
     @staticmethod
     def _write_upload_archive(archive: BinaryIO, source: Path, name: str) -> None:

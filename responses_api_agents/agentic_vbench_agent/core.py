@@ -28,6 +28,14 @@ from typing import Iterator
 REVISION = "410a75fe3dae37de4344fc9e5317da089505330a"
 REPO_URL = "https://github.com/PhiloLabs/agentic-vbench.git"
 FAMILIES = {"repair": 18, "assembly": 18, "sequencing": 28, "repurpose": 36}
+ARM64_DOCKERFILE_OVERRIDES = (
+    "tasks/agentic_vbench_repair/exp-codec-restore-task01/environment/Dockerfile",
+    "tasks/agentic_vbench_repair/exp-declip-task01/environment/Dockerfile",
+    "tasks/agentic_vbench_repair/exp-dereverb-task01/environment/Dockerfile",
+    "tasks/agentic_vbench_repair/exp-dns-denoise-task01/environment/Dockerfile",
+    "tasks/agentic_vbench_repair/exp-voicebank-denoise-task01/environment/Dockerfile",
+)
+ARM64_TASK_PATCH_SHA256 = "ead82c282a013d258cfe00e19127d2da0e808788aa18652460a41e0802b049b5"
 # Harbor's Docker environment shells out to `docker compose`; the gym-native driver
 # image ships neither, so the agent fetches the static client the production runs used.
 DOCKER_CLI_VERSION = "28.0.4"
@@ -42,7 +50,12 @@ def inventory(root: Path) -> dict[str, dict]:
         raise ValueError(f"Expected Agentic-VBench {REVISION}, found {revision}")
     changed = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--", "tasks"], text=True)
     if changed.strip():
-        raise ValueError("Benchmark tasks differ from the pinned checkout")
+        expected_changed = "".join(f" M {path}\n" for path in ARM64_DOCKERFILE_OVERRIDES)
+        patch = subprocess.check_output(
+            ["git", "-C", str(root), "diff", "--no-ext-diff", "--binary", "--", "tasks"]
+        )
+        if changed != expected_changed or hashlib.sha256(patch).hexdigest() != ARM64_TASK_PATCH_SHA256:
+            raise ValueError("Benchmark tasks differ from the pinned checkout")
     tasks = {}
     # The checkout also carries the separate "understanding" area; the benchmark is the four families.
     paths = (root / "tasks" / f"agentic_vbench_{family}" for family in FAMILIES)

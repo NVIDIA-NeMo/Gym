@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import io
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -128,3 +129,73 @@ def test_exec_uses_rootless_tar_default_and_preserves_explicit_options(
     run.assert_awaited_once_with("tar -xf node.tar.xz", cwd="/tmp", env=expected, timeout_sec=60, user="root")
     assert environment._persistent_env == persistent
     assert provided == provided_before
+
+
+@pytest.mark.parametrize("upload", [True, False])
+def test_container_tar_retries_transient_api_500_with_clean_archive(
+    monkeypatch: pytest.MonkeyPatch, upload: bool
+) -> None:
+    environment = object.__new__(RemoteEnvironment)
+    environment.logger = Mock()
+    environment._run_docker_compose_command = AsyncMock(
+        return_value=ExecResult(return_code=0, stdout="container-id\n")
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    positions: list[int] = []
+    outcomes = iter(
+        [
+            (1, b"unable to upgrade to tcp, received 500", b"partial"),
+            (0, b"", b"complete"),
+        ]
+    )
+
+    async def create_process(*args, **kwargs):
+        returncode, stderr, output = next(outcomes)
+        stream = kwargs["stdin"] if upload else kwargs["stdout"]
+        positions.append(stream.tell())
+
+        process = Mock()
+        process.returncode = returncode
+
+        async def communicate():
+            if upload:
+                stream.read()
+            else:
+                stream.write(output)
+            return None, stderr
+
+        process.communicate = communicate
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    archive = io.BytesIO(b"payload" if upload else b"")
+
+    asyncio.run(environment._container_tar(["-xf" if upload else "-cf", "-"], archive, upload=upload))
+
+    assert positions == [0, 0]
+    if not upload:
+        assert archive.getvalue() == b"complete"
+    assert environment._run_docker_compose_command.await_count == 2
+    sleep.assert_awaited_once_with(1)
+
+
+def test_container_tar_does_not_retry_nontransient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    environment = object.__new__(RemoteEnvironment)
+    environment.logger = Mock()
+    environment._run_docker_compose_command = AsyncMock(
+        return_value=ExecResult(return_code=0, stdout="container-id\n")
+    )
+    process = Mock(returncode=1)
+    process.communicate = AsyncMock(return_value=(None, b"tar: destination is read-only"))
+    create_process = AsyncMock(return_value=process)
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    with pytest.raises(RuntimeError, match="destination is read-only"):
+        asyncio.run(environment._container_tar(["-xf", "-"], io.BytesIO(b"payload"), upload=True))
+
+    create_process.assert_awaited_once()
+    sleep.assert_not_awaited()
