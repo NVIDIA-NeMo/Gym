@@ -31,6 +31,7 @@ from aiohttp import (
     ClientPayloadError,
     ClientResponseError,
     ClientSession,
+    ClientTimeout,
     RequestInfo,
     ServerDisconnectedError,
     TCPConnector,
@@ -168,11 +169,17 @@ class TestRequestRetries:
 
     @staticmethod
     async def _short_body_server(replies: list[bytes]) -> tuple[asyncio.Server, str]:
-        """A loopback server that sends each reply in turn, then closes the connection."""
+        """A loopback server that sends each reply in turn, then closes the connection.
+
+        A request past the scripted replies gets a complete 599 reply, so it is never retried as a dropped
+        connection and the test's own request count fails instead of hanging.
+        """
 
         async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             await reader.readuntil(b"\r\n\r\n")
-            writer.write(replies.pop(0))
+            writer.write(
+                replies.pop(0) if replies else b"HTTP/1.1 599 Unexpected Extra Request\r\nContent-Length: 0\r\n\r\n"
+            )
             await writer.drain()
             writer.close()
 
@@ -228,7 +235,7 @@ class TestRequestRetries:
                 await nemo_gym.server_utils.request("POST", url, _internal=True, _read_body=True, json={}, **limits)
         assert len(replies) == 1
 
-    @mark.parametrize("limits", [{}, {"_max_num_tries": 3}])
+    @mark.parametrize("limits", [{"_max_num_tries": 3}, {"_max_connection_retries": 3}])
     async def test_cancellation_during_body_read_is_not_replayed(self, monkeypatch: MonkeyPatch, limits) -> None:
         response = MagicMock(read=AsyncMock(side_effect=asyncio.CancelledError()))
         client = MagicMock(request=AsyncMock(return_value=response))
@@ -239,6 +246,81 @@ class TestRequestRetries:
             )
         assert client.request.await_count == 1
         assert response.read.await_count == 1
+
+    @mark.parametrize("options", [{}, {"_resend_after_disconnect": False, "_max_num_tries": 2}])
+    async def test_without_a_resend_bound_the_reply_goes_back_unread(self, monkeypatch: MonkeyPatch, options) -> None:
+        """Nothing is read that cannot be retried, so the caller's own read sees the reply exactly as sent."""
+        response = MagicMock(read=AsyncMock())
+        client = MagicMock(request=AsyncMock(return_value=response))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+        returned = await nemo_gym.server_utils.request(
+            "POST", "http://agent/run", _internal=True, _read_body=True, json={}, **options
+        )
+        assert returned is response and response.read.await_count == 0
+
+    _COMPLETE_500 = (
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 39\r\n\r\n"
+        b'{"detail": "verifier failed: KeyError"}'
+    )
+
+    @mark.parametrize("options", [{}, {"_max_num_tries": 2}, {"_max_connection_retries": 2}])
+    async def test_a_complete_error_reply_keeps_its_body_for_raise_for_status(
+        self, monkeypatch: MonkeyPatch, options
+    ) -> None:
+        replies = [self._COMPLETE_500]
+        server, url = await self._short_body_server(replies)
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            response = await nemo_gym.server_utils.request(
+                "POST", url, _internal=True, _read_body=True, json={}, **options
+            )
+            with raises(ClientResponseError) as caught:
+                await raise_for_status(response)
+        assert caught.value.status == 500
+        assert caught.value.response_content == b'{"detail": "verifier failed: KeyError"}'
+        assert replies == []
+
+    @staticmethod
+    async def _stalled_body_server(stall_s: float) -> tuple[asyncio.Server, str, list[int]]:
+        """A loopback server that sends the headers and part of the body, waits `stall_s`, then sends the rest."""
+        requests: list[int] = []
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readuntil(b"\r\n\r\n")
+            requests.append(1)
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n" + b'{"rew')
+            await writer.drain()
+            await asyncio.sleep(stall_s)
+            writer.write(b'ard": 1.0}')
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/run", requests
+
+    @mark.parametrize("options", [{}, {"_resend_after_disconnect": False}])
+    async def test_an_explicit_total_timeout_during_the_body_keeps_its_original_error(
+        self, monkeypatch: MonkeyPatch, options
+    ) -> None:
+        server, url, requests = await self._stalled_body_server(2.0)
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            response = await nemo_gym.server_utils.request(
+                "POST", url, _internal=True, _read_body=True, json={}, timeout=ClientTimeout(total=0.1), **options
+            )
+            assert response.status == 200
+            with raises(TimeoutError):
+                await get_response_json(response)
+        assert requests == [1]
+
+    async def test_a_slow_body_without_an_explicit_timeout_still_completes(self, monkeypatch: MonkeyPatch) -> None:
+        """No deadline is added: the default client has no total timeout for a reply body."""
+        server, url, requests = await self._stalled_body_server(0.3)
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            response = await nemo_gym.server_utils.request("POST", url, _internal=True, _read_body=True, json={})
+            assert await get_response_json(response) == {"reward": 1.0}
+        assert requests == [1]
 
 
 class TestServerUtils:
@@ -660,9 +742,12 @@ class TestServerUtils:
         )
         assert "my mock response" == actual_response
 
-    @mark.parametrize("url_path, reads_body", [("/run", True), ("/v1/responses", False)])
+    @mark.parametrize(
+        "url_path, bound, reads_body",
+        [("/run", {"_max_num_tries": 2}, True), ("/run", {}, False), ("/v1/responses", {"_max_num_tries": 2}, False)],
+    )
     async def test_ServerClient_reads_run_reply_inside_request(
-        self, monkeypatch: MonkeyPatch, url_path: str, reads_body: bool
+        self, monkeypatch: MonkeyPatch, url_path: str, bound: dict, reads_body: bool
     ) -> None:
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="abcdef", port=12345),
@@ -672,7 +757,7 @@ class TestServerUtils:
         client = MagicMock(request=AsyncMock(return_value=response))
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
 
-        assert await server_client.post(server_name="my_server", url_path=url_path, json={}) is response
+        assert await server_client.post(server_name="my_server", url_path=url_path, json={}, **bound) is response
         assert response.read.await_count == int(reads_body)
 
     @mark.parametrize("tracing_enabled", [False, True])
