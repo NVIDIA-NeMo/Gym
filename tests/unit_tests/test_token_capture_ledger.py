@@ -223,6 +223,15 @@ def test_stores_implement_capture_ledger(store):
     assert isinstance(store, CaptureLedger)
 
 
+async def test_ledger_methods_take_capture_keys_by_keyword(store):
+    await store.record_failure(capture_key="r1", model_call_id="c1", reason="worker_capture_failed")
+
+    manifest = RolloutManifest.model_validate(await store.manifest(capture_key="r1"))
+    assert [failure.model_call_id for failure in manifest.failures] == ["c1"]
+    assert await store.retire(capture_keys=["r1"]) == {"removed": ["r1"], "absent": []}
+    assert await store.delete(capture_keys=["r1"]) == {"removed": [], "absent": ["r1"]}
+
+
 @pytest.mark.asyncio
 async def test_ledger_row_round_trips_token_free_manifest(store):
     await _record_call_1(store)
@@ -330,7 +339,7 @@ async def test_has_rows_is_false_for_untouched_rollout(store):
 
 async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
     context = CaptureContext(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=model_call_id,
         token_sink=None,
         lineage_store=store,
