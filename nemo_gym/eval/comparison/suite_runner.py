@@ -14,6 +14,8 @@
 # limitations under the License.
 """Orchestrate suite artifact loading, processing, and result provenance."""
 
+import shlex
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -22,6 +24,12 @@ from nemo_gym.comparison.suite_processing import aggregate_suite_cells, compare_
 from nemo_gym.comparison.suite_schema import SuiteComparisonConfig, SuiteComparisonResult
 from nemo_gym.config_types import ConfigError
 from nemo_gym.package_info import __version__
+from nemo_gym.secret_utils import hide_secrets_in_overrides
+
+
+def invoked_command() -> str:
+    """Record the suite command with its Hydra overrides, masking secret values."""
+    return shlex.join(["gym", "eval", "compare-suite", *hide_secrets_in_overrides(sys.argv[1:])])
 
 
 def build_suite_comparison(config: SuiteComparisonConfig, command: str) -> SuiteComparisonResult:
