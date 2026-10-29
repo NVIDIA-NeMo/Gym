@@ -19,9 +19,9 @@ from scripts.harness_conformance.runner import _fingerprint, inspect_episode, ma
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.client import ServerClient
 from nemo_gym.harness_capabilities.cli import json_rows
 from nemo_gym.observability.model_calls import build_model_call_record
-from nemo_gym.server_utils import ServerClient
 from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -226,7 +226,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
     monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
-    monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
     monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
     if interface.endswith("error"):

@@ -30,13 +30,9 @@ from typing import Literal
 from aiohttp import ClientResponse
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
+from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, request, set_global_aiohttp_client
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
-from nemo_gym.server_utils import (
-    GlobalAIOHTTPAsyncClientConfig,
-    request,
-    set_global_aiohttp_client,
-)
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunRequest, NOOARunResult

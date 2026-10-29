@@ -39,6 +39,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import (
     JUDGE_FAILED,
     SESSION_EXPIRED,
@@ -49,7 +50,6 @@ from nemo_gym.core import (
     TaskId,
 )
 from nemo_gym.reward_profile import select_measured
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.session_routing import ResourcesSessionLifetimes
 from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
 from nemo_gym.testing.session_conformance import check_resources_session_contract

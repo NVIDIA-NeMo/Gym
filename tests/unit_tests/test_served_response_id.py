@@ -30,13 +30,13 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture import TokenCaptureStore, TokenEntry
 
 

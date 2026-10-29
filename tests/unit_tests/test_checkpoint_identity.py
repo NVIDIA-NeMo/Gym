@@ -9,9 +9,10 @@ from pydantic import ValidationError
 
 import nemo_gym.server_utils
 from nemo_gym._checkpoint.settings import checkpoint_settings
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, rollout_context
 from nemo_gym.core.episode import current_episode_id
-from nemo_gym.server_utils import BaseServerConfig, ServerClient
+from nemo_gym.server_utils import BaseServerConfig
 
 
 @pytest.mark.parametrize(
@@ -57,7 +58,7 @@ def _client(monkeypatch: pytest.MonkeyPatch, extra: dict) -> tuple[ServerClient,
     request_mock = AsyncMock(return_value="response")
     client_mock = MagicMock()
     client_mock.return_value.request = request_mock
-    monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", client_mock)
     return client, request_mock
 
 
@@ -91,7 +92,8 @@ async def test_calls_stay_unprefixed_when_checkpointing_and_observability_are_of
 def test_a_bad_checkpoint_block_fails_when_the_client_is_built_not_on_every_request() -> None:
     from omegaconf import OmegaConf
 
-    from nemo_gym.server_utils import BaseServerConfig, ServerClient
+    from nemo_gym.client import ServerClient
+    from nemo_gym.server_utils import BaseServerConfig
 
     with pytest.raises(ValueError, match="control_auth_token is required"):
         ServerClient(

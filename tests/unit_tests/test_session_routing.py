@@ -63,8 +63,8 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.session_routing import (
     SESSION_CLAIMS_DIR,
     SESSION_OWNER_HEADER,

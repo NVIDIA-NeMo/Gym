@@ -18,9 +18,9 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.core import current_rollout_id, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
 
 
 class _Agent(SimpleResponsesAPIAgent):

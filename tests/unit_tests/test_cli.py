@@ -802,8 +802,8 @@ class TestRunHelperServerReadiness:
         """Each probe used to wait its full 5s, so the deadline was checked only after every server had been tried."""
         import socket
 
+        from nemo_gym.client import ServerClient
         from nemo_gym.config import BaseServerConfig
-        from nemo_gym.server_utils import ServerClient
 
         # A listening socket that never accepts completes the TCP handshake and then never answers.
         stalled_sockets = []

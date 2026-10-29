@@ -20,16 +20,18 @@ from unittest.mock import MagicMock
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
-import nemo_gym.profiling
-from nemo_gym.profiling import Profiler
+import nemo_gym.telemetry.profiling
+from nemo_gym.telemetry import Profiler
 
 
 class TestProfiling:
     def test_sanity(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.profiling, "graph_from_dot_file", MagicMock(return_value=(MagicMock(),)))
+        monkeypatch.setattr(
+            nemo_gym.telemetry.profiling, "graph_from_dot_file", MagicMock(return_value=(MagicMock(),))
+        )
 
         monkeypatch.setattr(Profiler, "_check_for_dot_installation", MagicMock())
-        monkeypatch.setattr(nemo_gym.profiling, "_require_gprof2dot", MagicMock(return_value=MagicMock()))
+        monkeypatch.setattr(nemo_gym.telemetry.profiling, "_require_gprof2dot", MagicMock(return_value=MagicMock()))
 
         profiler = Profiler(name="test_name", base_profile_dir=tmp_path / "profile")
         profiler.start()

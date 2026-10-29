@@ -304,7 +304,7 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
 #: Packages a Gym server process needs in order to export telemetry. `nemo-lens[sdk]`
 #: brings the providers and exporters; the FastAPI instrumentation package backs
 #: `instrument_fastapi`, which nemo-lens imports lazily. Outbound aiohttp calls need no
-#: instrumentation package: `server_utils.request` makes its own CLIENT span and injects
+#: instrumentation package: `client.http_client.request` makes its own CLIENT span and injects
 #: `traceparent`.
 _SERVER_TELEMETRY_PACKAGES = (
     ("nemo-lens", "nemo-lens[sdk]"),

@@ -17,6 +17,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.client import ServerClient
 from nemo_gym.core import JUDGE_FAILED, SESSION_LOST, VERIFIER_ERROR, rollout_context
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT
@@ -24,7 +25,6 @@ from nemo_gym.judge import JudgeError, call_judge, judge_failsafe
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.server_utils import ServerClient
 
 
 class Verdict(BaseModel):
@@ -227,10 +227,8 @@ async def test_observability_disabled_leaves_execution_unchanged(tmp_path):
 async def test_direct_model_requests_inside_verify_inherit_owner(tmp_path, monkeypatch):
     from omegaconf import OmegaConf
 
-    from nemo_gym import server_utils
-
     transport = AsyncMock()
-    monkeypatch.setattr(server_utils, "request", transport)
+    monkeypatch.setattr("nemo_gym.client.server_client.request", transport)
     client = ServerClient(
         head_server_config={"host": "localhost", "port": 0},
         global_config_dict=OmegaConf.create(

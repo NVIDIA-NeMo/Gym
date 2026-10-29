@@ -51,10 +51,8 @@ class TestOpenAIUtils:
     async def test_failed_response_logs_request_only_when_request_debug_is_enabled(
         self, monkeypatch, capsys, debug_enabled: bool
     ) -> None:
-        import nemo_gym.server_utils
-
         # set_global_aiohttp_client sets the flag on server_utils at startup, after openai_utils was imported.
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
         monkeypatch.setattr(openai_utils_module, "raise_for_status", AsyncMock())
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
         request_kwargs = {"url": "https://example.com/v1/chat/completions", "json": {"model": "m"}}

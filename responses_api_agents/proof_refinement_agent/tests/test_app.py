@@ -15,7 +15,7 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_agents.proof_refinement_agent.app import (
     ModelServerRef,
     ProofRefinementAgent,

@@ -30,6 +30,7 @@ from fastapi import Request
 from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -53,7 +54,6 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,

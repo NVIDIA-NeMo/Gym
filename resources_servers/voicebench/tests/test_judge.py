@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import yaml
 
+from nemo_gym.client import ServerClient
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient
 from resources_servers.voicebench.scorers.open_judge import JudgeSettings, OpenJudgeScorer, parse_score, score_outputs
 from resources_servers.voicebench.scorers.reference_qa import ReferenceQAScorer
 

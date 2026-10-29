@@ -22,7 +22,7 @@ Two real FastAPI apps are served over real HTTP on two ports, so `traceparent` g
 travels over the wire and is genuinely extracted by the receiver's ASGI instrumentation.
 The two apps share this test process (spawning interpreters from a unit test would be
 slow and flaky), but nothing about the propagation path is faked: the header is written by
-`server_utils.request`, parsed by the FastAPI instrumentor, and the resulting parent link
+`nemo_gym.client.http_client.request`, parsed by the FastAPI instrumentor, and the resulting parent link
 is what gets asserted.
 """
 
@@ -37,7 +37,7 @@ from aiohttp import ClientSession
 from fastapi import FastAPI
 from omegaconf import OmegaConf
 
-from nemo_gym import server_utils
+import nemo_gym.client.http_client
 from nemo_gym.config import global_config
 from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry import setup as telemetry_setup
@@ -111,7 +111,7 @@ def traces(monkeypatch):
 
 @pytest.fixture
 def loop_local_aiohttp_client(monkeypatch):
-    """Give `server_utils.request` a session bound to whichever loop calls it.
+    """Give `nemo_gym.client.http_client.request` a session bound to whichever loop calls it.
 
     Gym's real global client is created once against the process's event loop. Here the
     two servers run in their own threads with their own loops, so a single shared session
@@ -126,7 +126,7 @@ def loop_local_aiohttp_client(monkeypatch):
             sessions[loop] = ClientSession()
         return sessions[loop]
 
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", get_client)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", get_client)
     yield
     for loop, session in sessions.items():
         if not loop.is_closed():
@@ -149,7 +149,7 @@ def _serve(app: FastAPI, port: int):
 
 @pytest.fixture
 def two_gym_servers(traces, loop_local_aiohttp_client):
-    """An 'agent' server that calls a 'model' server through `server_utils.request`."""
+    """An 'agent' server that calls a 'model' server through `nemo_gym.client.http_client.request`."""
     from nemo.lens.contrib.fastapi import instrument_fastapi
 
     port_model = _free_port()
@@ -165,7 +165,7 @@ def two_gym_servers(traces, loop_local_aiohttp_client):
 
     @agent_app.get("/call")
     async def call():
-        response = await server_utils.request("GET", f"http://127.0.0.1:{port_model}/work")
+        response = await nemo_gym.client.http_client.request("GET", f"http://127.0.0.1:{port_model}/work")
         return {"status": response.status}
 
     instrument_fastapi(model_app)
@@ -275,10 +275,10 @@ async def test_lazy_client_initialization_failure_is_inside_the_client_span(
 
     if not tracing_enabled:
         set_enabled_span_groups(frozenset())
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
-    monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 4)
-    monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+    monkeypatch.setattr("nemo_gym.utils.server_process.get_nemo_gym_fastapi_num_workers", lambda: 4)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_nemo_gym_fastapi_worker", lambda: True)
     # A server worker reads the config its parent puts in its environment, and nothing is cached yet.
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv(
@@ -289,13 +289,13 @@ async def test_lazy_client_initialization_failure_is_inside_the_client_span(
     with pytest.raises(ValueError, match="must remain at least 1"):
         # Bound the call so a validation regression that reaches the network fails instead of retrying forever.
         await asyncio.wait_for(
-            server_utils.request(
+            nemo_gym.client.http_client.request(
                 "GET", "http://127.0.0.1/work", _max_connection_retries=1, _server_name="policy_model"
             ),
             timeout=5,
         )
 
-    assert server_utils._GLOBAL_AIOHTTP_CLIENT is None
+    assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT is None
     assert connection_pool._SERVER_NAME.get() == "external"
     client_spans = _by_kind(traces(), "CLIENT")
     if tracing_enabled:
@@ -322,7 +322,9 @@ async def test_client_span_url_attribute_drops_the_query_string(traces, loop_loc
     server, thread = _serve(app, port)
     try:
         async with ClientSession():
-            await server_utils.request("GET", f"http://127.0.0.1:{port}/work?api_key=secret&task=sensitive")
+            await nemo_gym.client.http_client.request(
+                "GET", f"http://127.0.0.1:{port}/work?api_key=secret&task=sensitive"
+            )
     finally:
         server.should_exit = True
         thread.join(timeout=10)
@@ -344,7 +346,7 @@ async def test_no_spans_when_the_http_client_group_is_disabled(two_gym_servers, 
 
 
 async def test_without_traces_no_client_span_or_traceparent_is_produced(two_gym_servers, traces, monkeypatch):
-    """With traces off, span groups stay enabled, so `server_utils.request` must check the exporter itself."""
+    """With traces off, span groups stay enabled, so `nemo_gym.client.http_client.request` must check the exporter itself."""
     monkeypatch.setattr(telemetry_setup, "_TRACES_EXPORTING", False)
 
     await _drive_one_request(two_gym_servers)

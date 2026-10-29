@@ -38,6 +38,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, is_global_aiohttp_client_setup, set_global_aiohttp_client
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, get_global_config_dict
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -53,11 +54,6 @@ from nemo_gym.core import (
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
-from nemo_gym.server_utils import (
-    GlobalAIOHTTPAsyncClientConfig,
-    is_global_aiohttp_client_setup,
-    set_global_aiohttp_client,
-)
 from nemo_gym.telemetry import init_telemetry
 
 

@@ -27,13 +27,13 @@ from fastapi import Body, Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import ServerClient
 
 
 def _build_response(text: str, model: str = "downstream-model") -> NeMoGymResponse:

@@ -18,9 +18,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.mini_swe_agent.app import (
     MiniSWEAgent,
     MiniSWEAgentConfig,

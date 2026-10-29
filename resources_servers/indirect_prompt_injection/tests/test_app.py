@@ -17,8 +17,8 @@ from unittest.mock import MagicMock
 from fastapi import Request
 from pytest import fixture
 
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.indirect_prompt_injection.app import (
     InjectionSpec,
     IPIResourcesServer,

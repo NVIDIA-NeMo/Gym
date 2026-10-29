@@ -32,6 +32,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -44,7 +45,6 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.responses_converter import split_responses_input_output_items
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.conversational_tool_use_simulation.prompt import (
     AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE,
     AGENT_SYSTEM_MESSAGE_TEMPLATE,

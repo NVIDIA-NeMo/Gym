@@ -23,9 +23,9 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 
 
 try:

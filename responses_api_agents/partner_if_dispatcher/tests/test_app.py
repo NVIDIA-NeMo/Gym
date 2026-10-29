@@ -292,8 +292,8 @@ async def test_metrics_server_failure_is_raised_not_replaced_by_empty_metrics():
 
 def test_example_config_runs_each_partner_if_example_in_its_own_environment():
     from nemo_gym import PARENT_DIR
+    from nemo_gym.client import ServerClient
     from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
-    from nemo_gym.server_utils import ServerClient
 
     module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
     config = GlobalConfigDictParser().parse(

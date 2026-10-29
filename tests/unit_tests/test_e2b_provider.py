@@ -288,10 +288,9 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
 ) -> None:
     import httpx
 
-    from nemo_gym import server_utils
     from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
     if configured:
         monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
     else:

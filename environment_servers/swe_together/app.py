@@ -54,6 +54,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -74,7 +75,6 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     resolve_provider_config,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

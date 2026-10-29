@@ -29,15 +29,14 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 
+from nemo_gym.client import apply_rollout_prefix, trace_context_path_segment
+from nemo_gym.client.server_client import _TRACEPARENT_PATTERN
 from nemo_gym.core import current_rollout_id
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import (
-    _TRACEPARENT_PATTERN,
     TraceContextPathMiddleware,
-    apply_rollout_prefix,
     install_request_context_isolation,
     install_trace_context_path,
-    trace_context_path_segment,
 )
 from tests.unit_tests.telemetry.conftest import requires_lens
 from tests.unit_tests.telemetry.test_propagation import (
@@ -288,7 +287,7 @@ def test_agent_hand_off_urls_carry_the_current_span(traces):  # noqa: F811
     from opentelemetry import trace
 
     from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.client import ServerClient
 
     class _Agent(SimpleResponsesAPIAgent):
         async def responses(self, body=...):

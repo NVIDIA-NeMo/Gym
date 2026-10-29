@@ -59,9 +59,9 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.session_routing import (
     ResourcesSessionLifetimes,
     SessionClaims,

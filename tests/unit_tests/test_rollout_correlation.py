@@ -22,7 +22,6 @@ from omegaconf import OmegaConf
 from pydantic import ConfigDict
 from starlette.testclient import TestClient
 
-import nemo_gym.server_utils
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -39,10 +38,10 @@ from nemo_gym.base_responses_api_model import (
     _CaptureMiddleware,
     install_model_call_capture,
 )
+from nemo_gym.client import ServerClient, get_response_json
 from nemo_gym.config import BaseServerConfig
 from nemo_gym.core import current_rollout_id, maybe_rollout_id_from_run_body
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
-from nemo_gym.server_utils import ServerClient, get_response_json
 
 
 def _model_response(model: str, text: str = "") -> dict:
@@ -196,7 +195,8 @@ async def test_verify_correlates_policy_and_judge_calls_and_preserves_raw_captur
         response = clients[parsed.hostname].request(method, parsed.path, json=kwargs.get("json"))
         return _Response(response)
 
-    monkeypatch.setattr(nemo_gym.server_utils, "request", dispatch)
+    monkeypatch.setattr("nemo_gym.client.server_client.request", dispatch)
+    monkeypatch.setattr("nemo_gym.client.http_client.request", dispatch)
 
     verify = await server_client.post(
         server_name="agent",

@@ -10,6 +10,7 @@ import pytest
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
 from omegaconf import DictConfig, OmegaConf
 
+import nemo_gym.client.http_client
 from nemo_gym import server_utils
 from nemo_gym.config import global_config
 from nemo_gym.telemetry import connection_pool, gym_metrics
@@ -39,7 +40,7 @@ def collected_metrics(monkeypatch):
 
     monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
     monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: True)
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
     gym_metrics._reset_for_testing()
     connection_pool._CONNECT_COUNTS.clear()
 
@@ -82,7 +83,7 @@ async def _client(monkeypatch, *, limit: int, limit_per_host: int):
     session = ClientSession(
         connector=connection_pool.QueueTimedTCPConnector(limit=limit, limit_per_host=limit_per_host),
     )
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: session)
     try:
         yield session
     finally:
@@ -91,11 +92,11 @@ async def _client(monkeypatch, *, limit: int, limit_per_host: int):
 
 @asynccontextmanager
 async def _lazy_client(monkeypatch, *, metrics_enabled: bool = True, workers: int = 1, aggregate_limit: int = 4):
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: metrics_enabled)
-    monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: workers)
-    monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
+    monkeypatch.setattr("nemo_gym.utils.server_process.get_nemo_gym_fastapi_num_workers", lambda: workers)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_nemo_gym_fastapi_worker", lambda: True)
     # A server worker reads the config its parent puts in its environment, and nothing is cached yet.
     monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv(
@@ -110,14 +111,14 @@ async def _lazy_client(monkeypatch, *, metrics_enabled: bool = True, workers: in
     try:
         yield
     finally:
-        if server_utils._GLOBAL_AIOHTTP_CLIENT is not None:
-            await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-            monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        if nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT is not None:
+            await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
+            monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
 
 
 async def _get(url: str, **kwargs) -> None:
     try:
-        response = await server_utils.request("GET", url, _server_name="model", **kwargs)
+        response = await nemo_gym.client.http_client.request("GET", url, _server_name="model", **kwargs)
         assert response.status == 200
         await response.read()
     finally:
@@ -155,8 +156,8 @@ async def test_client_span_is_kept_when_queue_metrics_are_enabled(collected_metr
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     monkeypatch.setattr(trace, "get_tracer", provider.get_tracer)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: True)
-    monkeypatch.setattr(server_utils, "is_trace_exporter_active", lambda: True)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _group: True)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_trace_exporter_active", lambda: True)
 
     async def immediate(_request):
         return web.json_response({"ok": True})
@@ -166,7 +167,8 @@ async def test_client_span_is_kept_when_queue_metrics_are_enabled(collected_metr
             for count in (1, 2):
                 await _get(url)
                 assert isinstance(
-                    server_utils._GLOBAL_AIOHTTP_CLIENT.connector, connection_pool.QueueTimedTCPConnector
+                    nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.connector,
+                    connection_pool.QueueTimedTCPConnector,
                 )
                 spans = exporter.get_finished_spans()
                 assert len(spans) == count
@@ -243,7 +245,7 @@ async def test_server_client_labels_samples_with_the_destination_server(collecte
 async def test_lazy_client_labels_first_and_subsequent_attempts(
     collected_metrics, monkeypatch, metrics_enabled: bool, tracing_enabled: bool, server_name: str | None, workers: int
 ):
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _group: tracing_enabled)
 
     async def immediate(_request):
         return web.json_response({"ok": True})
@@ -253,7 +255,7 @@ async def test_lazy_client_labels_first_and_subsequent_attempts(
         _serve(immediate) as url,
     ):
         for count in (1, 2):
-            response = await server_utils.request("GET", url, _server_name=server_name)
+            response = await nemo_gym.client.http_client.request("GET", url, _server_name=server_name)
             assert response.status == 200
             await response.read()
             points = collected_metrics().get(CONNECT_TOTAL, [])
@@ -263,7 +265,7 @@ async def test_lazy_client_labels_first_and_subsequent_attempts(
                 assert point.attributes == {"nemo.gym.http.destination.server.name": server_name or "external"}
             else:
                 assert points == []
-                assert type(server_utils._GLOBAL_AIOHTTP_CLIENT.connector) is TCPConnector
+                assert type(nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.connector) is TCPConnector
             assert _points(collected_metrics) == []
             assert connection_pool._SERVER_NAME.get() == "external"
 
@@ -276,7 +278,7 @@ async def test_request_restores_the_callers_destination_label(collected_metrics,
         token = connection_pool.set_server_name("outer")
         try:
             for name in ("policy_model", None):
-                response = await server_utils.request("GET", url, _server_name=name)
+                response = await nemo_gym.client.http_client.request("GET", url, _server_name=name)
                 assert response.status == 200
                 await response.read()
                 assert connection_pool._SERVER_NAME.get() == "outer"
@@ -305,7 +307,7 @@ async def test_lazy_client_preserves_concurrent_destination_labels(collected_met
         return web.json_response({"ok": True})
 
     async def get_named(url: str, server_name: str) -> None:
-        response = await server_utils.request("GET", url, _server_name=server_name)
+        response = await nemo_gym.client.http_client.request("GET", url, _server_name=server_name)
         assert response.status == 200
         await response.read()
         assert connection_pool._SERVER_NAME.get() == "external"
@@ -623,7 +625,7 @@ async def test_a_refused_connection_records_a_failed_setup(collected_metrics, mo
 
     async with _client(monkeypatch, limit=2, limit_per_host=2):
         with pytest.raises(Exception):
-            await server_utils.request(
+            await nemo_gym.client.http_client.request(
                 "GET", f"http://127.0.0.1:{closed_port}/work", _server_name="model", _max_connection_retries=0
             )
 

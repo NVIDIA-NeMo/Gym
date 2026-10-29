@@ -13,9 +13,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.agent_utils.supervisor_client import DEFAULT_CLEANUP_TIMEOUT
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.hermes_sandboxed_agent.app import (
     MAX_OUTPUT_BYTES,
     HermesSandboxedAgent,

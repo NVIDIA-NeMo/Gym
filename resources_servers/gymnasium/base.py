@@ -21,8 +21,8 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from nemo_gym.base_resources_server import BaseVerifyRequest, SimpleResourcesServer
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
-from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 class EnvResetRequest(BaseModel):

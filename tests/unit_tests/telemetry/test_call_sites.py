@@ -269,7 +269,7 @@ def test_server_type_is_none_for_an_unrelated_class():
 
 def test_url_query_string_is_stripped_before_it_becomes_an_attribute():
     """Gym URLs carry API keys, and rollout-prefixed routes carry task identity."""
-    from nemo_gym.server_utils import _redacted_url
+    from nemo_gym.client.http_client import _redacted_url
 
     assert _redacted_url("http://h:1/v1/responses?api_key=sk-abc") == "http://h:1/v1/responses"
     assert _redacted_url("http://h:1/v1/responses") == "http://h:1/v1/responses"

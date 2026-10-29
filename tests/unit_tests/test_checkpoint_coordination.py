@@ -20,8 +20,9 @@ from nemo_gym._checkpoint.control import (
     next_attempt,
 )
 from nemo_gym._checkpoint.coordination import CoordinationError
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
-from nemo_gym.server_utils import BaseServerConfig, ServerClient
+from nemo_gym.server_utils import BaseServerConfig
 
 
 TOKEN = "t"
@@ -368,15 +369,13 @@ async def test_discover_reports_a_server_that_is_down_instead_of_retrying_foreve
 ) -> None:
     import aiohttp
 
-    import nemo_gym.server_utils as server_utils
-
     calls: list[Optional[int]] = []
 
     async def refused(**kwargs: Any) -> Any:
         calls.append(kwargs.get("_max_num_tries"))
         raise aiohttp.ClientOSError(111, "connection refused")
 
-    monkeypatch.setattr(server_utils, "request", refused)
+    monkeypatch.setattr("nemo_gym.client.server_client.request", refused)
     client = ServerClient(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create(
@@ -392,12 +391,10 @@ async def test_discover_reports_a_server_that_is_down_instead_of_retrying_foreve
 async def test_discover_reports_a_server_that_never_replies(monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
 
-    import nemo_gym.server_utils as server_utils
-
     async def silent(**kwargs: Any) -> Any:
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(server_utils, "request", silent)
+    monkeypatch.setattr("nemo_gym.client.server_client.request", silent)
     monkeypatch.setattr(coordination, "_DISCOVER_TIMEOUT_SECONDS", 0.05)
     client = ServerClient(
         head_server_config=BaseServerConfig(host="head", port=1),

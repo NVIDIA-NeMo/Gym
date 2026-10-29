@@ -8,9 +8,9 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import ServerClient
 from nemo_gym.core import MODEL_REQUEST_ERROR, NeMoGymResponse
 from nemo_gym.core.failure_kinds import FAILURE_KINDS
-from nemo_gym.server_utils import ServerClient
 
 
 def test_inherited_outcome_reporting_preserves_response_and_marks_unknown():

@@ -43,6 +43,7 @@ from checkpoint_deployment import (
     weather_row,
 )
 
+import nemo_gym.client.http_client
 import nemo_gym.server_utils as server_utils
 from nemo_gym._checkpoint import coordination
 from nemo_gym.core import EpisodeId
@@ -62,14 +63,14 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 async def gym_http_client() -> AsyncIterator[None]:
     """Coordination calls go through Gym's global aiohttp client, which is bound to this test's loop."""
-    server_utils.set_global_aiohttp_client(server_utils.GlobalAIOHTTPAsyncClientConfig())
+    nemo_gym.client.http_client.set_global_aiohttp_client(server_utils.GlobalAIOHTTPAsyncClientConfig())
     yield
-    await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-    server_utils._GLOBAL_AIOHTTP_CLIENT = None
+    await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
+    nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
     # Coordination uses the reserved control pool, created on first use in this test's loop.
-    if server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
-        await server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
-        server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
+    if nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
+        await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
+        nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
 
 
 async def lift_connection_limit() -> None:
@@ -78,9 +79,9 @@ async def lift_connection_limit() -> None:
     Each ``/run`` holds a connection until its episode replies,
     so a pool smaller than the rollouts in flight would leave the rest unsent.
     """
-    await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-    server_utils._GLOBAL_AIOHTTP_CLIENT = None
-    server_utils.set_global_aiohttp_client(
+    await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
+    nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
+    nemo_gym.client.http_client.set_global_aiohttp_client(
         server_utils.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=0)
     )
 

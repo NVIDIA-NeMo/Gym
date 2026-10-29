@@ -25,8 +25,8 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
 AUTH = {"authorization": "Bearer t"}

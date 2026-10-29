@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym import server_utils
+import nemo_gym.client.http_client
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     EpisodeId,
@@ -26,7 +27,6 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
-from nemo_gym.server_utils import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymLLM,
@@ -1063,10 +1063,10 @@ class TestHarnessOutcomes:
             probe.bind(("127.0.0.1", 0))
             closed_port = probe.getsockname()[1]
         monkeypatch.setattr(app_module, "MODEL_CONNECTION_RETRIES", 2)
-        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-        monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
-        monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
-        http_client = server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr("nemo_gym.utils.server_process.get_nemo_gym_fastapi_num_workers", lambda: 1)
+        monkeypatch.setattr(nemo_gym.client.http_client, "is_nemo_gym_fastapi_worker", lambda: True)
+        http_client = nemo_gym.client.http_client.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
 
         async def run(agent, instruction, environment, context):
             llm = agent.kwargs["llm"]
@@ -1080,7 +1080,7 @@ class TestHarnessOutcomes:
                 await _execute_with_harness(monkeypatch, run, config=_harness_config(sandbox_timeout=30))
         finally:
             await http_client.close()
-            monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+            monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
         elapsed = perf_counter() - started
 
         # Two connection retries half a second apart, then ModelUnreachableError: a 502, not a verified timeout.

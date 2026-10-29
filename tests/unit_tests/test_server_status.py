@@ -19,8 +19,9 @@ from unittest.mock import MagicMock
 import requests
 from pytest import MonkeyPatch
 
+from nemo_gym.client import ServerClient
 from nemo_gym.server_status import StatusCommand
-from nemo_gym.server_utils import ServerClient, ServerInstanceDisplayConfig
+from nemo_gym.server_utils import ServerInstanceDisplayConfig
 
 
 class TestServerStatus:

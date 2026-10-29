@@ -155,6 +155,9 @@ redirects:
   # Library reference pages of modules moved into nemo_gym/core (#5166).
   - source: "/nemo/gym/nemo-gym/nemo_gym/failure_kinds"
     destination: "/nemo/gym/nemo-gym/nemo_gym/core/failure_kinds"
+  # Library reference pages of modules moved into nemo_gym/telemetry (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/profiling"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/telemetry/profiling"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

@@ -17,9 +17,9 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     mcp_session_token_serializer,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
 from nemo_gym.mcp_auto_exposure import maybe_auto_expose
-from nemo_gym.server_utils import ServerClient
 from tests.unit_tests.test_checkpoint_resources import AUTH, SEED, CounterServer, control, signal_waits, until
 
 

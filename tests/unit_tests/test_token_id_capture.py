@@ -47,6 +47,7 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
     _request_messages,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -54,7 +55,6 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.observability.model_calls import read_model_call_records
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture import (
     TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,

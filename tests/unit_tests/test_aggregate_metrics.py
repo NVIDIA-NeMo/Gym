@@ -24,6 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import ServerClient
 from nemo_gym.config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER
 from nemo_gym.reward_profile import (
@@ -36,7 +37,6 @@ from nemo_gym.reward_profile import (
     highest_k_metrics,
     is_repeat_aggregatable_metric,
 )
-from nemo_gym.server_utils import ServerClient
 
 
 class _TestResourcesServer(SimpleResourcesServer):

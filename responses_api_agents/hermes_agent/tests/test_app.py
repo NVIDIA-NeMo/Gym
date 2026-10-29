@@ -31,6 +31,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     _AgentSessionRecord,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     EpisodeId,
     NeMoGymEasyInputMessage,
@@ -44,7 +45,6 @@ from nemo_gym.core import (
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.hermes_agent.app import (

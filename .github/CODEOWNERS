@@ -76,7 +76,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/agent_registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/rollout_collection.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/profiling.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/telemetry/profiling.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/config/server_metadata.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_status.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/train_data_utils.py @nvidia-nemo/gym_core

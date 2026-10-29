@@ -67,6 +67,7 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.profiling": MovedPath(new="nemo_gym.telemetry.profiling", since="0.8.0"),
     "nemo_gym.failure_kinds": MovedPath(new="nemo_gym.core.failure_kinds", since="0.8.0"),
     "nemo_gym.config_types": MovedPath(new="nemo_gym.config.config_types", since="0.8.0"),
     "nemo_gym.global_config": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
@@ -88,6 +89,78 @@ def _names(new: str, since: str, names: str) -> dict[str, MovedPath]:
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
 MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.server_utils": {
+        # Moved, and still imported by server_utils for its own use.
+        **_names(
+            "nemo_gym.client.http_client",
+            "0.8.0",
+            "GlobalAIOHTTPAsyncClientConfig _detach_global_aiohttp_clients _format_upstream_error_log _set_tcp_keepalive global_aiohttp_client_exit is_global_aiohttp_client_request_debug_enabled",
+        ),
+        **_names(
+            "nemo_gym.client.server_client", "0.8.0", "SESSION_ID_KEY ServerClient ServerStatus _TRACEPARENT_PATTERN"
+        ),
+        **_names("nemo_gym.telemetry.profiling", "0.8.0", "ProfilingMiddlewareConfig"),
+        **_names(
+            "nemo_gym.client.http_client",
+            "0.8.0",
+            """
+            DISCONNECTED_CLIENT_OS_HELP_TEXT DISCONNECTED_CLIENT_OS_PRINT_INTERVAL MAX_NUM_TRIES
+            _GLOBAL_AIOHTTP_CLIENT _GLOBAL_AIOHTTP_CLIENT_CONFIG _GLOBAL_AIOHTTP_CLIENT_LOOP
+            _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
+            _GLOBAL_AIOHTTP_CONTROL_CLIENT _NUM_CLIENT_OS_ERROR _NUM_SERVER_DISCONNECTED_ERROR
+            _PickleSafeRequestInfo _UPSTREAM_ERROR_LOG_BODY_CHARS _format_upstream_error_body
+            _make_keepalive_socket_factory _redacted_url _request_with_retries _traced_request
+            format_exception_with_response_body get_global_aiohttp_client
+            get_global_aiohttp_control_client get_response_json is_global_aiohttp_client_setup
+            raise_for_status request set_global_aiohttp_client
+            """,
+        ),
+        **_names(
+            "nemo_gym.client.server_client",
+            "0.8.0",
+            """
+            NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME
+            _connectable_client_host apply_rollout_prefix get_server_url rollout_path_prefix
+            setup_server_client trace_context_path_segment
+            """,
+        ),
+        **_names("nemo_gym.telemetry.profiling", "0.8.0", "ProfilingMiddlewareInputConfig"),
+        # Names server_utils imported and no longer uses; each resolves where it is defined or now imported.
+        **_names("nemo_gym._checkpoint.settings", "0.8.0", "checkpoint_settings"),
+        **_names(
+            "nemo_gym.client.http_client",
+            "0.8.0",
+            """
+            CIMultiDict ClientConnectorError ClientOSError ClientResponse ClientSession ClientTimeout
+            DummyCookieJar Field ServerDisconnectedError _RequestOptions
+            """,
+        ),
+        **_names("nemo_gym.client.server_client", "0.8.0", "ConfigDict ConnectionError"),
+        **_names("nemo_gym.config.config_types", "0.8.0", "HeadServerUnreachableError"),
+        **_names(
+            "nemo_gym.config.global_config",
+            "0.8.0",
+            """
+            GlobalConfigDictParser GlobalConfigDictParserConfig HEAD_SERVER_KEY_NAME
+            OBSERVABILITY_ENABLED_KEY_NAME maybe_get_global_config_dict
+            """,
+        ),
+        **_names(
+            "nemo_gym.core.episode",
+            "0.8.0",
+            """
+            VERIFIER_INVOCATION_HEADER current_rollout_id current_verifier_invocation_id
+            maybe_rollout_id_from_run_body
+            """,
+        ),
+        **_names("nemo_gym.telemetry._fallbacks", "0.8.0", "safe_set_span_attributes"),
+        **_names(
+            "nemo_gym.telemetry.connection_pool",
+            "0.8.0",
+            """
+            QueueTimedTCPConnector build_connection_pool_connector reset_server_name set_server_name
+            """,
+        ),
+        **_names("nemo_gym.utils.server_process", "0.8.0", "get_nemo_gym_fastapi_num_workers"),
         **_names(
             "nemo_gym.utils.server_process",
             "0.8.0",

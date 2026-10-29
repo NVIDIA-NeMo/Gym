@@ -29,9 +29,9 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.finance_agent.app import (
     FinanceAgent,
     FinanceAgentConfig,

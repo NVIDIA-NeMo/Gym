@@ -29,10 +29,11 @@ import yaml
 from aiohttp import ClientTimeout
 from omegaconf import OmegaConf
 
-from nemo_gym import server_utils
+import nemo_gym.client.http_client
 from nemo_gym._checkpoint import coordination
+from nemo_gym.client import ServerClient
 from nemo_gym.runtime_dir import RUNTIME_ROOT
-from nemo_gym.server_utils import BaseServerConfig, ServerClient
+from nemo_gym.server_utils import BaseServerConfig
 
 
 HERE = Path(__file__).resolve().parent
@@ -124,7 +125,7 @@ class GymHTTP:
         return None
 
     async def request(self, method: str, path: str, *, json: Any = None, headers: Optional[dict] = None) -> Reply:
-        response = await server_utils.request(
+        response = await nemo_gym.client.http_client.request(
             method,
             f"{self.base_url}{path}",
             _resend_after_disconnect=False,

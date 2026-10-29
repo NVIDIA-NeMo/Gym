@@ -32,9 +32,9 @@ assert nemo_gym.__file__.startswith(str(WORK_DIR / "gym_mount")), f"wrong nemo_g
 
 from omegaconf import OmegaConf  # noqa: E402
 
+from nemo_gym.client import ServerClient  # noqa: E402
 from nemo_gym.config import BaseServerConfig  # noqa: E402
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming  # noqa: E402
-from nemo_gym.server_utils import ServerClient  # noqa: E402
 
 
 def main() -> None:

@@ -16,6 +16,7 @@ import pytest
 from fastapi import FastAPI
 from pydantic import BaseModel, ValidationError, model_validator
 
+import nemo_gym.client.http_client
 from nemo_gym._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
@@ -629,29 +630,37 @@ async def test_control_calls_use_a_reserved_pool_when_data_calls_fill_theirs() -
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
-    saved = (server_utils._GLOBAL_AIOHTTP_CLIENT, server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT)
-    server_utils._GLOBAL_AIOHTTP_CLIENT = server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
+    saved = (
+        nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT,
+        nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT,
+    )
+    nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT = (
+        None
+    )
     try:
         # One data connection per host, and a long call holding it.
-        server_utils.set_global_aiohttp_client(
+        nemo_gym.client.http_client.set_global_aiohttp_client(
             server_utils.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=1)
         )
-        held = asyncio.create_task(server_utils.request("GET", f"http://127.0.0.1:{port}/slow"))
+        held = asyncio.create_task(nemo_gym.client.http_client.request("GET", f"http://127.0.0.1:{port}/slow"))
         await asyncio.sleep(0.1)
         control = await asyncio.wait_for(
-            server_utils.request("GET", f"http://127.0.0.1:{port}/fast", _control=True), 10
+            nemo_gym.client.http_client.request("GET", f"http://127.0.0.1:{port}/fast", _control=True), 10
         )
-        data = asyncio.create_task(server_utils.request("GET", f"http://127.0.0.1:{port}/fast"))
+        data = asyncio.create_task(nemo_gym.client.http_client.request("GET", f"http://127.0.0.1:{port}/fast"))
         await asyncio.sleep(0.2)
         data_waited = not data.done()
         release.set()
         await held
         await data
     finally:
-        await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-        if server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
-            await server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
-        server_utils._GLOBAL_AIOHTTP_CLIENT, server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT = saved
+        await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
+        if nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
+            await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
+        (
+            nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT,
+            nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT,
+        ) = saved
         await runner.cleanup()
 
     assert control.status == 200
@@ -1552,7 +1561,7 @@ async def test_a_completed_commit_or_restore_retried_with_other_arguments_confli
 
 
 def test_the_control_connection_pool_refuses_negative_limits() -> None:
-    from nemo_gym.server_utils import GlobalAIOHTTPAsyncClientConfig
+    from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig
 
     for field in ("global_aiohttp_control_connector_limit", "global_aiohttp_control_connector_limit_per_host"):
         with pytest.raises(ValidationError):

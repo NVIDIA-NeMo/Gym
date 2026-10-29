@@ -53,6 +53,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, is_global_aiohttp_client_request_debug_enabled, raise_for_status
+from nemo_gym.client import request as http_request
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -64,14 +66,6 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import (
-    get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
-    raise_for_status,
-)
-from nemo_gym.server_utils import (
-    request as http_request,
-)
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"

@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.server_utils import ServerClient
 from resources_servers.genrm_eval.app import (
     GenRMEvalConfig,
     GenRMEvalResourcesServer,

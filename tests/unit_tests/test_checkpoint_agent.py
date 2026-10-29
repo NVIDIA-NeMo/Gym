@@ -37,8 +37,9 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
-from nemo_gym.server_utils import BaseServerConfig, ServerClient
+from nemo_gym.server_utils import BaseServerConfig
 from tests.unit_tests.test_checkpoint_resources import SEED
 
 

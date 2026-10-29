@@ -52,10 +52,10 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,

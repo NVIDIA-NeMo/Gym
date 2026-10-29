@@ -25,6 +25,7 @@ from openai.types.responses.response import IncompleteDetails
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -34,7 +35,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
-from nemo_gym.server_utils import ServerClient
 from resources_servers.arena.app import (
     ArenaResourcesServer,
     ArenaResourcesServerConfig,
