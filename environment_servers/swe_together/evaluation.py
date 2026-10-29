@@ -35,6 +35,39 @@ PROMPTS = Path(__file__).with_name("prompts")
 PASS_THRESHOLD = 0.85
 BASE_TAGS = {"request", "question", "verification", "workflow", "approval", "context"}
 ALL_TAGS = BASE_TAGS | {"correction", "nudge"}
+VERDICT_PATH = "/tmp/judge_inputs/verdict.json"
+# Root Claude Code invocation error types that explain a missing verdict.
+JUDGE_STOP_CAUSES = {"refusal": "judge_refused", "error_max_turns": "judge_turn_limit", "timeout": "judge_timeout"}
+
+
+class JudgeMeasurementError(RuntimeError):
+    """A grading failure with a stable cause; the episode is masked, never scored."""
+
+    def __init__(self, cause: str, message: str) -> None:
+        super().__init__(message)
+        self.cause = cause
+
+
+def judge_stop_cause(close: dict) -> str:
+    """Name why a closed judge left no verdict, from its root invocation observation."""
+    records = (close.get("agent_observations") or {}).get("records") or []
+    root = next(
+        (r for r in records if r.get("kind") == "agent_invocation" and r.get("parent_invocation_id") is None), {}
+    )
+    return JUDGE_STOP_CAUSES.get(root.get("error_type"), "judge_no_verdict")
+
+
+async def missing_verdict_cause(sandbox: AsyncSandbox, close: dict, evidence: dict) -> str:
+    """Call a verdict missing only when the judge sandbox confirms the file is absent; otherwise the read failed."""
+    try:
+        probe = await sandbox.exec("test -e " + quote(VERDICT_PATH), timeout_s=15)
+    except Exception as error:
+        evidence["judge_verdict_probe"] = {"error": f"{type(error).__name__}: {error}"}
+        return "judge_verdict_transfer_failed"
+    evidence["judge_verdict_probe"] = {"return_code": probe.return_code, "error_type": probe.error_type}
+    if probe.return_code == 1 and not probe.error_type:
+        return judge_stop_cause(close)
+    return "judge_verdict_transfer_failed"
 
 
 def derive_score(rubric: dict, verdict: dict) -> dict:
@@ -216,19 +249,25 @@ async def run_judge(
                 raise original_error
             # Otherwise a cancellation is already propagating; let it continue.
     try:
-        raw = await read_text(sandbox, path="/tmp/judge_inputs/verdict.json")
+        raw = await read_text(sandbox, path=VERDICT_PATH)
     except Exception as error:
-        # A verdict saved before a lost response is still graded; without one, the primary error is the cause.
+        # A saved verdict still wins after a lost response; otherwise preserve the primary exception.
         if original_error is not None:
             raise original_error
-        raise RuntimeError(
+        raise JudgeMeasurementError(
+            await missing_verdict_cause(sandbox, receipt, evidence),
             "Judge produced no readable verdict; outcome="
             + json.dumps(evidence.get("judge_outcome"))
             + "; transport="
             + str(original_error)
+            + f"; read={type(error).__name__}: {error}",
         ) from error
     (artifact_dir / "judge-verdict-raw.json").write_text(raw)
-    verdict = derive_score(json.loads((task_dir / "canonical_goals.json").read_text()), json.loads(raw))
+    rubric = json.loads((task_dir / "canonical_goals.json").read_text())
+    try:
+        verdict = derive_score(rubric, json.loads(raw))
+    except (ValueError, TypeError, AttributeError, KeyError) as error:
+        raise JudgeMeasurementError("judge_verdict_invalid", f"Judge verdict is invalid: {error}") from error
     verdict.update(await read_test_reward(sandbox))
     verdict["judge_close"] = receipt
     verdict["judge_runtime"] = (transcript.get("metadata") or {}).get("runtime_version")
