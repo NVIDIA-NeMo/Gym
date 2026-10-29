@@ -260,6 +260,22 @@ def is_unstarted_rollout_row(row: Mapping[str, Any]) -> bool:
     return is_omitted_rollout_row(row) and bool(row.get(NG_DISPATCH_DRAINED_KEY))
 
 
+# Set only on the omitted-rollout row that keeps the evidence of a failed /run with route_failures_to_sidecar off.
+NG_UNROUTED_RUN_ERROR_KEY = "_ng_unrouted_run_error"
+
+
+def is_non_superseding_rollout_row(row: Mapping[str, Any]) -> bool:
+    """Whether readers skip a sidecar row before they pick a rollout's latest attempt.
+
+    A row never started is no execution. A failed /run kept as evidence with routing off is no new outcome: the
+    attempt it records stands no more than before it was kept, so an older failure still stands and a later attempt
+    still replaces it. An interrupted ``record_omitted_rollouts`` row is neither and still hides older failures.
+    """
+    return is_unstarted_rollout_row(row) or (
+        is_omitted_rollout_row(row) and row.get(NG_UNROUTED_RUN_ERROR_KEY) is True
+    )
+
+
 NG_TERMINAL_KEY = "_ng_failure_terminal"
 # Set by the producer of a final failure row that must be counted as a zero in the metrics, whatever
 # count_failure_classes_as_zero names (a rollout the evaluated model failed, for example).
@@ -617,6 +633,8 @@ class _CompletedRollout:
     # The failure report the `/run` reply forwarded, or Collection's own for a failed dispatch. Only the writer
     # saves it, so run_examples yields the same result as before.
     failure_report: Optional[FailureReport] = None
+    # A failed `/run` with route_failures_to_sidecar off: the writer keeps evidence of it, then raises this error.
+    run_error: Optional[BaseException] = None
 
 
 def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
@@ -1376,7 +1394,8 @@ class SharedRolloutCollectionConfig(
         description=(
             "Record a failed agent /run as a failures-sidecar row and keep going, instead of ending "
             "the run. The failed rollouts are then absent from the rollouts jsonl and from the "
-            "score, which is reported over fewer rollouts than were dispatched."
+            "score, which is reported over fewer rollouts than were dispatched. Off, the first failed "
+            "/run ends the run, after an omitted-rollout row records it (not scored, not an attempt)."
         ),
     )
     rollout_collection_driver: Optional[str] = Field(
@@ -2395,7 +2414,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
 
     An interrupted attempt that ``record_omitted_rollouts`` recorded is the rollout's latest execution but no
     failure: it hides any older failure, so the rollout is left out here and is missing. A row the dispatch budget
-    never started is no execution and is skipped.
+    never started, and the evidence of a failed /run with routing off, are skipped (``is_non_superseding_rollout_row``).
     """
     latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
     for fpath in failures_fpaths:
@@ -2407,7 +2426,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if is_unstarted_rollout_row(row):
+                if is_non_superseding_rollout_row(row):
                     continue
                 latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
     return {key: row for key, row in latest_by_key.items() if not is_omitted_rollout_row(row)}
@@ -2641,7 +2660,7 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if is_unstarted_rollout_row(row):
+                if is_non_superseding_rollout_row(row):
                     continue
                 latest[identity(row)] = row
                 if is_omitted_rollout_row(row):
@@ -3751,6 +3770,7 @@ class RolloutCollectionHelper(BaseModel):
                 input_rows,
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
+                record_unrouted_failures=True,
                 max_resident_tasks=config.max_resident_rollout_tasks,
                 interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,
@@ -3878,6 +3898,23 @@ class RolloutCollectionHelper(BaseModel):
                     upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
 
                 dispatch_name = self._dispatch_name(row)
+                if completed.run_error is not None:
+                    # route_failures_to_sidecar is off, so this failed /run ends the run. Its identity, cause and
+                    # report are kept as an omitted-rollout row first: no reader counts it as a failure, an attempt
+                    # or a score, so resume still runs the rollout and no denominator shrinks unasked.
+                    write_started = perf_counter()
+                    omitted_bytes = orjson.dumps(omitted_rollout_record(result) | {NG_UNROUTED_RUN_ERROR_KEY: True})
+                    failures_file.write(omitted_bytes + b"\n")
+                    failures_file.flush()
+                    _record_output_write(write_started, omitted_bytes)
+                    _record_rollout_outcome(result, "omitted", dispatch_name)
+                    print(
+                        "[rollout_collection] the run stops at a failed /run (route_failures_to_sidecar is off); "
+                        f"it is recorded in {failures_fpath}. {len(input_rows) - completed_count + 1} of "
+                        f"{len(input_rows)} dispatched rollouts have no result, and resume_from_cache runs them.",
+                        flush=True,
+                    )
+                    raise completed.run_error
                 if not no_persist and not sources_dropped:
                     # The rows this run adds are not the merged ones an aggregation's shard list names. The list goes with the
                     # first row the run writes, so a run that writes none leaves it as it was.
@@ -4694,9 +4731,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
         run_timing: Optional[RunTimingReport] = None,
+        record_unrouted_failures: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
+
+        ``record_unrouted_failures`` returns a failed `/run` that ``route_failures_to_sidecar`` would route as a
+        failure row whose ``run_error`` holds the error, so the collection writer can keep evidence of it before it
+        raises the error. Other callers keep receiving the exception.
 
         When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
         at once. When unset, all examples are scheduled as before. The collection
@@ -4828,7 +4870,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                         flush=True,
                     )
-                    if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
+                    if not isinstance(e, _RUN_FAILURE_ERRORS) or not (
+                        route_failures_to_sidecar or record_unrouted_failures
+                    ):
                         raise
                     if res is not None:
                         res.release()
@@ -4849,6 +4893,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             failure_row[NG_FAILURE_CLASS_KEY],
                             getattr(e, "headers", None) or getattr(res, "headers", None),
                         ),
+                        run_error=None if route_failures_to_sidecar else e,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
