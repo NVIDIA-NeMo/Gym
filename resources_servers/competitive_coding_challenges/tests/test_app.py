@@ -40,8 +40,12 @@ class _StubCCCEvaluator:
 ccc_eval_stub.CCCEvaluator = _StubCCCEvaluator
 sys.modules.setdefault("ccc_eval", ccc_eval_stub)
 
+import resources_servers.competitive_coding_challenges.app as ccc_app
+from nemo_gym import PARENT_DIR
+from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.app import (
     CompetitiveCodingChallengesResourcesServer,
     CompetitiveCodingChallengesResourcesServerConfig,
@@ -66,7 +70,7 @@ def _make_server(**config_overrides) -> CompetitiveCodingChallengesResourcesServ
 def _make_verify_request(
     *,
     text: str = "```cpp\nint main() { return 0; }\n```",
-    competition_id: str = "comp-1",
+    competition_id: str | None = "comp-1",
     problem_id: str = "prob-1",
     subtask: str | None = "samples",
     subtask_score: float | None = None,
@@ -128,6 +132,8 @@ def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChalleng
             "shared_dir": server.config.shared_dir,
             "local_compile_dir": server.config.local_compile_dir,
             "run_all_tests": False,
+            "grade_all_subtasks": False,
+            "partial_credit": False,
         },
         num_parallel_requests=server.config.num_parallel_requests,
     )
@@ -146,6 +152,32 @@ def test_setup_webserver_warns_when_shared_dir_is_tmp(
 
     assert "CCC shared_dir is /tmp" in caplog.text
     assert "Set CCC_SHARED_TEMP_DIR to a path mounted into both containers" in caplog.text
+
+
+def test_setup_webserver_resolves_a_benchmark_test_file_from_the_gym_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # Benchmark configs (benchmarks/ioi/config.yaml) give repo-relative paths; the server runs from its own dir.
+    repo_relative = "resources_servers/competitive_coding_challenges/app.py"
+    monkeypatch.chdir(tmp_path)
+    server = _make_server(test_file=repo_relative)
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["test_file"] == str(PARENT_DIR / repo_relative)
+
+
+def test_setup_webserver_keeps_a_test_file_found_from_the_server_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "test_metadata.jsonl").write_text("{}\n")
+    monkeypatch.chdir(tmp_path)
+    server = _make_server(test_file="data/test_metadata.jsonl")
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["test_file"] == "data/test_metadata.jsonl"
 
 
 def test_setup_webserver_allows_disabling_local_compile_staging() -> None:
@@ -231,6 +263,8 @@ async def test_verify_partial_subtask_score_returns_zero_reward() -> None:
     response = await server.verify(request)
 
     assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.failure_kind is None
     evaluator.get_problem_metadata.assert_called_once_with("prob-1", "comp-1")
 
 
@@ -272,6 +306,17 @@ def test_setup_webserver_fraction_reward_runs_all_tests() -> None:
         server.setup_webserver()
 
     assert evaluator_cls.call_args.kwargs["config"]["run_all_tests"] is True
+
+
+@pytest.mark.parametrize(("grade_all_subtasks", "partial_credit"), [(True, False), (False, True)])
+def test_setup_webserver_passes_scoring_flags(grade_all_subtasks: bool, partial_credit: bool) -> None:
+    server = _make_server(grade_all_subtasks=grade_all_subtasks, partial_credit=partial_credit)
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    config = evaluator_cls.call_args.kwargs["config"]
+    assert config["grade_all_subtasks"] is grade_all_subtasks
+    assert config["partial_credit"] is partial_credit
 
 
 @pytest.mark.asyncio
@@ -318,6 +363,48 @@ async def test_verify_returns_error_details_when_evaluator_fails(
 
     assert response.reward == 0.0
     assert response.details == {"error": "boom"}
+    assert response.mask_sample is True
+    assert response.failure_kind == "verifier_error"
+    assert response.failure_reason == "boom"
+
+
+@pytest.mark.asyncio
+async def test_verify_scores_generated_text_that_cannot_be_encoded() -> None:
+    # A lone surrogate in the model's code comes from the model, so masking it would remove its penalty.
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(side_effect=lambda _entry: "\ud800".encode("utf-8"))
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request())
+
+    assert response.reward == 0.0
+    assert response.mask_sample is False
+    assert response.failure_kind is None
+    assert "surrogates not allowed" in response.details["error"]
+
+
+@pytest.mark.asyncio
+async def test_verify_masks_a_sandbox_infra_error() -> None:
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(
+        return_value={
+            "test_case_results": {"samples": {"score": 0.0, "outputs": [{"compile_success": False, "score": 0.0}]}},
+            "infra_error": "sandbox cannot see the shared work dir",
+        }
+    )
+    evaluator.get_problem_metadata.return_value = {
+        "subtasks": {"samples": {"score": 1.0, "aggregation": "min", "test_names": ["t1"]}}
+    }
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request())
+
+    assert response.reward == 0.0
+    assert response.mask_sample is True
+    assert response.failure_kind == "provider_unavailable"
+    assert response.failure_reason == "sandbox cannot see the shared work dir"
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +555,27 @@ class TestComputeMetrics:
         metrics = server_with_two_problems.compute_metrics([[rollout]])
         assert metrics["total_score"] == 6
 
+    def test_pass_at_1_total_averages_rows_then_keeps_the_best_row(self, server_with_two_problems) -> None:
+        # NeMo Skills' pass@1[avg-of-k] total: per row and subtask, the mean over that row's rollouts;
+        # per subtask, the best row. Row 1 averages 6 on 01-equal and 0 on 02-permutation; row 2 averages
+        # 4.5 and 6.5. Each row is best on a different subtask.
+        row_1 = [
+            _make_rollout("nile", "01-equal", {"01-equal": {"score": 6.0}, "02-permutation": {"score": 0.0}}),
+            _make_rollout("nile", "01-equal", {"01-equal": {"score": 6.0}, "02-permutation": {"score": 0.0}}),
+        ]
+        row_2 = [
+            _make_rollout("nile", "02-permutation", {"01-equal": {"score": 6.0}, "02-permutation": {"score": 13.0}}),
+            _make_rollout("nile", "02-permutation", {"01-equal": {"score": 3.0}, "02-permutation": {"score": 0.0}}),
+        ]
+        metrics = server_with_two_problems.compute_metrics([row_1, row_2])
+
+        assert metrics["pass@1[avg-of-2]/total_score"] == 6.0 + 6.5
+        assert metrics["total_score"] == 19
+
+    def test_total_score_keeps_partial_credit(self, server_with_two_problems) -> None:
+        rollout = _make_rollout("nile", "01-equal", {"01-equal": {"score": 4.5}, "02-permutation": {"score": 0.0}})
+        assert server_with_two_problems.compute_metrics([[rollout]])["total_score"] == 4.5
+
     def test_skips_rollouts_without_problem_id(self, server_with_two_problems) -> None:
         rollout = {"details": {"test_case_results": {"01-equal": {"score": 6.0}}}}
         metrics = server_with_two_problems.compute_metrics([[rollout]])
@@ -479,11 +587,130 @@ class TestGetKeyMetrics:
         agent_metrics = {
             "total_score": 123,
             "pass@1[avg-of-2]/accuracy": 0.5,
+            "pass@1[avg-of-2]/total_score": 98.5,
             "pass@2/accuracy": 1.0,
         }
         key = server_with_two_problems.get_key_metrics(agent_metrics)
         assert key["total_score"] == 123
+        assert key["pass@1[avg-of-2]/total_score"] == 98.5
 
     def test_omits_total_score_when_absent(self, server_with_two_problems) -> None:
         key = server_with_two_problems.get_key_metrics({})
         assert "total_score" not in key
+
+
+class TestSandboxPath:
+    """verify() wiring for sandbox_provider; the sandbox path itself is covered in test_sandbox_evaluator.py."""
+
+    _EVALUATOR_CONFIG = {
+        "test_batch_size": 4,
+        "time_scale": 2.0,
+        "run_all_tests": False,
+        "grade_all_subtasks": True,
+        "partial_credit": True,
+    }
+
+    def _sandbox_server(self) -> CompetitiveCodingChallengesResourcesServer:
+        server = _make_server(
+            sandbox_provider="sandbox",
+            sandbox_config={"image": "ccc-verifier:test", "resources": {"cpu": 8}},
+            test_batch_size=4,
+        )
+        # Skip global-config resolution; evaluate_in_sandbox is replaced in these tests.
+        server._sandbox_target = ({"local": {}}, {"nemo_gym_server": "competitive_coding_challenges"})
+        evaluator = MagicMock()
+        evaluator.load_metadata = AsyncMock()
+        evaluator.config = {**self._EVALUATOR_CONFIG, "test_file": "metadata.json"}
+        server._evaluator = evaluator
+        return server
+
+    def test_sandbox_provider_requires_image(self) -> None:
+        with pytest.raises(ValueError, match="sandbox_config.image is required"):
+            _make_server(sandbox_provider="sandbox")
+
+    def test_sandbox_provider_requires_cpu(self) -> None:
+        with pytest.raises(ValueError, match="sandbox_config.resources.cpu is required"):
+            _make_server(sandbox_provider="sandbox", sandbox_config={"image": "x"}, test_batch_size=4)
+
+    def test_setup_fails_for_an_unknown_sandbox_provider(self, monkeypatch) -> None:
+        # verify() would otherwise score every sample 0.0 unmasked: the error is not a SandboxVerificationError.
+        monkeypatch.setattr(ccc_app, "get_global_config_dict", lambda: {})
+        server = _make_server(
+            sandbox_provider={"opensandboxx": {}},
+            sandbox_config={"image": "x", "resources": {"cpu": 8}},
+            test_batch_size=4,
+        )
+        with pytest.raises(ValueError, match="Unknown sandbox provider"):
+            server.setup_webserver()
+
+    def test_test_batch_size_must_fit_the_sandbox_cpus(self) -> None:
+        with pytest.raises(ValueError, match="must not exceed sandbox_config.resources.cpu"):
+            _make_server(
+                sandbox_provider="sandbox", sandbox_config={"image": "x", "resources": {"cpu": 4}}, test_batch_size=32
+            )
+
+    async def test_sandbox_results_are_scored(self, monkeypatch) -> None:
+        calls = []
+
+        async def _evaluate(entry, **kwargs):
+            calls.append((entry, kwargs))
+            return {"test_case_results": {"samples": {"score": 5.0, "outputs": []}}, "num_tests_run": 3}
+
+        monkeypatch.setattr(ccc_app, "evaluate_in_sandbox", _evaluate)
+        response = await self._sandbox_server().verify(_make_verify_request(subtask="samples", subtask_score=5.0))
+
+        assert response.reward == 1.0 and not response.mask_sample
+        assert response.num_tests_run == 3
+        entry, kwargs = calls[0]
+        assert (entry["competition_id"], entry["problem_id"], entry["subtask"]) == ("comp-1", "prob-1", "samples")
+        assert kwargs["evaluator_config"] == self._EVALUATOR_CONFIG
+        assert kwargs["metadata"] == {"nemo_gym_server": "competitive_coding_challenges"}
+
+    async def test_infrastructure_failure_masks_the_sample(self, monkeypatch) -> None:
+        async def _fail(entry, **kwargs):
+            raise SandboxVerificationError(PROVIDER_UNAVAILABLE, "sandbox start failed: no capacity")
+
+        monkeypatch.setattr(ccc_app, "evaluate_in_sandbox", _fail)
+        response = await self._sandbox_server().verify(_make_verify_request())
+
+        assert response.mask_sample is True
+        assert response.failure_kind == PROVIDER_UNAVAILABLE
+        assert response.failure_reason == "sandbox start failed: no capacity"
+        assert response.reward == 0.0
+
+    async def test_missing_provider_sdk_fails_loudly(self, monkeypatch) -> None:
+        # A venv without nemo-gym[sandbox] must not score every sample 0.0.
+        async def _fail(entry, **kwargs):
+            raise ModuleNotFoundError("OpenSandbox SDK is required")
+
+        monkeypatch.setattr(ccc_app, "evaluate_in_sandbox", _fail)
+        with pytest.raises(ModuleNotFoundError, match="OpenSandbox SDK is required"):
+            await self._sandbox_server().verify(_make_verify_request())
+
+    async def test_row_without_competition_reads_its_problem_from_the_competition(self, monkeypatch) -> None:
+        entries = []
+
+        async def _evaluate(entry, **kwargs):
+            entries.append(entry)
+            return {"test_case_results": {"samples": {"score": 5.0, "outputs": []}}}
+
+        monkeypatch.setattr(ccc_app, "evaluate_in_sandbox", _evaluate)
+        server = self._sandbox_server()
+        server._evaluator.problem_index = {"prob-1": {"comp-1": {}}}
+        response = await server.verify(_make_verify_request(competition_id=None, subtask_score=5.0))
+
+        assert response.reward == 1.0 and not response.mask_sample
+        assert entries[0]["competition_id"] == "comp-1"
+
+    async def test_unknown_problem_fails_before_any_sandbox(self, monkeypatch) -> None:
+        async def _must_not_run(entry, **kwargs):
+            raise AssertionError("no sandbox should be created for an unknown problem")
+
+        monkeypatch.setattr(ccc_app, "evaluate_in_sandbox", _must_not_run)
+        server = self._sandbox_server()
+        server._evaluator.get_problem_metadata.side_effect = ValueError("Problem 'prob-1' not found in metadata.")
+        response = await server.verify(_make_verify_request())
+
+        assert response.reward == 0.0 and response.mask_sample
+        assert response.failure_kind == "verifier_error"
+        assert response.details == {"error": "Problem 'prob-1' not found in metadata."}

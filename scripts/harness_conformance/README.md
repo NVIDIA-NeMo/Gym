@@ -82,12 +82,14 @@ python scripts/run_harness_conformance.py \
 ```
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
-installed. Probes using agent sessions require Linux and install the adapter's
+installed. Simple Agent (`--harness simple`) uses Gym's Python implementation and
+a direct HTTP shell tool; it needs `sh` and does not require a sandbox provider.
+Other probes using agent sessions require Linux and install the adapter's
 pinned runtime during session setup, using Gym's local subprocess sandbox provider.
 Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
 `PATH`; Hermes must be importable in the same Python environment. Missing
 dependencies or unsuccessful runtime installation are execution failures.
-Omitting `--harness` selects all four.
+Omitting `--harness` selects all registered harnesses.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
@@ -133,6 +135,7 @@ python scripts/run_harness_conformance.py --harness codex \
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
 | `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
+| `judge_verifier` | Final policy answer graded by a separate scripted judge; the saved grade references its verifier-owned call, which has no policy step | TE-1–TE-4, TE-6–TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
@@ -148,6 +151,7 @@ reports a failed response with the model error to EnvServer; it does not re-rais
 the model failure. The runner witnesses that response before grading. EnvServer
 owns verification and masking policy, so this scenario does not prescribe a grade
 or require verification. Retained model-call evidence is still required.
+
 Every applicable individual P0 check must pass;
 TE labels group results and do not determine priority or grant exemptions.
 

@@ -24,7 +24,6 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         if executable is None:
             pytest.skip(f"Installer test requires {name}")
         (bindir / name).symlink_to(executable)
-    (bindir / "python3").symlink_to(sys.executable)
     scripts = {
         "id": '#!/bin/bash\necho "${TEST_UID:-0}"\n',
         "apt-get": """#!/bin/bash
@@ -116,15 +115,6 @@ def test_cached_runtime_needs_no_package_installation(sandbox: tuple[Path, dict[
     assert not (root / "download.log").exists()
 
 
-def test_missing_supervisor_python_explains_task_image_requirement(sandbox):
-    root, env = sandbox
-    (root / "bin/python3").unlink()
-    result = run_installer(root, env)
-    assert result.returncode == 1
-    assert "requires Python >=3.8 in the task image" in result.stderr
-    assert not (root / "download.log").exists()
-
-
 def test_download_failure_identifies_command_and_exit_status(sandbox):
     root, env = sandbox
     shutil.copy(root / "curl", root / "bin/curl")
@@ -208,17 +198,11 @@ def _use_musl_platform(root: Path, *, architecture: str = "x86_64") -> None:
     _replace_command(root, "getconf", "exit 1\n")
     _replace_command(root, "ldd", "echo 'musl libc' >&2\nexit 1\n")
     _replace_command(root, "uname", f'case "$1" in -s) echo Linux;; -m) echo {architecture};; esac\n')
-    # The task image has its existing C++ library, but our private Node may need
-    # a newer version. Other Python calls still exercise the real interpreter.
-    _replace_command(
-        root,
-        "python3",
-        'if [[ "$*" == *ctypes.CDLL* ]]; then exit 0; fi\n' + f'exec "{sys.executable}" "$@"\n',
-    )
+    # The task image has its existing C++ library, but our private Node may need a newer version.
     _replace_command(
         root,
         "apk",
-        'echo "$*" >> "$TEST_ROOT/packages.log"\ncp "$TEST_ROOT/curl" "$TEST_ROOT/bin/curl"\n',
+        '[ "$1" != info ] || exit 0\necho "$*" >> "$TEST_ROOT/packages.log"\ncp "$TEST_ROOT/curl" "$TEST_ROOT/bin/curl"\n',
     )
 
 

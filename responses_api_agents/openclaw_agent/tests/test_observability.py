@@ -301,3 +301,35 @@ def test_reports_intra_session_branching() -> None:
     bundle = build_openclaw_observations("session-1", [], events, transcript_available=True)
 
     assert "agent_conversation_branching_unavailable" in {gap.code for gap in bundle.gaps}
+
+
+def _time_split(observations) -> tuple:
+    """The run-health timeouts section's policy, tool and untracked shares for a 100-second timed-out rollout whose
+    only model call ran for its first 40 seconds, with these observations attached as collection attaches them."""
+    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.health.timeouts import ELAPSED_S_KEY, read_rollout_timing, summarize_timeouts
+    from nemo_gym.rollout_collection import _attach_trajectory_record
+
+    started = 1_000_000.0
+    call = {
+        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+        "started_at": started,
+        "completed_at": started + 40,
+        "latency_total_ms": 40_000,
+        "tokens_out": 100,
+    }
+    row = {
+        "agent_timed_out": True,
+        ELAPSED_S_KEY: 100.0,
+        "reward": 0.0,
+        "ng_model_call_capture": {"calls": [call]},
+        "ng_agent_observations": observations.model_dump(mode="json"),
+    }
+    _attach_trajectory_record({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, row)
+    split = summarize_timeouts([read_rollout_timing(row)]).model_dump()["time_split"]
+    return split["policy_model"], split["tool"], split["untracked"]
+
+
+def test_a_rollout_without_its_transcript_leaves_tool_time_unknown() -> None:
+    """OpenClaw reports an empty history with `agent_transcript_unavailable`: that is not an empty tool history."""
+    assert _time_split(build_openclaw_observations("0-0", [], [], transcript_available=False)) == (0.4, None, None)
