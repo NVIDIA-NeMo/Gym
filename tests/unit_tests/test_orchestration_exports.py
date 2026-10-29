@@ -14,6 +14,7 @@
 # limitations under the License.
 import os
 import re
+import shlex
 import signal
 import subprocess
 import time
@@ -305,6 +306,7 @@ class TestSbatchScript:
 # A real bash run of the tail, with a `gym` that records what it is asked to export.
 FAKE_GYM = """#!/bin/bash
 echo "$@" >> "$FAKE_GYM_LOG"
+printf '%s\\0' "$@" > "$FAKE_GYM_LOG.args"
 if [ "$1 $2" = "eval export" ] && [ "${FAKE_EXPORT_FAILS:-}" = "$3" ]; then exit 1; fi
 """
 
@@ -401,19 +403,98 @@ def test_the_entrypoint_hands_the_run_to_the_tail_instead_of_exec() -> None:
     assert "TAIL-MARKER" not in render_driver_entrypoint("https://repo", "ref", None)
 
 
+def _parse_overrides(args: list[str]) -> dict[str, Any]:
+    """What Hydra makes of `args`, nested back into a dict the way the exporter's settings are."""
+    from hydra.core.override_parser.overrides_parser import OverridesParser
+
+    settings: dict[str, Any] = {}
+    for override in OverridesParser.create().parse_overrides(args):
+        *path, leaf = override.key_or_group.split(".")
+        node = settings
+        for part in path:
+            node = node.setdefault(part, {})
+        node[leaf] = override.value()
+    return settings
+
+
+AWKWARD = {
+    "agent_version": "1",
+    "float_like": "1.0",
+    "bool_like": "true",
+    "null_like": "null",
+    "label": "nightly(run)",
+    "owner": "o'brien",
+    "spaced": "nightly run",
+    "padded": " padded ",
+    "empty": "",
+    "listy": "a,b",
+    "bracket": "x]y",
+    "backslash": "C:\\path\\",
+    "unicode": "caf\u00e9",
+    "interpolation": "${oc.env:EVALRDL_URL}",
+    "tags": ["1", "true", "a b", "x,y", "o'brien"],
+    "count": 3,
+    "ratio": 2.5,
+    "enabled": True,
+    "nothing": None,
+    "meta": {"benchmark": "gpqa", "owner": "o'brien", "version": "2"},
+}
+
+
+def test_export_settings_reach_hydra_with_their_values_and_types() -> None:
+    from nemo_gym.orchestration.executors.utils import flatten_export_args
+
+    tokens = [shlex.split(arg)[0] for arg in flatten_export_args(AWKWARD)]
+
+    assert _parse_overrides(tokens) == AWKWARD
+    assert isinstance(_parse_overrides(tokens)["agent_version"], str)
+
+
+def test_the_arguments_of_a_submitted_export_validate_against_the_exporters_own_model() -> None:
+    from nemo_gym.exporters import load_run_exporter_config_model
+    from nemo_gym.orchestration.executors.utils import flatten_export_args
+
+    for name, settings, field, expected in (
+        ("atif", {"agent_version": "1"}, "agent_version", "1"),
+        ("evalrdl", {"label": "nightly(run)", "tags": ["1", "a b"]}, "label", "nightly(run)"),
+    ):
+        full = export_run_settings(name, settings, benchmark_name="gpqa", gym_job_id=JOB_ID, bench_dir=BENCH_DIR)
+        tokens = [shlex.split(arg)[0] for arg in flatten_export_args(full)]
+
+        validated = load_run_exporter_config_model(name).model_validate(_parse_overrides(tokens))
+
+        assert getattr(validated, field) == expected, name
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [{"tags": [{"a": 1}]}, {"bad key": "x"}, {"meta": {"a=b": "x"}}, {"": "x"}],
+)
+def test_export_settings_that_cannot_be_written_as_overrides_are_refused(settings: dict[str, Any]) -> None:
+    from nemo_gym.orchestration.executors.utils import flatten_export_args
+
+    with pytest.raises(ValueError, match="cannot be written as a Hydra override"):
+        flatten_export_args(settings)
+
+
 def test_the_rendered_entrypoint_passes_awkward_settings_to_gym_eval_export_unchanged(
     tail_env: dict[str, Any],
 ) -> None:
-    from nemo_gym.orchestration.executors.utils import flatten_run_args
+    from nemo_gym.orchestration.executors.utils import flatten_export_args
 
     settings = export_run_settings(
         "evalrdl",
-        {"label": "nightly run", "tags": ["a", "b"], "meta": {"owner": "o'brien"}, "url": "${oc.env:EVALRDL_URL}"},
+        {
+            "label": "nightly(run)",
+            "tags": ["a b", "1"],
+            "meta": {"owner": "o'brien", "version": "2"},
+            "url": "${oc.env:EVALRDL_URL}",
+        },
         benchmark_name="gpqa",
         gym_job_id=JOB_ID,
         bench_dir=tail_env["bench"],
     )
-    tail = render_export_tail(tail_env["bench"], [("evalrdl", flatten_run_args(settings))])
+    tail = render_export_tail(tail_env["bench"], [("evalrdl", flatten_export_args(settings))])
     entrypoint = render_driver_entrypoint(None, None, None, export_tail=tail)
 
     completed = subprocess.run(
@@ -426,15 +507,13 @@ def test_the_rendered_entrypoint_passes_awkward_settings_to_gym_eval_export_unch
     )
 
     assert completed.returncode == 0, completed.stderr
-    exported = _calls(tail_env)[-1].split(" ", 3)
-    assert exported[:3] == ["eval", "export", "evalrdl"]
-    received = exported[3]
-    for expected in (
-        "+label=nightly run",
-        "+tags=[a,b]",
-        "+meta.owner=o'brien",
-        "+url=${oc.env:EVALRDL_URL}",
-        "+meta.benchmark=gpqa",
-        f"+result_json_fpath={tail_env['bench']}/exports/evalrdl.result.json",
-    ):
-        assert expected in received
+    received = Path(f"{tail_env['log']}.args").read_bytes().decode().split("\0")[:-1]
+    assert received[:3] == ["eval", "export", "evalrdl"]
+    assert _parse_overrides(received[3:]) == {
+        "label": "nightly(run)",
+        "tags": ["a b", "1"],
+        "meta": {"owner": "o'brien", "version": "2", "benchmark": "gpqa"},
+        "url": "${oc.env:EVALRDL_URL}",
+        "rollouts_jsonl_fpath": f"{tail_env['bench']}/artifacts/rollouts.jsonl",
+        "result_json_fpath": f"{tail_env['bench']}/exports/evalrdl.result.json",
+    }

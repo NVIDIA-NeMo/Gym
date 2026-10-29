@@ -62,7 +62,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
 )
-from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
 
 
@@ -1144,7 +1144,7 @@ def build_sbatch_script(
             [
                 (
                     name,
-                    flatten_run_args(
+                    flatten_export_args(
                         export_run_settings(
                             name,
                             settings,
