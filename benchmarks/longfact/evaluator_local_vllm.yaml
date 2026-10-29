@@ -1,0 +1,33 @@
+# A separate vLLM endpoint used only for SAFE claim extraction, relevance,
+# search planning, and judgment. The policy model is configured by `ng_run`.
+longfact_evaluator_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:LONGFACT_EVALUATOR_BASE_URL}
+      api_key: ${oc.env:LONGFACT_EVALUATOR_API_KEY,dummy_key}
+      model: ${oc.env:LONGFACT_EVALUATOR_MODEL}
+      return_token_id_information: false
+      # The Qwen judge endpoint is launched with `--reasoning-parser qwen3`.
+      # Preserve that contract here so Gym unwraps reasoning_content instead
+      # of rejecting otherwise valid evaluator responses.
+      uses_reasoning_parser: true
+      sequential_reasoning_allowed: false
+      chat_template_kwargs:
+        enable_thinking: false
+      extra_body:
+        top_k: ${oc.env:LONGFACT_QWEN_JUDGE_TOP_K,20}
+        presence_penalty: ${oc.env:LONGFACT_QWEN_JUDGE_PRESENCE_PENALTY,1.5}
+      # Pinned on this server rather than in the resources server's request params, so an
+      # evaluator overlay for another endpoint does not inherit them.
+      sampling_overrides:
+        temperature: ${oc.decode:${oc.env:LONGFACT_QWEN_JUDGE_TEMPERATURE,0.7}}
+        top_p: ${oc.decode:${oc.env:LONGFACT_QWEN_JUDGE_TOP_P,0.8}}
+      default_headers: {}
+
+longfact:
+  resources_servers:
+    longfact:
+      evaluator_responses_create_params:
+        input: []
+        max_output_tokens: ${oc.env:LONGFACT_QWEN_JUDGE_MAX_OUTPUT_TOKENS,8192}

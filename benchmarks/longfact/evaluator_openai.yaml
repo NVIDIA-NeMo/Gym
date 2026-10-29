@@ -1,0 +1,29 @@
+# Judge on an OpenAI-compatible endpoint (for example a hosted gateway) for SAFE claim
+# extraction, relevance, search planning and judgment. Add it after the benchmark config:
+#   gym eval run --benchmark longfact '+config_paths=[benchmarks/longfact/evaluator_openai.yaml]' ...
+# It repoints the resources server at its own model server; the benchmark's local vLLM
+# evaluator stays defined, reads the same variables and receives no requests.
+longfact_openai_evaluator_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:LONGFACT_EVALUATOR_BASE_URL}
+      openai_api_key: ${oc.env:LONGFACT_EVALUATOR_API_KEY}
+      openai_model: ${oc.env:LONGFACT_EVALUATOR_MODEL}
+
+longfact:
+  resources_servers:
+    longfact:
+      evaluator_model_server:
+        type: responses_api_models
+        name: longfact_openai_evaluator_model
+      # A gateway can echo a dated snapshot or another alias than the requested name, so
+      # the identity check reads its own variable; leave it unset to skip the check.
+      evaluator_model_identity: ${oc.env:LONGFACT_EVALUATOR_RESPONSE_MODEL,unknown}
+      # OpenAI strict json_schema rejects the claim-list array root; the prompts ask for JSON instead.
+      evaluator_constrain_json_schema: false
+      # No sampling here: the provider's defaults apply, and reasoning judges reject explicit
+      # values. Add temperature or top_p as overrides for a model that takes them.
+      evaluator_responses_create_params:
+        input: []
+        max_output_tokens: ${oc.env:LONGFACT_EVALUATOR_MAX_OUTPUT_TOKENS,8192}

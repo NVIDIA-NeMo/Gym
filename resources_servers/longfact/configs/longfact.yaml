@@ -1,0 +1,82 @@
+longfact:
+  resources_servers:
+    longfact:
+      entrypoint: app.py
+      domain: knowledge
+      description: LongFact long-form factuality evaluation using a SAFE-style verifier.
+      value: Claim-level factuality with three-way verdicts, scored with SAFE F1@100.
+      verified: false
+      benchmark_variant: longfact-safe-v1
+      evaluator_model_server:
+        type: responses_api_models
+        name: longfact_evaluator_model
+      evaluator_model_identity: ${oc.env:LONGFACT_EVALUATOR_MODEL,unknown}
+      evaluator_responses_create_params:
+        input: []
+      # Version the extraction prompt so resumed runs never silently mix
+      # claim definitions. Legacy remains the compatibility default.
+      claim_extraction_prompt: ${oc.env:LONGFACT_CLAIM_EXTRACTION_PROMPT,legacy_v1}
+      # Distinguish explicit contradictions from insufficient evidence by
+      # default; binary mode remains available for historical comparisons.
+      claim_verdict_mode: ${oc.env:LONGFACT_CLAIM_VERDICT_MODE,three_way}
+      # Tantivy is the reproducible local default. Override to tavily for live
+      # web retrieval or milvus for a compatible semantic-search collection.
+      search_backend: ${oc.env:LONGFACT_SEARCH_BACKEND,tantivy}
+      tantivy_index_dir: ${oc.env:TANTIVY_INDEX_DIR,MISSING}
+      tantivy_corpus_db_path: ${oc.env:CORPUS_DB_PATH,MISSING}
+      tantivy_candidate_pool: 32
+      tantivy_max_result_chars: 6000
+      milvus_uri: ${oc.env:LONGFACT_MILVUS_URI,MISSING}
+      milvus_collection_name: ${oc.env:LONGFACT_MILVUS_COLLECTION_NAME,MISSING}
+      milvus_token: ${oc.env:LONGFACT_MILVUS_TOKEN,MISSING}
+      milvus_embedding_model: ${oc.env:LONGFACT_MILVUS_EMBEDDING_MODEL,google/embeddinggemma-300m}
+      milvus_embedding_device: ${oc.env:LONGFACT_MILVUS_EMBEDDING_DEVICE,cpu}
+      milvus_anns_field: ${oc.env:LONGFACT_MILVUS_ANNS_FIELD,emb}
+      milvus_search_list: ${oc.env:LONGFACT_MILVUS_SEARCH_LIST,256}
+      milvus_timeout_seconds: ${oc.env:LONGFACT_MILVUS_TIMEOUT_SECONDS,30.0}
+      milvus_candidate_multiplier: ${oc.env:LONGFACT_MILVUS_CANDIDATE_MULTIPLIER,4}
+      milvus_max_result_chars: ${oc.env:LONGFACT_MILVUS_MAX_RESULT_CHARS,8000}
+      milvus_cache_size: ${oc.env:LONGFACT_MILVUS_CACHE_SIZE,10000}
+      tavily_api_key: ${oc.env:TAVILY_API_KEY,MISSING}
+      max_claims: ${oc.env:LONGFACT_MAX_CLAIMS,0}
+      max_queries: 3
+      max_search_results: 3
+      f1_max_claims: 100
+      # A local 4-GPU Qwen server becomes slower (and starts timing out) when
+      # hundreds of per-claim requests are admitted at once. Keep these
+      # tunable so hosted judges can use a different envelope.
+      evaluator_max_concurrency: ${oc.env:LONGFACT_EVALUATOR_MAX_CONCURRENCY,16}
+      evaluator_max_attempts: ${oc.env:LONGFACT_EVALUATOR_MAX_ATTEMPTS,6}
+      evaluator_timeout_seconds: ${oc.env:LONGFACT_EVALUATOR_TIMEOUT_SECONDS,180}
+      tavily_max_concurrency: 15
+      tavily_timeout_seconds: 90
+      tavily_search_max_attempts: 4
+      tavily_search_depth: advanced
+      tavily_cache_mode: ${oc.env:LONGFACT_TAVILY_CACHE_MODE,live}
+      tavily_cache_dir: ${oc.env:LONGFACT_TAVILY_CACHE_DIR,/tmp/longfact-safe-tavily-cache-${oc.env:USER,unknown-user}}
+
+longfact_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: longfact
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+      text_only_history: true
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/longfact/data/example.jsonl
+          license: Apache 2.0
+
+longfact_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: longfact_gymnasium_agent
