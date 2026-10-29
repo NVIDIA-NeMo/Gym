@@ -9,12 +9,13 @@ from omegaconf import OmegaConf
 
 from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from responses_api_agents.codex_agent.app import CodexAgentConfig
 from responses_api_agents.pi_agent.app import PiAgentConfig
 
 
 _BENCHMARK_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "gdpval"
 # Each harness config here (<harness>.yaml), with its agent's config class.
-_HARNESS_CONFIGS = {"pi": PiAgentConfig}
+_HARNESS_CONFIGS = {"pi": PiAgentConfig, "codex": CodexAgentConfig}
 
 
 @pytest.fixture(autouse=True)
@@ -49,6 +50,8 @@ def test_harness_replaces_stirrup_and_reaches_the_task_tools_over_mcp(harness):
     # The agent ignores keys its config class does not define, so a misspelled setting would be dropped silently.
     # Gym reads datasets and description itself.
     assert agent.keys() - {"datasets", "description"} - _HARNESS_CONFIGS[harness].model_fields.keys() == set()
+    # Building the config also runs its validators, such as the limits on timeouts and compaction.
+    _HARNESS_CONFIGS[harness].model_validate({**agent, "name": benchmark.agent_name})
     # Only the agent, the agents the resources server allows and the tool transport differ from config.yaml, so the
     # judges, scoring, sandbox and multi-stage driver are the ones Stirrup runs with.
     overrides = OmegaConf.to_container(OmegaConf.load(path))

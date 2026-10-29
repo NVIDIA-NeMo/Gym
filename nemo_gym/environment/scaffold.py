@@ -645,6 +645,7 @@ def _resources_server_app(module_name: str) -> str:
             ReverifyMode,
             SimpleResourcesServer,
         )
+        from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
         from nemo_gym.verifier_fixture import VerifierFixture
 
 
@@ -676,6 +677,9 @@ def _resources_server_app(module_name: str) -> str:
 
         if __name__ == "__main__":
             {class_name}ResourcesServer.run_webserver()
+        elif is_nemo_gym_fastapi_entrypoint(__file__):
+            # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+            app = {class_name}ResourcesServer.run_webserver()  # noqa: F401
         """
     )
 
@@ -766,6 +770,7 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
         from nemo_gym.base_responses_api_agent import Body
         from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import SimpleAgent
 
 
@@ -785,6 +790,7 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
         from nemo_gym.base_responses_api_agent import Body
         from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import (
             SimpleAgent,
             SimpleAgentRunRequest,
@@ -815,6 +821,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
         if __name__ == "__main__":
             {class_name}Agent.run_webserver()
+        elif is_nemo_gym_fastapi_entrypoint(__file__):
+            # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+            app = {class_name}Agent.run_webserver()  # noqa: F401
         """
         )
     )

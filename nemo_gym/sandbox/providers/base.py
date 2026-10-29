@@ -387,6 +387,43 @@ class SupportsSandboxSharedStorage(Protocol):
     def shared_volume_metadata(self) -> dict[str, str]: ...
 
 
+# The per-service container settings a Compose file may declare behind ``SupportsSandboxServiceOptions``.
+COMPOSE_SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+
+
+@runtime_checkable
+class SupportsSandboxServiceOptions(Protocol):
+    """Optional container settings a Compose service declares: ``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``.
+
+    ``SERVICE_OPTION_FIELDS`` names the subset the provider can apply; it is a class attribute so prepare
+    can check a task against a provider by name, without instantiating it. ``service_options`` returns
+    the ``provider_options`` that apply the given values at create time (an empty mapping when none are
+    given) and raises ``ValueError`` for a value it cannot express.
+    """
+
+    SERVICE_OPTION_FIELDS: frozenset[str]
+
+    def service_options(
+        self,
+        *,
+        tmpfs: tuple[str, ...] = (),
+        ulimits: Mapping[str, Any] | None = None,
+        sysctls: Mapping[str, str] | None = None,
+        security_opt: tuple[str, ...] = (),
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxPullPolicy(Protocol):
+    """Optional per-sandbox image pull policy: ``always``, ``missing`` or ``never`` (Compose's ``pull_policy``).
+
+    ``pull_policy_options`` returns the ``provider_options`` that apply it at create time. A provider
+    without this capability leaves the pull behaviour to the deployment's default.
+    """
+
+    def pull_policy_options(self, policy: str) -> dict[str, Any]: ...
+
+
 @runtime_checkable
 class SupportsSandboxEndpoint(Protocol):
     """Optional provider capability for resolving declared service ports."""
