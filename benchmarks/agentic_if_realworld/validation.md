@@ -1,9 +1,103 @@
 # Validation and privacy
 
 The implementation has been exercised with independently constructed synthetic
-tasks. Real traces, per-item criteria, original policy documents, historical
+tasks and the bounded real-task run below. Real traces, per-item criteria, original policy documents, historical
 outputs, registry access instructions and raw receipts remain in approved private
 systems. The public repository contains no real benchmark examples.
+
+## October 28 review validation
+
+Runtime `4d5e18b55ffccd0444dd6cbdb03369be9bd90d03` passed 248 focused
+tests (238 Resources Server/scorer, 5 model adapter and 5 shared relay tests).
+The Resources Server CI entrypoint passed its 238 tests and synthetic data
+validation; model-component CI passed 5 tests. All-files pre-commit passed,
+except the unavailable private guardword catalog; a separate private/public
+content audit passed. Shared relay behavior and global lint configuration are
+unchanged.
+
+The mock `gym eval run` workflow passed preparation, environment validation,
+incomplete-delivery recovery, judging, resume, health and no-tools P0 checks.
+Standalone `gym eval aggregate` through `native.yaml` reproduced the complete
+aggregation artifact without model calls. A synthetic quote/newline request to
+the actual judge returned HTTP 200 and a valid pass.
+
+### Provider compatibility and saved-answer recovery
+
+An initial bounded run at `b58db4abc33dcd02e38d9648575b8d3113c69d47`
+stopped after four complete policy answers: two scored pass, two judge requests
+returned HTTP 400, and 46 selected tasks were not admitted. The provider rejected
+quote/newline literals in `support_quote.enum`. All original receipts remain
+unchanged and are separate from the new run.
+
+Transport v2 omits only that enum from the provider request. The full bounded
+schema still enforces the exact support quote locally, alongside the unchanged
+frozen strict-v2.2 validator and rubric. Both schemas are saved and checked in
+a separately versioned cache. Recovery of the two saved answers made zero new
+policy calls: one scored fail and one remained masked with
+`judge_delivery_or_validation_error` after two reviews. All three judge HTTP
+attempts returned 200; original answer hashes and receipts were unchanged.
+
+### Bounded current-model run
+
+The deterministic first 50 prepared task IDs ran with GLM-5.3 (`max` policy
+reasoning), GPT-6.1 Sol (`medium` judging), temperature 0.7 and
+`adaptive_first_complete_max_effort_v1`, at concurrency 4. Selection did not use
+outcomes. All 50 retained the first complete answer at seed 17 / 32,768 tokens.
+The frozen input, criteria and policy hashes were unchanged.
+
+**50 scored: 33 pass / 17 fail; 0 masked; 0 selected tasks unsettled.**
+Mask reasons: none. Physical judge HTTP attempts: **51 × 200 and 1 × 429**;
+the rate-limited attempt recovered through the bounded retry path. One answer
+needed a second delivered review before scoring. Policy HTTP attempts were
+50 × 200 and 1 × 429, also recovered. These transport retries do not change the
+seed/token-limit stage.
+
+| View | Declared | Scored | Pass | Fail | Masked | Unattempted | Scoring coverage |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original failure focused | 912 | 47 | 33 | 14 | 0 | 865 | 5.1535% |
+| Supplemental active single turn | 57 | 3 | 0 | 3 | 0 | 54 | 5.2632% |
+| Labeled composite | 969 | 50 | 33 | 17 | 0 | 919 | 5.1600% |
+
+`complete_accuracy` remains null for both views and the composite. Subtype
+results below count subtype verdicts; their task denominators overlap.
+
+| Subtype | Declared | Scored | Pass | Fail | Masked | Unattempted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| IF-CITE | 43 | 2 | 2 | 0 | 0 | 41 |
+| IF-COVERAGE | 119 | 4 | 4 | 0 | 0 | 115 |
+| IF-FORMAT | 237 | 15 | 13 | 2 | 0 | 222 |
+| IF-LANG | 98 | 3 | 3 | 0 | 0 | 95 |
+| IF-LENGTH | 282 | 13 | 4 | 9 | 0 | 269 |
+| IF-NEWINSTR | 108 | 17 | 16 | 1 | 0 | 91 |
+| IF-PLAN | 17 | 1 | 0 | 1 | 0 | 16 |
+| IF-SCOPE | 351 | 12 | 5 | 7 | 0 | 339 |
+| IF-TOOLPREF | 155 | 0 | 0 | 0 | 0 | 155 |
+
+Health reported 50 healthy, 0 unhealthy and 0 unobserved tasks. The retained-artifact
+P0 checker completed with `fulfilled` for all 50 no-tools records; this is not
+behavioral qualification. A completed-run `--resume` made zero new policy or judge calls; all 555 saved
+receipt/capture files and all selected-response hashes were unchanged.
+
+The private receipt inventory contains 504 artifacts with SHA-256
+`2d35c6e6ed51ca1ddc589c12325e7fb5ec302447fadc98025458c476916e72ff`.
+The runtime uses Python 3.13.14, nemo-gym 0.7.0rc0, aiohttp 3.14.4,
+jsonschema 4.23.0, openai 2.44.0 and pydantic 2.13.4.
+
+
+### Privacy and interpretation
+
+All 969 tasks remain development-exposed and evaluation-only. Mechanical checks
+verified unchanged wrapper text, embedded tool registries, criteria bindings and
+private artifact permissions. Real traces, criteria, model outputs and raw
+receipts remain in approved private storage; no real example or review rationale
+was inspected to change the rubric or implementation. The public history audit
+found no private task IDs, wrappers, long source spans or complete artifacts, and
+anonymous access to all 28 private registry artifacts was denied.
+
+This bounded integration check does not calibrate judge quality, reproduce the
+historical recovery waves, establish a full reference score or certify cluster
+readiness. Policy `max` and judge `medium` effort were verified in request bytes;
+provider-internal reasoning behavior was not independently measured.
 
 ## Initial public export checks
 
