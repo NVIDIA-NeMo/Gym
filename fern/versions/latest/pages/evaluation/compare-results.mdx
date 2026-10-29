@@ -128,6 +128,8 @@ Referencing the same run and agent more than once is rejected because this metho
 
 Every selected metric needs theoretical lower and upper bounds and a score direction. For `mean/reward`, Gym reads `reward.range` and `higher_is_better` from the named benchmark's manifest. Other metrics need explicit `low`, `high`, and `higher_is_better` values. A complete explicit definition overrides manifest metadata.
 
+Metric bounds and directions are defined once per benchmark and shared across all models. The report's metric normalization table lists each benchmark's metric definitions once.
+
 Bounds must be finite, with `high > low`. They describe the metric's possible values, not the smallest and largest values observed in these runs. Values outside the declared bounds are errors.
 
 For every metric value in a repeat, Gym calculates:
