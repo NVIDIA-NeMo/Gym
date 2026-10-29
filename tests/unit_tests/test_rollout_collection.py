@@ -66,7 +66,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.path_utils import aggregation_sources_path_for, materialized_path_for
+from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -12378,3 +12378,93 @@ def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(with_
     # Do not repair conflicting ownership silently: the checker must still see both claims.
     assert [ref.model_call_id for ref in trajectory.invocations[0].model_calls] == call_ids
     assert trajectory.verifier_invocations[0].model_calls[0].model_dump(exclude_none=True) == judge_ref
+
+
+@pytest.mark.parametrize("compact", [False, True])
+@pytest.mark.parametrize("retain", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_collect_compact_prompts_and_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_global_config: MagicMock,
+    compact: bool,
+    retain: bool,
+    failed: bool,
+) -> None:
+    from nemo_gym.rollout_prompt_storage import STORAGE_KEY, decode_rollout
+
+    first = [{"role": "user", "content": "Task instructions. " * 100}]
+    prompts = [first, first + [{"role": "assistant", "content": "answer"}], [{"role": "user", "content": "summary"}]]
+    payload = {
+        "reward": 1.0,
+        "ng_model_call_capture": {
+            "calls": [
+                {
+                    "model_call_id": f"call-{i}",
+                    "started_at": float(i),
+                    "request": {"messages": prompt},
+                    "response": {"choices": [{"message": {"role": "assistant", "content": "answer"}}]},
+                    "tokens_in": 200 + i,
+                    "tokens_out": 2,
+                    "status_code": 200,
+                }
+                for i, prompt in enumerate(prompts)
+            ]
+        },
+    }
+    if failed:
+        payload[NG_FAILURE_CLASS_KEY] = AGENT_RUN_ERROR_FAILURE_CLASS
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(orjson.dumps({"agent_ref": {"name": "my_agent"}, "responses_create_params": {"input": []}}))
+    output = tmp_path / "evaluator_rollouts.jsonl"
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(output),
+        compact_model_call_prompts=compact,
+        retain_results_in_memory=retain,
+        disable_health_check=True,
+        upload_rollouts=False,
+    )
+
+    async def post(server_name, url_path, json, **kwargs):
+        if url_path == "/run":
+            return FakeResponse(200, deepcopy(payload))
+        assert url_path == "/aggregate_metrics"
+        # Collection strips large evidence before sending aggregate-metrics requests.
+        [record] = json.verify_responses
+        assert record["reward"] == 1.0
+        return FakeResponse(200, compute_aggregate_metrics([dict(record)]).model_dump())
+
+    post_mock = AsyncMock(side_effect=post)
+    install_fake_server_client(monkeypatch, post_mock)
+    if failed:
+        with pytest.raises(RuntimeError, match="produced a result"):
+            await RolloutCollectionHelper().run_from_config(config)
+        saved = orjson.loads(failures_path_for(output).read_bytes())
+        assert (STORAGE_KEY in saved) == compact
+        expanded = decode_rollout(saved)
+        assert [c["request"]["messages"] for c in expanded["ng_trajectory"]["model_calls"]] == prompts
+        assert NG_FAILURE_MAX_ATTEMPTS_KEY in expanded
+        if compact:
+            assert saved["ng_trajectory"]["model_calls"][1]["request"]["messages"]["append_to"] == 0
+        return
+    results = await RolloutCollectionHelper().run_from_config(config)
+    saved = orjson.loads(output.read_bytes())
+    assert (STORAGE_KEY in saved) == compact
+    if compact:
+        assert saved["ng_trajectory"]["model_calls"][1]["request"]["messages"] == {
+            "append_to": 0,
+            "items": prompts[1][1:],
+        }
+        assert saved["ng_trajectory"]["model_calls"][2]["request"]["messages"] == {"full": prompts[2]}
+    expanded = decode_rollout(saved)
+    assert [c["request"]["messages"] for c in expanded["ng_trajectory"]["model_calls"]] == prompts
+    assert results == ([expanded] if retain else [])
+    before_resume = output.read_bytes()
+    # The decoder follows the file marker, not the current write setting.
+    config.resume_from_cache = True
+    config.compact_model_call_prompts = not compact
+    resumed = await RolloutCollectionHelper().run_from_config(config)
+    assert resumed == ([expanded] if retain else [])
+    assert output.read_bytes() == before_resume
+    assert sum(c.kwargs["url_path"] == "/run" for c in post_mock.call_args_list) == 1

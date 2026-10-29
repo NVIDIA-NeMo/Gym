@@ -67,6 +67,7 @@ from nemo_gym.rollout_collection import (
     is_omitted_rollout_row,
     is_terminal_failure,
 )
+from nemo_gym.rollout_prompt_storage import decode_rollout
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
@@ -516,7 +517,7 @@ def _reject_multistage_recovery_source(rollouts_jsonl_fpath: Path) -> None:
         for line in f:
             if not line.strip():
                 continue
-            row = orjson.loads(line)
+            row = decode_rollout(orjson.loads(line))
             # A rollout that produced no result has nothing to recover, so its row cannot lose stage identity.
             if "stage_index" in row and not is_omitted_rollout_row(row):
                 raise ConfigError(
@@ -569,7 +570,7 @@ def _yield_inputs_and_rollouts_paired(
     inputs_by_key = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
         for line in m_f:
-            r = orjson.loads(line)
+            r = decode_rollout(orjson.loads(line))
             inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
     # `limit` bounds the number of pairs actually YIELDED (post-predicate)
     n_yielded = 0
@@ -577,7 +578,7 @@ def _yield_inputs_and_rollouts_paired(
         for line in tqdm(r_f, desc="Reading rollouts"):  # never holds the whole file
             if limit is not None and n_yielded >= limit:
                 break
-            rollout_row = orjson.loads(line)
+            rollout_row = decode_rollout(orjson.loads(line))
             if rollout_predicate is not None and not rollout_predicate(rollout_row):
                 continue
             input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
@@ -966,7 +967,7 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     (with the same resolver as /verify). Read once and reused for both so the file is never read twice.
     """
     with output_fpath.open("rb") as f:
-        results = [orjson.loads(line) for line in f if line.strip()]
+        results = [decode_rollout(orjson.loads(line)) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
     rows = [
         {k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME) if k in r}

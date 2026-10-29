@@ -57,6 +57,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.rollout_observability import ModelCallRef, TrajectoryModelCall, TrajectoryRecord
+from nemo_gym.rollout_prompt_storage import decode_rollout
 
 
 class AtifExportError(ConfigError):
@@ -921,6 +922,7 @@ def gym_rollout_to_atif(rollout: dict[str, Any], *, session_id: str, agent_versi
         raise _path_error("session_id", "expected a non-empty string")
     if not isinstance(agent_version, str) or not agent_version.strip():
         raise _path_error("agent_version", "expected a non-empty string")
+    rollout = decode_rollout(rollout)
     _validate_json_value(rollout, path="rollout")
     raw_trajectory = rollout.get("ng_trajectory")
     _preflight_raw_trajectory(raw_trajectory)

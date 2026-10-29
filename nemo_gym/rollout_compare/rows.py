@@ -38,6 +38,7 @@ from nemo_gym.rollout_compare.schema import (
     CompareInputError,
     TaskSide,
 )
+from nemo_gym.rollout_prompt_storage import decode_rollout
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -51,7 +52,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         if not line.strip():
             continue
         try:
-            row = json.loads(line)
+            row = decode_rollout(json.loads(line))
         except ValueError as exc:
             raise CompareInputError(f"{path}:{lineno}: invalid JSON ({exc})") from exc
         if not isinstance(row, dict):

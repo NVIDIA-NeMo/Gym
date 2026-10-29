@@ -1,24 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental append/reset storage for captured model-call prompts.
+"""Lossless append/reset storage for captured model-call prompts.
 
-This operates on a completed rollout, outside model adapters. It is deliberately
-not enabled in the collector: readers must call decode_rollout before consuming
-this format. The outer format marker prevents a stored row from looking like an
-ordinary rollout. Each row is independent; references never cross JSONL lines.
-References use call-list positions: decode before filtering or reordering calls.
-
-Proposed collector write boundary, after trajectory/token finalization:
-    serialized = orjson.dumps(encode_rollout(result))
-
-Matching read boundary, before validation/health/export consumers:
-    result = decode_rollout(orjson.loads(line))
-
-Those call sites are examples, not enabled integrations. Resume, aggregation,
-health and export readers would all need the decoder before adoption. Capture
-files and model adapters do not change. This encodes message arrays, not token-ID
-arrays, and makes no inference about turn ownership or compaction semantics.
+Collection optionally encodes a separate copy after trajectory/token finalization.
+Readers decode before consuming prompts. References are call-list positions within
+one JSONL row, not causal links or turn ownership; decode before reordering calls.
+Only message/input arrays are compressed, not token-ID arrays or capture files.
 """
 
 from __future__ import annotations
@@ -29,6 +17,7 @@ from typing import Any
 
 
 FORMAT = "gym-model-call-prompts-v1"
+STORAGE_KEY = "_ng_model_call_prompt_storage"
 PROMPT_FIELDS = ("messages", "input")
 
 
@@ -59,7 +48,7 @@ def encode_rollout(row: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(row, dict):
         raise ValueError("expected a rollout object")
-    if row.get("format") == FORMAT:
+    if STORAGE_KEY in row:
         raise ValueError("decode the storage document before encoding it again")
     stored = deepcopy(row)
     calls = _calls(row)
@@ -78,22 +67,23 @@ def encode_rollout(row: dict[str, Any]) -> dict[str, Any]:
                     if len(_json(append).encode("utf-8")) < len(_json(representation).encode("utf-8")):
                         representation = append
             request[field] = representation
-    return {"format": FORMAT, "rollout": stored}
+    stored[STORAGE_KEY] = FORMAT
+    return stored
 
 
 def decode_rollout(document: dict[str, Any]) -> dict[str, Any]:
-    """Expand a storage document into an ordinary rollout without mutating it.
+    """Expand referenced prompts; ordinary rows pass through unchanged.
 
-    Reject malformed/unknown formats rather than passing a partial prompt to a
-    consumer. This explicitly decodes encoded documents; plain rows bypass it.
+    The reserved top-level marker identifies encoded prompts without hiding task
+    IDs, scores or other rollout fields. Reject unknown versions and bad references.
+    Encoded input is copied so expanding one prompt cannot mutate another.
     """
-    if not isinstance(document, dict) or document.keys() != {"format", "rollout"}:
-        raise ValueError("expected a prompt-storage document with format and rollout")
-    if document["format"] != FORMAT:
-        raise ValueError(f"unsupported prompt-storage format: {document['format']!r}")
-    if not isinstance(document["rollout"], dict):
-        raise ValueError("rollout must be an object")
-    row = deepcopy(document["rollout"])
+    if not isinstance(document, dict) or STORAGE_KEY not in document:
+        return document
+    if document[STORAGE_KEY] != FORMAT:
+        raise ValueError(f"unsupported prompt-storage format: {document[STORAGE_KEY]!r}")
+    row = deepcopy(document)
+    del row[STORAGE_KEY]
     calls = _calls(row)
     for index, call in enumerate(calls):
         request = _request(call)

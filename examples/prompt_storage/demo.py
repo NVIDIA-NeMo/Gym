@@ -43,7 +43,7 @@ def main() -> None:
         documents.append(dump(document))
         restored.append(dump(decoded))
         originals.append(original)
-        calls = document["rollout"].get("ng_trajectory", {}).get("model_calls", [])
+        calls = document.get("ng_trajectory", {}).get("model_calls", [])
         for index, call in enumerate(calls):
             request = call.get("request") or {}
             for field in ("messages", "input"):
