@@ -25,12 +25,15 @@ from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
+    JobInfo,
     JobKey,
     JobRef,
+    JobStatus,
     LogSource,
     ObservedStatus,
     Progress,
     SubmissionRecord,
+    SubmissionStatus,
 )
 
 
@@ -124,6 +127,65 @@ class BaseExecutor(ABC):
         planned has none. Raises `ValueError` naming the known benchmarks for one the record lacks.
         """
         return list(record.benchmark_job(benchmark).log_sources)
+
+    # The operations built on the primitives. They hold all the policy -- guards, ordering, partial
+    # failure, the mapping to `JobState` -- so that every executor gets them by implementing the
+    # primitives above. Executors do not override them.
+
+    def status(self, records: list[SubmissionRecord], benchmarks: list[str] | None = None) -> list[SubmissionStatus]:
+        """The live status of `records`, one `SubmissionStatus` each, in the order given.
+
+        `benchmarks` limits each submission to those benchmarks. Records are grouped by
+        `connection_key` and `query_states` is called once per group, so the cost grows with the number
+        of connections, not submissions; the groups run concurrently. A group whose connection fails
+        yields `UNKNOWN` for its records and does not hide the others. The executor's `state` is
+        reconciled with the files the job wrote, and `CANCELLED` is never overridden by a file.
+        Read-only: it never writes the record.
+        """
+        raise NotImplementedError
+
+    def info(self, record: SubmissionRecord, benchmark: str | None = None) -> JobInfo:
+        """Describe `record`, or only `benchmark` of it: its directories, the job ids observed, its log
+        sources and, when `read_run_files` can read it, the resolved config. Read-only."""
+        raise NotImplementedError
+
+    def cancel(self, record: SubmissionRecord, benchmark: str) -> JobStatus:
+        """Stop `benchmark`'s job and return its status as observed afterwards.
+
+        Re-queries the scheduler first, so it acts on the jobs that exist now and not on a stale
+        record, and leaves a job that is already terminal alone. Calls `terminate` and writes nothing to
+        the record. A refusal from the scheduler (permission denied, say) is raised for the caller to
+        report against this benchmark.
+        """
+        raise NotImplementedError
+
+    def cancel_submission(self, record: SubmissionRecord, *, confirm: str) -> list[JobStatus]:
+        """Stop every live benchmark of `record`, and return each one's status as observed afterwards.
+
+        `confirm` has no default and must equal `record.gym_job_id`, or `ValueError` is raised: cancelling
+        a whole submission by accident costs more than typing its id. A benchmark that cannot be stopped
+        is reported on its own and the others proceed.
+        """
+        raise NotImplementedError
+
+    def logs(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        source: str = "driver",
+        instance: str | None = None,
+        tail: int | None = None,
+        follow: bool = False,
+    ) -> Iterator[str]:
+        """Yield the lines of one of `benchmark`'s logs.
+
+        `source` and `instance` are resolved against `log_sources`, so `stream_logs` receives one
+        `LogSource` and executors never validate names. A name that matches nothing, or a source with
+        several instances and none chosen, raises `ValueError` listing what exists. The current job is
+        found with `query_states`, and its id fills the location's `{job_id}`.
+        """
+        raise NotImplementedError
 
     def _unsupported(self, operation: str) -> UnsupportedOperationError:
         return UnsupportedOperationError(
