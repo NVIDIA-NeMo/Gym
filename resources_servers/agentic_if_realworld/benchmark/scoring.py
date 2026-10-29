@@ -41,10 +41,13 @@ def _validate_dispatch(receipt: dict) -> None:
     if receipt["status"] == "generated" or receipt.get("dispatch_status") == "not_dispatched":
         return
     status = receipt.get("http_status", 0)
+    # Non-2xx headers establish no review delivery even if the error body is truncated.
+    if 300 <= status < 600:
+        return
     if (
         receipt.get("dispatch_status") == "unknown"
-        or not 200 <= status < 600
-        or (status < 300 and receipt.get("response_body_complete") is not True)
+        or not 200 <= status < 300
+        or receipt.get("response_body_complete") is not True
     ):
         raise ValueError("Ambiguous judge dispatch; reconcile saved transport before retrying")
 

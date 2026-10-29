@@ -83,8 +83,11 @@ deliveries are allowed across resumes, with bounded transport retries and the
 existing timeouts. Malformed reviews consume that budget; failed connections and
 non-2xx judge responses do not. Those infrastructure failures stop the run so the
 operator can fix the service or credentials and explicitly resume the saved
-answer. After two delivered reviews, unresolved scoring stays unscored. Judge
-endpoint, model and credential presence are checked before policy generation.
+answer. Received non-2xx headers allow this recovery even if the error body is
+truncated. Interrupted 2xx bodies and requests without a known delivery outcome
+still require reconciliation. After two delivered reviews, unresolved scoring
+stays unscored. Judge endpoint, model and credential presence are checked before
+policy generation.
 
 For a vLLM-backed model requiring maximum reasoning effort, set
 `policy_model.responses_api_models.agentic_if_text.reasoning_effort=max` in the

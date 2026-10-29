@@ -419,16 +419,25 @@ def test_read_error_preserves_only_a_saved_complete_sse_stream(tmp_path, monkeyp
 
 @pytest.mark.parametrize("status", [401, 404, 429, 503])
 @pytest.mark.parametrize("failed_invocations", [1, 2])
+@pytest.mark.parametrize("body_complete", [False, True])
 def test_judge_transport_failure_recovery_preserves_receipts_and_review_budget(
-    judge_payload, tmp_path, monkeypatch, status, failed_invocations
+    judge_payload, tmp_path, monkeypatch, status, failed_invocations, body_complete
 ):
+    from aiohttp import ClientPayloadError
+
     calls = []
     healthy = False
+
+    class ErrorResponse(Response):
+        async def iter_chunked(self, size):
+            yield json.dumps(self.value).encode() if body_complete else b'{"error":'
+            if not body_complete:
+                raise ClientPayloadError("Synthetic interrupted error body")
 
     async def request(*args, **kwargs):
         calls.append(kwargs["headers"]["Authorization"])
         if not healthy:
-            return Response(status, {"error": "synthetic service unavailable"})
+            return ErrorResponse(status, {"error": "synthetic service unavailable"})
         content = json.dumps(review(judge_payload))
         return Response(200, {"choices": [{"finish_reason": "stop", "message": {"content": content}}]})
 
@@ -444,11 +453,16 @@ def test_judge_transport_failure_recovery_preserves_receipts_and_review_budget(
     for invocation in range(failed_invocations):
         with pytest.raises(RetryableTransportError, match="explicitly resume"):
             asyncio.run(score(judge_payload, **kwargs))
-        expected_calls = (invocation + 1) * (3 if status in {429, 503} else 1)
+        expected_calls = (invocation + 1) * (3 if body_complete and status in {429, 503} else 1)
         assert len(calls) == expected_calls
     work = next((kwargs["directory"] / "judges").iterdir())
     original = {path: path.read_bytes() for path in work.glob("attempt*.*")}
     assert len(list(work.glob("attempt*.json"))) == failed_invocations
+    if not body_complete:
+        for path in work.glob("attempt*.json"):
+            receipt = read(path)
+            assert receipt["http_status"] == status and receipt["dispatch_status"] == "unknown"
+            assert receipt["response_body_complete"] is False
     assert asyncio.run(score(judge_payload, **kwargs, validate_only=True))["scoring_status"] == "not_scored"
     assert len(calls) == expected_calls
     # A corrected credential does not change the request fingerprint or regenerate the policy answer.
