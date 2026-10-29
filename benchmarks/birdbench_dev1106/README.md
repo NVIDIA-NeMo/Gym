@@ -25,11 +25,14 @@ The two benchmarks share the databases, the `sql_context` rendering
 difference between them reflects the annotation changes only. Run them side
 by side to compare a model on both releases.
 
-`config.yaml` raises the resource server's `sql_execution_timeout_s` from 30s to 300s.
-Three revised gold queries (ids 518, 701, 1131) take about 30s, 105s, and 165s
-on SQLite, and a gold timeout scores 0. Of the 1534 gold queries, 1533 match
-themselves under the verifier. The exception is id 178, which averages floats
-and differs in the eighth significant digit between runs.
+The verifier keeps `bird_sql`'s 30s `sql_execution_timeout_s`, matching the
+30s limit in BIRD's official EX evaluation. Three gold queries are slow on
+SQLite: id 518 takes about 30s, id 1131 about 105s, and id 701 about 165s.
+A gold timeout scores 0, so 701 and 1131 score 0 for every model, as they do
+officially. Id 518 sits at the limit, and whether it can score depends on
+machine load. Of the 1534 gold queries, the other 1530 match themselves under
+the verifier. The exception is id 178, which averages floats and differs in
+the eighth significant digit between runs.
 
 ## Preparation
 

@@ -17,11 +17,6 @@ prepare_script_args:
 # Inherit-from directives isolate this benchmark config from the generic server config.
 birdbench_dev1106_bird_sql_resources_server:
   _inherit_from: bird_sql_resources_server
-  resources_servers:
-    bird_sql:
-      # Three revised gold queries (ids 518, 701, 1131) take ~30s, ~105s, and ~165s on SQLite; a gold
-      # timeout scores 0, so the 30s default would make them unanswerable.
-      sql_execution_timeout_s: 300.0
 
 birdbench_dev1106_bird_sql_simple_agent:
   _inherit_from: bird_sql_simple_agent
