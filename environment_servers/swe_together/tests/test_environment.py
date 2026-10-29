@@ -326,6 +326,51 @@ async def test_webserver_lifespan_closes_runtime_helper(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path, monkeypatch):
+    policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.1"}]}
+    environment = server(
+        tmp_path,
+        dependency_proxy_url="http://10.0.0.3:3128",
+        sandbox_config={
+            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed"},
+            "provider_options": {"network_policy": policy},
+        },
+        judge_sandbox_config={"metadata": {}},
+    )
+    environment.server_client = SimpleNamespace(global_config_dict={})
+    specs = {}
+
+    class Sandbox:
+        def __init__(self, provider):
+            pass
+
+        async def start(self, spec):
+            specs[spec.metadata["role"]] = spec
+
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=0, error_type=None)
+
+    monkeypatch.setattr(app, "AsyncSandbox", Sandbox)
+    monkeypatch.setattr(app, "resolve_provider_config", lambda *_: object())
+    monkeypatch.setattr(app, "install_trust_bundle", AsyncMock())
+    episode = Episode(request(), request().task.task_input.task_data, tmp_path, tmp_path)
+    episode.task_metadata = {"environment": {"memory": "4G"}}
+    episode.runtime = SimpleNamespace(
+        metadata=lambda: {"placement": "shared"}, mount_options=lambda *_: {"volumes": []}
+    )
+    episode.dependency_access = SimpleNamespace(
+        certificate=AsyncMock(return_value="cert"), sandbox_settings=lambda token, policy, cert: (policy, {}, {})
+    )
+    await environment._new_sandbox(episode)
+    await environment._new_sandbox(episode, judge=True)
+    candidate, judge = specs["candidate"].metadata, specs["judge"].metadata
+    assert candidate["nemo.nvidia.com/oom-kill"] == "process"
+    assert candidate["placement"] == "shared" and judge["placement"] == "shared"
+    assert "nemo.nvidia.com/oom-kill" not in judge
+    assert specs["candidate"].resources.memory_mib == 4096
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("activation_error", [False, True])
 async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, monkeypatch, activation_error):
     environment = server(tmp_path)
