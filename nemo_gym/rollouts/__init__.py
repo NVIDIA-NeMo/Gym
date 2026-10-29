@@ -12,10 +12,10 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.rollouts.harness_capabilities.behavior import inspect_behavior
     from nemo_gym.rollouts.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
+    from nemo_gym.rollouts.harness_capabilities.checks import Verdict
     from nemo_gym.rollouts.harness_capabilities.cli import digest_file, inspect_bundle, json_rows, main
     from nemo_gym.rollouts.harness_capabilities.health import inspect_health
     from nemo_gym.rollouts.harness_capabilities.results import gate_passes, render_matrices
-    from nemo_gym.rollouts.health.types import Verdict
     from nemo_gym.rollouts.model_calls import (
         ModelCallRecord,
         clear_model_call_captures_for_rollouts,
@@ -29,7 +29,6 @@ if TYPE_CHECKING:
         NG_RESULT_TYPE_KEY,
         NG_TERMINAL_KEY,
         NG_TRAJECTORY_KEY,
-        DispatchLatencyTracker,
         RolloutCollectionConfig,
         RolloutCollectionHelper,
         get_max_rollout_attempts,
@@ -39,12 +38,13 @@ if TYPE_CHECKING:
         record_resubmit_offset,
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
+    from nemo_gym.rollouts.rollout_perf import DispatchLatencyTracker
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
-    "DispatchLatencyTracker": "rollout_collection",
+    "DispatchLatencyTracker": "rollout_perf",
     "ENVIRONMENT_SERVER_FAILURE_CLASS": "rollout_collection",
     "EvidenceScope": "harness_capabilities.checker",
     "ModelCallRecord": "model_calls",
@@ -55,7 +55,7 @@ _PUBLIC_API = {
     "NG_TRAJECTORY_KEY": "rollout_collection",
     "RolloutCollectionConfig": "rollout_collection",
     "RolloutCollectionHelper": "rollout_collection",
-    "Verdict": "health.types",
+    "Verdict": "harness_capabilities.checks",
     "clear_model_call_captures_for_rollouts": "model_calls",
     "digest_file": "harness_capabilities.cli",
     "gate_passes": "harness_capabilities.results",

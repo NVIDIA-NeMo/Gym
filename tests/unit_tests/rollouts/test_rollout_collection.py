@@ -45,6 +45,8 @@ from pydantic import ValidationError
 import nemo_gym.models.token_capture.delivery
 import nemo_gym.rollouts.batch_status
 import nemo_gym.rollouts.rollout_collection
+import nemo_gym.rollouts.rollout_perf
+import nemo_gym.rollouts.trajectory_builder
 import nemo_gym.server_runtime.server_utils
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.artifacts.rollout_rows import _rollout_for_export
@@ -108,15 +110,10 @@ from nemo_gym.rollouts.rollout_collection import (
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_OMITTED_ROLLOUT_KEY,
-    NG_PERF_KEY,
     PROVENANCE_KEYS,
     E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
-    _attach_ng_perf,
-    _attach_trajectory_record,
-    _build_ng_perf,
-    _build_trajectory_record,
     _CompletedRollout,
     _counted_failure_row,
     _drop_truncated_tail,
@@ -130,10 +127,15 @@ from nemo_gym.rollouts.rollout_collection import (
     _rollout_order_key,
     _rollout_request_debug_summary,
     _round_robin_by_agent,
-    _trajectory_identity,
     loads_jsonl_line,
 )
 from nemo_gym.rollouts.rollout_health import health_check_run_dir
+from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, _attach_ng_perf, _build_ng_perf
+from nemo_gym.rollouts.trajectory_builder import (
+    _attach_trajectory_record,
+    _build_trajectory_record,
+    _trajectory_identity,
+)
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
@@ -1114,7 +1116,7 @@ class TestRolloutCollection:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
         result = {"ng_trajectory": {}}
         monkeypatch.setattr(
-            nemo_gym.rollouts.rollout_collection, "_build_trajectory_record", MagicMock(side_effect=ValueError)
+            nemo_gym.rollouts.trajectory_builder, "_build_trajectory_record", MagicMock(side_effect=ValueError)
         )
 
         _attach_trajectory_record(row, result)
@@ -1470,7 +1472,7 @@ class TestRolloutCollection:
     def test_attach_ng_perf_swallows_build_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # An unexpected assembly failure must never take down rollout collection over an observability side-channel.
         result = {NG_TRAJECTORY_KEY: {}}
-        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "_build_ng_perf", MagicMock(side_effect=ValueError))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_perf, "_build_ng_perf", MagicMock(side_effect=ValueError))
 
         _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=42.0)
 
@@ -10328,7 +10330,7 @@ class TestTurnsFromModelCalls:
             self._call("second", {"output": [message]}, started_at=2.0),
         ]
 
-        turns = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
+        turns = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
             "task", "rollout", [self._invocation("root", ["first", "second"])], calls, resolved=True
         )
 
@@ -10345,7 +10347,7 @@ class TestTurnsFromModelCalls:
         message = {"role": "assistant", "content": "", "reasoning_content": "think", "tool_calls": [{"id": "t1"}]}
         calls = [self._call("only", {"choices": [{"message": message}]}, started_at=1.0)]
 
-        [turn] = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
+        [turn] = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
             "task", "rollout", [self._invocation("root", ["only"])], calls, resolved=None
         )
 
@@ -10359,7 +10361,7 @@ class TestTurnsFromModelCalls:
         failed = TrajectoryModelCall.model_validate({"model_call_id": "failed", "started_at": 1.0})
         answered = self._call("answered", {"output": []}, started_at=2.0)
 
-        turns = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
+        turns = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
             "task", "rollout", [self._invocation("root", ["failed", "answered"])], [failed, answered], None
         )
 
@@ -10371,7 +10373,7 @@ class TestTurnsFromModelCalls:
         failed.response_metadata.status_code = status
         answered = self._call("answered", {"output": []}, started_at=2.0)
         invocation = self._invocation("root", ["failed", "answered"])
-        turns = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
+        turns = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
             "task", "rollout", [invocation], [failed, answered], None
         )
         assert [(turn.model_calls[0].model_call_id, turn.turn_no) for turn in turns] == [("answered", 1)]
@@ -10386,7 +10388,7 @@ class TestTurnsFromModelCalls:
         ]
         invocations = [self._invocation("assistant", ["owned"]), self._invocation("user", [])][:invocation_count]
 
-        turns = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
+        turns = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
             "task", "rollout", invocations, calls, None
         )
 

@@ -108,12 +108,11 @@ from nemo_gym.rollouts import (
 from nemo_gym.rollouts.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
-    _attach_trajectory_record,
     _environment_server_for_agent,
     _environment_servers_by_agent,
-    _has_observation_gap,
     _record_rollout_outcome,
 )
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.utils import (
     aggregation_sources_path_for,
     failures_path_for,
@@ -2498,7 +2497,7 @@ async def run_e2e_multistage(
     from contextlib import nullcontext
 
     from nemo_gym.rollouts import RolloutCollectionHelper, observability_enabled_from_config
-    from nemo_gym.rollouts.rollout_collection import _attach_ng_perf
+    from nemo_gym.rollouts.rollout_perf import _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
     observability_enabled = observability_enabled_from_config(global_config_dict)

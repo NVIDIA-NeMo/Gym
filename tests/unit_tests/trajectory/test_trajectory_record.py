@@ -6,6 +6,7 @@ from pydantic import ValidationError
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.rollouts import ModelCallRecord
+from nemo_gym.rollouts.trajectory_builder import join_agent_model_calls
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -16,7 +17,7 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall, join_agent_model_calls
+from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 
 
 @pytest.mark.parametrize(

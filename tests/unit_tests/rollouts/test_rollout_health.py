@@ -16,7 +16,7 @@ import nemo_gym.cli.main as cli_main
 import nemo_gym.rollouts.health.checks as health_checks
 import nemo_gym.rollouts.rollout_collection as rollout_collection
 import nemo_gym.rollouts.rollout_health as health
-from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, run_health_checks
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, run_health_checks, trajectory_builder
 from nemo_gym.rollouts.model_calls import build_model_call_record
 from nemo_gym.rollouts.rollout_collection import _CompletedRollout
 from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY
@@ -806,7 +806,7 @@ def test_current_producer_response_reference_binds_to_captured_call_id(tmp_path:
             ]
         },
     }
-    trajectory = rollout_collection._build_trajectory_record(row, result)
+    trajectory = trajectory_builder._build_trajectory_record(row, result)
     rollout_path = tmp_path / "rollouts.jsonl"
     rollout_path.write_bytes(
         orjson.dumps(
@@ -2045,7 +2045,7 @@ def test_a_producer_reporting_no_turns_is_missing_turns_not_unobserved() -> None
             "turns": [],
         }
     }
-    trajectory = rollout_collection._build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, result)
+    trajectory = trajectory_builder._build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, result)
 
     assert "turns_unavailable" not in {gap.code for gap in trajectory.gaps}
 
@@ -2054,7 +2054,7 @@ def test_an_agent_that_publishes_no_trajectory_still_reports_turns_unavailable()
     """Regression guard: 45 of 47 agents publish no `TrajectoryRecord`. Their
     turns are genuinely unavailable, not empty, and must stay unobserved rather
     than turn the whole fleet unhealthy."""
-    trajectory = rollout_collection._build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, {})
+    trajectory = trajectory_builder._build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, {})
 
     assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
 

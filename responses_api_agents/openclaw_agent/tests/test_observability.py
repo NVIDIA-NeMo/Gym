@@ -308,7 +308,7 @@ def _time_split(observations) -> tuple:
     only model call ran for its first 40 seconds, with these observations attached as collection attaches them."""
     from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
     from nemo_gym.rollouts.health.timeouts import ELAPSED_S_KEY, read_rollout_timing, summarize_timeouts
-    from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 
     started = 1_000_000.0
     call = {

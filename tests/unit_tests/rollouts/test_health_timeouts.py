@@ -36,12 +36,9 @@ from nemo_gym.rollouts.health.timeouts import (
     summarize_timeouts,
 )
 from nemo_gym.rollouts.health.types import RunHealthLimits
-from nemo_gym.rollouts.rollout_collection import (
-    RolloutAggregationConfig,
-    RolloutAggregationHelper,
-    _attach_trajectory_record,
-)
+from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
 from nemo_gym.rollouts.rollout_health import health_check_run_dir
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.utils import failures_path_for
 from tests.unit_tests.rollouts.test_rollout_collection import (  # noqa: F401 - fixture
     FakeResponse,
