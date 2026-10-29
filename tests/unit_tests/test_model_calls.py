@@ -551,12 +551,54 @@ _USAGE_SHAPES = {
         120,
         None,
     ),
+    # OpenAI cache writes are part of input_tokens / prompt_tokens: reported separately, never added again.
+    "responses nothing cached": (
+        {
+            "input_tokens": 100,
+            "input_tokens_details": {"cache_write_tokens": 0, "cached_tokens": 0},
+            "output_tokens": 20,
+        },
+        100,
+        120,
+        0,
+    ),
+    "responses cache read and write": (
+        {
+            "input_tokens": 12000,
+            "input_tokens_details": {
+                "cached_tokens": 4000,
+                "cache_write_tokens": 7000,
+                "cache_write_tokens_details": {"ttl_30m_tokens": 3000, "ttl_12h_tokens": 4000},
+            },
+            "output_tokens": 20,
+            "total_tokens": 12020,
+        },
+        12000,
+        12020,
+        7000,
+    ),
+    "responses malformed cache write": (
+        {"input_tokens": 100, "input_tokens_details": {"cache_write_tokens": "60"}, "output_tokens": 20},
+        100,
+        120,
+        None,
+    ),
     "chat completions": ({"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}, 100, 120, None),
     "chat completions cached subset": (
         {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 80}, "completion_tokens": 20},
         100,
         120,
         None,
+    ),
+    "chat completions cache read and write": (
+        {
+            "prompt_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 60},
+            "completion_tokens": 20,
+        },
+        100,
+        120,
+        60,
     ),
     "anthropic messages with cache": (
         {"input_tokens": 20, "cache_read_input_tokens": 70, "cache_creation_input_tokens": 10, "output_tokens": 20},
