@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -379,6 +380,23 @@ class TrajectoryRecord(ObservationModel):
         return self
 
 
+# A harness relaunched within one activation, for example after a checkpoint stopped it, tags its model calls with
+# ``<agent session>:activation-<n>:launch-<K>:<harness session>``. Every launch continues the same harness session,
+# so its calls belong to the invocation ``<agent session>:activation-<n>:<harness session>``.
+_LAUNCH_SEGMENT = re.compile(r"(:activation-\d+):launch-\d+(?=:)")
+
+
+def invocation_of_client_session(client_session_id: str | None) -> str | None:
+    """The invocation a model call's client session ID names, with any relaunch segment removed.
+
+    A call from launch ``K`` of an activation continues the invocation its first launch started, so calls of every
+    launch join the same ``AgentInvocation``; the raw ID, with its launch, stays on the call record.
+    """
+    if client_session_id is None:
+        return None
+    return _LAUNCH_SEGMENT.sub(r"\1", client_session_id, count=1)
+
+
 def join_assistant_message_calls(
     bundle: AgentObservationBundle,
     trajectory: TrajectoryRecord | None,
@@ -437,7 +455,8 @@ def join_assistant_message_calls(
     for call in calls:
         if not call.client_assistant_message_id:
             continue
-        candidates = targets.get((call.client_session_id or "", call.client_assistant_message_id), [])
+        invocation_id = invocation_of_client_session(call.client_session_id)
+        candidates = targets.get((invocation_id or "", call.client_assistant_message_id), [])
         candidates = [target for target in candidates if target.source_model_ref in (None, call.model_ref)]
         code = None
         if len(candidates) != 1:
@@ -448,13 +467,13 @@ def join_assistant_message_calls(
             code = "identity_unavailable"
         elif call_counts[call.model_call_id] != 1:
             code = "ambiguous"
-        elif owners[call.model_call_id] != {call.client_session_id}:
+        elif owners[call.model_call_id] != {invocation_id}:
             code = "ownership_conflict"
         if code is not None:
             result.gaps.append(
                 ObservationGap(
                     code=f"assistant_message_call_{code}",
-                    invocation_id=call.client_session_id,
+                    invocation_id=invocation_id,
                     detail=f"{call.client_assistant_message_id}:{call.model_call_id}",
                 )
             )
@@ -500,7 +519,7 @@ def join_agent_model_calls(
     for call in captured:
         if not call.client_session_id or not call.model_call_id:
             continue
-        invocation = invocations_by_id.get(call.client_session_id)
+        invocation = invocations_by_id.get(invocation_of_client_session(call.client_session_id))
         if invocation is None:
             continue
         model_ref_key = (call.model_ref.type, call.model_ref.name) if call.model_ref is not None else None
