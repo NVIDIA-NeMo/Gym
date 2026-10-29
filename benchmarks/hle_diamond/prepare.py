@@ -23,7 +23,10 @@ prompt template is baked into ``responses_create_params.input`` and image
 questions carry an ``input_image`` block, so the dataset needs no
 ``prompt_config`` at rollout time (``config.yaml``). ``--text-only`` keeps the 728
 questions without an image as raw fields to be templated at rollout time via
-``prompt_config`` (``text.yaml`` and the sandboxed presets).
+``prompt_config`` (``text.yaml`` and the text-only sandboxed presets). ``--prompt opencode``
+materializes every question with ``prompts/opencode.yaml`` instead, the single user
+message the OpenCode sandboxed harness forwards (``opencode_full.yaml``): image
+questions carry the same ``input_image`` block, and there is no system message to drop.
 
 The corpus is validated before anything is written: a wrong row count, partition
 split, image count or duplicated id aborts preparation. ``--limit N`` is the one
@@ -44,11 +47,15 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "hle_diamond_benchmark.jsonl"
 OUTPUT_TEXT_FPATH = DATA_DIR / "hle_diamond_benchmark_text.jsonl"
+OUTPUT_OPENCODE_FPATH = DATA_DIR / "hle_diamond_benchmark_opencode_full.jsonl"
 
 # Upstream's SYSTEM_PROMPT verbatim as the system message with the bare question as the user message
 # (prompts/default.yaml; see README > Prompting). The text variant applies the same file at rollout
 # time via prompt_config.
 PROMPT_CONFIG_FPATH = BENCHMARK_DIR / "prompts" / "default.yaml"
+# The same instruction folded after the question into one user message, for the sandboxed harnesses that
+# forward only the user turn (README > Prompting). Selected with ``prompt="opencode"``.
+PROMPT_CONFIGS = {"default": PROMPT_CONFIG_FPATH, "opencode": BENCHMARK_DIR / "prompts" / "opencode.yaml"}
 
 REPO_ID = "cais/hle-diamond"
 SPLIT = "test"
@@ -138,7 +145,7 @@ def format_row(row: dict[str, Any], prompt_config: Any = None) -> dict[str, Any]
     return entry
 
 
-def prepare(text_only: bool = False, limit: Optional[int] = None) -> Path:
+def prepare(text_only: bool = False, limit: Optional[int] = None, prompt: str = "default") -> Path:
     """Download HLE-Diamond and write the Gym JSONL file.
 
     Args:
@@ -148,11 +155,18 @@ def prepare(text_only: bool = False, limit: Optional[int] = None) -> Path:
             ``responses_create_params.input`` (``hle_diamond_benchmark.jsonl``).
         limit: Keep only the first ``limit`` emitted rows. The only supported subset
             mechanism; it bypasses the completeness check.
+        prompt: Which ``prompts/`` file the full set is materialized with: ``default``
+            (upstream's system message plus the bare question) or ``opencode`` (the
+            instruction folded into the single user message the OpenCode sandboxed
+            harness forwards; written to ``hle_diamond_benchmark_opencode_full.jsonl``).
+            Ignored with ``text_only``, whose rows are templated at rollout time.
 
     Returns:
         Path to the written JSONL file.
     """
     validate_limit(limit)
+    if prompt not in PROMPT_CONFIGS:
+        raise ValueError(f"prompt must be one of {sorted(PROMPT_CONFIGS)}, got {prompt!r}")
 
     from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_dict
 
@@ -174,9 +188,12 @@ def prepare(text_only: bool = False, limit: Optional[int] = None) -> Path:
     if not text_only:
         from nemo_gym.prompt import load_prompt_config
 
-        prompt_config = load_prompt_config(str(PROMPT_CONFIG_FPATH))
+        prompt_config = load_prompt_config(str(PROMPT_CONFIGS[prompt]))
 
-    output_fpath = OUTPUT_TEXT_FPATH if text_only else OUTPUT_FPATH
+    if text_only:
+        output_fpath = OUTPUT_TEXT_FPATH
+    else:
+        output_fpath = OUTPUT_OPENCODE_FPATH if prompt == "opencode" else OUTPUT_FPATH
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
     with open(output_fpath, "w", encoding="utf-8") as f:
         for row in rows:
@@ -221,10 +238,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Keep only questions without an image, as raw fields for prompt_config (writes the _text file).",
     )
+    parser.add_argument(
+        "--prompt",
+        choices=sorted(PROMPT_CONFIGS),
+        default="default",
+        help="Prompt file the full set is materialized with (opencode writes the _opencode_full file).",
+    )
     add_limit_argument(parser)
     return parser
 
 
 if __name__ == "__main__":
     args = build_parser().parse_args()
-    prepare(text_only=args.text_only, limit=args.limit)
+    prepare(text_only=args.text_only, limit=args.limit, prompt=args.prompt)
