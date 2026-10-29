@@ -22,7 +22,8 @@ import re
 import shlex
 import shutil
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from contextlib import AbstractAsyncContextManager, nullcontext
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
@@ -31,17 +32,20 @@ from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from openai.types.responses.response import IncompleteDetails
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
+from nemo_gym._checkpoint.agent import Activation, RestoredAgentSession
 from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
 from nemo_gym.agent_outcome import AgentOutcome
+from nemo_gym.agent_utils.run_until_parked import Finished, Stopped, run_until_parked
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
@@ -50,6 +54,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.failure_kinds import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
@@ -88,6 +93,7 @@ from responses_api_agents.opencode_agent.artifacts import (
 )
 from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
+from responses_api_agents.opencode_agent.resume import resume_decision
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
     OPENCODE_VERSION,
@@ -98,6 +104,7 @@ from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
 LOG = logging.getLogger(__name__)
+RESUME_SCRIPT = Path(__file__).with_name("resume_opencode.sh")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
@@ -180,6 +187,31 @@ done
     )
 
 
+class _PauseClock:
+    """An activation's park handle that adds up the time spent parked, so a relaunch keeps the unspent budget."""
+
+    def __init__(self, activation: Activation) -> None:
+        self._activation = activation
+        self.paused_s = 0.0
+
+    @property
+    def park_requested(self) -> bool:
+        return self._activation.park_requested
+
+    async def wait_park_requested(self) -> None:
+        await self._activation.wait_park_requested()
+
+    async def boundary(self, snapshot: Callable[[], dict[str, JsonValue]]) -> None:
+        started = monotonic()
+        try:
+            await self._activation.boundary(snapshot)
+        finally:
+            self.paused_s += monotonic() - started
+
+    def queued(self) -> AbstractAsyncContextManager[None]:
+        return self._activation.queued()
+
+
 class _ActivationDeadlineExpired(Exception):
     """The immutable activation window elapsed before process launch."""
 
@@ -218,6 +250,12 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Where each session keeps its supervisor files and OpenCode's HOME and data. With checkpointing it must be on
+    # the sandbox's snapshotted disk, so a restore finds the saved conversation.
+    sandbox_session_root: str = "/tmp/nemo-gym-opencode-sessions"
+    # How long a launch may stay paused for checkpoints in all, beyond `timeout`. Paused time does not count against
+    # `timeout`; a launch paused for longer fails, so size it to cover the longest checkpoint commit.
+    checkpoint_pause_allowance_seconds: float = Field(default=3600, ge=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
@@ -281,6 +319,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     config: OpenCodeAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
+    # A one-activation session in a sandbox the agent borrows pauses OpenCode in place at a checkpoint and resumes
+    # its saved conversation after a crash. Sessions the agent cannot capture restart (``_seed_restarts``).
+    checkpoint_mode: ClassVar[str] = "exported"
+    # OpenCode takes no resources tool grants; a re-bound session renders its configuration again anyway.
+    rebinds_tool_accesses: ClassVar[bool] = True
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -577,11 +620,24 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
+            participant = self.checkpoint_participant
+            index = self._activation_index(request)
+            if participant is not None:
+                episode_id = EpisodeId.from_capture_key(request.path_params["rollout_id"])
+                participant.check_session(session_id, episode_id)
+                if index is not None and index == state.completed_activation and state.completed_reply is not None:
+                    # The caller's checkpoint precedes the reply this activation already gave: give it again.
+                    participant.answered_from_saved_reply(session_id, episode_id)
+                    return NeMoGymResponse.model_validate(state.completed_reply)
+                if index is not None and index != state.completed_activation + 1:
+                    raise HTTPException(409, f"OpenCode activation {index} is out of order")
             prompt, system = self._session_input(body)
             if state.task is None:
+                if state.session is None:
+                    raise HTTPException(409, "OpenCode session was restored and not re-bound: seed it again first")
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._session_response(state, state.activation_request, prompt=prompt, system=system)
+                    self._activation_task(state, state.activation_request, prompt=prompt, system=system, index=index)
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
@@ -590,11 +646,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # session markers are rejected above, never retried on the host.
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
-        episode = await self._create_episode(
-            body,
-            rollout_id=rollout_id,
-            collect_observations=isinstance(rollout_id, str),
-        )
+        participant = self.checkpoint_participant
+        # Nothing of a local run is in a checkpoint: with checkpointing on it is a restart.
+        async with participant.restart_call(rollout_id) if participant is not None else nullcontext():
+            episode = await self._create_episode(
+                body,
+                rollout_id=rollout_id,
+                collect_observations=isinstance(rollout_id, str),
+            )
         if not isinstance(rollout_id, str):
             return episode.response
         return episode.response.model_copy(
@@ -606,6 +665,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "OpenCode sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(422, "Local OpenCode /run requires resources_server")
+        participant = self.checkpoint_participant
+        # Nothing of a local run is in a checkpoint: with checkpointing on it is a restart.
+        async with (
+            participant.restart_call(self.rollout_id_from_run(body)) if participant is not None else nullcontext()
+        ):
+            return await self._run_locally(request, body)
+
+    async def _run_locally(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
         async with self.sem:
             cookies = request.cookies
 
@@ -665,6 +732,115 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 | ({"ng_agent_observations": observations} if observations is not None else {})
                 | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )
+
+    # -- partial-rollout checkpoints ----------------------------------------------------------------------------
+
+    def _seed_restarts(self, body: AgentSeedSessionRequest) -> bool:
+        # A sandbox the agent owns is in no checkpoint, and a multi-turn continuation session keeps its turns'
+        # evidence outside one: their episodes start over after a crash.
+        return body.sandbox_access is None or body.continuation is not None
+
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
+        """Each session's bookmark: its seed, where its files are, and what its launches so far produced.
+
+        Every session is parked, its harness paused or not started, so nothing here changes while it is read.
+        The sandbox itself is the resources server's to snapshot.
+        """
+        exported: dict[str, dict[str, JsonValue]] = {}
+        for key in session_keys:
+            state = self._session_state(key)
+            if not isinstance(state, OpenCodeSandboxSession):
+                raise TypeError(f"no open OpenCode session {key!r}")
+            if state.session is None:
+                # Restored and not re-bound yet: what the checkpoint it came from kept is still its state.
+                exported[key] = dict(state.restored or {})
+                continue
+            exported[key] = {
+                "request": state.request.model_dump(mode="json"),
+                "session": dict(state.session.checkpoint_state()),
+                "runtime": state.runtime,
+                "sandbox_id": state.sandbox_id,
+                "harness_session_id": state.harness_session_id,
+                "launch_count": state.launch_count,
+                "launch_records": list(state.launch_records),
+                "observations": state.observations.model_dump(mode="json") if state.observations else None,
+                "completed_activation": state.completed_activation,
+                "completed_reply": state.completed_reply,
+            }
+        return exported
+
+    async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
+        """Install every session without a sandbox connection; the replacement attempt's seed re-binds it."""
+        restored: dict[str, OpenCodeSandboxSession] = {}
+        for session in sessions:
+            saved = session.session
+            request = AgentSeedSessionRequest.model_validate(
+                saved["request"] | {"episode_id": session.episode_id.model_dump(mode="json")}
+            )
+            observations = saved.get("observations")
+            restored[session.session_key] = OpenCodeSandboxSession(
+                request=request,
+                session=None,
+                runtime=str(saved["runtime"]),
+                sandbox_id=saved.get("sandbox_id"),
+                model_ref=self.config.model_server,
+                observations=AgentObservationBundle.model_validate(observations) if observations else None,
+                harness_session_id=saved.get("harness_session_id"),
+                checkpointed=True,
+                launch_count=int(saved["launch_count"]),
+                launch_records=list(saved.get("launch_records") or []),
+                completed_activation=int(saved.get("completed_activation") or 0),
+                completed_reply=saved.get("completed_reply"),
+                restored=dict(saved),
+            )
+        for key, state in restored.items():
+            self._install_restored_session(key, state)
+
+    async def _rebind_restored_agent_session_state(
+        self, state: AgentSessionState, body: AgentSeedSessionRequest
+    ) -> AgentSessionState:
+        """Connect a restored session to the sandbox its replacement attempt borrows, a fork of the snapshot.
+
+        The fork holds the session's files as of the checkpoint: the runtime, the supervisor files and the saved
+        conversation. Files the snapshot does not hold are put back; a conversation it does not hold makes the next
+        launch start the task afresh.
+        """
+        assert isinstance(state, OpenCodeSandboxSession)
+        if state.session is not None:
+            return state
+        access = body.sandbox_access
+        if access is None or not isinstance(access.connection, DirectSandboxConnection):
+            raise AgentSeedRejectedError("A restored OpenCode session needs direct SandboxAccess to re-bind")
+        provider = create_provider(
+            resolve_provider_config(access.connection.provider_config_ref, get_global_config_dict())
+        )
+        try:
+            sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
+        except BaseException:
+            await provider.aclose()
+            raise
+        session = SandboxSession.reattach(
+            sandbox, state.restored["session"], workdir=access.workdir, harness="OpenCode", pausable=True
+        )
+        root = session.session_root
+        files = (f"{state.runtime}/opencode", f"{root}/{HARNESS_RUNNER_FILE}", f"{root}/{RESUME_SCRIPT.name}")
+        present = await sandbox.exec(
+            " && ".join(f"[ -e {quote(path)} ]" for path in files),
+            cwd="/",
+            timeout_s=self.config.session_close_timeout_seconds,
+        )
+        if present.return_code != 0 or present.error_type:
+            LOG.warning("Restored OpenCode session %s lacks its runtime or files; installing them again", root)
+            command = _sandbox_prepare_command(access.workdir, root, state.runtime)
+            result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
+            self._check_sandbox_setup(command, result)
+            await self._install_session_files(sandbox, root, access.workdir, state.runtime, checkpointed=True)
+        state.session = session
+        state.sandbox_id = sandbox.sandbox_id
+        state.restored = None
+        return state
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
@@ -732,15 +908,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         # Caller-assigned IDs are wire identifiers, never filesystem paths.
-        directory = f"/tmp/nemo-gym-opencode-sessions/{uuid4().hex}"
+        directory = f"{self.config.sandbox_session_root.rstrip('/')}/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
+        checkpointed = self.checkpoint_participant is not None and not self._seed_restarts(body)
         state = OpenCodeSandboxSession(
             request=body,
             session=SandboxSession(
-                sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
+                sandbox=sandbox,
+                session_dir=directory,
+                workdir=workdir,
+                harness="OpenCode",
+                owns_sandbox=owns_sandbox,
+                pausable=checkpointed,
             ),
             runtime=runtime,
             model_ref=self.config.model_server,
+            checkpointed=checkpointed,
         )
         prepared_directory = False
         try:
@@ -757,25 +940,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
-            installer = "install_opencode_runtime.sh"
-            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
-            command = "bash " + " ".join(
-                quote(arg)
-                for arg in (
-                    f"{directory}/{installer}",
-                    runtime,
-                    self.config.opencode_version,
-                    self.config.sandbox_executable_path or "",
-                    self.config.sandbox_executable_sha256 or "",
-                    ":".join(self.config.sandbox_path_prefix),
-                )
-            )
-            result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
-            self._check_sandbox_setup(command, result)
-            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
-            await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
-            if self._model_call_capture_enabled():
-                await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
+            await self._install_session_files(sandbox, directory, workdir, runtime, checkpointed=checkpointed)
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -788,6 +953,32 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
+    async def _install_session_files(
+        self, sandbox: AsyncSandbox, directory: str, workdir: str, runtime: str, *, checkpointed: bool
+    ) -> None:
+        """Install the OpenCode runtime if the sandbox lacks it, and upload the session's helper files."""
+        installer = "install_opencode_runtime.sh"
+        await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+        command = "bash " + " ".join(
+            quote(arg)
+            for arg in (
+                f"{directory}/{installer}",
+                runtime,
+                self.config.opencode_version,
+                self.config.sandbox_executable_path or "",
+                self.config.sandbox_executable_sha256 or "",
+                ":".join(self.config.sandbox_path_prefix),
+            )
+        )
+        result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
+        self._check_sandbox_setup(command, result)
+        await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+        await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
+        if self._model_call_capture_enabled():
+            await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
+        if checkpointed:
+            await sandbox.upload(RESUME_SCRIPT, f"{directory}/{RESUME_SCRIPT.name}")
+
     @staticmethod
     def _check_sandbox_setup(command: str, result: SandboxExecResult) -> None:
         if result.return_code != 0 or result.error_type is not None:
@@ -799,6 +990,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Finalize and release the connection; retain release failures for retry."""
         assert isinstance(state, OpenCodeSandboxSession)
+        if state.session is None:
+            # Restored from a checkpoint and closed before its replacement attempt re-bound it to a sandbox:
+            # the evidence is what the checkpoint kept, and there is no connection to release.
+            LOG.warning(
+                "Closing OpenCode session %s, which was restored and never re-bound; returning its saved evidence",
+                state.request.agent_session_id,
+            )
+            return AgentCloseSessionResponse(
+                agent_session_id=state.request.agent_session_id,
+                agent_observations=state.observations
+                or AgentObservationBundle(
+                    source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
+                ),
+            )
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
             source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
@@ -1064,6 +1269,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             metadata={
                 "harness_execution": "sandbox",
                 "opencode_version": self.config.opencode_version,
+                **({"harness_launches": str(state.launch_count)} if state.checkpointed else {}),
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
@@ -1091,10 +1297,167 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         system: str,
         timeout: float | None = None,
         deadline: float | None = None,
+        activation: Activation | None = None,
     ) -> NeMoGymResponse:
         timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         started = monotonic()
         previous_session_id = state.harness_session_id
+        failure = None
+        try:
+            async with activation.queued() if activation is not None else nullcontext():
+                async with asyncio.timeout_at(deadline):
+                    await self.sem.acquire()
+            try:
+                if state.checkpointed and activation is not None:
+                    await self._run_launches(
+                        state,
+                        activation,
+                        lambda: self._launch_payload(state, prompt=prompt, system=system),
+                        prompt=prompt,
+                        timeout=timeout,
+                        deadline=deadline,
+                    )
+                else:
+                    await state.execute(
+                        self._launch_payload(state, prompt=prompt, system=system),
+                        timeout=timeout,
+                        close_timeout=self.config.session_close_timeout_seconds,
+                        deadline=deadline,
+                    )
+            finally:
+                self.sem.release()
+        except TimeoutError as exc:
+            if state.is_continuation and not state.session.launch_started:
+                raise _ActivationDeadlineExpired from None
+            failure = exc
+        except BaseException as exc:
+            failure = exc
+        return self._finish_session_response(
+            state, body, timeout=timeout, started=started, previous_session_id=previous_session_id, failure=failure
+        )
+
+    async def _activation_task(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        prompt: str,
+        system: str,
+        index: int | None,
+    ) -> NeMoGymResponse:
+        """Run the session's activation; with checkpointing, as the participant's activation of the session.
+
+        Entered inside the task every request of the activation awaits, so a close or a retire that cancels the
+        participant's activation stops the launch too.
+        """
+        participant = self.checkpoint_participant
+        if participant is None:
+            return await self._session_response(state, body, prompt=prompt, system=system)
+        async with participant.activation(
+            state.request.agent_session_id, state.request.episode_id, index=index
+        ) as activation:
+            response = await self._session_response(state, body, prompt=prompt, system=system, activation=activation)
+            # Recorded before the activation ends, so a checkpoint exports the session with its reply.
+            state.completed_activation = index if index is not None else state.completed_activation + 1
+            state.completed_reply = response.model_dump(mode="json")
+            return response
+
+    async def _run_launches(
+        self,
+        state: OpenCodeSandboxSession,
+        activation: Activation,
+        payload: Callable[[], dict[str, JsonValue]],
+        *,
+        prompt: str,
+        timeout: float,
+        deadline: float | None,
+    ) -> None:
+        """Launch OpenCode until a launch finishes, pausing it in place at every checkpoint.
+
+        A launch whose pause or continue failed was stopped; the next launch resumes the saved conversation, and so
+        does the first launch of a restored session that had started one. Each launch has what is left of the
+        activation's budget, not counting time paused for checkpoints.
+        """
+        close_timeout = self.config.session_close_timeout_seconds
+        clock = _PauseClock(activation)
+        while True:
+            resuming = state.launch_count > 0
+            if resuming:
+                await state.prepare_launch(state.launch_count + 1, timeout=close_timeout)
+            launch_payload = payload()
+            if resuming:
+                launch_payload = await self._relaunch_payload(state, launch_payload, prompt=prompt)
+            state.launch_count += 1
+            launch = state.launch_count
+            launch_deadline = None if deadline is None else deadline + clock.paused_s
+            outcome = await run_until_parked(
+                state.require_session(),
+                clock,
+                launch=lambda: state.execute(
+                    launch_payload,
+                    timeout=timeout,
+                    close_timeout=close_timeout,
+                    deadline=launch_deadline,
+                    pause_allowance_s=self.config.checkpoint_pause_allowance_seconds,
+                ),
+                on_parked=lambda: {"launch": launch, "harness_session_id": state.harness_session_id},
+                stop_timeout=close_timeout,
+            )
+            receipt = state.session.cleanup or {}
+            state.launch_records.append(
+                {
+                    "launch": launch,
+                    "resumed": resuming,
+                    "outcome": "finished" if isinstance(outcome, Finished) else "stopped",
+                    "return_code": receipt.get("return_code"),
+                    "paused_s": round(clock.paused_s, 3),
+                }
+            )
+            if isinstance(outcome, Finished):
+                return
+            assert isinstance(outcome, Stopped)
+            LOG.warning(
+                "OpenCode launch %d of session %s stopped at a checkpoint (%s); relaunching it",
+                launch,
+                state.request.agent_session_id,
+                outcome.error or "pause not confirmed",
+            )
+
+    async def _relaunch_payload(
+        self, state: OpenCodeSandboxSession, payload: dict[str, JsonValue], *, prompt: str
+    ) -> dict[str, JsonValue]:
+        """Resume the saved conversation without a new user turn when it is usable; otherwise start afresh."""
+        timeout = self.config.session_close_timeout_seconds
+        decision = resume_decision(await state.inspect_conversation(timeout=timeout), prompt)
+        if decision.resume:
+            LOG.info(
+                "OpenCode launch %d of session %s resumes conversation %s",
+                state.launch_count + 1,
+                state.request.agent_session_id,
+                decision.session_id,
+            )
+            state.harness_session_id = decision.session_id
+            command = [
+                "bash",
+                f"{state.persistent_directory}/{RESUME_SCRIPT.name}",
+                f"{state.runtime}/opencode",
+                decision.session_id,
+                f"{state.session.session_dir}/resume.json",
+            ]
+            return {**payload, "command": command, "resume": decision.payload}
+        LOG.warning(
+            "OpenCode launch %d of session %s starts the task afresh: %s",
+            state.launch_count + 1,
+            state.request.agent_session_id,
+            decision.reason,
+        )
+        await state.discard_conversation(timeout=timeout)
+        state.harness_session_id = None
+        state.message_ids = []
+        return payload
+
+    def _launch_payload(self, state: OpenCodeSandboxSession, *, prompt: str, system: str) -> dict[str, JsonValue]:
+        """The runner's input for the next launch of OpenCode, in the session's current launch directory."""
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
             "model": "nemo_gym/" + self.config.sandbox_model_id,
@@ -1140,7 +1503,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.append("--thinking")
         if state.harness_session_id:
             command.extend(["--session", state.harness_session_id])
-        payload = {
+        activation_id = {}
+        if state.is_continuation:
+            # A relaunch within one activation tags its calls with its launch; they join the activation's invocation.
+            launch = f":launch-{state.launch_count + 1}" if state.launch_count else ""
+            activation_id = {"NEMO_GYM_OPENCODE_ACTIVATION_ID": f"{state.invocation_prefix}{launch}"}
+        return {
             "instructions": system,
             "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,
@@ -1152,7 +1520,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "XDG_CONFIG_HOME": f"{state.persistent_directory}/config",
                 "XDG_CACHE_HOME": f"{state.persistent_directory}/cache",
                 "XDG_STATE_HOME": f"{state.persistent_directory}/state",
-                **({"NEMO_GYM_OPENCODE_ACTIVATION_ID": state.invocation_prefix} if state.is_continuation else {}),
+                **activation_id,
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
@@ -1160,27 +1528,20 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
         }
+
+    def _finish_session_response(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        timeout: float,
+        started: float,
+        previous_session_id: str | None,
+        failure: BaseException | None,
+    ) -> NeMoGymResponse:
+        """Build the reply from the last launch's artifacts, or raise what the activation failed with."""
         error = None
         export = {}
-        failure = None
-        try:
-            async with asyncio.timeout_at(deadline):
-                await self.sem.acquire()
-            try:
-                await state.execute(
-                    payload,
-                    timeout=timeout,
-                    close_timeout=self.config.session_close_timeout_seconds,
-                    deadline=deadline,
-                )
-            finally:
-                self.sem.release()
-        except TimeoutError as exc:
-            if state.is_continuation and not state.session.launch_started:
-                raise _ActivationDeadlineExpired from None
-            failure = exc
-        except BaseException as exc:
-            failure = exc
         observations = state.activation_observations if state.is_continuation else state.observations
         if observations is None:
             observations = AgentObservationBundle(
