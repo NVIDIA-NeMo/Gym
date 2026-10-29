@@ -430,12 +430,28 @@ class TestPrepareBuilds:
         assert "needs a build (COPY)" in prepared.skipped["b"]
         assert prepared.tasks[0].built_images == {"world": world_image}
 
-    def test_builds_disabled_leaves_out_a_record_that_does_not_fit_the_run(self, tmp_path, fake_builder, capsys):
+    def test_builds_disabled_leaves_out_a_record_that_does_not_fit_the_run(
+        self, tmp_path, fake_builder, capsys, monkeypatch
+    ):
         """A record of another platform is no better than none: with builds disabled its tasks are left out with
         the reason, as the enabled path would rebuild it, and no row references the image."""
+        from nemo_gym.tasks.harbor import image_configs
         from nemo_gym.tasks.harbor.build_options import BuildOptions
         from nemo_gym.tasks.harbor.cli import prepare_target
 
+        asked = []
+
+        class MultiArchRegistry:
+            """Answers for the platform it was made for, as the registry does behind a multi-arch tag."""
+
+            def __init__(self, *args, platform, **kwargs):
+                self.platform = platform
+
+            def image_config(self, reference):
+                asked.append((reference, tuple(self.platform[:2])))
+                return {**UBUNTU_RECORD, "image": reference, "architecture": self.platform[1]}
+
+        monkeypatch.setattr(image_configs, "RegistryClient", MultiArchRegistry)
         folder = tmp_path / "ds"
         write_task(folder / "a")
         write_task(folder / "c", dockerfile=PULL_DOCKERFILE)
@@ -467,11 +483,13 @@ class TestPrepareBuilds:
         assert arm_image not in (tmp_path / "out" / "ds" / "tasks.jsonl").read_text()
         assert arm_image not in prepared.images
         assert f"Skipping a: recorded image {arm_image} cannot be used: it is linux/arm64" in capsys.readouterr().out
-        # The same record serves a run that asks for its platform.
+        assert asked == []
+        # The same record serves a run that asks for its platform; c's amd64 base record is read again at its pin.
         prepared = prepare_target(
             str(folder), output_root=tmp_path / "out", build=BuildOptions(enabled=False, platform="linux/arm64")
         )
         assert [t.task_id for t in prepared.tasks] == ["a", "c"]
+        assert asked == [("ubuntu:24.04", ("linux", "arm64"))]
 
     def test_an_amd64_level_above_the_baseline_is_refused_before_any_build(self, tmp_path, monkeypatch):
         """A BuildOptions made in code (prepare_target's callers, not from_config) reaches the tool through
