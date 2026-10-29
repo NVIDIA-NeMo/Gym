@@ -196,7 +196,7 @@ def test_markdown_uses_four_significant_digits_without_rounding_json(tmp_path: P
     assert "| model | 3 | 15.23 | 15.64 | -0.4115 | [-6.858, 6.035] | 3.024 | 4.000 |" in markdown
     assert "| model | tiny | included | 3 | 3 | 2.000e-06 | [-1.541e-05, 1.941e-05] | 0.3333 | 0.3333 |" in markdown
     assert "| model | constant | included | 3 | 3 | 0.000 | unavailable | 0.3333 | 0.3333 |" in markdown
-    assert "| model | constant | mean/reward | -1.235e+05 | 9.877e+05 | True |" in markdown
+    assert "| constant | mean/reward | -1.235e+05 | 9.877e+05 | True |" in markdown
 
     payload = json.loads((output / "suite_compare_report.json").read_bytes())
     assert payload["overall"]["statistics"]["candidate_mean"] == pytest.approx(15.226346007037051)
@@ -205,6 +205,53 @@ def test_markdown_uses_four_significant_digits_without_rounding_json(tmp_path: P
     assert payload["cells"][0]["statistics"]["ci_low"] == pytest.approx(-1.5406456118259828e-5)
     assert payload["cells"][0]["model_weight"] == 1 / 3
     assert payload["cells"][2]["metrics"][0]["high"] == 987654.321
+
+
+def test_normalization_table_lists_each_benchmark_metric_once_across_models(suite_path: Path, monkeypatch) -> None:
+    manifest = yaml.safe_load(suite_path.read_text())
+    manifest["benchmarks"]["first"]["metrics"].append(
+        {"name": "mean/latency", "low": 0, "high": 10, "higher_is_better": False}
+    )
+    manifest["benchmarks"]["second"]["metrics"][0].update(high=100, higher_is_better=False)
+    manifest["models"]["model-b"] = {
+        benchmark: {
+            role: {"rollouts": _saved_run(suite_path.parent / f"model-b-{benchmark}-{role}", values)}
+            for role, values in (("baseline", [0.1, 0.3, 0.5]), ("candidate", [0.4, 0.6, 0.8]))
+        }
+        for benchmark in ("first", "second")
+    }
+    for benchmarks in manifest["models"].values():
+        for source in benchmarks["first"].values():
+            aggregate_path = Path(source["rollouts"]).with_name("rollouts_aggregate_metrics.json")
+            aggregate = json.loads(aggregate_path.read_bytes())
+            for repeat, metrics in enumerate(aggregate[0]["repeat_level_metrics"]):
+                metrics["mean/latency"] = 1.5 + repeat
+            aggregate_path.write_text(json.dumps(aggregate))
+    suite_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+    output = suite_path.parent / "reports"
+    monkeypatch.setattr(
+        "sys.argv", ["gym", "eval", "compare-suite", "--suite", str(suite_path), "--output-dir", str(output)]
+    )
+    main()
+
+    markdown = (output / "suite_compare_report.md").read_text()
+    normalization = markdown.split("## Metric normalization\n", 1)[1].split("\n## ", 1)[0]
+    assert [line for line in normalization.splitlines() if line.startswith("|")] == [
+        "| Benchmark | Metric | Theoretical low | Theoretical high | Higher is better | Definition source |",
+        "| --- | --- | ---: | ---: | --- | --- |",
+        "| first | mean/reward | 0.000 | 1.000 | True | suite manifest override |",
+        "| first | mean/latency | 0.000 | 10.00 | False | suite manifest override |",
+        "| second | mean/reward | 0.000 | 100.0 | False | suite manifest override |",
+    ]
+    assert "Model" not in normalization
+    result = SuiteComparisonResult.model_validate_json((output / "suite_compare_report.json").read_bytes())
+    assert [(cell.model, cell.benchmark) for cell in result.cells] == [
+        ("model-a", "first"),
+        ("model-a", "second"),
+        ("model-b", "first"),
+        ("model-b", "second"),
+    ]
+    assert result.cells[0].metrics[0].baseline_raw != result.cells[2].metrics[0].baseline_raw
 
 
 def test_adjustable_confidence_and_json_only_output(suite_path: Path, monkeypatch) -> None:
