@@ -35,6 +35,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     StageOutcomePolicyConfig,
+    agent_instance_context,
     applied_outcome_fields,
     environment_fault_policy,
     require_retry_or_fail,
@@ -1569,6 +1570,7 @@ Return type in JSON Schema format: {return_type}
             model_server=model_server,
             params=self.config.user_responses_create_params,
             messages=self._user_simulator_messages(state),
+            agent_instance="user",
             rollout_id=state.rollout_id,
         )
         response_text = self._first_response_text(response)
@@ -1615,6 +1617,7 @@ Return type in JSON Schema format: {return_type}
             model_server=model_server,
             params=self.config.tool_simulator_responses_create_params,
             messages=messages,
+            agent_instance="tool_simulation",
             rollout_id=state.rollout_id,
         )
         return self._first_response_text(response), response.model_dump(mode="json", exclude_unset=True)
@@ -2120,6 +2123,7 @@ Return type in JSON Schema format: {return_type}
                     model_server=model_server,
                     params=params,
                     messages=messages,
+                    agent_instance="judge",
                     rollout_id=rollout_id,
                 )
             except Exception as exc:
@@ -2174,15 +2178,18 @@ Return type in JSON Schema format: {return_type}
         model_server: ModelServerRef,
         params: NeMoGymResponseCreateParamsNonStreaming,
         messages: List[NeMoGymEasyInputMessage],
+        agent_instance: str,
         rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
         request_body = params.model_copy(deep=True)
         request_body.input = messages
-        response = await self.server_client.post(
-            server_name=model_server.name,
-            url_path=f"{rollout_path_prefix(rollout_id)}/v1/responses",
-            json=request_body,
-        )
+        # Named in the prefix built here, and in context for a call without a rollout id that the client prefixes.
+        with agent_instance_context(agent_instance):
+            response = await self.server_client.post(
+                server_name=model_server.name,
+                url_path=f"{rollout_path_prefix(rollout_id, agent_instance=agent_instance)}/v1/responses",
+                json=request_body,
+            )
         await raise_for_status(response)
         try:
             return NeMoGymResponse.model_validate(await get_response_json(response))

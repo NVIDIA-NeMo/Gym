@@ -89,6 +89,7 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.core.typed_exceptions import agent_route_failure, find_boundary_failure
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
+from nemo_gym.models.token_capture.config import agent_instance_carries_training_tag
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_runtime._checkpoint.agent import (
     ActivationOutOfOrderError,
@@ -1501,19 +1502,44 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             f"{url_path}"
         )
 
-    def base_url_for_run(self, base_url: str, body: Any, *, trained: bool = True) -> str:
+    def base_url_for_run(
+        self,
+        base_url: str,
+        body: Any,
+        *,
+        trained: bool = True,
+        agent_instance: Optional[str] = None,
+        token_capture: Optional[bool] = None,
+    ) -> str:
         """Apply this run's capture path and sampling segment to a model-server root URL.
 
         Append the API-version suffix after this method returns. While traces export, the URL also
         names this run's current span, so the model server parents calls that arrive without a
         ``traceparent`` header (a harness in a sandbox) to it. A role the framework does not train
         (``trained=False``) gets ``null`` instead of the run's values.
+
+        ``agent_instance`` names the agent instance whose calls use the URL. ``token_capture`` sets the
+        training tag for this one URL; ``None`` keeps the agent's own setting. A run whose rollout skips
+        capture with ``_ng_skip_token_capture: true`` carries no training tag either way.
         """
         return apply_rollout_prefix(
             base_url,
             self.rollout_id_from_run(body),
-            token_capture=self._run_captures(body),
+            token_capture=(
+                self._run_captures(body) if token_capture is None else token_capture and not skips_token_capture(body)
+            ),
             model_sampling=self.model_sampling_segment_for_run(body, trained=trained),
+            agent_instance=agent_instance,
+        )
+
+    def training_tag_for(self, agent_instance: Optional[str]) -> bool:
+        """Whether this agent's URLs for ``agent_instance`` carry the training tag.
+
+        The agent must capture at all, and the agent instance must be selected by
+        ``token_id_capture.training_agent_instances`` (``assistant`` by default).
+        """
+        return self._token_id_capture_enabled() and agent_instance_carries_training_tag(
+            self.server_client.global_config_dict, agent_instance
         )
 
     def _run_captures(self, body: Any) -> bool:
@@ -1549,12 +1575,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         *,
         trace_context: bool = True,
         trained: bool = True,
+        agent_instance: Optional[str] = None,
+        token_capture: Optional[bool] = None,
     ) -> str:
         """Resolve a model-server URL with an optional rollout prefix (and trace context and sampling segment, as
         ``base_url_for_run``).
 
         Pass ``trace_context=False`` for a URL that a client cached across rollouts will keep using, and
         ``trained=False`` for a role the training framework does not train, which keeps its own sampling.
+        ``agent_instance`` and ``token_capture`` are as for ``base_url_for_run``.
         """
         server_config = get_first_server_config_dict(self.server_client.global_config_dict, model_server_name)
         base_url = self.server_client._build_server_base_url(server_config)
@@ -1562,9 +1591,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         prefixed = apply_rollout_prefix(
             base_url,
             rollout_id,
-            token_capture=self._token_id_capture_enabled(),
+            token_capture=self._token_id_capture_enabled() if token_capture is None else token_capture,
             trace_context=trace_context,
             model_sampling=MODEL_SAMPLING_NULL if untrained else None,
+            agent_instance=agent_instance,
         )
         return f"{prefixed}/v1"
 

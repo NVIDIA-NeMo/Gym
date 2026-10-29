@@ -11,7 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
-from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, current_rollout_id
+from nemo_gym.core.correlation import verifier_invocation_id_of
+from nemo_gym.core.episode_context import current_agent_instance, current_rollout_id
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.eval.recovery.evidence import select_managed_evidence
 from nemo_gym.eval.recovery.gate import trial_verdict
@@ -171,7 +172,7 @@ class _ObservedDependencies(_Client):
                 exchange["model_call_id"] = f"call-judge-{sequence}"
             exchange.update(
                 request=kwargs["json"],
-                verifier_invocation_id=kwargs["headers"][VERIFIER_INVOCATION_HEADER],
+                verifier_invocation_id=verifier_invocation_id_of(current_agent_instance()),
                 failure_report={"events": {}, "omitted": False, "failure_id": None},
                 model_operations=[
                     {
