@@ -85,12 +85,6 @@ from nemo_gym.config import (
 )
 from nemo_gym.failure_kinds import AGENT_TIMEOUT, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.path_utils import (
-    aggregation_sources_path_for,
-    failures_path_for,
-    materialized_path_for,
-    resubmit_offset_path_for,
-)
 from nemo_gym.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
@@ -116,6 +110,12 @@ from nemo_gym.rollout_collection import (
     record_resubmit_offset,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.utils import (
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from resources_servers.gdpval.multistage_elo import (
     PartialStagePolicy,
     PerReferenceTotals,

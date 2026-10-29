@@ -14,8 +14,8 @@
 # limitations under the License.
 from pathlib import Path
 
-from nemo_gym.path_utils import exporter_run_id_path_for
 from nemo_gym.run_artifacts import RunArtifacts
+from nemo_gym.utils.path_utils import exporter_run_id_path_for
 
 
 def test_exporter_run_id_path_for() -> None:

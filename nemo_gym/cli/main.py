@@ -26,8 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
-from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.run_exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
+from nemo_gym.utils.text import did_you_mean
 
 
 logger = logging.getLogger(__name__)

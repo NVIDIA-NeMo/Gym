@@ -71,10 +71,33 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.global_config": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
     "nemo_gym.secret_utils": MovedPath(new="nemo_gym.config.secret_utils", since="0.8.0"),
     "nemo_gym.server_metadata": MovedPath(new="nemo_gym.config.server_metadata", since="0.8.0"),
+    "nemo_gym.decorators": MovedPath(new="nemo_gym.utils.decorators", since="0.8.0"),
+    "nemo_gym.path_utils": MovedPath(new="nemo_gym.utils.path_utils", since="0.8.0"),
+    "nemo_gym.install_lock": MovedPath(new="nemo_gym.utils.install_lock", since="0.8.0"),
+    "nemo_gym.cli._compat": MovedPath(new="nemo_gym.utils.compat", since="0.8.0"),
+    "nemo_gym.cli._venv_setup": MovedPath(new="nemo_gym.utils.venv_setup", since="0.8.0"),
 }
 
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
-MOVED_NAMES: dict[str, dict[str, MovedPath]] = {}
+MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
+    "nemo_gym.server_utils": {
+        # server_utils imported this before the split and no longer uses it.
+        "NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
+        "IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "NEMO_GYM_FASTAPI_NUM_WORKERS": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "_has_injected_global_config_env": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "get_nemo_gym_fastapi_num_workers": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "is_nemo_gym_fastapi_entrypoint": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "is_nemo_gym_fastapi_worker": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "set_is_nemo_gym_fastapi_entrypoint": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "set_is_nemo_gym_fastapi_worker": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        "set_nemo_gym_fastapi_num_workers": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+    },
+    "nemo_gym.cli.utils": {
+        "did_you_mean": MovedPath(new="nemo_gym.utils.text", since="0.8.0"),
+    },
+}
 
 
 def _running_version() -> str:

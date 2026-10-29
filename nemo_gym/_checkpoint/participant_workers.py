@@ -89,8 +89,8 @@ from nemo_gym._checkpoint.workers import (
     encode_records,
 )
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.server_utils import is_nemo_gym_fastapi_worker
 from nemo_gym.session_routing import ROUTED_LIFESPANS_STATE, ResourcesSessionLifetimes, SessionClaims
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
 LOGGER = logging.getLogger(__name__)

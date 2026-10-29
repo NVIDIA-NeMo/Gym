@@ -71,7 +71,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
+from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4

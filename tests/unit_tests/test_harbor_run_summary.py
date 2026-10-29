@@ -13,10 +13,11 @@ import yaml
 
 import nemo_gym.cli.main as main_module
 from nemo_gym.config import global_config
-from nemo_gym.path_utils import failures_path_for, materialized_path_for, run_summary_path_for
 from nemo_gym.rollout_health import write_provisional_summary
 from nemo_gym.tasks.harbor.cli import prepare_target, resolve_agent
 from nemo_gym.tasks.harbor.run_summary import build_run_summary, write_run_summary
+from nemo_gym.utils import failures_path_for, materialized_path_for
+from nemo_gym.utils.path_utils import run_summary_path_for
 from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
 from tests.unit_tests.test_harbor_validation import (  # noqa: F401 (fixtures)
     oracle_collection,

@@ -700,7 +700,7 @@ def _health_check_collected_rollouts(
     from nemo_gym.rollout_health import format_health_report, run_health_checks, write_provisional_summary
 
     if _terminated and landed_keys is not None:
-        from nemo_gym.path_utils import aggregation_sources_path_for
+        from nemo_gym.utils.path_utils import aggregation_sources_path_for
 
         if aggregation_sources_path_for(output_fpath).is_file():
             # A run drops the shard list with the first row it writes, so this run added none: the summary the

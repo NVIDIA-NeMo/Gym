@@ -83,11 +83,8 @@ from nemo_gym.sandbox.agent_tools import (
     seed_mcp_servers,
     verify_agent_response,
 )
-from nemo_gym.server_utils import (
-    SESSION_ID_KEY,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
-)
+from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.observability import (
     append_opencode_turns,
     opencode_tool_outcome,

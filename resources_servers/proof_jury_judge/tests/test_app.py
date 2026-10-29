@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 
-import nemo_gym.server_utils
 from nemo_gym.config import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
@@ -283,9 +282,9 @@ def test_module_exports_app_for_multi_worker_import(monkeypatch):
     calls = []
     monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda cls: calls.append(cls) or worker_app))
 
-    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: False)
+    monkeypatch.setattr("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", lambda _: False)
     assert "app" not in runpy.run_path(str(app_path), run_name="proof_jury_judge.library_import")
     assert calls == []
 
-    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
+    monkeypatch.setattr("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", lambda _: True)
     assert runpy.run_path(str(app_path), run_name="proof_jury_judge.worker_import")["app"] is worker_app

@@ -3732,7 +3732,7 @@ def test_eval_run_resume_refuses_a_changed_selection_or_digest(tmp_path, monkeyp
 
     import nemo_gym.cli.main as main_module
     from nemo_gym.config import global_config
-    from nemo_gym.path_utils import materialized_path_for
+    from nemo_gym.utils import materialized_path_for
 
     monkeypatch.chdir(tmp_path)
     folder = tmp_path / "ds"
@@ -3808,7 +3808,7 @@ def test_eval_run_resume_reports_a_config_error_cleanly(tmp_path, monkeypatch, c
 
     import nemo_gym.cli.main as main_module
     from nemo_gym.config import global_config
-    from nemo_gym.path_utils import materialized_path_for
+    from nemo_gym.utils import materialized_path_for
 
     monkeypatch.chdir(tmp_path)
     folder = tmp_path / "ds"
