@@ -24,7 +24,7 @@ from nemo_gym.config_types import ConfigError
 
 
 def _number(value: float | None) -> str:
-    return "unavailable" if value is None else f"{value:.4f}"
+    return "unavailable" if value is None else f"{value:#.4g}"
 
 
 def _text(value: object) -> str:
@@ -34,7 +34,7 @@ def _text(value: object) -> str:
 def _interval(statistics: SuiteStatistics | None) -> str:
     if statistics is None or statistics.ci_low is None or statistics.ci_high is None:
         return "unavailable"
-    return f"[{statistics.ci_low:.4f}, {statistics.ci_high:.4f}]"
+    return f"[{_number(statistics.ci_low)}, {_number(statistics.ci_high)}]"
 
 
 def render_suite_summary(result: SuiteComparisonResult) -> str:
@@ -102,7 +102,7 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
             f"| {_text(cell.model)} | {_text(cell.benchmark)} | {_text(status)} "
             f"| {cell.candidate.repeat_count} | {cell.baseline.repeat_count} "
             f"| {_number(cell.statistics.delta if cell.statistics else None)} | {_interval(cell.statistics)} "
-            f"| {cell.model_weight:.4f} | {cell.overall_weight:.4f} |"
+            f"| {_number(cell.model_weight)} | {_number(cell.overall_weight)} |"
         )
     lines.extend(
         [
