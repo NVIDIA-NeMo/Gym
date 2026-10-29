@@ -153,6 +153,32 @@ class TestSanitizeStreamingChatBody:
         assert params.max_tokens == 128
         assert params.tools[0]["function"]["name"] == "get_weather"
 
+    def test_drops_echoed_assistant_reasoning(self) -> None:
+        # OpenCode (interleaved.field: reasoning) echoes each assistant turn's reasoning; the strict
+        # assistant-message model forbids the field, so the request was rejected with 422.
+        body = {
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "look at the image first",
+                    "tool_calls": [
+                        {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            ],
+            "stream": True,
+        }
+        with pytest.raises(ValueError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": body["messages"]})
+        cleaned, _ = sanitize_streaming_chat_body(body)
+        assert "reasoning" not in cleaned["messages"][1]
+        assert cleaned["messages"][1]["tool_calls"][0]["id"] == "c1"
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(cleaned)
+        assert body["messages"][1]["reasoning"] == "look at the image first"
+
     def test_does_not_mutate_caller_body(self) -> None:
         body = {"messages": [], "stream": True, "stream_options": {"include_usage": True}}
         sanitize_streaming_chat_body(body)
