@@ -196,3 +196,35 @@ async def test_atom_root_and_child_sessions_route_through_gym(tmp_path: Path, mo
     assert all(call["server_name"] == "policy" and call["url_path"] == "/fixture/v1/responses" for call in calls)
     assert all(call["json"].max_output_tokens == 131072 for call in calls)
     assert all(call["cookies"]["session"] == "fixture" for call in calls)
+
+
+def test_terminal_bench_atom_recipe_routes_the_benchmark_to_atom() -> None:
+    """Follow the recipe the way Gym does: taskset -> environment -> its agent server must be the Atom harness.
+
+    Guards against overriding an agent block that nothing references, which silently runs the default agent."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import GlobalConfigDictParser
+
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths([str(ROOT / "benchmarks/terminal_bench_2_1/atom.yaml")])
+    config = OmegaConf.merge(*configs)
+    parser._recursively_swap_keys(config)
+    routes = OmegaConf.to_container(config.environment_server_routes, resolve=True)
+    assert routes, "the Terminal-Bench NOOA config must route its taskset to an environment"
+    for taskset, env_name in routes.items():
+        environment = next(iter(config[env_name].environment_servers.values()))
+        agent_name = environment.agent_server.name
+        agent = NOOAAgentConfig(
+            name=agent_name,
+            host="localhost",
+            port=8001,
+            **OmegaConf.to_container(config[agent_name].responses_api_agents.nooa_agent, resolve=True),
+        )
+        agent_class, adapter = validate_invocation(agent.nooa)
+        assert agent_class is atom_gym.AtomHarness, (
+            f"{taskset} -> {env_name} -> {agent_name} runs {agent.nooa.agent_class}"
+        )
+        assert adapter is invoke_atom
+        assert agent.nooa.execution_mode == "sandboxed"
+        assert agent.nooa.init_kwargs == {"turn_method": "handle_batch"}

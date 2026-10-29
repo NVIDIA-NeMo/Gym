@@ -1,9 +1,25 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Terminal-Bench 2.1 with Atom (nooa_atom.gym:AtomHarness) through the sandboxed NOOA adapter.
+# nooa.yaml routes the benchmark's taskset to the `experiment` environment, whose agent server is the
+# `agent` instance; this file swaps that instance's agent class, so the override must target `agent`.
 config_paths:
   - benchmarks/terminal_bench_2_1/nooa.yaml
 
-terminal_bench_2_1_nooa_agent:
+agent:
   responses_api_agents:
     nooa_agent:
       nooa:
