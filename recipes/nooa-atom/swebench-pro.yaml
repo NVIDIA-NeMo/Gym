@@ -24,7 +24,7 @@
 # Preparation builds the full benchmark once, then writes the roster's rows as this recipe's dataset file.
 
 gym_commit: PENDING-UNTIL-FREEZE
-nooa_commit: bbed2039c690ead85fedd480b3c8e73917901e40  # pragma: allowlist secret
+nooa_commit: 94c6b1db495df2cc9d3ddaae542520f6e12fb619  # pragma: allowlist secret
 # Pinned task set: the roster file and its sha256, checked by the prepare script.
 prepare_script_args:
   roster: recipes/nooa-atom/swebench-pro-swe120.txt
