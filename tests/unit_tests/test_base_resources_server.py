@@ -43,7 +43,7 @@ from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import select_measured
+from nemo_gym.metrics.reward_profile import select_measured
 from nemo_gym.session_routing import ResourcesSessionLifetimes
 from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
 from nemo_gym.testing.session_conformance import check_resources_session_contract

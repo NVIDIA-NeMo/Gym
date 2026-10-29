@@ -37,7 +37,7 @@ from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, L
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
-from nemo_gym.reward_profile import RewardProfiler
+from nemo_gym.metrics import RewardProfiler
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig

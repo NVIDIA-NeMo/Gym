@@ -60,12 +60,12 @@ from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
 )
-from nemo_gym.prompt import PromptConfig, load_prompt_config
-from nemo_gym.reward_profile import (
+from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.verification import call_judge
 
 
