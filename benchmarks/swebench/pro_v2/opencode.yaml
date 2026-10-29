@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SWE-bench Pro V2 (642 tasks) under upstream's locked protocol: the agent sandbox reaches only the
+# policy model server, and the agent's diff is graded by the task's own verifier on a fresh sandbox
+# from the pristine image. Needs OpenSandbox for the network lock.
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+- resources_servers/swebench_pro/configs/swebench_pro.yaml
+
+# With use_absolute_ip, only model servers leave loopback: the locked sandbox may reach the model server's host,
+# so the head server and its config endpoint must not listen there.
+absolute_ip_server_types: [responses_api_models]
+
+swebench_pro_v2_opencode_resources_server:
+  _inherit_from: swebench_pro_resources_server
+  resources_servers:
+    swebench_pro:
+      image_repository: ghcr.io/scaleapi/swe-bench_pro-v2
+      # V2's test.sh does its own resets; the V1 entryscript repairs and Go prefetch do not apply.
+      environment_repairs: []
+      prefetch_go_modules: false
+      agent_network_lock: true
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Upstream's 3000s verifier budget, plus sandbox creation, for one attempt and one retry.
+      evaluation_timeout: 3000
+      verification_attempt_timeout: 3900
+      verification_total_timeout: 7800
+      sandbox_config:
+        metadata:
+          benchmark: swebench-pro-v2
+
+swebench_pro_v2_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      # Upstream's 50-minute agent budget; the patch made so far is still graded.
+      sandbox_timeout: 3000
+      # The locked sandbox cannot download OpenCode or ripgrep. OpenCode 1.17.11 installs offline from the S3 cache
+      # mounted in NVIDIA's OpenSandbox sandboxes (override these elsewhere); prepare.py stages the rg that is uploaded.
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+      remote_opencode_musl_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11
+      # Relative to the agent server's own directory, where Gym starts it.
+      local_ripgrep_binary_path: ../../benchmarks/swebench/data/ripgrep-14.1.1-x86_64-unknown-linux-musl/rg
+      resources_server:
+        type: resources_servers
+        name: swebench_pro_v2_opencode_resources_server
+      datasets:
+        - name: swebench_pro_v2
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_v2_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro_v2/prepare.py
+          num_repeats: 3
+
+swebench_pro_v2_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swebench_pro_v2_opencode_sandboxed_agent

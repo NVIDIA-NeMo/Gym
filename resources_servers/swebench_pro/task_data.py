@@ -31,6 +31,7 @@ class TaskData(BaseModel):
     parser_script: str = Field(json_schema_extra={"consumed_by": ["verify"]})
     base_dockerfile: str = Field(default="", json_schema_extra={"consumed_by": ["verify"]})
     instance_dockerfile: str = Field(default="", json_schema_extra={"consumed_by": ["verify"]})
+    verifier_files: dict[str, str] | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
     subset: str = Field(default="pro", json_schema_extra={"consumed_by": ["provenance"]})
     split: str = Field(default="test", json_schema_extra={"consumed_by": ["provenance"]})
     evaluator_commit: str = Field(json_schema_extra={"consumed_by": ["provenance"]})

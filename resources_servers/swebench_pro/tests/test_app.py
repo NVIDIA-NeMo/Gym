@@ -37,6 +37,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import SESSION_LOST
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.swebench_pro.app import (
@@ -134,7 +135,7 @@ def typed_seed_json(session_id: str, rollout_id: str = "rollout", task_data: dic
 def stub_task_sandboxes(monkeypatch: MonkeyPatch, server: SWEBenchProResourcesServer) -> AsyncMock:
     """Make typed seeds open fake task sandboxes; return the ``_create_sandbox`` mock."""
     create = AsyncMock(
-        side_effect=lambda body, files=None: SimpleNamespace(
+        side_effect=lambda body, files=None, **_: SimpleNamespace(
             _handle=SimpleNamespace(sandbox_id="sandbox-id"),
             exec=AsyncMock(),
             serialize=AsyncMock(return_value={"sandbox_id": "sandbox-id"}),
@@ -571,8 +572,11 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
     )
     verifier_sandbox = SimpleNamespace(stop=AsyncMock(side_effect=stop_verifier))
 
-    async def create_sandbox(body: SWEBenchProInstanceRequest, files: dict | None = None) -> SimpleNamespace:
+    async def create_sandbox(
+        body: SWEBenchProInstanceRequest, files: dict | None = None, *, agent_phase: bool = False
+    ) -> SimpleNamespace:
         if files is None:
+            assert agent_phase is True
             events.append("create-task")
             return task_sandbox
         events.append("create-verifier")
@@ -1356,3 +1360,220 @@ def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
     assert typed_close.status_code == 200
     assert typed_close.json()["resources_session_id"] == "session"
     assert malformed_close.status_code == 422
+
+
+V2_VERIFIER_FILES = {
+    "test.sh": "bash /tests/run_script.sh\n",
+    "run_script.sh": "#!/bin/bash\n",
+    "parser.py": "print('{}')\n",
+    "config.json": "{}\n",
+    "test_patch.patch": "",
+}
+
+
+def v2_request_body() -> dict:
+    return request_body() | {"verifier_files": V2_VERIFIER_FILES, "subset": "pro_v2"}
+
+
+def test_v2_row_is_graded_by_the_task_verifier(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
+    create = AsyncMock(return_value=SimpleNamespace(stop=AsyncMock()))
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    v1 = AsyncMock()
+    v2 = AsyncMock(
+        return_value=VerificationResult(
+            completed=True, resolved=True, patch_applied=True, test_results={"tests": []}, test_output="RESULT: PASSED"
+        )
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", v1)
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_v2_verification", v2)
+
+    response = client_with_task_sandbox(server).post("/verify", json=v2_request_body())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reward"] == 1.0
+    assert response.json()["mask_sample"] is False
+    v1.assert_not_awaited()
+    v2.assert_awaited_once()
+    files = create.await_args.kwargs["files"]
+    assert files["/tests/test.sh"] == V2_VERIFIER_FILES["test.sh"]
+    assert files["/workspace/patch.diff"] == "agent patch"
+    assert "/workspace/entryscript.sh" not in files
+
+
+def test_v2_masks_what_the_environment_could_not_grade(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="agent patch"))
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_v2_verification",
+        AsyncMock(
+            return_value=VerificationResult(
+                completed=False,
+                resolved=False,
+                patch_applied=True,
+                test_results=None,
+                error="The task's test patch did not apply",
+            )
+        ),
+    )
+
+    response = client_with_task_sandbox(server).post("/verify", json=v2_request_body())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reward"] == 0.0
+    assert response.json()["mask_sample"] is True
+    assert response.json()["failure_kind"] == "verifier_error"
+    assert "test patch did not apply" in response.json()["failure_reason"]
+
+
+def test_v2_grades_a_patch_it_could_not_extract_as_empty(monkeypatch: MonkeyPatch) -> None:
+    """An agent that broke /app/.git gets upstream's empty-patch 0, not a masked sample."""
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    monkeypatch.setattr(
+        server, "_extract_model_patch", AsyncMock(side_effect=RuntimeError("fatal: not a git repository"))
+    )
+    create = AsyncMock(return_value=SimpleNamespace(stop=AsyncMock()))
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_v2_verification",
+        AsyncMock(
+            return_value=VerificationResult(completed=True, resolved=False, patch_applied=True, test_results=None)
+        ),
+    )
+
+    response = client_with_task_sandbox(server).post("/verify", json=v2_request_body())
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reward"] == 0.0
+    assert response.json()["mask_sample"] is False
+    assert "not a git repository" in response.json()["error"]
+    assert create.await_args.kwargs["files"]["/workspace/patch.diff"] == ""
+
+
+class RecordingProvider:
+    """A provider that records the spec of every sandbox it creates."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.created: list[SandboxSpec] = []
+
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        self.created.append(spec)
+        return SandboxHandle(sandbox_id=f"sb-{len(self.created)}", provider_name=self.name, raw=None)
+
+    async def exec(self, handle: SandboxHandle, command: object, **kwargs: object) -> SandboxExecResult:
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+    async def upload_file(self, *args: object, **kwargs: object) -> None:
+        return None
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict:
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor: dict) -> SandboxHandle:
+        return SandboxHandle(sandbox_id=descriptor["sandbox_id"], provider_name=self.name, raw=None)
+
+    async def close(self, handle: SandboxHandle) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_network_lock_reaches_only_the_seeded_agent_sandbox(monkeypatch: MonkeyPatch, typed: bool) -> None:
+    server = make_server(
+        golden=False,
+        apply_anti_cheating=False,
+        inconclusive_verification_retries=0,
+        agent_network_lock=True,
+        sandbox_model_server={"type": "responses_api_models", "name": "policy_model"},
+    )
+    server.config.sandbox_config["provider_options"] = {"beta_no_ttl_cap": True}
+    provider = RecordingProvider("opensandbox")
+    monkeypatch.setattr("resources_servers.swebench_pro.app.get_global_config_dict", lambda: {})
+    monkeypatch.setattr("resources_servers.swebench_pro.app.resolve_provider_config", lambda *_: provider)
+    monkeypatch.setattr("resources_servers.swebench_pro.app.resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.sandbox_server_url", lambda name, **_: "http://10.1.2.3:8000"
+    )
+    monkeypatch.setattr(SWEBenchProResourcesServer, "_image_info", lambda self, body: {"image": "img:tag"})
+    monkeypatch.setattr(SWEBenchProResourcesServer, "normalize_sandbox_environment", AsyncMock())
+    monkeypatch.setattr(SWEBenchProResourcesServer, "pristine_untracked_files", AsyncMock(return_value=frozenset()))
+    monkeypatch.setattr(SWEBenchProResourcesServer, "_extract_model_patch", AsyncMock(return_value="agent patch"))
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.run_v2_verification",
+        AsyncMock(
+            return_value=VerificationResult(
+                completed=True, resolved=False, patch_applied=True, test_results={"tests": []}
+            )
+        ),
+    )
+    task_data = v2_request_body()
+
+    with TestClient(server.setup_webserver()) as client:
+        if typed:
+            seed_body = {
+                "resources_session_id": "resources-session",
+                "episode_id": {"rollout_id": "rollout", "attempt": 1},
+                "task_id": {"taskset": "swebench_pro_v2", "task_id": "instance_example"},
+                "task_data": {k: v for k, v in task_data.items() if k not in ("responses_create_params", "response")},
+            }
+        else:
+            seed_body = task_data
+        assert client.post("/ng-rollout/r-1/seed_session", json=seed_body).status_code == 200
+        assert client.post("/ng-rollout/r-1/verify", json=task_data).status_code == 200
+
+    seeded, verifying = provider.created
+    assert seeded.provider_options == {
+        "beta_no_ttl_cap": True,
+        "network_policy": {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.1.2.3"}]},
+    }
+    assert verifying.provider_options == {"beta_no_ttl_cap": True}
+    assert server.config.sandbox_config["provider_options"] == {"beta_no_ttl_cap": True}  # config not mutated
+
+
+@pytest.mark.asyncio
+async def test_network_lock_fails_closed_without_network_policy_support(monkeypatch: MonkeyPatch) -> None:
+    server = make_server(
+        golden=False,
+        agent_network_lock=True,
+        sandbox_model_server={"type": "responses_api_models", "name": "policy_model"},
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.get_global_config_dict", lambda: {})
+    monkeypatch.setattr("resources_servers.swebench_pro.app.resolve_provider_config", lambda *_: {"docker": {}})
+    monkeypatch.setattr("resources_servers.swebench_pro.app.resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.sandbox_server_url", lambda name, **_: "http://10.1.2.3:8000"
+    )
+
+    with pytest.raises(ValueError, match="OpenSandbox"):
+        await server._create_sandbox(SWEBenchProInstanceRequest.model_validate(v2_request_body()), agent_phase=True)
+
+
+def test_network_lock_requires_a_model_server() -> None:
+    with pytest.raises(ValueError, match="requires sandbox_model_server"):
+        make_server(golden=False, agent_network_lock=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("head_host", ["10.1.2.3", "0.0.0.0", "::", "node-01.cluster"])
+async def test_network_lock_refuses_a_head_server_off_loopback(monkeypatch: MonkeyPatch, head_host: str) -> None:
+    """The policy allows the model's whole host, so the head's config endpoint must stay on loopback."""
+    server = make_server(
+        golden=False,
+        agent_network_lock=True,
+        sandbox_model_server={"type": "responses_api_models", "name": "policy_model"},
+    )
+    head = {"head_server": {"host": head_host, "port": 11000}}
+    monkeypatch.setattr("resources_servers.swebench_pro.app.get_global_config_dict", lambda: head)
+    monkeypatch.setattr("resources_servers.swebench_pro.app.resolve_provider_config", lambda *_: {"opensandbox": {}})
+    monkeypatch.setattr("resources_servers.swebench_pro.app.resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.sandbox_server_url", lambda name, **_: "http://10.1.2.3:8000"
+    )
+
+    with pytest.raises(ValueError, match="absolute_ip_server_types"):
+        await server._create_sandbox(SWEBenchProInstanceRequest.model_validate(v2_request_body()), agent_phase=True)
