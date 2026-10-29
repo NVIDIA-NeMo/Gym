@@ -57,7 +57,13 @@ def test_catalog_covers_p0_without_exposing_expectations():
 @pytest.mark.parametrize("use_agent_sessions", [False, True])
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
-    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
+    config = _config(
+        harness,
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+        use_agent_sessions=use_agent_sessions,
+    )
     from omegaconf import OmegaConf
 
     from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
@@ -263,7 +269,12 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
 def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_name):
     from omegaconf import OmegaConf
 
-    config = _config("opencode", tmp_path, [10001, 10002, 10003, 10004], 12)
+    config = _config(
+        "opencode",
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+    )
     server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
     header = server_client.assistant_message_header("policy_model")
     assert header is not None
@@ -861,3 +872,17 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+def test_missing_judge_reference_fails_p1_without_blocking_p0(retained_episode):
+    from dataclasses import replace
+
+    directory, _ = retained_episode
+    scenario = replace(SCENARIO["verifier_failure"], judge_verifier=True)
+    result = inspect_episode(scenario, directory, {"returncode": 0, "timed_out": False})
+    check = next(c for c in result["checks"] if c["id"] == "verifier.judge_reference")
+    assert check["tier"] == "P1"
+    assert check["status"] == "fail"
+    assert result["behavioral_status"] == "fail"
+    assert result["verdict"] == "fulfilled"
+    assert all(c["status"] in {"pass", "not_applicable"} for c in result["checks"] if c["tier"] == "P0")
