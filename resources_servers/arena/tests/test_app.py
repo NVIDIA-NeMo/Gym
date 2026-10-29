@@ -1434,6 +1434,14 @@ class TestArenaResourcesServer:
                 "metadata": {"nemo_gym_context_window_exceeded": "true"},
             }
         }
+        # vllm_model also reports zero usage, without the marker, when the output budget alone exceeds the
+        # context window (invalid_output_token_parameter); that rejection stays an output-limit failure.
+        output_budget_rejected = truncated | {
+            "response": {
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            }
+        }
         reasoning_only = truncated | {
             "response": {"status": "completed"},
             "policy_answer": None,
@@ -1441,17 +1449,24 @@ class TestArenaResourcesServer:
         }
 
         metrics = reference_server.compute_metrics(
-            [[win], [truncated], [context_exceeded_without_marker], [context_exceeded], [reasoning_only]]
+            [
+                [win],
+                [truncated],
+                [context_exceeded_without_marker],
+                [context_exceeded],
+                [output_budget_rejected],
+                [reasoning_only],
+            ]
         )
 
-        assert metrics["max_token_reached_rate"] == approx(1 / 5)
-        assert metrics["context_window_exceeded_rate"] == approx(2 / 5)
+        assert metrics["max_token_reached_rate"] == approx(2 / 6)
+        assert metrics["context_window_exceeded_rate"] == approx(2 / 6)
         assert metrics["rollout_failure_rate"] == approx(0.0)
-        assert metrics["reasoning_only_response_rate"] == approx(1 / 5)
+        assert metrics["reasoning_only_response_rate"] == approx(1 / 6)
         assert metrics["missing_judgment_rate"] == approx(0.0)
-        assert metrics["win_rate_no_SC"] == approx(1 / 5, abs=0.05)
-        assert metrics["win_rate"] == approx(1 / 5, abs=0.05)
-        assert metrics["verbosity_acceptance_rate"] == approx(1 / 5)
+        assert metrics["win_rate_no_SC"] == approx(1 / 6, abs=0.05)
+        assert metrics["win_rate"] == approx(1 / 6, abs=0.05)
+        assert metrics["verbosity_acceptance_rate"] == approx(1 / 6)
 
     @mark.parametrize("style_control_method", ["bradley_terry", "none"])
     def test_compute_metrics_v2_max_token_response_remains_failure(
