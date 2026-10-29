@@ -20,9 +20,55 @@ from app import (
     XlamFcResourcesServerConfig,
     XlamFcVerifyRequest,
 )
+from fastapi.testclient import TestClient
 
+from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
+from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.testing.session_conformance import check_resources_session_contract
+
+
+def _server() -> XlamFcResourcesServer:
+    return XlamFcResourcesServer(
+        config=XlamFcResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="xlam_fc"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+def _response(output: list[dict]) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="resp_test",
+        created_at=0.0,
+        model="dummy",
+        object="response",
+        output=output,
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
+    )
+
+
+def _call(call_id: str, name: str, arguments: dict) -> dict:
+    return {"call_id": call_id, "name": name, "arguments": json.dumps(arguments), "type": "function_call"}
+
+
+def _tool_output(call_id: str, output: str = '{"detail":"Not Found"}') -> dict:
+    return {"call_id": call_id, "output": output, "type": "function_call_output"}
+
+
+def _message(text: str) -> dict:
+    return {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+LONDON = {"name": "timezone_for_location", "arguments": {"location": "London", "area": "Europe"}}
+TOKYO = {"name": "timezone_for_location", "arguments": {"location": "Tokyo", "area": "Asia"}}
 
 
 class TestApp:
@@ -428,3 +474,27 @@ class TestApp:
         assert result.num_expected == 1
         assert result.num_predicted == 1
         assert result.num_correct == 1
+
+
+class TestToolRoutes:
+    """The model must never see a 404 for a tool the dataset asked it to call (NVBug 6900453)."""
+
+    def test_any_tool_call_is_acknowledged(self) -> None:
+        client = TestClient(_server().setup_webserver())
+        response = client.post("/timezone_for_location", json={"location": "London", "area": "Europe"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "ok"
+        assert "detail" not in body
+
+    def test_catch_all_tool_route_keeps_the_session_contract(self) -> None:
+        check_resources_session_contract(
+            _server().setup_webserver(),
+            ResourcesSeedSessionRequest(
+                resources_session_id="contract-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+                task_data={},
+            ),
+            keeps_state=False,
+        )
