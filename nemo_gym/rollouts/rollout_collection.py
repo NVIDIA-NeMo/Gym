@@ -89,8 +89,9 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.core.correlation import validate_agent_instance
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
-from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
+from nemo_gym.core.episode_types import AGENT_INSTANCES_KEY, EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     CANCELLED,
     COLLECTION_DISPATCH_FAILED,
@@ -706,6 +707,12 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     reply_report = _reply_failure_report(response)
     if reply_report:
         record = FailureReportRow.merged_into(record, *reply_report)
+    agent_instances = response.get(AGENT_INSTANCES_KEY)
+    if agent_instances:
+        # Each agent instance's terminal call and optional reward, next to the episode's top-level reward.
+        record[AGENT_INSTANCES_KEY] = {
+            validate_agent_instance(name): dict(entry) for name, entry in agent_instances.items()
+        }
     return record
 
 
