@@ -23,7 +23,7 @@ from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.config import ModelServerRef, get_global_config_dict
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -40,7 +40,6 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import get_first_server_config_dict
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,

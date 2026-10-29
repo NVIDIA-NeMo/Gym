@@ -20,7 +20,7 @@ import requests
 from devtools import pprint
 
 from nemo_gym.client.server_client import ServerClient, ServerStatus
-from nemo_gym.server_utils import ServerInstanceDisplayConfig
+from nemo_gym.server_runtime.registry_server import ServerInstanceDisplayConfig
 
 
 logger = logging.getLogger(__name__)

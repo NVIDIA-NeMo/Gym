@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from nemo_gym.server_utils import SimpleServer
+from nemo_gym.server_runtime.base_server import SimpleServer
 
 
 def test_app_import_from_component_working_directory():

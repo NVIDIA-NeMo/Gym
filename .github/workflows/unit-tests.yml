@@ -64,7 +64,7 @@ jobs:
           base_sha: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
           files: |
             nemo_gym/server_runtime/request_handling/session_routing.py
-            nemo_gym/server_utils.py
+            nemo_gym/server_runtime/base_server.py
             nemo_gym/utils/server_process.py
             nemo_gym/client/**
             nemo_gym/base_responses_api_agent.py
