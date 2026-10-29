@@ -1,168 +1,102 @@
 # Vision2Code
 
-A single-turn Gym environment supporting **all 16 upstream dataset rubrics and the generic rubric**:
-reference image → `simple_agent` Python submission → fresh Enroot render → vision rubric judge → reward.
-It produces rollouts and rewards. RL trainer configuration is separate.
+Image recreation: **reference image → Python submission → Enroot render → vision judge → reward**.
+The `vision2code_agent` extends `SimpleAgent`, defaults to one policy call, and supports
+optional feedback-driven revisions. The verifier
+compares the rendered PNG with the reference using one of 16 dataset rubrics or the generic rubric.
+Policy and judge use separate configurable OpenAI-compatible vision endpoints.
 
-This environment adapts the scoring code and generation/judge prompts from
-[image2code/vision2code](https://github.com/image2code/vision2code), by the
-Vision2Code Authors, under Apache-2.0. It does **not** import or install the
-upstream package. Gym owns model calls, orchestration, sandboxing, and artifacts.
-[NOTICE](NOTICE), [LICENSE.upstream](LICENSE.upstream), and
-[source provenance](tests/fixtures/provenance.json) record the source revision,
-exact hashes, and local rubric modifications. The base upstream commit alone
-does not reproduce the modified EEE background and whitespace scoring behavior.
+## Create the Python environment
 
-This is a configurable environment using Vision2Code rubrics, not a claim
-to reproduce the complete upstream benchmark or its published results. Input
-datasets retain their own licenses; the Apache-2.0 code license does not grant
-rights to redistribute reference images. The committed example is synthetic.
-
-The catalog entry is [environments/vision2code](../../environments/vision2code/manifest.yaml).
-It declares a continuous reward in `[0, 1]` and stochastic judging. `verified: false`
-and `experimental: true` remain set until broader baselining and maintainer review.
-
-## NeMo RL compatible base
-
-This branch adds Vision2Code to Gym commit
-`c004bce8068eaa35690be8705d3e263be10581e8`. Core code, `pyproject.toml`, and
-`uv.lock` retain that base, including locked Ray **2.56.1** and the training
-capture fixes already present there. The environment uses the base's normal
-Ray startup and manifest schema. The composition uses `simple_agent` directly;
-the later `legacy_agent` environment-server wrapper is not present in this base.
-
-Use `uv sync --frozen --extra dev` for the root environment. Gym's per-server
-`uv pip install` setup resolves dependencies separately from the root lockfile;
-keep those processes on the same Ray version as the NeMo RL cluster:
+From the Gym repository root, create and activate a virtual environment with Python 3.13.14
+or newer, then install Gym and the renderer's host dependencies:
 
 ```bash
-printf 'ray==2.56.1\n' > /tmp/vision2code-ray-constraint.txt
-export UV_CONSTRAINT=/tmp/vision2code-ray-constraint.txt
+uv venv --python 3.13.14
+source .venv/bin/activate
+uv sync --frozen --extra dev
+cd resources_servers/vision2code
+uv pip install -r requirements.txt
+cd ../..
 ```
 
-Set this before `gym env start`. If reusing existing server venvs with
-`+skip_venv_if_present=true`, first install `ray[default]==2.56.1` into each
-venv for `vision2code`, `simple_agent`, and `vllm_model`.
+The evaluation worker also needs Enroot and the renderer image built below. Policy and
+judge inference run on separately configured endpoints; a local GPU is not required for
+the Gym servers. The container has its own Python dependencies.
 
 ## Prepare tasks
 
-Run commands from the Gym repository root, using Gym's Python environment with
-`resources_servers/vision2code/requirements.txt` installed. A manifest is JSONL:
+Run from the Gym repository root with Gym and [requirements.txt](requirements.txt) installed.
+Create a JSONL manifest with an explicit rubric for each image:
 
 ```json
 {"id":"chem-001","image_path":"images/chem-001.png","rubric":"ChemVQA-2K"}
-{"id":"doc-001","image_path":"images/doc-001.png","rubric":"DocVQA"}
 {"id":"chart-001","image_path":"images/chart-001.png","rubric":"ChartQA"}
-{"id":"eee-001","image_path":"images/eee-001.png","rubric":"EEE-Bench"}
-{"id":"geometry-001","image_path":"images/triangle.png","rubric":"geometry3k"}
-{"id":"graph-001","image_path":"images/graph.png","rubric":"Graph-Algorithms"}
-{"id":"other-001","image_path":"images/other.png","rubric":"generic"}
+{"id":"other-001","image_path":"images/other-001.png","rubric":"generic"}
 ```
 
-Relative image paths resolve against the manifest directory. Choose an exact rubric
-name for each image; the filename does not select the rubric.
-
-| Image category | Accepted `rubric` values |
+| Category | Rubric names |
 | --- | --- |
-| Charts and plots | `ChartQA`, `dvqa`, `figureqa`, `matplotlib` |
+| Charts | `ChartQA`, `dvqa`, `figureqa`, `matplotlib` |
 | Chemistry | `ChemVQA-2K`, `ChemVQA-2K-spacing-v1` |
-| Documents | `DocVQA` |
-| Electrical/electronics diagrams | `EEE-Bench` |
+| Documents / electronics | `DocVQA`, `EEE-Bench` |
 | Geometry | `geometry3k`, `GEOQA_8K_R1V`, `Geoperception` |
 | Graphs | `Graph-Algorithms`, `GraphVQA-Swift` |
-| Olympiad/problem diagrams | `OlympiadBench` |
-| Physics | `Physics` |
-| Spatial/3D scenes | `spatialvlm_qa` |
-| General image recreation | `generic` |
-
-The spacing variant adds the upstream chemistry legibility and spacing criteria.
-`generic` uses the upstream general-purpose prompt and four equally weighted
-categories: information, layout, text/annotations, and visual completeness.
-Strict-category geometry/graph modes and the custom strict-ceiling mode are excluded.
-Unknown names are rejected during preparation. Existing four-rubric task files remain valid.
+| Problem diagrams / physics / spatial scenes | `OlympiadBench`, `Physics`, `spatialvlm_qa` |
+| General recreation | `generic` |
 
 ```bash
 python -m resources_servers.vision2code.prepare /data/manifest.jsonl /data/tasks.jsonl
 ```
 
-Preparation validates each static PNG/JPEG/WebP/GIF, embeds its bytes in a
-Responses `input_image` data URL, and records absolute reference path, dimensions,
-and SHA-256 in `verifier_metadata`. It retains the upstream generation prompt and
-adds explicit output dimensions, available libraries, and `/workspace/output.png`.
-The verifier checks the reference hash again. References must be readable by the
-resource server; they are never uploaded to the renderer.
+Relative image paths resolve against the manifest directory. Preparation validates static
+PNG/JPEG/WebP/GIF images, embeds them in the policy input, and records their absolute paths,
+dimensions, and hashes in `verifier_metadata`. The resource server must still be able to read
+these files; changed references are rejected. A portable synthetic task is provided in
+[data/example.jsonl](data/example.jsonl).
 
-For a portable first run, use `resources_servers/vision2code/data/example.jsonl`.
-Its reference path resolves against the Gym checkout regardless of the resource
-server's working directory. It contains an original synthetic chart released under Apache-2.0,
-not a redistributed ChartQA example. `prepare.py` is the Gym row adapter; source
-dataset downloading and split selection remain with the dataset owner.
+## Renderer and evaluation
 
-## Build the renderer once
-
-The [Dockerfile](container/Dockerfile) pins the Python base digest, Debian snapshot,
-fonts, `unshare`, and Python dependencies. It includes matplotlib, NumPy, Pillow,
-pandas, NetworkX, DejaVu, and Liberation fonts. It contains no inference libraries,
-model weights, RDKit, Schemdraw, or notebook services.
-
-On a Docker build host:
+Build the renderer once on a Docker host, then place the `.sqsh` on the evaluation worker:
 
 ```bash
 docker build -t vision2code-render:1 resources_servers/vision2code/container
 enroot import -o /images/vision2code-render.sqsh dockerd://vision2code-render:1
 ```
 
-Alternatively, build with Podman and import `podman://localhost/vision2code-render:1`.
-On clusters without subordinate UID ranges, rootless Podman may need
-`--storage-opt overlay.ignore_chown_errors=true`. The Dockerfile runs apt as the
-build container's root to support this case. Use owned `XDG_RUNTIME_DIR` and
-`ENROOT_TEMP_PATH` directories for image import. The resulting local `.sqsh` must
-be accessible on the worker; evaluation does not import images or build containers.
+The image contains matplotlib, NumPy, Pillow, pandas, NetworkX, and DejaVu/Liberation fonts.
+Each submission runs in a fresh sandbox with network/PID isolation, a read-only rootfs,
+and a private writable `/workspace`. References and host credentials are not mounted.
+The launcher supplies `OUTPUT_PATH`, `TARGET_WIDTH`, and `TARGET_HEIGHT`; code must save
+`/workspace/output.png`. Defaults: 60-second execution timeout and eight concurrent renders.
+The worker or scheduler supplies resource limits; Enroot does not enforce per-attempt CPU/memory limits.
 
-## Check the target allocation
-
-Run this inside the Slurm worker allocation **before evaluation**, with the same
-Enroot installation and image. Point `--forbid-path` at an actual reference file
-and any host credential directory that must be absent:
+Optionally check isolation when setting up a new worker or renderer image; Slurm is optional.
+This diagnostic is separate from normal evaluation, which checks isolation before each render:
 
 ```bash
 python -m resources_servers.vision2code.smoke \
-  --image /images/vision2code-render.sqsh \
-  --artifacts /results/vision2code/isolation \
+  --image /images/vision2code-render.sqsh --artifacts /results/vision2code/isolation \
   --forbid-path /data/images/chem-001.png
 ```
 
-The probe checks blocked outbound networking, no network routes, an allowlisted
-process environment, hidden parent processes, and absent forbidden paths. Each
-render also checks namespace creation and mount visibility before executing code.
-The host home mount is disabled and the rootfs is read-only. The bundled Enroot
-[profile](enroot/mounts.d/10-renderer.fstab) selects only basic devices and private
-shared memory, with no site/user hooks, host `/run`, or `/sys` mounts. This avoids
-site hooks that would otherwise expose service-account credentials and Slurm IPC. Only the provider's unique `/workspace` mount is writable for task
-files. Enroot remains an HPC execution boundary with limited isolation; this is
-not a hardened adversarial multi-tenant runtime. Site hooks and mount configuration
-must pass the actual allocation smoke. There is no unsandboxed fallback.
+`--forbid-path` asserts that the supplied host path is **not visible inside the sandbox**;
+it does not configure mounts or deny access itself. Replace the example with a reference
+image that exists on your worker to check that generated code cannot read and copy it.
+Repeat the flag for additional reference or credential paths, or omit it to use the
+default home, checkout, and credential-directory checks. There is no
+unsandboxed fallback. Enroot is an HPC execution boundary, not a hardened multi-tenant runtime.
 
-Slurm supplies the worker CPU/memory limits; Enroot does **not** enforce per-attempt
-CPU/memory limits. Provision enough worker resources for four simultaneous renders,
-or lower `render_concurrency`. Every attempt unpacks a fresh rootfs; inspect the
-recorded startup time before considering any future reuse.
-
-## Configure and evaluate
-
-Both adapters connect to existing OpenAI-compatible chat-completions endpoints;
-this configuration does not launch inference services. Both models must
-accept image inputs. Policy and judge may use independent hosts, models, and keys.
-The endpoint URLs should include `/v1`.
+Configure existing inference services; Gym's adapters do not launch them:
 
 ```bash
 export VISION2CODE_SQSH=/images/vision2code-render.sqsh
 export VISION2CODE_ARTIFACTS=/results/vision2code/artifacts
 export VISION2CODE_POLICY_URL=http://policy-host:8000/v1
-export VISION2CODE_POLICY_MODEL=your-served-vision-model
+export VISION2CODE_POLICY_MODEL=your-vision-model
 export VISION2CODE_JUDGE_URL=http://judge-host:8000/v1
-export VISION2CODE_JUDGE_MODEL=your-served-vision-judge
-# VISION2CODE_POLICY_KEY and VISION2CODE_JUDGE_KEY default independently to EMPTY.
+export VISION2CODE_JUDGE_MODEL=your-vision-judge
+# Set VISION2CODE_POLICY_KEY and VISION2CODE_JUDGE_KEY if required; both default to EMPTY.
 
 gym env start --config resources_servers/vision2code/configs/vision2code.yaml
 
@@ -171,111 +105,176 @@ gym eval run --no-serve --agent vision2code_simple_agent \
   --num-repeats 1 --temperature 0.7 --max-output-tokens 8192
 ```
 
-`simple_agent` has no tools and `max_steps: 1`. No repair turn or judge feedback is
-sent to the policy. The resource config controls judge reference/sampling, local
-image/provider storage paths, execution timeout (60 seconds), render concurrency
-(4), and artifact directory. Namespace/mount behavior cannot be weakened through
-provider overrides. Judge transport and its retries are Gym's `call_judge`.
+Start with `--limit 1` and inspect the code, render, judge scores, and cleanup diagnostics.
+For optional feedback-driven revisions, see [Multi-pass revisions](#multi-pass-revisions).
+For reasoning endpoints, configure each model adapter's `uses_reasoning_parser` to match
+its response format. The optional [Qwen config](configs/vision2code_qwen.yaml) uses
+`NVIDIA_API_KEY` and the same hosted model for both roles; use an independent judge for baselining.
 
-The optional [hosted Qwen config](configs/vision2code_qwen.yaml) inherits this
-composition and overrides only policy/judge model settings. Set `NVIDIA_API_KEY`
-and `VISION2CODE_SQSH`, then pass that file to `gym env start --config`. Both roles
-use the same model in this convenience config; self-judged smoke rewards are not
-an independent benchmark quality estimate. For reasoning models, set the model
-adapter's `uses_reasoning_parser` according to the endpoint's response format.
+For NeMo RL, use `uv sync --frozen --extra dev` and keep per-server venvs on the base's
+Ray version, **2.56.1**. Before server setup, set `UV_CONSTRAINT` to a file containing
+`ray==2.56.1`; update reused venvs separately. RL trainer configuration is external to this environment.
 
-For a smoke test, limit collection to one row with `--limit 1`. Inspect its Python,
-rendered PNG, rubric selection, reward, cleanup diagnostics, and timings. Broader
-evaluation should cover each rubric with independently selected policy and judge models.
+## Multi-pass revisions
 
-## Results and artifacts
-
-`POST /verify` takes the normal Gym response and task row, and returns `reward`,
-`render`, `rubric_result`, `reward_power`, `judge_diagnostics`, `artifacts`, and `timings` alongside
-the normal Gym fields. Reward is `(final_rating_0_to_5 / 5.0) ** reward_power`,
-with **`reward_power: 2.0` by default**. Shaping is applied after rubric caps and
-rounding, including for the generic rubric. The upstream category
-weights, decimal rounding, critical-category caps, EEE background treatment, and
-blank-image inspection are preserved. Sparse whitespace is diagnostic only.
-Generic scoring preserves upstream behavior: an equal-weight mean, with no
-critical-category or automatic blank-image caps. Image inspection is still
-recorded; failed renders receive zero under every rubric.
-
-The squared curve reduces partial credit while preserving zero and full reward:
-
-| Final rubric rating | Linear reward (`reward_power: 1`) | Default reward (`reward_power: 2`) |
-| --- | --- | --- |
-| 1 / 5 | 0.20 | 0.04 |
-| 2 / 5 | 0.40 | 0.16 |
-| 3 / 5 | 0.60 | 0.36 |
-| 4 / 5 | 0.80 | 0.64 |
-| 5 / 5 | 1.00 | 1.00 |
-
-Set `vision2code.resources_servers.vision2code.reward_power=1` to reproduce the
-previous linear rewards, or use a larger finite power for stronger penalties.
-Powers below 1 are rejected. Version 0.2.0 changes the default reward curve;
-compare raw `rubric_result.final_rating_0_to_5` when evaluating runs with different
-powers. Saved results record the power used. Judge prompts and raw rubric scores
-are unchanged, and the renderer image does not need rebuilding.
-
-| Outcome | Reward | Masked | Judge called |
-| --- | --- | --- | --- |
-| Valid PNG | `(rubric rating / 5) ** reward_power` | no | yes |
-| Valid blank PNG | dataset blank cap, then shaping; generic uses judge scores, then shaping | no | yes |
-| Code error, timeout, missing/invalid PNG | 0 | no | no |
-| Sandbox/transfer/isolation failure | 0 placeholder | yes | no |
-| Judge transport or malformed/invalid score | 0 placeholder | yes | attempted |
-| Missing/changed reference | 0 placeholder | yes | no |
-
-Failures use `mask_sample`, `failure_kind`, `failure_reason`, compatibility
-`instance_config.mask_sample`, and `_ng_failure_class` so Gym excludes them from
-quality aggregates and routes them to its failure sidecar. A malformed judge reply
-is deliberately masked in this environment, overriding Gym's usual wrong-answer
-interpretation. There is no judge repair conversation or custom retry loop.
-
-Each attempt has a UUID directory containing:
-
-- `code.py`: normalized raw/fenced submission, without code repair.
-- `output.png`: only when a valid PNG was downloaded before sandbox teardown.
-- `execution.json`: process results, isolation/mount checks, dimensions, cleanup,
-  and startup/render/cleanup/total seconds.
-- `judge.json`: received judge response and candidate inspection, or transport error.
-- `result.json`: reward, mask, rubric category breakdown/caps, diagnostics, artifact
-  paths, and timings; omits the large input data URLs and policy response.
-
-The renderer rejects symlinks, nonregular files, non-PNG/unreadable images,
-animated PNGs, files over 32 MiB, and images over 25 million pixels. Dimension
-mismatches are recorded without resizing or rewriting the output. `savefig` is
-never overridden. Cancellation waits for bounded start/exec operations and sandbox
-stop before propagating; `execution.json` records cleanup failures if infrastructure
-prevents teardown. A hard worker kill cannot run Python cleanup.
-
-## Tests
+The agent reuses `SimpleAgent` for model requests, verification, cookies, and rollout
+capture. Enable up to three generate-and-verify passes, including the initial attempt:
 
 ```bash
-python -m pytest resources_servers/vision2code/tests
-
-# With the configuration variables above set (no inference or containers started):
-gym env validate vision2code
-gym env test vision2code
-gym env publish vision2code
-
-# Real execution, inside the intended worker allocation:
-VISION2CODE_TEST_SQSH=/images/vision2code-render.sqsh \
-  python -m pytest resources_servers/vision2code/tests/test_enroot_integration.py
-
-pre-commit run --files $(git ls-files --cached --others --exclude-standard resources_servers/vision2code)
+gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
+  +vision2code_simple_agent.responses_api_agents.vision2code_agent.num_passes=3
 ```
 
-The committed golden fixtures were produced from the existing upstream checkout,
-not from the port, and require no external repository. They cover all 17 rubric
-definitions and prompts, scores/rounding/caps, sparse/blank handling, and invalid
-scores. Tests also cover preparation, Gym image schemas, failure masking,
-concurrency, transfers, limits, dimensions, and cancellation during startup and exec.
+Continue using `--agent vision2code_simple_agent` in `gym eval run`; the instance name
+is retained for compatibility.
+Agent settings live under `vision2code_simple_agent.responses_api_agents.vision2code_agent`:
 
-The exported verifier fixture exercises production rubric aggregation and reward
-normalization for full, zero, and malformed scores across all 17 rubrics (51 cases). It
-does not attest live judge quality or sandbox behavior; those have separate server,
-Enroot, and model rollout checks. The current legacy CI data validator still asks
-for five example rollouts even for manifest workloads; this environment follows
-the manifest contract and does not fabricate extra rollouts to satisfy that check.
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `num_passes` | `1` | Maximum generate-and-verify cycles, including the initial attempt. Positive integer; no fixed upper bound. |
+| `max_steps` | `1` | Fixed at one policy response per pass. Use `num_passes` for revisions. |
+| `skip_verification` | `false` | Inherited single-pass option; incompatible with multiple passes. |
+
+Each pass submits a complete Python program. After a successful render, feedback lists
+the readable label and judge rationale for each category scored below 5, under
+"Improve on these." Scores, weights, perfect-score categories, overall issues, and the
+overall summary are omitted. If no category needs correction but the configured reward
+still permits another pass (for example, with Blend A), feedback asks the model to recheck
+the image against the reference. A failed render supplies its status, return code, error
+type, and at most the last 4,000 characters of stderr. The conversation retains the
+original reference, instructions, previous responses, and feedback. The generated PNG
+is not added to the policy conversation.
+
+The loop stops at exact reward `1.0`, the pass limit, or a masked infrastructure/judge
+failure. Early stopping uses the configured verifier reward, including reward shaping
+or Blend A. Code errors, timeouts, and invalid images can be revised.
+
+The **last attempt** supplies the returned response, reward, rubric, and artifact paths,
+even if an earlier attempt scored higher. Multi-pass results add an `attempts` list
+with each pass's number, reward, feedback, and artifacts. Policy token usage and rollout
+trajectory include all executed passes. With `num_passes=1`, the agent delegates directly
+to `SimpleAgent` and preserves its response format.
+
+Every pass uses a fresh Enroot sandbox from the same image. Files, processes, and Python
+state do not persist; only conversation history carries forward. This prevents a stale
+`output.png` or modified workspace from affecting the next score.
+
+Each additional pass costs a policy call and render, plus a judge call for a valid image.
+The default execution timeout is 60 seconds **per render**. Model output-token limits
+apply per call; the agent has no aggregate token or wall-clock budget. Start with a small
+pass budget and inspect timings before increasing it.
+
+## Performance
+
+Inspect `render.timings` (startup, execution, cleanup) and `timings.judge_s` in each
+attempt's `result.json` before tuning. A fresh sandbox preserves independent attempts;
+reusing a live workspace can let stale outputs or modified files affect scores.
+
+The renderer uses one combined network/PID isolation and mount probe before running
+code. Workspace setup is shared by evaluation and the isolation smoke. Use node-local
+temporary storage for Enroot's `data_path` and `runtime_path` when cluster defaults point
+to a shared filesystem. These existing provider settings live under
+`vision2code.resources_servers.vision2code.sandbox_provider.enroot.create`.
+
+Increase `render_concurrency` only when render queueing limits throughput and the worker
+has enough CPU and memory. Increase evaluation `--concurrency` to overlap model/judge
+latency across tasks within endpoint capacity. Passes within a task remain sequential.
+Changing judge models, reasoning settings, or token limits may change scores; validate
+those separately rather than treating them as equivalent performance optimizations.
+
+## Rewards
+
+All three modes return rewards in `[0, 1]`. Let `R` be the final rubric rating in `[0, 5]`
+and `L` the raw weighted judge score before caps and final rounding.
+
+| Mode | Configuration | Reward |
+| --- | --- | --- |
+| Normal (linear) | `use_blended_reward=false`, `reward_power=1` | `R / 5` |
+| Squared (default) | `use_blended_reward=false`, `reward_power=2` | `(R / 5)²` |
+| Blend A | `use_blended_reward=true` | `0.1 × RGB + 0.2 × foreground F1 + 0.2 × edge F1 + 0.5 × (L / 5)` |
+
+A **rubric** is the checklist given to the vision judge. It scores each category from 0 to 5
+and explains its assessment. Categories and weights depend on the image type: ChartQA uses
+numeric information (30%), chart structure/layout (30%), text/label accuracy and legibility
+(25%), and completeness (15%). Chemistry rubrics instead emphasize chemical structure and
+labels. The generic rubric weights information, layout, text, and completeness equally.
+
+The weighted category mean is `L`. Dataset rubrics then apply **caps**: maximum allowed
+ratings when critical categories are weak or the image is blank/degenerate. For example,
+a chart with correct numbers but the wrong orientation/type can be capped at 3.5/5.
+After caps and rounding, the result is `R`; generic scoring has no automatic caps.
+`R=4` gives **0.8 normal** or **0.64 squared**. Other finite powers of at least 1 remain supported.
+
+**We removed the `mostly_empty_canvas` filter from reward penalties.** Sparse diagrams
+are not capped merely for having a mostly white or black canvas. The flag remains in
+inspection diagnostics; other blank/degenerate checks and dataset-specific caps still apply.
+
+Blend A mixes three computed image metrics with the judge's assessment:
+
+| Component | What it measures | Reward weight |
+| --- | --- | --- |
+| Foreground RGB similarity | How closely pixel colors match where either image has foreground content. Empty background does not inflate the score. | 10% |
+| Foreground F1 | Whether drawn regions occur in the right places, balancing extra content against missing content. | 20% |
+| Edge F1 | Whether boundaries, lines, and outlines occur in the right places. | 20% |
+| Raw judge score `L / 5` | Rubric-based correctness, layout, and readability that pixel matching alone cannot assess. | 50% |
+
+The three image metrics range from 0 to 1, with 1 meaning a perfect match under that metric.
+Foreground means pixels sufficiently different from the reference's estimated background color.
+F1 combines precision (how much generated content matches the reference) and recall (how much
+reference content was reproduced); a match may be within **2 pixels** in the analysis image.
+
+The candidate is placed at the top-left of a canvas matching the reference dimensions;
+overflow is cropped and uncovered space uses the estimated background color. Both images are
+then downscaled together if the longest side exceeds **1024 pixels**. There is no automatic
+alignment (image registration), so shifted drawings can lose credit.
+
+Blend A uses **raw `L`**, bypassing rubric caps and `reward_power`. For example, RGB=0.9,
+foreground F1=0.8, edge F1=0.7, and `L=4` give reward **0.79**. The blended 0–5 rating is rounded
+to four decimals before division by 5. If a metric is undefined, such as when neither image
+has any edges, the sample is masked (excluded from scored aggregates); the remaining components
+do not receive its weight.
+
+Choose a mode by appending an override to `gym env start`:
+
+```bash
+# Normal; omit the override for default squared rewards.
+gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
+  +vision2code.resources_servers.vision2code.reward_power=1
+
+# Blend A; ignores reward_power.
+gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
+  +vision2code.resources_servers.vision2code.use_blended_reward=true
+```
+
+## Failures and artifacts
+
+Code errors, timeouts, and missing/invalid PNGs receive **zero** without a judge call.
+Infrastructure failures, missing/changed references, judge failures, and invalid judge scores
+are **masked** and excluded from quality aggregates. Masking fields and failure-sidecar routing
+are retained in the rollout.
+
+Artifacts include `code.py`, reference `image.png`, valid `output.png`, `execution.json`,
+`judge.json`, and `result.json` in a unique attempt directory. Results include category scores, caps,
+reward settings, timings, and cleanup diagnostics. Outputs must be regular, readable,
+nonanimated PNGs of at most 32 MiB and 25 million pixels. Dimension mismatches are recorded;
+the renderer does not resize outputs. Cancellation waits for bounded execution and cleanup.
+
+## Validation and provenance
+
+```bash
+python -m pytest resources_servers/vision2code/tests responses_api_agents/vision2code_agent/tests
+
+# Real renderer tests, on an Enroot worker:
+VISION2CODE_TEST_SQSH=/images/vision2code-render.sqsh \
+  python -m pytest resources_servers/vision2code/tests/test_enroot_integration.py
+```
+
+Golden fixtures cover all 17 rubrics, exact prompts, rounding/caps, failure results, and
+Blend A metrics. Server tests cover reward modes, masking, concurrency, and cancellation;
+the offline verifier fixture checks aggregation only. Live judge quality requires model rollouts.
+
+Adapted from [Vision2Code](https://github.com/image2code/vision2code), under Apache-2.0;
+see [NOTICE](NOTICE), [LICENSE.upstream](LICENSE.upstream), and [provenance](tests/fixtures/provenance.json).
+Dataset licenses are separate. This is a configurable environment, not a reproduction of all
+upstream benchmark results. The [catalog entry](../../environments/vision2code/manifest.yaml)
+remains experimental and unverified pending broader baselining.

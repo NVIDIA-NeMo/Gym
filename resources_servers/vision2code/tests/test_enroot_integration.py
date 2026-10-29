@@ -17,12 +17,7 @@ pytestmark = [
         not IMAGE or not shutil.which("enroot"), reason="Set VISION2CODE_TEST_SQSH in an Enroot worker allocation"
     ),
 ]
-PROVIDER = {
-    "enroot": {
-        "create": {"mount_point": "/workspace"},
-        "probe": {"command": "test -d /workspace", "expected_stdout": None},
-    }
-}
+PROVIDER = {"enroot": {}}
 VALID = "from PIL import Image\nImage.new('RGB',(TARGET_WIDTH,TARGET_HEIGHT),'white').save(OUTPUT_PATH)"
 
 

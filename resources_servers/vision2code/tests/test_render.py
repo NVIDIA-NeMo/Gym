@@ -39,8 +39,8 @@ def fake_sandbox(monkeypatch):
         async def start(self):
             if self.mode == "create_failure":
                 raise RuntimeError("unpack failed")
-            self.entered.set()
             if self.mode == "cancel_start":
+                self.entered.set()
                 await self.gate.wait()
 
         async def upload(self, local_path, remote_path):
@@ -48,13 +48,9 @@ def fake_sandbox(monkeypatch):
 
         async def exec(self, command, **kwargs):
             self.commands.append(command)
-            if command.endswith("/bin/true"):
-                return SandboxExecResult(
-                    "",
-                    "unshare denied" if self.mode == "isolation_failure" else "",
-                    1 if self.mode == "isolation_failure" else 0,
-                )
             if "mountinfo" in command:
+                if self.mode == "isolation_failure":
+                    return SandboxExecResult("", "unshare denied", 1)
                 if self.mode == "mount_failure":
                     return SandboxExecResult('{"unexpected":["/run/secrets"]}', "", 1)
                 return SandboxExecResult('{"mounts":["/","/workspace"],"unexpected":[]}', "", 0)
@@ -138,6 +134,7 @@ async def test_lifecycle(fake_sandbox, tmp_path, mode, status):
     assert dict(os.environ) == previous
     assert instances[0].environment["ENROOT_MOUNT_HOME"] == "no"
     assert instances[0].provider["enroot"]["create"]["rw"] is False
+    assert instances[0].provider["enroot"]["create"]["mount_point"] == "/workspace"
     assert result.status == status
     assert instances[0].stopped == (mode != "stop_failure")
     assert json.loads((tmp_path / "execution.json").read_text())["status"] == status
@@ -147,6 +144,8 @@ async def test_lifecycle(fake_sandbox, tmp_path, mode, status):
         assert "unshare --user --map-current-user --net" in instances[0].commands[0]
     if mode in {"symlink", "oversized", "missing_output", "isolation_failure", "mount_failure"}:
         assert not instances[0].downloaded
+    if mode in {"isolation_failure", "mount_failure"}:
+        assert not any("launcher.py" in command for command in instances[0].commands)
     if mode == "ok":
         assert (result.width, result.height, result.dimension_mismatch) == (40, 50, False)
         assert (tmp_path / "output.png").exists()
@@ -172,9 +171,9 @@ async def test_cancellation_waits_for_cleanup(fake_sandbox, tmp_path, stage):
     cls.gate = asyncio.Event()
     cls.stop_gate = asyncio.Event()
     task = asyncio.create_task(attempt(tmp_path))
-    while not instances or (stage == "cancel_exec" and len(instances[0].commands) < 3):
+    while not instances:
         await asyncio.sleep(0)
-    await instances[0].entered.wait()
+    await asyncio.wait_for(instances[0].entered.wait(), timeout=5)
     task.cancel()
     await asyncio.sleep(0)
     assert not task.done()

@@ -6,7 +6,7 @@ vision2code:
       entrypoint: app.py
       domain: coding
       verified: false
-      description: Single-turn image recreation with isolated Python rendering and dataset or generic rubric rewards
+      description: Image recreation with optional feedback-driven revision, isolated Python rendering, and rubric rewards
       value: Evaluate charts, chemistry, documents, circuits, geometry, graphs, physics, and spatial scenes with 17 rubrics
       judge_model_server:
         type: responses_api_models
@@ -19,7 +19,7 @@ vision2code:
         enroot: {}
       sandbox_image: ${oc.env:VISION2CODE_SQSH}
       execution_timeout: 60
-      render_concurrency: 4
+      render_concurrency: 8
       reward_power: 2.0
       # Opt in to reference Blend A / 5; uses raw LLM scores and ignores reward_power.
       # 0.1 * foreground_RGB + 0.2 * foreground_F1 + 0.2 * edge_F1 + 0.5 * raw_LLM/5.
@@ -32,9 +32,10 @@ vision2code:
 
 vision2code_simple_agent:
   responses_api_agents:
-    simple_agent:
+    vision2code_agent:
       entrypoint: app.py
-      max_steps: 1
+      # Stop early at reward == 1; otherwise return the last of up to num_passes attempts.
+      num_passes: 1
       resources_server:
         type: resources_servers
         name: vision2code

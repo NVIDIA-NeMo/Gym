@@ -50,6 +50,22 @@ See [Integrate Existing Agents](/agent-server/integrate-existing-agents) to use 
 
 ## Server Configuration
 
+### Vision2Code revision passes
+
+Vision2Code uses `vision2code_agent`, an extension of `simple_agent`, for Python image
+recreation. It defaults to one generate-and-verify pass. Enable up to three with:
+
+```bash
+gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
+  +vision2code_simple_agent.responses_api_agents.vision2code_agent.num_passes=3
+```
+
+Continue using `--agent vision2code_simple_agent` to collect rollouts. Each pass uses a
+fresh sandbox and receives feedback from the previous attempt. The loop stops at reward
+`1.0`, the pass limit, or a masked infrastructure/judge failure, and returns the last attempt.
+See the [environment README](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/vision2code/README.md)
+for setup, revision behavior, budgets, result fields, and rewards.
+
 To add conversations, tool timing, and model-call references to a custom harness, see
 [Rollout Evidence](/main/observability/rollout-evidence#add-evidence-to-a-custom-agent).
 
