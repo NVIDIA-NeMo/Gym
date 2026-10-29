@@ -27,6 +27,10 @@ from nemo_gym.openai_utils import (
 )
 
 
+# Claude Code reports a model stop_reason "refusal" as an is_error result with subtype "success" and this text.
+USAGE_POLICY_REFUSAL = "appears to violate our Usage Policy"
+
+
 def _extract_text(content: list[Any]) -> str:
     return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
 
@@ -96,6 +100,8 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                 result_metadata["subtype"] = event["subtype"]
             if isinstance(event.get("is_error"), bool):
                 result_metadata["is_error"] = event["is_error"]
+            if event.get("is_error") is True and isinstance(event.get("result"), str) and event["result"]:
+                result_metadata["error_message"] = event["result"][:2000]
             duration_ms = event.get("duration_ms")
             if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool) and duration_ms >= 0:
                 result_metadata["duration_ms"] = float(duration_ms)
@@ -237,8 +243,10 @@ def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tup
     subtype = metadata.get("subtype")
     if subtype == "error_max_turns":
         return "incomplete", subtype
-    if metadata.get("is_error") is True or (isinstance(subtype, str) and subtype.startswith("error_")):
-        return "failed", subtype if isinstance(subtype, str) else "agent_error"
+    if isinstance(subtype, str) and subtype.startswith("error_"):
+        return "failed", subtype
+    if metadata.get("is_error") is True:
+        return "failed", "refusal" if USAGE_POLICY_REFUSAL in metadata.get("error_message", "") else "agent_error"
     if returncode not in (0, None):
         return "failed", f"process_exit_{returncode}"
     if subtype == "success":

@@ -548,7 +548,9 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
     async def interrupted(**kwargs):
         result = await launch(**kwargs)
         sandbox.files[f"{payloads[-1]['directory']}/stdout.jsonl"] = (
-            json.dumps({"type": "error"}) if error_event else ""
+            json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": 400}}})
+            if error_event
+            else ""
         )
         return result
 
@@ -562,6 +564,9 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
         if error_event:
             assert response.status_code == 502
             assert "OpenCode emitted an error event" in response.json()["detail"]
+            assert (
+                '"name": "APIError"' in response.json()["detail"] and '"statusCode": 400' in response.json()["detail"]
+            )
         else:
             assert response.status_code == 200 and response.json()["status"] == "incomplete"
         invocation = roots(close(client, request)["agent_observations"])[-1]

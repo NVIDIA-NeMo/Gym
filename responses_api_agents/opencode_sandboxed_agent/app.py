@@ -83,7 +83,11 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
-from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_agent.observability import (
+    append_opencode_turns,
+    opencode_tool_outcome,
+    scope_opencode_trajectory,
+)
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
     OPENCODE_VERSION,
@@ -245,19 +249,17 @@ def parse_opencode_observations(
             conversation.append(call)
             first_item_id_by_message.setdefault((session_id, message_id), call_id)
             native_time = state.get("time") if isinstance(state.get("time"), dict) else {}
-            # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
-            if native_status == "completed" and native_time.get("compacted") is not None:
-                observed_tool_output = "[Old tool result content cleared]"
-            else:
-                observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
-            if observed_tool_output is not None:
+            outcome = opencode_tool_outcome(part.get("tool"), state)
+            if outcome.output is not None:
                 result = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=call_id,
-                    output=str(observed_tool_output),
+                    output=outcome.output,
                     status=response_status,
                 )
                 conversation.append(result)
+            if outcome.gap is not None:
+                gaps.append(ObservationGap(code=outcome.gap, invocation_id=session_id, detail=observed_call_id))
 
             native_start = native_time.get("start")
             native_end = native_time.get("end")
@@ -271,26 +273,7 @@ def parse_opencode_observations(
             started_at = _milliseconds(native_start) if valid_interval else None
             completed_at = _milliseconds(native_end) if valid_interval else None
             duration_ms = float(native_end - native_start) if valid_interval else None
-            status = {
-                "completed": "completed",
-                "error": "failed",
-                "running": "incomplete",
-                "pending": "incomplete",
-            }.get(native_status, "unknown")
-            if native_status == "completed" and part.get("tool") == "bash":
-                # Completion describes the tool lifecycle, not shell success. Timeout/abort
-                # can complete that lifecycle with a null exit code in the native artifact.
-                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-                exit_code = metadata.get("exit")
-                if type(exit_code) is int:
-                    status = "completed" if exit_code == 0 else "failed"
-                else:
-                    status = "unknown"
-                    gaps.append(
-                        ObservationGap(
-                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
-                        )
-                    )
+            status = outcome.status
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -302,7 +285,7 @@ def parse_opencode_observations(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if status == "failed" else None,
+                        error_type=outcome.error_type,
                     )
                 )
             else:
@@ -337,7 +320,7 @@ def parse_opencode_observations(
             child_id = metadata.get("sessionId")
             if isinstance(child_id, str) and observed_call_id is not None:
                 child_tools.setdefault(child_id, set()).add(observed_call_id)
-                child_status[child_id] = status
+                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(status, status)
             continue
         if ptype == "compaction":
             compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))
