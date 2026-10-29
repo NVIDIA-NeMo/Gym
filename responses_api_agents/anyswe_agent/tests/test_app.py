@@ -28,7 +28,7 @@ from types import SimpleNamespace
 import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
+from responses_api_agents.anyswe_agent.agent_runner import _REPO_CANDIDATES, _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
@@ -158,6 +158,7 @@ class TestSandboxAPI:
         )
         assert config.sandbox_provider == "sandbox"
         assert config.agent_runtime_source == "baked"
+        assert config.sanitize_repo_git is True
 
     def test_image_uses_swebench_tag_format(self) -> None:
         image = AnySweAgent._sandbox_image(
@@ -286,7 +287,122 @@ class TestSandboxAPI:
         assert "agent_deps_url" not in result
 
 
+_SANITIZE_SCRIPT = Path(__file__).parent.parent / "setup_scripts" / "sanitize_repo_git.sh"
+
+
+def _git_env(tmp_path: Path) -> dict[str, str]:
+    # The script registers the repo as a safe.directory in the global git config.
+    return os.environ | {
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_GLOBAL": str(tmp_path / ".gitconfig"),
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+
+
+def _git(repo: Path, env: dict[str, str], *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _has_object(repo: Path, env: dict[str, str], sha: str) -> bool:
+    return subprocess.run(["git", "cat-file", "-e", sha], cwd=repo, env=env, capture_output=True).returncode == 0
+
+
+def _repo_with_future_fix(repo: Path, env: dict[str, str]) -> tuple[str, str]:
+    """main has a base commit and a later fix commit, HEAD at the fix."""
+    repo.mkdir()
+    _git(repo, env, "init", "-q", "-b", "main")
+    (repo / "a.py").write_text("bug\n")
+    _git(repo, env, "add", "-A")
+    _git(repo, env, "commit", "-qm", "base")
+    base = _git(repo, env, "rev-parse", "HEAD")
+    (repo / "a.py").write_text("fix\n")
+    _git(repo, env, "commit", "-qam", "upstream fix")
+    return base, _git(repo, env, "rev-parse", "HEAD")
+
+
+def _sanitize(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    # The agent runs the script as root through `su -s /bin/sh`, so it has to stay POSIX sh.
+    return subprocess.run(["sh", str(_SANITIZE_SCRIPT), str(repo)], env=env, capture_output=True, text=True)
+
+
 class TestSetupScriptsExist:
+    def test_sanitize_repo_git_keeps_only_head_ancestry(self, tmp_path) -> None:
+        env, repo = _git_env(tmp_path), tmp_path / "repo"
+        base, fix = _repo_with_future_fix(repo, env)
+        _git(repo, env, "tag", "v1.0")
+        _git(repo, env, "remote", "add", "origin", "https://example.com/repo.git")
+        _git(repo, env, "checkout", "-q", base)
+
+        assert _sanitize(repo, env).returncode == 0
+        assert _git(repo, env, "rev-parse", "HEAD") == base
+        assert _git(repo, env, "log", "--all", "--format=%H").split() == [base]
+        assert _git(repo, env, "remote") == ""
+        assert not _has_object(repo, env, fix)
+
+    def test_sanitize_repo_git_keeps_the_branch_next_to_a_same_named_tag(self, tmp_path) -> None:
+        env, repo = _git_env(tmp_path), tmp_path / "repo"
+        base, fix = _repo_with_future_fix(repo, env)
+        _git(repo, env, "tag", "main")
+        _git(repo, env, "reset", "-q", "--hard", base)
+
+        assert _sanitize(repo, env).returncode == 0
+        assert _git(repo, env, "symbolic-ref", "HEAD") == "refs/heads/main"
+        assert _git(repo, env, "rev-parse", "HEAD") == base
+        assert _git(repo, env, "for-each-ref", "--format=%(refname)") == "refs/heads/main"
+        assert not _has_object(repo, env, fix)
+
+    def test_sanitize_repo_git_copies_the_objects_a_shared_clone_borrows(self, tmp_path) -> None:
+        env, source, clone = _git_env(tmp_path), tmp_path / "source", tmp_path / "clone"
+        base, fix = _repo_with_future_fix(source, env)
+        subprocess.run(["git", "clone", "-q", "--shared", str(source), str(clone)], env=env, check=True)
+        _git(clone, env, "checkout", "-q", base)
+
+        assert _sanitize(clone, env).returncode == 0
+        assert _git(clone, env, "cat-file", "-p", "HEAD:a.py") == "bug"
+        assert not (clone / ".git" / "objects" / "info" / "alternates").exists()
+        assert not _has_object(clone, env, fix)
+        assert _has_object(source, env, fix)
+
+    def test_sanitize_repo_git_leaves_no_dangling_symref_after_a_plain_clone(self, tmp_path) -> None:
+        # A plain clone writes refs/remotes/origin/HEAD as a symref to origin/main. Deleting it must remove the
+        # symref itself, not only its target, or git fsck reports an invalid pointer.
+        env, source, clone = _git_env(tmp_path), tmp_path / "source", tmp_path / "clone"
+        base, _ = _repo_with_future_fix(source, env)
+        subprocess.run(["git", "clone", "-q", str(source), str(clone)], env=env, check=True)
+        assert _git(clone, env, "symbolic-ref", "refs/remotes/origin/HEAD") == "refs/remotes/origin/main"
+        _git(clone, env, "checkout", "-q", base)
+
+        assert _sanitize(clone, env).returncode == 0
+        assert not (clone / ".git" / "refs" / "remotes" / "origin" / "HEAD").exists()
+        assert _git(clone, env, "for-each-ref", "--format=%(refname)") == ""
+        fsck = subprocess.run(["git", "fsck"], cwd=clone, env=env, capture_output=True, text=True)
+        assert fsck.returncode == 0, fsck.stderr
+
+    def test_sanitize_repo_git_fails_when_a_ref_cannot_be_deleted(self, tmp_path) -> None:
+        env, repo = _git_env(tmp_path), tmp_path / "repo"
+        base, _ = _repo_with_future_fix(repo, env)
+        _git(repo, env, "checkout", "-q", base)
+        (repo / ".git" / "refs" / "heads" / "main.lock").write_text("")
+
+        assert _sanitize(repo, env).returncode != 0
+
+    def test_sanitize_repo_git_rejects_a_gitfile_checkout(self, tmp_path) -> None:
+        env, repo = _git_env(tmp_path), tmp_path / "repo"
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(tmp_path / "meta"), str(repo)], env=env, check=True
+        )
+
+        result = _sanitize(repo, env)
+        assert result.returncode != 0
+        assert "gitfile" in result.stderr
+
+    def test_sanitize_repo_git_defaults_to_the_runner_repo_candidates(self) -> None:
+        defaults = next(line for line in _SANITIZE_SCRIPT.read_text().splitlines() if "|| set -- " in line)
+        assert tuple(defaults.split("|| set -- ")[1].split()) == _REPO_CANDIDATES
+
     def test_supported_agents_have_deps_scripts(self) -> None:
         scripts = Path(__file__).parent.parent / "setup_scripts"
         assert (scripts / "hermes_agent_deps.sh").exists()

@@ -210,6 +210,8 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     swebench_tests_timeout: int = 1800
     swebench_agent_timeout: int = 2700
     concurrency: int = 256
+    # Drop branches, tags and remotes beyond HEAD so the upstream fix is not in `git log --all`.
+    sanitize_repo_git: bool = True
 
 
 class AnySweServerConfig(BaseModel):
@@ -665,6 +667,11 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     timeout_s=30,
                     user="root",
                 )
+            if params.sanitize_repo_git:
+                sanitize_script = (Path(__file__).parent / "setup_scripts" / "sanitize_repo_git.sh").read_text()
+                sanitized = await sandbox.exec(sanitize_script, timeout_s=900, user="root")
+                if sanitized.return_code != 0:
+                    raise RuntimeError(f"repo git sanitize failed: {(sanitized.stderr or '')[:300]}")
             runtime_dir = "/sandbox/agent_deps_runtime" if external_runtime else "/agent_deps_mount"
             agent_env = self._sandbox_agent_env(params)
             agent_env["NGSWE_AGENT_DEPS_DIR"] = runtime_dir
