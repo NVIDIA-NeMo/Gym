@@ -80,7 +80,7 @@ from nemo_gym.token_id_capture.staging.routes import (
     encode_routed_experts,
     routed_experts_token_count,
 )
-from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
+from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call, select_terminal_calls
 
 # Terminal selection is shared with the existing capture path.
 # Rows with a ``staging_key`` use their recorded response and content fingerprints.
@@ -145,6 +145,7 @@ __all__ = [
     "routed_experts_token_count",
     "resolve_terminal",
     "select_terminal_call",
+    "select_terminal_calls",
     "staging_key",
     "verify_and_linearize",
 ]

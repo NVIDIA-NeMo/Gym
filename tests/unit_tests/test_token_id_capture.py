@@ -2349,7 +2349,7 @@ async def test_file_lineage_cache_is_lru_and_keeps_nodes_metadata_only(tmp_path)
 
     assert "r-a" in resolver._cache
     assert "r-b" not in resolver._cache
-    node = resolver._cache["r-a"][2].by_call_id["r-a-c1"]
+    node = resolver._cache["r-a"][2][(None, None)].by_call_id["r-a-c1"]
     assert node.cum_tokens is None
     assert node.entry_offset >= 0
 
@@ -2558,7 +2558,7 @@ def test_served_calls_do_not_link_across_a_changed_system_prompt(tmp_path):
 
 async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
     class _FailingResolver:
-        async def resolve(self, rollout_id, request_items):
+        async def resolve(self, rollout_id, request_items, *, identity=None):
             raise RuntimeError("resolver unavailable")
 
         def is_process_shared(self):
@@ -2838,7 +2838,7 @@ class _ConfiguredLineage:
     def __init__(self, namespace: str = "") -> None:
         self.namespace = namespace
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]):
+    async def resolve(self, rollout_id: str, request_items: list[dict], *, identity=None):
         return LineageResolution(ParentResolutionStatus.ROOT)
 
     def is_process_shared(self) -> bool:

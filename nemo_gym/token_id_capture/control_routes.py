@@ -73,11 +73,16 @@ def install_rollout_control_routes(
     @router.get("/rollouts/{capture_key}/manifest")
     async def rollout_manifest(
         capture_key: str,
+        agent_instance: str | None = None,
+        agent_kind: str | None = None,
+        model_ref: str | None = None,
         authorization: str | None = Header(default=None),
     ) -> dict:
         check_auth(authorization)
         try:
-            return await lineage_store.manifest(capture_key)
+            return await lineage_store.manifest(
+                capture_key, agent_instance=agent_instance, agent_kind=agent_kind, model_ref=model_ref
+            )
         except RolloutRetiredError as error:
             # Gone, not empty: an empty manifest would read as a rollout that made no calls.
             raise HTTPException(status_code=410, detail=str(error)) from error
@@ -144,13 +149,28 @@ class RolloutControlClient:
         self._headers = {"Authorization": f"Bearer {auth_token}"}
         self._request_timeout_s = request_timeout_s
 
-    async def manifest(self, capture_key: str) -> RolloutManifest:
-        """Fetch a rollout's manifest. A retired rollout raises ``RolloutRetiredError``."""
+    async def manifest(
+        self,
+        capture_key: str,
+        *,
+        agent_instance: str | None = None,
+        agent_kind: str | None = None,
+        model_ref: str | None = None,
+    ) -> RolloutManifest:
+        """Fetch a rollout's manifest. A retired rollout raises ``RolloutRetiredError``.
+
+        The filters select one agent instance, agent kind, or serving model server name;
+        failures that apply to the whole episode are returned under every filter.
+        """
         from nemo_gym.token_id_capture.store import validate_rollout_id
 
         # Validate before building the URL: dot segments are normalized, so "../rollouts/r1" would fetch r1.
         validate_rollout_id(capture_key)
-        response = await self._request("GET", f"/rollouts/{capture_key}/manifest")
+        filters = {"agent_instance": agent_instance, "agent_kind": agent_kind, "model_ref": model_ref}
+        params = {name: value for name, value in filters.items() if value is not None}
+        response = await self._request(
+            "GET", f"/rollouts/{capture_key}/manifest", **({"params": params} if params else {})
+        )
         if response.status == 410:
             raise RolloutRetiredError(f"rollout {capture_key} is retired: {await response.text()}")
         if response.status != 200:

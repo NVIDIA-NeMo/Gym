@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from nemo_gym.token_id_capture.groups import GroupKey, row_group
 from nemo_gym.token_id_capture.staging.records import (
     TERMINAL_AMBIGUOUS,
     TERMINAL_DUPLICATE_CALL_ID,
@@ -111,3 +112,16 @@ def select_terminal_call(records: Sequence[CallRecord]) -> TerminalSelection:
         if len(pool) > 1:
             return TerminalSelection(None, AMBIGUOUS_TERMINAL)
         node = pool[0]
+
+
+def select_terminal_calls(records: Sequence[CallRecord]) -> dict[GroupKey, TerminalSelection]:
+    """Select a terminal call for each group of a manifest: the calls of one agent instance on one model server.
+
+    Parent links never cross groups, so selecting over the whole manifest of an episode with several agent
+    instances would see several unrelated roots. Each group gets its own walk; the key is
+    ``(agent instance, model server name)``, with ``None`` for an unnamed agent or server.
+    """
+    groups: dict[GroupKey, list[CallRecord]] = {}
+    for record in records:
+        groups.setdefault(row_group(record), []).append(record)
+    return {group: select_terminal_call(group_records) for group, group_records in groups.items()}

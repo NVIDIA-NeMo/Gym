@@ -42,6 +42,7 @@ from uuid import uuid4
 
 import orjson
 
+from nemo_gym.token_id_capture.groups import OutcomeAttribution, inherited_identity_columns
 from nemo_gym.token_id_capture.protocols import (
     RolloutRemovalPayload,
     TokenCaptureFrozenError,
@@ -400,16 +401,40 @@ class TokenCaptureStore:
             self._record_engine_refusal, rollout_id, model_call_id, code, parent_call_id, parent_resolution
         )
 
-    def _dangling_intents(self, rollout_id: str, entries: tuple[TokenEntry, ...], state: dict[str, Any]) -> list[str]:
-        path = self.intents_path_for(rollout_id)
+    def _call_lines(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
             return []
+        return [_read_call_line(line) for line in path.read_bytes().splitlines() if line.strip()]
+
+    def _dangling_intents(
+        self, rollout_id: str, entries: tuple[TokenEntry, ...], state: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         # An entry or a refusal resolves an intent; a refused call never generated, so it was
         # not lost.
         resolved = {entry.model_call_id for entry in entries}
         resolved.update(str(record["model_call_id"]) for record in state.get("engine_refusals") or [])
-        intents = [_read_call_line(line)["model_call_id"] for line in path.read_bytes().splitlines() if line.strip()]
-        return [call_id for call_id in intents if call_id not in resolved]
+        intents = self._call_lines(self.intents_path_for(rollout_id))
+        return [intent for intent in intents if intent["model_call_id"] not in resolved]
+
+    def _outcomes(self, rollout_id: str, entries: tuple[TokenEntry, ...], state: dict[str, Any]) -> OutcomeAttribution:
+        """Attribute the rollout's lost calls and incomplete marks to agent instances."""
+        intents = self._call_lines(self.intents_path_for(rollout_id))
+        marks = self._call_lines(self.incomplete_path_for(rollout_id))
+        named_episode = any(entry.agent_instance is not None for entry in entries) or any(
+            "agent_instance" in intent for intent in intents
+        )
+        outcomes = OutcomeAttribution()
+        # Marks first, inheriting their call's intent identity; then lost calls.
+        rows = [{**intent, "intent": True} for intent in intents] + marks
+        for row, columns in zip(rows, inherited_identity_columns(rows)):
+            if not row.get("intent"):
+                outcomes.add(row["model_call_id"], columns, named_episode=named_episode)
+        for intent in self._dangling_intents(rollout_id, entries, state):
+            outcomes.add(intent["model_call_id"], intent, named_episode=named_episode)
+        if state.get("incomplete", False) and not marks:
+            # Marked without a record of which call, as a conflicting write is: the whole episode.
+            outcomes.episode_wide = True
+        return outcomes
 
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
         return await asyncio.to_thread(self.freeze_now, rollout_id)
@@ -430,19 +455,20 @@ class TokenCaptureStore:
                 self._write_state(rollout_id, state)
             entries = tuple(self._read_entries_unlocked(rollout_id))
             # A dispatched call with neither an entry nor a refusal was lost.
-            # The rollout must be masked.
-            incomplete = bool(state.get("incomplete", False)) or bool(
-                self._dangling_intents(rollout_id, entries, state)
-            )
+            # The agent instance that made it, or the whole rollout, must be masked.
+            outcomes = self._outcomes(rollout_id, entries, state)
+            incomplete = bool(state.get("incomplete", False)) or bool(outcomes.agent_instances)
             return TokenCaptureSnapshot(
                 capture_key=rollout_id,
                 entries=entries,
-                incomplete=incomplete,
+                incomplete=incomplete or outcomes.episode_wide,
                 snapshot_id=str(state["snapshot_id"]),
                 version=int(state["version"]),
                 engine_refusals=tuple(
                     EngineRefusalRecord.model_validate(record) for record in state.get("engine_refusals") or []
                 ),
+                incomplete_agent_instances=frozenset(outcomes.agent_instances),
+                incomplete_episode=outcomes.episode_wide,
             )
 
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool:

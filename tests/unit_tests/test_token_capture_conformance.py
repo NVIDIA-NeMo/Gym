@@ -137,7 +137,7 @@ class _MemoryLineage:
     def __init__(self, backend):
         self.backend = backend
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]):
+    async def resolve(self, rollout_id: str, request_items: list[dict], *, identity=None):
         return await self.backend.lineage.resolve(rollout_id, request_items)
 
     def is_process_shared(self) -> bool:

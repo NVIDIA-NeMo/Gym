@@ -177,7 +177,7 @@ def _environment_server_config() -> DictConfig:
 class _StubLineageStore:
     """Satisfy the normal custom-sink contract in collector-only tests."""
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    async def resolve(self, rollout_id: str, request_items: list[dict], *, identity=None) -> LineageResolution:
         return LineageResolution(ParentResolutionStatus.ROOT)
 
     def is_process_shared(self) -> bool:
