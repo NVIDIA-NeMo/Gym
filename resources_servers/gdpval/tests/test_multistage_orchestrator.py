@@ -3705,6 +3705,49 @@ class TestCompletionContract:
         assert all(stage0[key] == row for key, row in saved.items())
         assert [sum(row["stage_index"] == index for row in rows) for index in (0, 1)] == [10, 20]
 
+    async def test_a_resume_reuses_an_accepted_partial_stage_and_owes_only_its_accepted_size(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Stage 0 is accepted at 9/10 with one terminal omission; stage 1 loses 18/20 rows and stays open.
+        def first_run(row, position):
+            if row["stage_index"] == 0:
+                return {NG_FAILURE_CLASS_KEY: "skipped", NG_TERMINAL_KEY: True} if position == 0 else "success"
+            return "success" if position < 2 else self.LOST
+
+        with pytest.raises(RuntimeError, match="11/29 samples completed"):
+            await self._run(tmp_path, monkeypatch, first_run)
+        _, outcomes, _ = read_journal(journal_path_for(tmp_path / "rollouts.jsonl"))
+        assert outcomes[0]["status"] == "partial_complete" and 1 not in outcomes
+        first_rows = self._rows(tmp_path / "rollouts.jsonl")
+        assert [sum(row["stage_index"] == index for row in first_rows) for index in (0, 1)] == [9, 2]
+        saved = {
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row
+            for row in first_rows
+            if row["stage_index"] == 0
+        }
+
+        cached_summaries: List[Dict[str, Any]] = []
+        resume_complete_stage = multistage_module._resume_complete_stage
+
+        def spy(index, *args):
+            elo = resume_complete_stage(index, *args)
+            cached_summaries.append(args[-2][-1])
+            return elo
+
+        monkeypatch.setattr(multistage_module, "_resume_complete_stage", spy)
+        dispatched = await self._run(tmp_path, monkeypatch, lambda row, position: "success", resume=True)
+
+        assert [sum(row["stage_index"] == index for row in dispatched) for index in (0, 1)] == [0, 18]
+        assert [(s["stage_index"], s["cached"], s["partial"], s["num_successful"]) for s in cached_summaries] == [
+            (0, True, True, 9)
+        ]
+        rows = self._rows(tmp_path / "rollouts.jsonl")
+        stage0 = {
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row for row in rows if row["stage_index"] == 0
+        }
+        assert stage0 == saved
+        assert [sum(row["stage_index"] == index for row in rows) for index in (0, 1)] == [9, 20]
+
 
 class TestIntegrationWiring:
     async def test_multistage_forwards_one_budget_and_shared_tracker(
