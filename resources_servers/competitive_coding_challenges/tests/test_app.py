@@ -369,6 +369,50 @@ async def test_verify_returns_error_details_when_evaluator_fails(
 
 
 @pytest.mark.asyncio
+async def test_verify_emits_the_extracted_code_that_aggregation_reads() -> None:
+    # compute_metrics counts a missing `extracted_code` as no_answer, so verify must emit it for submitted code.
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request())
+
+    assert response.model_dump()["extracted_code"] == "int main() { return 0; }\n"
+    metrics = server.compute_metrics([[response.model_dump()]])
+    assert metrics["pass@1/no_answer"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_verify_replaces_extracted_code_carried_by_a_saved_rollout() -> None:
+    # Re-verifying a saved rollout sends its old `extracted_code` back; verify must replace it, not fail.
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
+    server._evaluator = evaluator
+    request = CompetitiveCodingChallengesVerifyRequest.model_validate(
+        {**_make_verify_request().model_dump(), "extracted_code": "stale"}
+    )
+
+    response = await server.verify(request)
+
+    assert response.model_dump()["extracted_code"] == "int main() { return 0; }\n"
+
+
+@pytest.mark.asyncio
+async def test_verify_reports_an_empty_answer_as_no_answer() -> None:
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request(text=""))
+
+    assert response.model_dump()["extracted_code"] is None
+    assert server.compute_metrics([[response.model_dump()]])["pass@1/no_answer"] == 100.0
+
+
+@pytest.mark.asyncio
 async def test_verify_scores_generated_text_that_cannot_be_encoded() -> None:
     # A lone surrogate in the model's code comes from the model, so masking it would remove its penalty.
     server = _make_server()
