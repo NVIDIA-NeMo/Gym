@@ -9,7 +9,7 @@ folder digest (the value rows carry as
 ``_ng_digest``) with its upstream pin. The dataset's name and version live only in ``dataset.toml``, so nothing
 appears in both files; what a fetch records besides is the hub reference it was made from (``ref``), a fact of the
 fetch like the pins, which is what a committed entry's declared ``source`` is checked against without the hub
-(:func:`nemo_gym.data.tasks.harbor.cli._check_fetch_record`). Nobody edits the manifest by hand.
+(:func:`nemo_gym.data.tasks.harbor.prepare._check_fetch_record`). Nobody edits the manifest by hand.
 
 The output is deterministic: a fixed key order, sorted tasks and no timestamps, so equal manifests
 mean identical inputs and two runs compare by ``[dataset].digest``. The dataset digest is a hash over

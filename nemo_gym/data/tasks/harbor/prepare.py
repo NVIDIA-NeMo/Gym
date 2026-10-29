@@ -24,27 +24,20 @@ import fnmatch
 import json
 import logging
 import shlex
-import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import yaml
-from pydantic import ValidationError
 
 from nemo_gym import component_search_roots
-from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config.config_types import ConfigError
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.data.tasks.harbor.build_options import (
     BuildOptions,
-    _block_from_overrides,
-    _merged_cli_config,
-    build_options_from_overrides,
 )
 from nemo_gym.data.tasks.harbor.build_plan import (
     DEFAULT_PLATFORM,
-    BuildError,
 )
 from nemo_gym.data.tasks.harbor.compose_overlay import HarborComposeOverlay
 from nemo_gym.data.tasks.harbor.dataset_config import DATASET_FILE, GymDatasetConfig, read_dataset_config
@@ -61,7 +54,6 @@ from nemo_gym.data.tasks.harbor.hub import (
     REGISTRY_SOURCE,
     HubError,
     HubRef,
-    datasets_dir,
     declares_recorded_fetch,
     expected_folder,
     fetch_ref,
@@ -88,8 +80,6 @@ from nemo_gym.data.tasks.harbor.manifest import (
     report_rewrite,
 )
 from nemo_gym.data.tasks.harbor.materialize import (
-    ENVIRONMENT_SERVER_IMPL,
-    ENVIRONMENT_SERVER_INSTANCE,
     run_config,
     write_rows,
 )
@@ -98,28 +88,13 @@ from nemo_gym.data.tasks.harbor.parameterized import is_template_folder, render_
 from nemo_gym.data.tasks.harbor.prepare_builds import _build_dockerfiles
 from nemo_gym.data.tasks.harbor.records import read_image_configs
 from nemo_gym.data.tasks.harbor.registry import (
-    ImageConfigError,
     RegistryClient,
-    credentials_for_image_prefixes,
     platform_pair,
 )
-from nemo_gym.data.tasks.harbor.run_summary import NO_REFERENCE_SOLUTION, output_signatures, write_run_summary
 from nemo_gym.data.tasks.harbor.task import HarborTask, discover_tasks, is_task_folder, iter_task_folders
 from nemo_gym.data.tasks.harbor.task_data import check_task_folders, check_tasks, load_task_data_schema
-from nemo_gym.data.tasks.harbor.validation_report import (
-    _task_digests,
-    _validation_key,
-    _validation_rows,
-    summarize_validation,
-)
-from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
-from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
-from nemo_gym.utils.path_utils import materialized_path_for
 
-
-if TYPE_CHECKING:
-    from nemo_gym.rollout_collection import RolloutCollectionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -140,17 +115,6 @@ USE_ABSOLUTE_IP_KEY = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY = "absolute_ip_server_types"
 SANDBOX_REACHABLE_SERVER_TYPES = ("responses_api_models",)
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
-# The top-level block the Harbor environment server reads its provider from by default (`sandbox_provider`).
-SANDBOX_BLOCK_KEY = "sandbox"
-# Where the server's settings sit in the configuration a command names: the shipped environment server instance
-# every run config inherits from. `gpu_sandbox_provider` names the block GPU-declaring tasks and GPU sidecars run
-# on; `sandbox_provider_options.platform` ({os, arch}) is the platform a service's `platform` must match.
-HARBOR_SERVER_KEY = f"{ENVIRONMENT_SERVER_INSTANCE}.environment_servers.{ENVIRONMENT_SERVER_IMPL}"
-GPU_SANDBOX_PROVIDER_KEY = f"{HARBOR_SERVER_KEY}.gpu_sandbox_provider"
-SANDBOX_PROVIDER_OPTIONS_KEY = f"{HARBOR_SERVER_KEY}.sandbox_provider_options"
-# The job-level Compose overlay (extra Compose files, MCP entries, prompt template), read at prepare so the
-# overlay's images are recorded and its merge checked with the tasks', exactly as the server reads it at seed.
-COMPOSE_OVERLAY_KEY = f"{HARBOR_SERVER_KEY}.compose_overlay"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.
 AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     # Hermes borrows the task sandbox and drives it through its terminal toolset. vLLM-only
@@ -167,180 +131,6 @@ AGENT_OVERRIDES: dict[str, dict[str, Any]] = {
     "terminus_2_sandboxed_agent": {"num_workers": 1, "resources_server": None},
     "miniswe_sandboxed_agent": {"num_workers": 1},
 }
-
-
-def _block_provider_name(overrides: list[str], sandbox: str | None, block_key: str) -> str | None:
-    """The provider name a top-level sandbox block carries, read from its keys alone (never its values)."""
-    from omegaconf import OmegaConf
-
-    from nemo_gym.sandbox.config import SANDBOX_BLOCK_RESERVED_KEYS
-
-    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
-    block = OmegaConf.select(_merged_cli_config(overrides, files), block_key, throw_on_resolution_failure=False)
-    if block is None or not hasattr(block, "keys"):
-        return None
-    providers = [str(key) for key in block.keys() if key not in SANDBOX_BLOCK_RESERVED_KEYS]
-    return providers[0] if len(providers) == 1 else None
-
-
-def sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
-    """The provider name (``opensandbox``, ``docker``, ...) of the ``sandbox:`` block the command names.
-
-    The block comes from the ``--sandbox`` provider file (when given) and the configuration the command line
-    names, merged as :func:`_merged_cli_config` does; only its keys are read, never its values, so provider
-    credentials are not needed for this (the registry credentials prepare does read are the block's
-    ``images.auth``, :func:`registry_credentials_from_overrides`). Prepare checks each Compose task's ``tmpfs``, ``ulimits``,
-    ``sysctls`` and ``security_opt`` against this provider's capabilities. ``None`` when no block names a
-    provider: the check then runs at seed, against the live provider.
-    """
-    return _block_provider_name(overrides, sandbox, SANDBOX_BLOCK_KEY)
-
-
-# The sandbox provider block's image credentials (OpenSandbox's `images.auth`: image prefix to username and
-# password), the one place a deployment names registry credentials; prepare reads private images with the same.
-SANDBOX_IMAGES_AUTH_KEY = "images.auth"
-
-
-def registry_credentials_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, tuple[str, str]]:
-    """The registry credentials prepare records private images with: the ``sandbox:`` block's ``images.auth``
-    (what the provider pulls those images with at seed), turned into the registry client's prefix-keyed form
-    (:func:`~nemo_gym.data.tasks.harbor.registry.credentials_for_image_prefixes`), so each image is read with the
-    credentials of its longest matching prefix, as the provider pulls it.
-
-    Read from the ``--sandbox`` provider file and the configuration the command names, resolved against them
-    (so ``${gitlab_registry_password}`` comes from ``env.yaml`` as it does at seed), like
-    :func:`volume_sources_from_overrides`. Empty when no block names a provider or the block has no
-    ``images.auth``: prepare then reads registries anonymously, as before. A malformed block is a
-    :class:`ValueError` naming the key.
-    """
-    provider = sandbox_provider_from_overrides(overrides, sandbox)
-    if provider is None:
-        return {}
-    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
-    key = f"{SANDBOX_BLOCK_KEY}.{provider}.{SANDBOX_IMAGES_AUTH_KEY}"
-    return credentials_for_image_prefixes(_block_from_overrides(overrides, key, config_files=files), key)
-
-
-def gpu_sandbox_provider_from_overrides(overrides: list[str], sandbox: str | None) -> str | None:
-    """The provider name of the block GPU-declaring tasks and GPU sidecars run on: the environment server's
-    ``gpu_sandbox_provider`` in the configuration the command names (``GPU_SANDBOX_PROVIDER_KEY``), read like
-    :func:`sandbox_provider_from_overrides` reads the ``sandbox:`` block. ``None`` when no GPU block is set
-    (every service is then checked against the ``sandbox:`` block) or the block does not name one provider."""
-    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
-    if block is None:
-        return None
-    if not isinstance(block, str) or not block:
-        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
-    return _block_provider_name(overrides, sandbox, block)
-
-
-def pairing_override_from_overrides(overrides: list[str]) -> bool:
-    """Whether the run waives the agent admission checks: ``--allow-unsupported-pairing`` (which the CLI translates
-    to ``+allow_unsupported_pairing=true``), a configuration file the command names that sets the key, or
-    ``NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING``. The same reading as the collector's pairing guard at dispatch
-    (:func:`~nemo_gym.config.global_config.pairing_override_enabled`), so the early admission check of ``prepare_target``
-    and the guard agree on one explicit override."""
-    from omegaconf import OmegaConf
-
-    from nemo_gym.config.global_config import ALLOW_UNSUPPORTED_PAIRING_KEY_NAME, pairing_override_enabled
-
-    block = _block_from_overrides(overrides, ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)
-    return pairing_override_enabled(OmegaConf.create({ALLOW_UNSUPPORTED_PAIRING_KEY_NAME: block}))
-
-
-def compose_platform_from_overrides(overrides: list[str]) -> str:
-    """The platform a Compose service's ``platform`` must match at prepare: the environment server's
-    ``sandbox_provider_options.platform`` (``{os, arch}``) in the configuration the command names, else
-    linux/amd64, exactly as the server reads it at seed (``deployment_platform``).
-
-    Only the ``platform`` subkey is selected and resolved. The sibling options (volumes, credentials, a
-    ``${results_dir}`` the server's configuration parser defaults later) are not needed at prepare and are
-    not evaluated; a block that is not a mapping selects no platform and the default stands, the server's own
-    configuration validation names the malformed block at dispatch."""
-    platform = _block_from_overrides(overrides, f"{SANDBOX_PROVIDER_OPTIONS_KEY}.platform")
-    return deployment_platform({"platform": platform} if platform is not None else None)
-
-
-def compose_overlay_from_overrides(overrides: list[str]) -> HarborComposeOverlay | None:
-    """The environment server's ``compose_overlay`` block in the configuration the command names
-    (``COMPOSE_OVERLAY_KEY``), validated as the server validates it, or ``None`` when the block is absent or null.
-    Prepare merges its files onto every task's Compose document and records their images, so the document the
-    server starts is the one prepare checked; a block that does not validate is a configuration error here."""
-    block = _block_from_overrides(overrides, COMPOSE_OVERLAY_KEY)
-    if block is None:
-        return None
-    if not isinstance(block, Mapping):
-        raise ValueError(
-            f"`{COMPOSE_OVERLAY_KEY}` must be a mapping (files, mcp_servers, prompt_template); got {block!r}"
-        )
-    try:
-        overlay = HarborComposeOverlay.model_validate(block)
-    except ValidationError as exc:
-        raise ValueError(f"`{COMPOSE_OVERLAY_KEY}`: {exc}") from exc
-    return overlay if overlay.configured else None
-
-
-def volume_sources_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, str] | None:
-    """The ``volume_sources`` of the ``sandbox:`` block the command names, for checking Compose volumes at prepare.
-
-    The block comes from the ``--sandbox`` provider file (when given) and the configuration the command
-    line names, merged as :func:`_block_from_overrides` does. ``None`` when no ``volume_sources`` is
-    configured: prepare then reports every external volume and foreign bind mount as unmapped.
-    """
-    return _block_volume_sources(overrides, sandbox, SANDBOX_BLOCK_KEY)
-
-
-def gpu_volume_sources_from_overrides(overrides: list[str], sandbox: str | None) -> dict[str, str] | None:
-    """The ``volume_sources`` of the block GPU-declaring tasks run on, for checking their Compose volumes at prepare.
-
-    The block is the environment server's ``gpu_sandbox_provider`` in the configuration the command names
-    (``GPU_SANDBOX_PROVIDER_KEY``). ``None`` when no GPU block is set: every task is then checked against
-    the ``sandbox:`` block. An empty mapping when the block is set but carries no ``volume_sources``, which
-    is what the server resolves such a task against.
-    """
-    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
-    if block is None:
-        return None
-    if not isinstance(block, str) or not block:
-        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
-    return _block_volume_sources(overrides, sandbox, block) or {}
-
-
-def _block_volume_sources(overrides: list[str], sandbox: str | None, block: str) -> dict[str, str] | None:
-    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
-    sources = _block_from_overrides(overrides, f"{block}.{SANDBOX_BLOCK_VOLUME_SOURCES_KEY}", config_files=files)
-    if sources is None:
-        return None
-    return validate_volume_sources(sources, f"the `{block}:` block")
-
-
-def shared_storage_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
-    """Whether the ``sandbox:`` block's provider configures shared storage, for checking Compose named volumes and
-    shared logs binds at prepare: OpenSandbox's ``shared_storage.host_path`` under the block's one provider key,
-    read from the ``--sandbox`` provider file and the configuration the command names. ``None`` when the block
-    names no single provider (the adapter then decides at seed); otherwise whether the path is set, which is
-    the one setting the server's provider requires for every such volume."""
-    return _block_shared_storage(overrides, sandbox, SANDBOX_BLOCK_KEY)
-
-
-def gpu_shared_storage_from_overrides(overrides: list[str], sandbox: str | None) -> bool | None:
-    """:func:`shared_storage_from_overrides` for the block GPU-declaring tasks and GPU sidecars run on
-    (``GPU_SANDBOX_PROVIDER_KEY``); ``None`` when no GPU block is set."""
-    block = _block_from_overrides(overrides, GPU_SANDBOX_PROVIDER_KEY)
-    if block is None:
-        return None
-    if not isinstance(block, str) or not block:
-        raise ValueError(f"`{GPU_SANDBOX_PROVIDER_KEY}` must name a top-level sandbox block; got {block!r}")
-    return _block_shared_storage(overrides, sandbox, block)
-
-
-def _block_shared_storage(overrides: list[str], sandbox: str | None, block: str) -> bool | None:
-    provider = _block_provider_name(overrides, sandbox, block)
-    if provider is None:
-        return None
-    files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
-    host_path = _block_from_overrides(overrides, f"{block}.{provider}.shared_storage.host_path", config_files=files)
-    return bool(host_path)
 
 
 @dataclass(frozen=True)
@@ -1107,11 +897,6 @@ def selection_reason(task_id: str, exclude: list[str], only: list[str] | None = 
     return None
 
 
-def _patterns(args: argparse.Namespace, name: str) -> list[str]:
-    raw = getattr(args, name, None) or ""
-    return [part.strip() for part in raw.split(",") if part.strip()]
-
-
 def resolve_agent(agent: str) -> AgentSelection:
     """Map ``--agent NAME[/FLAVOR]`` to ``responses_api_agents/<NAME>/configs/<FLAVOR>.yaml``.
 
@@ -1243,404 +1028,5 @@ def build_run(
     return config_path, tokens
 
 
-@exit_cleanly_on_config_error
-def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
-    """Entry point for ``gym eval run <target> ...``."""
-    from nemo_gym.cli.main import _merge_config_paths, dispatch
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
-
-    if getattr(args, "no_serve", False):
-        args._parser.error("A Harbor target starts its own servers; drop --no-serve")
-    agent_name = getattr(args, "agent", None)
-    if not agent_name:
-        args._parser.error("A Harbor target needs `--agent <harness>` (for example `--agent hermes_agent`)")
-    sandbox = getattr(args, "sandbox", None)
-    # Resolve selectors before preparation can download a registry dataset.
-    try:
-        agent = resolve_agent(agent_name)
-        if sandbox is not None:
-            resolve_sandbox_config(sandbox)
-    except (ValueError, OSError, yaml.YAMLError) as exc:
-        args._parser.error(str(exc))
-    if agent.impl_name == ORACLE_AGENT:
-        # The oracle runs the reference solution, not a model: its run is `gym dataset validate`, whose results
-        # live under results/harbor/validation/ where no model run, resumed or not, can pick them up as its own.
-        validate_target(args, overrides, agent=agent)
-        return
-    try:
-        # The `builds:` and `sandbox:` blocks come from the configuration the command names; the run config
-        # does not exist yet.
-        build = build_options_from_overrides(overrides)
-        prepared = prepare_target(
-            args.target,
-            exclude=_patterns(args, "exclude_tasks"),
-            only=_patterns(args, "only_tasks"),
-            build=build,
-            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
-            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
-            compose_platform=compose_platform_from_overrides(overrides),
-            volume_sources=volume_sources_from_overrides(overrides, sandbox),
-            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
-            shared_storage=shared_storage_from_overrides(overrides, sandbox),
-            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
-            compose_overlay=compose_overlay_from_overrides(overrides),
-            rows_name=_rows_name(agent),
-            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
-            agent=agent.impl_name,
-            allow_unsupported_pairing=pairing_override_from_overrides(overrides),
-        )
-    except (
-        HarborTaskError,
-        HubError,
-        BuildError,
-        ImageConfigError,
-        ManifestError,
-        ConfigError,
-        ValueError,
-        OSError,
-    ) as exc:
-        args._parser.error(str(exc))
-    if prepared.skipped and not getattr(args, "skip_unloadable", False):
-        args._parser.error(
-            f"{len(prepared.skipped)} task(s) could not load (see {prepared.output_dir / 'skipped.json'}):"
-            f"{_listed(prepared.skipped)}\nUse --skip-unloadable to explicitly run only the loadable subset."
-        )
-    try:
-        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
-    except (HarborTaskError, OSError) as exc:
-        args._parser.error(str(exc))
-    tokens = _merge_config_paths(tokens)
-    collection = _resolved_collection(tokens, prepared)
-    helper = RolloutCollectionHelper()
-    expected: list[dict[str, Any]] | None = None
-    before_dispatch = None
-    cache = _resumable_cache(collection)
-    if cache is not None:
-        # The collector resumes its saved inputs, not the rows just prepared: a selection or digest that
-        # changed since would run (or 404 on) tasks the server no longer maps. Refuse before startup.
-        expected = helper._preprocess_rows_from_config(collection)
-        conflict = _resume_conflict(cache, expected)
-        if conflict:
-            args._parser.error(conflict)
-        # The collector resumes the schedule it saved (the materialized inputs: every task and repeat as that run
-        # expanded them, with the input each carried), not the rows the current config expands: a resume with
-        # another `num_repeats` passes the check above and dispatches no further attempts, so the summary's
-        # expected attempts and input echo are the saved ones, not a missing attempt the run never owed.
-        expected = _validation_rows(cache)
-    else:
-        # A fresh start clears its output files only once the servers are up: what sits under those names now
-        # is an earlier run's, and the summary must not report it as this run's if the collector never gets there.
-        before_dispatch = output_signatures(Path(collection.output_jsonl_fpath))
-        # The collated split metrics an earlier run left are that run's selection; the data processor would
-        # refuse this one against them. Cleared here, they are rewritten before any server starts.
-        _clear_collector_metrics(Path(collection.output_jsonl_fpath), split=_collector_split())
-    print(f"Run config written to {config_path} (datasets folder: {datasets_dir()})")
-    try:
-        dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
-    finally:
-        _write_summary(
-            Path(collection.output_jsonl_fpath),
-            command="gym eval run",
-            target=args.target,
-            prepared=prepared,
-            agent=agent,
-            run_config=config_path,
-            # A fresh run reads its selected rows only for the summary, after the collector has had them.
-            expected=expected if expected is not None else lambda: helper._preprocess_rows_from_config(collection),
-            split=_collector_split(),
-            before_dispatch=before_dispatch,
-        )
-
-
-def _collector_split() -> str | None:
-    """The split the resolved run config dispatches (``validation`` unless overridden), for the run summary."""
-    from nemo_gym.config.global_config import get_global_config_dict
-
-    split = get_global_config_dict().get("split")
-    return str(split) if split else None
-
-
-def _clear_collector_metrics(rollouts: Path, *, split: str | None) -> None:
-    """Remove the collated split metrics an earlier run left under ``<rollouts stem>/preprocessed_datasets/``
-    (``<split>_metrics.json`` and the ``<split>_metrics_conflict.json`` of a refused run), right before a fresh
-    start dispatches the collector.
-
-    ``e2e_rollout_collection`` collates the rows it dispatches there and checks the metrics it computes against
-    that file, refusing a mismatch ("Found conflicting aggregate metrics") unless ``overwrite_metrics_conflicts``
-    is set. That protects a committed source dataset; on this path the rows are regenerated from the task folder
-    on every command and the output folder is reused per taskset, so the file is the previous selection's, and
-    a user must neither see that error nor pass the flag. A resumed run keeps the file: its rows are unchanged
-    (:func:`_resume_conflict`). So does a run that reuses the prepared input (``reuse_existing_data_preparation``
-    with the collated ``<split>.jsonl`` present): the processor does not run, and the metrics stay with the input
-    they describe. ``split`` is the resolved run config's (:func:`_collector_split`); without one nothing is known
-    to clear.
-    """
-    from nemo_gym.config.global_config import get_global_config_dict
-    from nemo_gym.data.tasks.harbor.run_summary import PREPROCESSED_SUBDIR
-
-    if not split:
-        return
-    preprocessed = Path(rollouts).with_suffix("") / PREPROCESSED_SUBDIR
-    reuses_input = bool(get_global_config_dict().get("reuse_existing_data_preparation"))
-    if reuses_input and (preprocessed / f"{split}.jsonl").is_file():
-        return
-    metrics = preprocessed / f"{split}_metrics.json"
-    for path in (metrics, metrics.with_name(f"{metrics.stem}_conflict.json")):
-        path.unlink(missing_ok=True)
-
-
-def _write_summary(
-    rollouts: Path, *, expected: list[dict[str, Any]] | Callable[[], list[dict[str, Any]]] | None, **kwargs: Any
-) -> None:
-    """Write the run summary beside ``rollouts`` (:mod:`nemo_gym.data.tasks.harbor.run_summary`) and say where.
-
-    Runs after collection whatever it did, so a run that stopped early still leaves a summary of what it
-    wrote; a summary that cannot be written is logged and never displaces the run's own outcome. ``expected``
-    may be a callable that reads the collector's selected rows, so a run that did not need them before
-    dispatch reads them here, inside the same guard. ``before_dispatch`` (in ``kwargs``) is what a fresh start
-    found under its output names before dispatch, so files it never got to clear are not reported as its own.
-    """
-    try:
-        if callable(expected):
-            expected = expected()
-        path = write_run_summary(rollouts, expected=expected, **kwargs)
-    except Exception:
-        logger.warning("Could not write the run summary beside %s", rollouts, exc_info=True)
-        return
-    print(f"Run summary written to {path}")
-
-
-def _rows_name(agent: AgentSelection) -> str:
-    """The rows file of one agent's run on a taskset: ``tasks_<agent>.jsonl`` next to ``run_config_<agent>.yaml``."""
-    return f"tasks_{agent.instance_name}.jsonl"
-
-
-def _resolved_collection(tokens: list[str], prepared: PreparedTaskset) -> "RolloutCollectionConfig":
-    """The collector's effective configuration for ``tokens``: resolved through the same parser and cache
-    dispatch uses, file overlays included, so what it would resume and run is read from it rather than
-    guessed from the command line."""
-    from omegaconf import OmegaConf
-    from omegaconf.errors import InterpolationResolutionError
-
-    from nemo_gym.config.global_config import (
-        get_global_config_dict,
-        reset_global_config_dict,
-        translate_interpolation_error,
-    )
-    from nemo_gym.rollout_collection import RolloutCollectionConfig
-
-    sys.argv = [sys.argv[0], *tokens]
-    # These tokens, not whatever this process resolved before them (the run config did not exist yet); the
-    # result stays cached, so dispatch runs on it without a second parse.
-    reset_global_config_dict()
-    config = get_global_config_dict()
-    try:
-        resolved = OmegaConf.to_container(config, resolve=True)
-    except InterpolationResolutionError as exc:
-        raise translate_interpolation_error(exc) from exc
-    return RolloutCollectionConfig.model_validate({**resolved, "input_jsonl_fpath": str(prepared.rows_path)})
-
-
-def _requested_output(tokens: list[str], default: Path) -> Path:
-    """The rollouts path ``tokens`` ask for (``--output``, ``+output_jsonl_fpath=`` or a ``--config`` overlay), or
-    ``default`` when they name none.
-
-    Resolved through the same parser dispatch uses, so a quoted ``--output`` and a file overlay both count, for
-    the path that dispatches nothing and so has no run config to resolve a collection from.
-    """
-    from nemo_gym.config.global_config import get_global_config_dict, reset_global_config_dict
-
-    sys.argv = [sys.argv[0], *tokens]
-    reset_global_config_dict()
-    requested = get_global_config_dict().get("output_jsonl_fpath")
-    return Path(str(requested)) if requested else default
-
-
-def _resumable_cache(collection: "RolloutCollectionConfig") -> Path | None:
-    """The saved inputs the collector would resume, or None when it starts fresh. Its own condition: the
-    effective ``resume_from_cache`` (flag or config file) and both the results file and the saved inputs."""
-    if not collection.resume_from_cache:
-        return None
-    output = Path(collection.output_jsonl_fpath)
-    materialized = materialized_path_for(output)
-    if not output.is_file() or not materialized.is_file():
-        return None
-    return materialized
-
-
-def _resume_conflict(materialized: Path, expected: list[dict[str, object]]) -> str | None:
-    """Why ``--resume`` cannot go ahead: the cached rows name other tasks or digests than the rows the collector
-    would run now (``expected``, after ``limit``)."""
-
-    def identity(row: dict[str, object]) -> tuple[str, str]:
-        return _validation_key(row)[:2]
-
-    cached = _task_digests(_validation_rows(materialized), identity)
-    current = _task_digests(expected, identity)
-    if cached == current:
-        return None
-    dropped = sorted(name for taskset, name in cached if (taskset, name) not in current)
-    added = sorted(name for taskset, name in current if (taskset, name) not in cached)
-    changed = sorted(
-        name for key, digest in current.items() if key in cached and cached[key] != digest for name in [key[1]]
-    )
-    detail = ", ".join(
-        part
-        for part in (
-            f"no longer selected: {', '.join(dropped)}" if dropped else "",
-            f"newly selected: {', '.join(added)}" if added else "",
-            f"changed digest: {', '.join(changed)}" if changed else "",
-        )
-        if part
-    )
-    return (
-        f"Cannot resume from {materialized}: the task selection or task digests differ from the cached run "
-        f"({detail}). Rerun with the same --only-tasks/--exclude-tasks, or pass +resume_from_cache=false to "
-        f"start over, or a new +output_jsonl_fpath to keep the old results"
-    )
-
-
-@exit_cleanly_on_config_error
-def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: AgentSelection | None = None) -> None:
-    """Entry point for ``gym dataset validate <target>``: run every task's reference solution and score it.
-
-    ``gym eval run <target> --agent harbor_oracle`` lands here too, with its ``agent`` selection, so the oracle's
-    results never share a folder with a model's.
-    """
-    from nemo_gym.cli.main import _merge_config_paths, dispatch
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
-
-    # Evaluation and reference validation must never share inputs, configs, or cached results.
-    try:
-        agent = agent or resolve_agent(ORACLE_AGENT)
-        sandbox = getattr(args, "sandbox", None)
-        if sandbox is not None:
-            resolve_sandbox_config(sandbox)
-        prepared = prepare_target(
-            args.target,
-            output_root=DEFAULT_OUTPUT_ROOT / "validation",
-            # A template renders where `gym eval run` renders it: one rendered dataset, one set of records (an image
-            # built for it once), while the oracle's rows and results stay under validation/.
-            render_root=DEFAULT_OUTPUT_ROOT,
-            exclude=_patterns(args, "exclude_tasks"),
-            only=_patterns(args, "only_tasks"),
-            build=build_options_from_overrides(overrides),
-            sandbox_provider=sandbox_provider_from_overrides(overrides, sandbox),
-            gpu_sandbox_provider=gpu_sandbox_provider_from_overrides(overrides, sandbox),
-            compose_platform=compose_platform_from_overrides(overrides),
-            volume_sources=volume_sources_from_overrides(overrides, sandbox),
-            gpu_volume_sources=gpu_volume_sources_from_overrides(overrides, sandbox),
-            shared_storage=shared_storage_from_overrides(overrides, sandbox),
-            gpu_shared_storage=gpu_shared_storage_from_overrides(overrides, sandbox),
-            compose_overlay=compose_overlay_from_overrides(overrides),
-            rows_name=_rows_name(agent),
-            registry_credentials=registry_credentials_from_overrides(overrides, sandbox),
-        )
-    except (
-        HarborTaskError,
-        HubError,
-        BuildError,
-        ImageConfigError,
-        ConfigError,
-        ValueError,
-        OSError,
-        yaml.YAMLError,
-    ) as exc:
-        args._parser.error(str(exc))
-    unvalidated = [task.task_id for task in prepared.tasks if not task.has_solution]
-    # Left out of the run, not failed: the summary names them with the reason so the result folder explains itself.
-    left_out = dict.fromkeys(unvalidated, NO_REFERENCE_SOLUTION)
-    prepared = replace(prepared, tasks=[task for task in prepared.tasks if task.has_solution])
-    write_rows(
-        prepared.tasks,
-        prepared.taskset,
-        prepared.rows_path,
-        dataset_digest=prepared.dataset_digest,
-        task_source=prepared.task_source,
-    )
-    rollouts = prepared.output_dir / "rollouts.jsonl"
-    expected = []
-    if prepared.tasks:
-        # Oracle runs reference scripts directly; it needs no placeholder model server.
-        overrides = list(overrides)
-        # Validation is not an evaluation: a reference solution scores the same every time, so the dataset's
-        # `[gym.defaults].num_repeats` does not apply to it. An explicit `+num_repeats=` still wins.
-        if not _has_override(overrides, "num_repeats"):
-            overrides.append("+num_repeats=1")
-        config_path, tokens = build_run(prepared, agent, sandbox=sandbox, overrides=overrides)
-        tokens = _merge_config_paths(tokens)
-        # Resolve through the same parser and cache used by dispatch, including file overlays.
-        collection = _resolved_collection(tokens, prepared)
-        expected = RolloutCollectionHelper()._preprocess_rows_from_config(collection)
-        rollouts = Path(collection.output_jsonl_fpath)
-        before_dispatch = None
-        cache = _resumable_cache(collection)
-        if cache is not None:
-            # The collector resumes its saved inputs, not the just-prepared task rows. Reject a stale
-            # selection or digest before startup so an old reward cannot validate a changed solution.
-            cached_digests = _task_digests(_validation_rows(cache), _validation_key)
-            if cached_digests != _task_digests(expected, _validation_key):
-                raise ConfigError(
-                    f"Cannot resume Harbor validation from {cache}: "
-                    "the selected tasks or task digests have changed. Use +resume_from_cache=false "
-                    "to validate the current tasks, or choose a new +output_jsonl_fpath to keep the old results."
-                )
-            # Only the oracle agent stamps `response.metadata.oracle`. Cached results without it were written by
-            # another run (a model evaluation on the same file); resumed, they would stand in for the oracle's.
-            foreign = sorted(
-                _validation_key(row)[1]
-                for row in _validation_rows(rollouts)
-                if ((row.get("response") or {}).get("metadata") or {}).get("oracle") is None
-            )
-            if foreign:
-                raise ConfigError(
-                    f"Cannot resume Harbor validation from {rollouts}: {len(foreign)} cached result(s) were not "
-                    f"produced by the oracle agent (no oracle metadata): {', '.join(foreign[:5])}"
-                    f"{', ...' if len(foreign) > 5 else ''}. Use +resume_from_cache=false to validate the current "
-                    "tasks, or choose a new +output_jsonl_fpath to keep the old results."
-                )
-            # What the collector resumes is its saved schedule (see run_target): the report and the summary
-            # expect the saved attempts, with the input each carried.
-            expected = _validation_rows(cache)
-        else:
-            # See run_target: a fresh start's files under the output names are an earlier run's until the
-            # collector clears them, which happens only once the servers are up; the collated metrics of an
-            # earlier selection would make the data processor refuse this one, so they go now.
-            before_dispatch = output_signatures(rollouts)
-            _clear_collector_metrics(rollouts, split=_collector_split())
-        print(f"Run config written to {config_path}; validating {len(expected)} oracle rollout(s)")
-        try:
-            dispatch("nemo_gym.cli.eval:e2e_rollout_collection", tokens)
-        finally:
-            _write_summary(
-                rollouts,
-                command="gym dataset validate",
-                target=args.target,
-                prepared=prepared,
-                agent=agent,
-                run_config=config_path,
-                expected=expected,
-                split=_collector_split(),
-                before_dispatch=before_dispatch,
-                unvalidated=left_out,
-            )
-    else:
-        # Nothing to dispatch (no selected task has a solution/): the summary still says what was selected,
-        # beside the rollouts file the command line asked for (there is no run config to resolve it from).
-        rollouts = _requested_output(_merge_config_paths(list(overrides)), rollouts)
-        _write_summary(
-            rollouts,
-            command="gym dataset validate",
-            target=args.target,
-            prepared=prepared,
-            agent=agent,
-            run_config=None,
-            expected=expected,
-            # Nothing ran, so whatever sits under the output names is an earlier run's.
-            before_dispatch=output_signatures(rollouts),
-            unvalidated=left_out,
-        )
-    report = summarize_validation(rollouts, unvalidated, expected=expected, skipped=prepared.skipped)
-    print(report.text)
-    if not report.ok:
-        sys.exit(1)
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)
