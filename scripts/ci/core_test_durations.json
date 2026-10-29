@@ -289,7 +289,7 @@
     "tests/unit_tests/test_terminal_attribution.py": 4.14,
     "tests/unit_tests/test_terminus_judge_readme_config.py": 0.13,
     "tests/unit_tests/test_tool_call_turn_fallback.py": 0.28,
-    "tests/unit_tests/test_trajectory_builder.py": 0.76,
+    "tests/unit_tests/models/test_token_capture_builder.py": 0.76,
     "tests/unit_tests/test_update_env_list.py": 0.01,
     "tests/unit_tests/test_uv_bootstrap.py": 0.12,
     "tests/unit_tests/test_verifier_runner.py": 0.02,
