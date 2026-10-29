@@ -21,10 +21,10 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import JUDGE_FAILED, SESSION_LOST, VERIFIER_ERROR, rollout_context
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT
-from nemo_gym.judge import JudgeError, call_judge, judge_failsafe
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.observability.verifiers import observe_verifier
 from nemo_gym.rollout_collection import _build_trajectory_record
+from nemo_gym.verification import JudgeError, call_judge, judge_failsafe
 
 
 class Verdict(BaseModel):

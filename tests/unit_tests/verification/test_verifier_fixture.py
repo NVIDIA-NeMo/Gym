@@ -8,12 +8,8 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from nemo_gym.verifier_fixture import (
-    VerifierFixture,
-    VerifierFixtureError,
-    exercise_verifier_fixture,
-    load_verifier_fixture,
-)
+from nemo_gym.verification import VerifierFixture, exercise_verifier_fixture
+from nemo_gym.verification.verifier_fixture import VerifierFixtureError, load_verifier_fixture
 
 
 def _write_cases(

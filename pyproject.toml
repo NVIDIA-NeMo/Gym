@@ -884,7 +884,7 @@ layers = [
     # metrics/
     "nemo_gym.metrics_config : nemo_gym.reward_profile",
     # verification/
-    "nemo_gym.judge : nemo_gym.verifier_fixture : nemo_gym.verifier_utils",
+    "nemo_gym.verification",
     # trajectory/
     "nemo_gym.trajectory",
     # sandbox/

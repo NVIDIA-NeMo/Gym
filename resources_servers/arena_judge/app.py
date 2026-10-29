@@ -57,13 +57,13 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.judge import call_judge
 from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.verification import call_judge
 
 
 logger = logging.getLogger(__name__)

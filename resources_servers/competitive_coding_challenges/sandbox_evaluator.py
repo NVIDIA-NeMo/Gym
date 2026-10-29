@@ -18,7 +18,7 @@
 This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py``, which
 runs only in the sandbox, and the unchanged ``ccc_eval.py``, the evaluator the NeMo Skills path
 runs in this server; nothing else from this server is uploaded. The upload and run go through
-``nemo_gym.verifier_utils.sandbox_verification.run_verification_sandbox``, which raises
+``nemo_gym.verification.sandbox_verification.run_verification_sandbox``, which raises
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 The problem's grader files and tests are read from ``problem_data_dir``, which must already
 exist in the sandbox (baked into the image or mounted), because full-problem test sets reach
@@ -36,11 +36,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from nemo_gym.sandbox import SandboxProvider
-from nemo_gym.verifier_utils.sandbox_verification import (
-    RUNNER_FILE,
-    SandboxVerificationConfig,
-    run_verification_sandbox,
-)
+from nemo_gym.verification import RUNNER_FILE, SandboxVerificationConfig, run_verification_sandbox
 
 
 _CCC_DIR = Path(__file__).parent

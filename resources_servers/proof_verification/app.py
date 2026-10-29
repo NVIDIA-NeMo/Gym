@@ -23,7 +23,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.client import get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.judge import reraise_judge_errors
+from nemo_gym.verification import reraise_judge_errors
 
 
 LOG = logging.getLogger(__name__)

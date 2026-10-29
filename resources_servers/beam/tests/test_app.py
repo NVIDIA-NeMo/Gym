@@ -24,7 +24,6 @@ import pytest
 from pydantic import ValidationError
 from pytest import approx
 
-from nemo_gym import judge as judge_module
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
@@ -34,7 +33,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import JudgeError, judge_failsafe
+from nemo_gym.verification import JudgeError, judge_failsafe
+from nemo_gym.verification import judge as judge_module
 from resources_servers.beam.app import (
     ABILITIES,
     BEAMResourcesServer,
@@ -111,7 +111,7 @@ def _mock_judge(
 ) -> List[Dict[str, Any]]:
     """Route /v1/responses to ``judge(messages)``; the first calls get ``statuses`` (e.g. 500) instead.
 
-    Patches the HTTP helpers ``nemo_gym.judge.call_judge`` uses, so failures surface as ``JudgeError``.
+    Patches the HTTP helpers ``nemo_gym.verification.judge.call_judge`` uses, so failures surface as ``JudgeError``.
     """
     calls: List[Dict[str, Any]] = []
     pending = list(statuses)

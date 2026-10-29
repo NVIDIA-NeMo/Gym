@@ -21,7 +21,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 from resources_servers.partner_if.checks import register_modules
 from resources_servers.partner_if.evidence import EvidenceBundle
 from resources_servers.partner_if.grading_contract import (

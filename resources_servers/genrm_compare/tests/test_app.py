@@ -33,7 +33,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.judge import JudgeError
+from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.app import (
     GROUP_ATTEMPT_KEY_NAME,
     GenRMCompareConfig,

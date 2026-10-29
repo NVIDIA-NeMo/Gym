@@ -18,7 +18,7 @@
 This module runs in the Gym server. Each verification uploads ``sandbox/sandbox_runner.py``, which
 runs only in the sandbox, and the unchanged grading harness from ``lcb_integration/``, the same
 code the Ray path runs; nothing else from this server is uploaded. The upload and run go through
-``nemo_gym.verifier_utils.sandbox_verification.run_verification_sandbox``, which raises
+``nemo_gym.verification.sandbox_verification.run_verification_sandbox``, which raises
 ``SandboxVerificationError`` on a sandbox or runner failure so the caller can mask the sample.
 Candidate failures (wrong answer, timeout, crash) come back as normal harness results.
 """
@@ -30,11 +30,7 @@ from typing import Any
 from pydantic import BaseModel, StrictBool, StrictInt
 
 from nemo_gym.sandbox import SandboxProvider
-from nemo_gym.verifier_utils.sandbox_verification import (
-    RUNNER_FILE,
-    SandboxVerificationConfig,
-    run_verification_sandbox,
-)
+from nemo_gym.verification import RUNNER_FILE, SandboxVerificationConfig, run_verification_sandbox
 
 
 _CODE_GEN_DIR = Path(__file__).parent

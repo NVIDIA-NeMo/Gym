@@ -19,7 +19,13 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
-from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, normalize_math_judge_verdict, reraise_judge_errors
+from nemo_gym.verification import (
+    JudgeError,
+    call_judge,
+    judge_failsafe,
+    normalize_math_judge_verdict,
+    reraise_judge_errors,
+)
 
 
 @pytest.mark.parametrize(
