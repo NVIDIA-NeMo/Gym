@@ -1234,6 +1234,9 @@ class TestMaxTokens:
         class _StubAIAgent:
             def __init__(self, **kwargs) -> None:
                 seen["max_tokens"] = kwargs.get("max_tokens")
+                self._ensure_primary_openai_client = lambda **kwargs: None
+                self._handle_max_iterations = lambda *args: None
+                self._interruptible_api_call = lambda request: None
                 self._build_api_kwargs = lambda _messages: {}
                 self.compression_enabled = True
 

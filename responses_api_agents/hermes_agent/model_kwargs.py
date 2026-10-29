@@ -42,14 +42,41 @@ def _model_api_kwargs(kwargs: dict[str, Any], *, preserve_reasoning_history: boo
     return kwargs
 
 
-def install_summary_compat(agent: Any, *, preserve_reasoning_history: bool) -> None:
+def install_summary_compat(
+    agent: Any,
+    *,
+    preserve_reasoning_history: bool,
+    sampling_overrides: dict[str, float | int] | None = None,
+) -> None:
     """Route pinned Hermes's iteration-limit summary through Gym's observed model path."""
     if getattr(agent, "_gym_summary_compat_installed", False):
         return
     original_ensure_client = getattr(agent, "_ensure_primary_openai_client", None)
     original_handle_max_iterations = getattr(agent, "_handle_max_iterations", None)
     if not callable(original_ensure_client) or not callable(original_handle_max_iterations):
+        if sampling_overrides:
+            raise RuntimeError("Hermes runtime lacks the hooks required to enforce model-call controls")
         return
+
+    original_call = agent._interruptible_api_call
+    controls = dict(sampling_overrides or {})
+
+    def controlled_call(kwargs: dict[str, Any]) -> Any:
+        request = _model_api_kwargs(kwargs, preserve_reasoning_history=preserve_reasoning_history)
+        for name, value in controls.items():
+            if name == "max_tokens":
+                # A smaller harness limit remains valid; training supplies a ceiling.
+                caps = [value]
+                caps.extend(
+                    request[key] for key in ("max_tokens", "max_completion_tokens") if request.get(key) is not None
+                )
+                request.pop("max_completion_tokens", None)
+                request[name] = min(caps)
+            else:
+                request[name] = value
+        return original_call(request)
+
+    agent._interruptible_api_call = controlled_call
 
     def create_summary(**kwargs: Any) -> Any:
         # Hermes's summary bypasses _build_api_kwargs and replays its internal history.
@@ -94,5 +121,5 @@ def install_summary_compat(agent: Any, *, preserve_reasoning_history: bool) -> N
             children = _SummaryCompatChildren(children)
             agent._active_children = children
         children._gym_prepare_child = lambda child: install_summary_compat(
-            child, preserve_reasoning_history=preserve_reasoning_history
+            child, preserve_reasoning_history=preserve_reasoning_history, sampling_overrides=controls
         )

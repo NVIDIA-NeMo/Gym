@@ -74,3 +74,41 @@ def test_standalone_runner_loads_shared_helper_without_gym_on_path(tmp_path):
     assert completed.returncode == 2
     assert "usage: sandbox_runner.py" in completed.stderr
     assert "ImportError" not in completed.stderr
+
+
+def test_sampling_controls_apply_to_calls_summaries_and_children():
+    from types import SimpleNamespace
+
+    from responses_api_agents.hermes_agent.model_kwargs import install_summary_compat
+
+    requests = []
+
+    def agent():
+        return SimpleNamespace(
+            _ensure_primary_openai_client=lambda **kwargs: None,
+            _handle_max_iterations=lambda *args: None,
+            _interruptible_api_call=lambda kwargs: requests.append(kwargs),
+            _active_children=[],
+            _sanitize_tool_calls_for_strict_api=lambda message: message,
+        )
+
+    root = agent()
+    install_summary_compat(
+        root,
+        preserve_reasoning_history=False,
+        sampling_overrides={"temperature": 0.7, "top_p": 0.8, "max_tokens": 64},
+    )
+    original = {"temperature": 1.0, "max_completion_tokens": 128}
+    root._interruptible_api_call(original)
+    summary = root._ensure_primary_openai_client(reason="iteration_limit_summary")
+    summary.chat.completions.create(messages=[], temperature=0.0, max_tokens=32)
+    child = agent()
+    root._active_children.append(child)
+    child._interruptible_api_call({"max_tokens": 256})
+    grandchild = agent()
+    child._active_children.append(grandchild)
+    grandchild._interruptible_api_call({})
+    assert original == {"temperature": 1.0, "max_completion_tokens": 128}
+    assert [request["max_tokens"] for request in requests] == [64, 32, 64, 64]
+    assert all(request["temperature"] == 0.7 and request["top_p"] == 0.8 for request in requests)
+    assert all("max_completion_tokens" not in request for request in requests)
