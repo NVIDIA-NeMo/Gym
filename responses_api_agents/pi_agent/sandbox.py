@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
+from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     AgentSessionState,
@@ -77,19 +78,46 @@ class PiSandboxSession(AgentSessionState):
                 # The agent base replays the activation error independently of close.
 
     async def execute(
-        self, *, command: list[str], env: dict[str, str], prompt: str, timeout: float, close_timeout: float
+        self,
+        *,
+        command: list[str],
+        env: dict[str, str],
+        prompt: str,
+        timeout: float,
+        close_timeout: float,
+        history_transport: dict | None = None,
     ) -> str:
         """Run through the common lifecycle; the adapter validates terminal events."""
         return await self.session.execute(
-            stage_activation=lambda: self.stage_activation(command=command, env=env, prompt=prompt),
+            stage_activation=lambda: self.stage_activation(
+                command=command, env=env, prompt=prompt, history_transport=history_transport
+            ),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
         )
 
-    async def stage_activation(self, *, command: list[str], env: dict[str, str], prompt: str) -> SandboxCommand:
+    async def stage_activation(
+        self,
+        *,
+        command: list[str],
+        env: dict[str, str],
+        prompt: str,
+        history_transport: dict | None = None,
+    ) -> SandboxCommand:
         """Stage the invocation and return the Pi worker command."""
         directory = self.session.session_dir
+        command = await stage_cli_transport(
+            self.session.sandbox,
+            {
+                "history_transport": history_transport,
+                "directory": directory,
+                "command": command,
+                "env": env,
+                "cwd": self.session.workdir,
+            },
+            harness="pi",
+        )
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
         params = {
             "cwd": self.session.workdir,
