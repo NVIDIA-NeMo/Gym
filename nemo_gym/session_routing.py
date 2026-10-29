@@ -64,9 +64,17 @@ A claim ends once its session's last record on the claimant is gone:
 The claims of a worker that exited stay until the server exits, so its sessions keep getting a 410.
 The whole directory goes with the server's runtime directory when the server exits.
 With one worker there is no private socket and no claim.
+
+A request without a session ID that belongs to one worker, such as an agent's call to itself within one ``/run``,
+names that worker in the ``x-ng-session-owner`` header, and is forwarded there, or gets a 410 if that worker is gone.
+
+A partial-rollout checkpoint restore installs each restored session on one live worker,
+which rewrites the session's claim to name itself (see ``SessionClaims.rewrite``).
+A cookie or MCP token from before the restore names only the session ID, so its requests reach the new holder.
 """
 
 import asyncio
+import fcntl
 import hashlib
 import heapq
 import json
@@ -74,9 +82,10 @@ import logging
 import math
 import os
 import re
+import secrets
 from base64 import b64decode
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Optional, Protocol
@@ -93,7 +102,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.config_types import DEFAULT_UVICORN_BACKLOG, ROLLOUT_PATH_PREFIX
 from nemo_gym.runtime_dir import server_runtime_dir
 
 
@@ -111,6 +120,15 @@ SESSION_ID_SCOPE_KEY = "nemo_gym.session_id"
 #: a new ID, or one a cookie names whose claim ended.
 #: The session middleware calls it once the handler has used the session.
 SESSION_CLAIM_SCOPE_KEY = "nemo_gym.claim_session"
+#: App state key with the lifespans, each called with the app, that a worker enters once its private socket listens,
+#: before it serves any request, and leaves before the socket closes.
+#: A checkpoint coordinator's link is one: the coordinator may place restored sessions on the worker once it joins.
+ROUTED_LIFESPANS_STATE = "nemo_gym_routed_lifespans"
+#: Header naming the worker a request without a session belongs to.
+SESSION_OWNER_HEADER = "x-ng-session-owner"
+# How many claims a batched rewrite replaces per hold of the workers' claims lock,
+# so a release on any worker waits for at most one batch.
+_REWRITE_BATCH = 256
 #: Scope key marking a request that arrived over a worker's private socket.
 _FORWARDED_SCOPE_KEY = "nemo_gym.session_forwarded"
 
@@ -205,6 +223,9 @@ class SessionClaims:
     It is not released while a request for the session is being served here,
     since that request may be about to create a record.
     Only the claimant removes its claim, so a removal cannot delete another worker's claim made since.
+    A checkpoint restore can rewrite a claim for another worker at any time, though.
+    The removal's check of the claimant and its unlink, and every rewrite, hold one lock file shared by the workers,
+    so a removal never deletes a claim a rewrite has just written.
     """
 
     def __init__(self, socket_dir: str, routing_id: str, holds: Callable[[str], bool]) -> None:
@@ -212,6 +233,8 @@ class SessionClaims:
         self.holds = holds
         self.directory = os.path.join(socket_dir, SESSION_CLAIMS_DIR)
         os.makedirs(self.directory, mode=0o700, exist_ok=True)
+        # Beside the claims, so a listing of the claims directory finds only claims.
+        self._lock_path = f"{self.directory}.lock"
         # The IDs this worker has claimed and not released, and the requests for an ID being served here.
         # Only this worker removes its claims, so an ID in the set is claimed by this worker on disk too.
         self._mine: set[str] = set()
@@ -239,7 +262,8 @@ class SessionClaims:
             return self.routing_id
         path = self._path(session_id)
         while True:
-            temporary = f"{path}.{self.routing_id}.tmp"
+            # Its own scratch file, so a restore rewriting the same ID in a thread here cannot truncate or remove it.
+            temporary = f"{path}.{self.routing_id}.{secrets.token_hex(8)}.tmp"
             fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
                 os.write(fd, self.routing_id.encode("ascii"))
@@ -258,6 +282,76 @@ class SessionClaims:
             if claimant is not None or os.path.exists(path):
                 return claimant
             # The claimant released it between the two calls: claim it again.
+
+    def rewrite(self, session_id: str) -> None:
+        """Claim the ID for this worker whoever claims it now, for a session a checkpoint restore installs here.
+
+        The claim file is replaced by one rename, so a reader finds either the old claimant or this one.
+        A live worker that claimed the ID before must ``disown`` it, since a worker trusts its own claims first.
+        """
+        self._replace_claims([session_id], [])
+        self._mine.add(session_id)
+
+    async def rewrite_all(self, session_ids: list[str]) -> None:
+        """``rewrite`` each ID, in a thread, so a restore of many sessions does not hold up the event loop.
+
+        The thread only replaces files, and holds the workers' claims lock once per ``_REWRITE_BATCH`` renames.
+        The IDs this worker claims change only on the event loop, once the thread has ended,
+        even if the caller was cancelled meanwhile.
+        They then name exactly the claims the thread rewrote, so a release after a failure misses none of them.
+        Until then this worker does not count them as its own, so a release here leaves them alone.
+        The caller holds the sessions (see ``holds``) from before this call, so no release afterwards removes them.
+        """
+        replaced: list[str] = []
+        replacing = asyncio.ensure_future(asyncio.to_thread(self._replace_claims, session_ids, replaced))
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(replacing)
+                break
+            except asyncio.CancelledError:
+                # The thread cannot be stopped: wait for it, then pass the cancellation on.
+                cancelled = True
+            except Exception:
+                break
+        self._mine.update(replaced)
+        if cancelled:
+            raise asyncio.CancelledError()
+        replacing.result()
+
+    def _replace_claims(self, session_ids: list[str], replaced: list[str]) -> None:
+        """Replace the claim file of each ID with one naming this worker, and append each ID to ``replaced`` once done.
+
+        It touches only files, so it can run in a thread.
+        """
+        for start in range(0, len(session_ids), _REWRITE_BATCH):
+            batch: list[tuple[str, str, str]] = []
+            try:
+                for session_id in session_ids[start : start + _REWRITE_BATCH]:
+                    path = self._path(session_id)
+                    # Its own scratch file, so a claim of the same ID on this worker meanwhile cannot remove it.
+                    temporary = f"{path}.{self.routing_id}.{secrets.token_hex(8)}.tmp"
+                    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                    batch.append((session_id, temporary, path))
+                    try:
+                        os.write(fd, self.routing_id.encode("ascii"))
+                    finally:
+                        os.close(fd)
+                with self._exclusive():
+                    for session_id, temporary, path in batch:
+                        os.replace(temporary, path)
+                        replaced.append(session_id)
+            finally:
+                # A batch cut short leaves no scratch file behind.
+                for _, temporary, _ in batch:
+                    try:
+                        os.unlink(temporary)
+                    except FileNotFoundError:
+                        pass
+
+    def disown(self, session_id: str) -> None:
+        """Stop holding the ID here, and leave its claim file to the worker a checkpoint restore moved it to."""
+        self._mine.discard(session_id)
 
     def mine(self, session_id: str) -> bool:
         return session_id in self._mine
@@ -279,10 +373,26 @@ class SessionClaims:
         if session_id not in self._mine or session_id in self._serving or self.holds(session_id):
             return
         self._mine.discard(session_id)
+        path = self._path(session_id)
+        with self._exclusive():
+            # A restore may have rewritten the claim for another worker before this worker disowned it.
+            if self.claimant(session_id) != self.routing_id:
+                return
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+
+    @contextmanager
+    def _exclusive(self) -> Iterator[None]:
+        """Hold the workers' claims lock; it is held only for a few file operations, never across an await."""
+        fd = os.open(self._lock_path, os.O_RDONLY | os.O_CREAT, 0o600)
         try:
-            os.unlink(self._path(session_id))
-        except FileNotFoundError:
-            pass
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            # Closing the file releases the lock.
+            os.close(fd)
 
     def __len__(self) -> int:
         return len(self._mine)
@@ -344,9 +454,11 @@ class ResourcesSessionLifetimes:
         # An entry can be earlier than its session's time, which moved on; the sweep then queues it again.
         self._expiries: list[tuple[float, str]] = []
         self._queued: set[str] = set()
+        # Sessions a checkpoint retire freed, whose claims last until ``ended`` whatever requests for them do.
+        self._retained: set[str] = set()
 
     def holds(self, session_id: str) -> bool:
-        return self._until.get(session_id, 0.0) > monotonic()
+        return session_id in self._retained or self._until.get(session_id, 0.0) > monotonic()
 
     def served(self, session_id: str, scope: Scope, status: Optional[int]) -> None:
         path = scope["path"]
@@ -370,8 +482,26 @@ class ResourcesSessionLifetimes:
 
     def ended(self, session_id: str) -> None:
         """End a session this worker claims, from a route that ends a session under another name."""
-        if session_id in self._until:
+        retained = session_id in self._retained
+        self._retained.discard(session_id)
+        if retained or session_id in self._until:
             self._expire_after_window(session_id)
+
+    def retain(self, session_id: str) -> None:
+        """Keep the claim on a session a checkpoint retire freed until ``ended``, when the retire's refusal ends.
+
+        Until then a late request that carries only the session's cookie reaches this worker, which refuses it.
+        """
+        self._retained.add(session_id)
+
+    def opened(self, session_id: str) -> None:
+        """Open a session a checkpoint restore installed on this worker, as a successful seed would."""
+        self._until[session_id] = math.inf
+
+    def forget(self, session_id: str) -> None:
+        """Drop a session whose install a failed restore undid, so its claim can be released at once."""
+        self._until.pop(session_id, None)
+        self._retained.discard(session_id)
 
     def _expire_after_window(self, session_id: str) -> None:
         until = monotonic() + self.window_seconds
@@ -398,7 +528,7 @@ class ResourcesSessionLifetimes:
         return expired
 
     def __len__(self) -> int:
-        return len(self._until)
+        return len(self._until.keys() | self._retained)
 
 
 class AgentSessionHolder(Protocol):
@@ -525,6 +655,11 @@ class SessionRoutingMiddleware:
         forwarded = bool(scope.get(_FORWARDED_SCOPE_KEY))
         starts = self.lifetimes is not None and self.lifetimes.starts(scope["path"])
         if session_id is None:
+            owner = _valid_routing_id(HTTPConnection(scope).headers.get(SESSION_OWNER_HEADER))
+            if owner is not None and owner != self.routing_id and not forwarded:
+                # A request that belongs to one worker without a session, such as an agent's call to itself.
+                await self._forward(owner, scope, receive, send, body=body)
+                return
             if not self.kind.cookie_session:
                 await self.app(scope, receive, send)
                 return
@@ -742,11 +877,15 @@ class _PrivateSocketProtocol(HttpToolsProtocol):
 
 
 @asynccontextmanager
-async def serve_private_socket(app: ASGIApp, path: str) -> AsyncIterator[None]:
+async def serve_private_socket(
+    app: ASGIApp, path: str, *, backlog: int = DEFAULT_UVICORN_BACKLOG
+) -> AsyncIterator[None]:
     """Serve *app* on a Unix socket for requests other workers forward here, on the running event loop."""
     config = uvicorn.Config(
         _mark_forwarded(app),
         uds=path,
+        # Other workers forward to this socket without a connection limit, so a burst can open thousands at once.
+        backlog=backlog,
         # This worker's main server already ran the app's lifespan.
         lifespan="off",
         # The forwarding worker's own server adds these, so adding them here would duplicate them.
@@ -804,6 +943,7 @@ def install_session_routing(
     session_starts: tuple[str, ...] = (),
     session_ends: tuple[str, ...] = (),
     close_follows_header: Optional[str] = None,
+    backlog: int = DEFAULT_UVICORN_BACKLOG,
 ) -> Optional[str]:
     """Route this worker's requests by session ID, and serve forwarded requests on a private socket.
 
@@ -865,10 +1005,13 @@ def install_session_routing(
     async def lifespan_with_private_socket(application: FastAPI) -> AsyncIterator[Any]:
         async with original_lifespan(application) as state:
             # Started after the app's own startup, so a forwarded request never reaches a half-started app.
-            async with serve_private_socket(application, worker_socket_path(socket_dir, routing_id)):
+            async with serve_private_socket(application, worker_socket_path(socket_dir, routing_id), backlog=backlog):
                 sweeper = asyncio.create_task(_sweep_claims(claims, lifetimes, sweep_seconds))
                 try:
-                    yield state
+                    async with AsyncExitStack() as routed:
+                        for lifespan in getattr(application.state, ROUTED_LIFESPANS_STATE, ()):
+                            await routed.enter_async_context(lifespan(application))
+                        yield state
                 finally:
                     sweeper.cancel()
                     await asyncio.gather(sweeper, return_exceptions=True)

@@ -34,7 +34,9 @@ gym dataset rm                # delete a dataset from GitLab
 gym dataset migrate           # move a dataset from GitLab to HF
 gym dataset render            # generate a dataset preview (materialize prompts)
 gym dataset collate           # validate and collate a dataset
-gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task)
+gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task; --parameterized for a template)
+gym dataset publish --harbor <target> --output <dir>  # write a Gym-authored dataset as plain Harbor task folders
+gym dataset pull <target>     # fetch a Harbor dataset (hub reference or committed entry) into environments/harbor/
 gym dataset validate <target> # run each Harbor task's reference solution through its verifier
 
 # Environments
@@ -55,7 +57,7 @@ gym eval plan                 # write one benchmark's task list (stable ids, dig
 gym eval run                  # collate data, start servers, and collect rollouts
 gym eval submit               # submit a benchmark job to Slurm
 gym eval aggregate            # merge sharded rollout results
-gym eval export               # export supported Gym trajectories as ATIF
+gym eval export               # export a finished run (default exporter: atif)
 gym eval health-check         # verify rollout artifact quality for an existing run
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
@@ -354,6 +356,26 @@ instruction, a verifier and a reference solution. Refer to [Harbor Tasks](/main/
 gym dataset init my-dataset --image ubuntu:24.04   # dataset.toml names it local/my-dataset
 ```
 
+### `gym dataset pull`
+
+Fetch a Harbor dataset into `environments/harbor/` of the Gym checkout, or under the working directory when Gym is
+installed as a package (`$NEMO_GYM_DATASETS_DIR` when set), and print where it landed, its task count and its
+dataset digest. Nothing is prepared, built or run. The fetch is the
+one `gym eval run` and `gym dataset validate` make for a `harbor:` target, so a folder that was edited by hand,
+left by an interrupted fetch of another version, or written for another package is refused in the same words;
+a second pull of an unchanged dataset downloads nothing and says so. Refer to
+[Harbor Tasks](/main/data/harbor-tasks#gym-dataset-pull-and-committed-entries).
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | `harbor:<org>/<name>[@<tag> \| @sha256:<digest>]` (a package-store dataset), `harbor:<dataset>[@<version>]` (a registry dataset), or the name of a committed entry under `environments/harbor/` whose `dataset.toml` declares `[gym] source` (for example `terminal_bench_4`). A reference an entry declares as its source lands in that entry's folder when the entry is under the working root (the checkout, or the working directory of a package install) and is not installed; an installed entry (one a package install ships under `site-packages`, a project-local `.venv` included) or one committed outside the working root is pulled, by name and by reference alike, into `environments/harbor/<entry>/` under the working directory (`$NEMO_GYM_DATASETS_DIR` when set), leaving the installation untouched. That copy folder never shadows the installed entry (its `.gym-layer.json` tells it apart), so an edit of the installed entry's `dataset.toml` reaches the next pull, while an entry of the same name the checkout commits itself keeps precedence. An entry name is found from any working directory (the pull takes no path). |
+
+```bash
+gym dataset pull terminal_bench_4                                  # the entry's source, into environments/harbor/terminal_bench_4/
+gym dataset pull harbor:terminal-bench/terminal-bench@4.0.0        # the same folder: the entry declares this reference
+gym dataset pull harbor:terminal-bench/terminal-bench-2-1          # no entry declares `latest`: environments/harbor/terminal-bench-2-1/
+```
+
 ### `gym dataset validate`
 
 Run each Harbor task's reference solution (`solution/solve.sh`) through its verifier with the oracle harness
@@ -366,7 +388,7 @@ selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-t
 
 | Option | Description |
 | --- | --- |
-| `TARGET` | A task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. |
+| `TARGET` | A task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. |
 | `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--only-tasks PATTERNS` | Comma-separated task names or globs; only matching tasks are validated. |
@@ -378,6 +400,7 @@ selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-t
 ```bash
 gym dataset validate my-dataset --sandbox opensandbox
 gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
+gym dataset validate terminal_bench_4 --sandbox opensandbox      # the committed entry, after `gym dataset pull terminal_bench_4`
 ```
 
 ### `gym dataset upload`
@@ -776,9 +799,9 @@ gym eval prepare --benchmark aime24
 
 ### `gym eval plan`
 
-Prepare one benchmark and write its plan: every task once, sorted by task id, with a digest of the exact input a run receives. The plan stores ids and digests, not the inputs themselves. The format is versioned (`"schema": "nemo-gym.eval-plan.v1"`), only changes additively within a version, and is printed as JSON Schema by `--schema`.
+Prepare one benchmark and write its plan: every task once, sorted by task id, with a digest of its prepared row. The plan stores ids and digests, not the inputs themselves. The format is versioned (`"schema": "nemo-gym.eval-plan.v1"`), only changes additively within a version, and is printed as JSON Schema by `--schema`.
 
-Each task's id comes from its row's `task_id`, `problem_id` or `instance_id`, and its taskset is the dataset's declared `taskset` (the benchmark name when none is declared). Unlike `gym eval run`, there is no fallback to the row's position, so benchmarks without such a field are refused. Benchmarks with a prompt template (`prompt_config`) are not supported yet.
+Each task's id comes from its row's `task_id`, `problem_id` or `instance_id`, and its taskset is the dataset's declared `taskset` (the benchmark name when none is declared). Unlike `gym eval run`, there is no fallback to the row's position, so benchmarks without such a field are refused. The digest covers the prepared row after excluding runtime routing and bookkeeping fields (`agent_ref`, `task_source`, `skills_ref`, and keys beginning with `_ng_`). A prompt template (`prompt_config`) is applied when a run starts, so editing the template does not change the digest.
 
 | Option | Description |
 | --- | --- |
@@ -799,7 +822,7 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
-In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
 
 | Option | Description |
 | --- | --- |
@@ -890,6 +913,18 @@ gym eval run --no-serve \
 Because the merge is shallow, setting a field inside a nested object, such as `++responses_create_params.reasoning.effort=low`, replaces the row's entire nested dictionary at that key. Other fields under the same nested object are not preserved.
 </Tip>
 
+#### Output files
+
+Next to `--output` (`<stem>` is its name without `.jsonl`), the run writes:
+
+| File | Content |
+| --- | --- |
+| `<stem>.jsonl` | The rollouts. |
+| `<stem>_materialized_inputs.jsonl` | The fully expanded input rows. |
+| `<stem>_failures.jsonl` | Failed rollouts routed to the sidecar, when there are any. |
+| `<stem>_aggregate_metrics.json` | Aggregate metrics, unless aggregation is disabled. |
+| `<stem>_resolved_config.yaml` | The run's configuration, written before collection starts and overwritten by each attempt. Secrets are masked and `${...}` interpolations stay unresolved. Masking is a precaution (it also covers the password in a URL's user info), not a guarantee: keep secrets out of the config with `${oc.env:NAME}` or `env.yaml`. |
+
 #### Resume interrupted runs
 
 Pass `--resume` to restart the **same command** after a crash or interruption and pick up only the rows that have not finished yet.
@@ -900,10 +935,11 @@ How it works:
 - **Incremental output.** Successful rollouts are flushed to the main output JSONL after each completion; retriable failures go to a `<stem>_failures.jsonl` sidecar, so partial progress survives a crash.
 - **Failed agent calls.** By default a failed agent `/run` ends the run, because the alternative is a score reported over fewer rollouts than were asked for. Pass `+route_failures_to_sidecar=true` to let the run continue instead: the call is then recorded in the same sidecar as one attempt, with no reward. Every rollout that leaves the score is logged as it happens, whichever layer classified it, and the totals appear with the closing artifact paths. The class says whether the rollout ran: `agent_run_error` when the agent itself answered, since a NeMo Gym agent returns 500 when its handler raises, and `agent_request_failed` for a gateway status (429, 502, 503, 504) or no usable reply, neither of which says anything about the rollout. Other rollouts keep running, the score is computed over completed rollouts only, and resume re-dispatches the row up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. A run in which nothing produced a result fails instead of reporting an empty score, unless an option below counts its rollouts as zeros.
 - **Counting failures in the score.** Metrics are computed over completed rollouts only. `+count_failure_classes_as_zero=[<class>]` includes the named sidecar rows in `/aggregate_metrics` so they land in the denominator: `[agent_run_error]` counts the rollouts that reached the agent and broke, which is what a model emitting unparsable tool calls looks like from here, and needs `+route_failures_to_sidecar=true` to have anything to count. A row that carries no reward is scored zero for the metric input only, so neither the sidecar nor the rollouts JSONL records a verdict that no verifier gave. It works the same in `gym eval run` and `gym eval aggregate`.
-- **Counting lost rollouts.** `+count_missing_rollouts_as_zero=true` scores as zero a rollout that is in the materialized inputs but left no row in the output JSONL or the sidecar, such as one killed mid-flight or one `dispatch_budget_s` never started. The zero goes into the metric input only, so `--resume` still runs the rollout and the resumed run scores it. A rollout recorded in the sidecar is never counted here, so this does not widen `+count_failure_classes_as_zero`. The count is reported as `coverage/imputed`. With `--disable-aggregation` nothing is scored, so a run with no row still fails. `gym eval aggregate` checks each shard against its own rows, materialized inputs and sidecar.
+- **Counting lost rollouts.** `+count_missing_rollouts_as_zero=true` scores as zero a rollout that is in the materialized inputs but left no row in the output JSONL and no failure row in the sidecar, such as one killed mid-flight or one `dispatch_budget_s` never started. A sidecar row written by `+record_omitted_rollouts` (see **Rollouts with no result**) is not a failure row, so such a rollout is counted here. The zero goes into the metric input only, so `--resume` still runs the rollout and the resumed run scores it. A rollout with a failure row in the sidecar is never counted here, so this does not widen `+count_failure_classes_as_zero`. The count is reported as `coverage/imputed`. With `--disable-aggregation` nothing is scored, so a run with no row still fails. `gym eval aggregate` checks each shard against its own rows, materialized inputs and sidecar.
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
 - **Terminal failures.** A sidecar row stamped `_ng_failure_terminal` is never retried. `+retry_terminal_timeouts=true` retries rows of class `timeout_exceeded` even when they are stamped terminal. Retries still stop at `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. Off by default, because some agents stamp their timeouts terminal on purpose.
-- **Dispatch budget.** `+dispatch_budget_s=<seconds>` stops starting new rollouts that many seconds after collection starts; set it to the usable walltime of the allocation. It requires `--concurrency` or `+max_resident_rollout_tasks`; without either limit, the whole queue could be sent before the budget is checked. Rows that are not started write nothing, so the next `--resume` runs them. `+drain_margin_s=<seconds>` also stops starting rows when less than that much time is left; unset, the margin is the p75 duration of the run's recorded attempts once there are at least 5. An attempt whose agent `/run` returns a usable reply is always recorded, even when the agent reports the rollout itself as failed or timed out; an attempt whose `/run` fails (an error status, or no usable reply) is recorded only if it ran at least as long as the median so far, because a quick failure says nothing about how long rollouts take. Every run ends with a latency summary over the same attempts (median, p90, p99, max) and the number of rows not started.
+- **Dispatch budget.** `+dispatch_budget_s=<seconds>` stops starting new rollouts that many seconds after collection starts; set it to the usable walltime of the allocation. It requires `--concurrency` or `+max_resident_rollout_tasks`; without either limit, the whole queue could be sent before the budget is checked. Rows that are not started are not attempts, so the next `--resume` runs them. `+drain_margin_s=<seconds>` also stops starting rows when less than that much time is left; unset, the margin is the p75 duration of the run's recorded attempts once there are at least 5. An attempt whose agent `/run` returns a usable reply is always recorded, even when the agent reports the rollout itself as failed or timed out; an attempt whose `/run` fails (an error status, or no usable reply) is recorded only if it ran at least as long as the median so far, because a quick failure says nothing about how long rollouts take. Every run ends with a latency summary over the same attempts (median, p90, p99, max) and the number of rows not started.
+- **Rollouts with no result.** By default a rollout that produced no result leaves no row anywhere: an attempt the agent reports as `kill_shaped` (Slurm SIGTERM, a dead Ray actor, an OOM outside the rollout) and a row `dispatch_budget_s` never started. `+record_omitted_rollouts=true` writes one `<stem>_failures.jsonl` row for each, so the absence has a record. The row keeps the rollout's `task_index`, `rollout_index` and `_ng_attempt_index`, carries `_ng_no_persist: true` and `_ng_omitted_rollout: true`, the failure class the result already had (`kill_shaped`, or `cancelled` with `_ng_dispatch_drained` for a row never started) and a reason in `_ng_failure_message`. Such a row is evidence, not a failure: it is left out of scoring, `+count_failure_classes_as_zero`, aggregate and exporter metrics, the run health summary, `gym dev compare`, rollout uploads, `gym eval reverify --judge-failed-only` and the resume attempt count, so `--resume` runs the rollout again. Where a reader takes a rollout's last attempt, an interrupted attempt is that last attempt, so an older failure is not counted again and the rollout is missing; a row never started is skipped. Rows carrying only `_ng_no_persist`, such as the `kill_shaped` rows ATIF reverification writes, are read as before. Off by default while readers of the sidecar outside NeMo Gym learn to treat these rows as not run rather than failed. A driver that is itself killed before it sees an outcome still leaves no row, and a custom `rollout_collection_driver` such as GDPVal's multi-stage one keeps its own persistence and ignores the option.
 - **Longest first.** `+dispatch_longest_first=true` starts the rows whose earlier failed attempts ran longest first on resume, using the `elapsed_seconds` those attempts recorded. Rows with no recorded timing keep their input order and start after them. Without it, rows start in input order.
 - **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, the existing output, its `<stem>_failures.jsonl` sidecar and its `<stem>_aggregate_metrics.json` are deleted before the run.
 
@@ -930,7 +966,7 @@ gym eval submit --config submit.yaml --resolve-only --json
 
 ### `gym eval aggregate`
 
-Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
+Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. It also lists the shards in `<output stem>_sources.json`, which `gym eval health-check` reads for a merged `rollouts.jsonl`. The output may be a shard only when it is the only one, reached through its own directory rather than a file link from elsewhere, and then nothing is listed. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
 
 | Option | Description |
 | --- | --- |
@@ -952,7 +988,9 @@ gym eval aggregate \
 
 ### `gym eval export`
 
-Export supported `ng_trajectory` attachments from a Gym rollouts JSONL file as ATIF v1.7. The command writes one ATIF
+Export a finished run with an exporter, chosen by the optional `EXPORTER` argument. `atif` is the default; `mlflow` and `wandb` send a finished run to those tracking backends, and `evalrdl` uploads it to EvalRDL. Exporter settings are Hydra `+key=value` overrides; the option flags below are equivalent forms for `atif`.
+
+`atif` exports supported `ng_trajectory` attachments from a Gym rollouts JSONL file as ATIF v1.7. The command writes one ATIF
 trajectory per rollout plus a manifest that preserves Gym's task and rollout identity. It is a strict offline conversion:
 if Gym cannot represent a source trajectory completely in the supported ATIF subset, the export fails instead of silently
 omitting data. All invalid JSONL rows are reported together, and no destination is published if any row fails. Captured
@@ -964,32 +1002,97 @@ row's `agent_ref.name`; `--agent-version` records the version of that agent impl
 
 | Option | Description |
 | --- | --- |
-| `--format atif` | Output format. ATIF is the only format supported initially. |
+| `EXPORTER` | Exporter to run: `atif`, `mlflow`, `wandb` or `evalrdl`. Defaults to `atif`. |
+| `--format atif` | Deprecated. Pass the exporter name instead. |
 | `--rollouts PATH` | Gym rollouts JSONL containing `ng_trajectory` version `1.0` attachments. |
 | `--output-dir DIR` | New directory for the ATIF files and manifest. |
 | `--session-id ID` | Stable identifier for the source evaluation run. |
 | `--agent-version VERSION` | Version of the agent implementation that produced the rollouts. |
 
 ```bash
-gym eval export \
-    --format atif \
-    --rollouts results/rollouts.jsonl \
-    --output-dir results/atif \
-    --session-id eval-2026-08-25 \
-    --agent-version 1.2.3
+gym eval export atif \
+    +rollouts_jsonl_fpath=results/rollouts.jsonl \
+    +output_dirpath=results/atif \
+    +session_id=eval-2026-08-25 \
+    +agent_version=1.2.3
+```
+
+#### Exporting to MLflow or W&B
+
+`mlflow` and `wandb` log what a live run would have logged: the run's saved config (`<stem>_resolved_config.yaml`),
+its aggregate metrics, and its rollouts. They need `<stem>_aggregate_metrics.json` (newer than the rollouts file) and the
+saved config next to the rollouts, so they cannot export a run that predates the saved config. Backend settings and
+credentials (`mlflow_tracking_uri`, `wandb_api_key`, ...) come from the export command itself (arguments or `env.yaml`),
+never from the run's saved config, which masks them. A backend SDK's own environment variables, such as
+`WANDB_API_KEY`, are also used when the command sets no key. Rollouts are uploaded unless the run's saved
+`upload_rollouts` is false; pass `+upload_rollouts=true|false` to override. The rollouts file itself is only needed
+when the rollouts are uploaded, so `+upload_rollouts=false` also exports a run whose rollouts file is gone.
+
+Once a run is exported, `<stem>_<exporter>_export_done` is written next to the rollouts and later exports of the same run
+are skipped without contacting the backend. Delete that file to export again. A failed export leaves no marker, so it can
+be retried. A run that was also logged live is not skipped: its `<stem>_<exporter>_run_id` shows only that the live run
+opened, not that every upload landed. The export sends the run again as a separate run and reports the live run id.
+
+```bash
+gym eval export mlflow \
+    +rollouts_jsonl_fpath=results/rollouts.jsonl \
+    +mlflow_tracking_uri=https://mlflow.example \
+    +mlflow_experiment_name=gym \
+    +mlflow_run_name=nightly
+```
+
+#### Exporting to EvalRDL
+
+`evalrdl` uploads one run: the whole directory the rollouts file is in. Everything there is part of the upload (the
+rollouts and their sidecars, health reports, model-call captures and any benchmark-specific files), and nothing is copied
+or picked out, so keep each run in a directory of its own (the export is refused when the directory holds another
+rollouts file, because EvalRDL would read both as one run). The run still needs `<stem>_aggregate_metrics.json` and
+`<stem>_resolved_config.yaml` there, like the `mlflow` and `wandb` exporters. The `evalrdl` SDK is installed into the
+exporter's own virtual environment, so it never enters Gym's environment. The SDK is served by the EvalRDL
+service's own package index, `<service URL>/v1/client/simple/`; `evalrdl` is not on PyPI. Configure that index through
+uv's own index settings (for example `UV_EXTRA_INDEX_URL`) when you run the command, and do not point uv at an index that
+could carry another package named `evalrdl`, because the SDK runs with your token in its environment. The SDK reads the
+token from `$EVALRDL_TOKEN`, `$GITLAB_TOKEN` or `$GITLAB_PRIVATE_TOKEN`, then from `glab`, which cluster nodes usually
+lack, so set one of the variables there. The environment is built once and the SDK is not upgraded afterwards; when the
+service stops accepting an old client, the export fails and names the environment to delete, or pin a newer version with
+`+requirement=evalrdl==VERSION`.
+
+| Setting | Description |
+| --- | --- |
+| `+rollouts_jsonl_fpath=PATH` | The run's rollouts JSONL. |
+| `+label=TEXT` | Label for the uploaded run. |
+| `+tags=[a,b]` | Tags for the uploaded run. |
+| `+meta.KEY=VALUE` | Extra metadata for the uploaded run. |
+| `+parallel=N` | Number of parallel upload parts. Defaults to `4`. |
+| `+wait=true\|false` | Wait for EvalRDL's verdict on the upload. Defaults to `true`. |
+| `+timeout=SECONDS` | How long to wait for the verdict. Defaults to `1800`. |
+| `+url=prod\|stg\|URL` | EvalRDL service. Defaults to the SDK's own choice. |
+| `+requirement=SPEC` | pip requirement for the SDK, such as a pinned version. Defaults to `evalrdl`. |
+
+The result is `succeeded` when EvalRDL stored the run as new, and `skipped` when it already held the same content. With
+`+wait=false` the run counts as `succeeded` once EvalRDL has stored it, and the upload token is in the result. When
+waiting, an upload EvalRDL stored without a verdict before the timeout fails with exit code `3`, and one it refused fails
+with exit code `4`; both name the reason. A worker still running after `+timeout` plus an hour for the upload itself is
+killed and the export fails.
+
+```bash
+gym eval export evalrdl \
+    +rollouts_jsonl_fpath=results/rollouts.jsonl \
+    +label=nightly '+tags=[a,b]' +meta.model=qwen
 ```
 
 See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-export) for the initial conversion boundary.
 
 ### `gym eval health-check`
 
-Verify rollout quality for an existing run directory. The command reads `<run-dir>/rollouts.jsonl` by default and writes
+Verify rollout quality for an existing run directory. The command reads `<run-dir>/rollouts.jsonl` by default, or the
+shards `gym eval aggregate` merged into it, and writes
 `quality_summary.json` and `rollout_verdicts.jsonl` in the run directory.
 
 | Option | Description |
 | --- | --- |
 | `RUN_DIR` | Directory in which to write the health reports. |
-| `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
+| `--rollouts-file PATH` | Rollout JSONL path, checked alone. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`, or to the shards `gym eval aggregate` merged into it and listed in `rollouts_sources.json`. |
 | `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
 | `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
 | `--health-max-not-final-failure-fraction`, `--health-max-final-failure-fraction` | Override the run's failure limits. Without either flag, the limits recorded in the run's `quality_summary.json` judge it again, so a recheck of the same artifacts keeps its verdict. Each flag overrides only its own limit, with a fraction in [0, 1] or `none` (any case) to remove it; a limit whose flag is not given keeps its recorded value. The summary records which limits were overridden, and a removed limit stays removed on later rechecks. |
