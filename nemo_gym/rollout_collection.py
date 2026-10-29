@@ -61,6 +61,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureReport, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.failure_kinds import CANCELLED, COLLECTION_DISPATCH_FAILED, JUDGE_FAILED, is_namespaced, is_registered
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.global_config import (
@@ -108,6 +109,7 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -118,6 +120,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTokenStats,
     TrajectoryToolCall,
     TrajectoryTurn,
+    VerifierInvocation,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
@@ -586,6 +589,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         if failure.get("trajectory") is not None:
             # The harness's own turns before the failure, in the producer's slot the projection reads first.
             record[NG_TRAJECTORY_KEY] = failure["trajectory"]
+        if failure.get("verifier_invocations") is not None:
+            record[NG_VERIFIER_INVOCATIONS_KEY] = failure["verifier_invocations"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -748,13 +753,19 @@ def _turns_from_model_calls(
     invocations: list[AgentInvocation],
     model_calls: list[TrajectoryModelCall],
     resolved: Any,
+    *,
+    verifier_invocations: Iterable[VerifierInvocation] = (),
 ) -> list[TrajectoryTurn]:
     """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
 
     A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
     in the raw evidence but do not become turns: even a single-agent rollout may capture judge
-    or auxiliary calls that do not belong to the agent.
+    or auxiliary calls that do not belong to the agent. Explicit verifier ownership also excludes
+    a call from turns when an agent incorrectly references it; retain both ownership claims for validation.
     """
+    verifier_call_ids = {
+        ref.model_call_id for invocation in verifier_invocations for ref in invocation.model_calls if ref.model_call_id
+    }
     invocation_by_call_id: dict[str, str] = {}
     invocation_by_response_id: dict[str, str] = {}
     for invocation in invocations:
@@ -769,6 +780,8 @@ def _turns_from_model_calls(
     tool_counts: Counter = Counter()
     for call in model_calls:
         metadata = call.response_metadata
+        if call.model_call_id in verifier_call_ids:
+            continue
         if call.response is None or (metadata.status_code is not None and metadata.status_code >= 400):
             # HTTP error payloads are retained attempts, not model decisions.
             continue
@@ -809,6 +822,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
     invocations: list[AgentInvocation] = []
+    verifier_invocations: list[VerifierInvocation] = []
     turns: list[TrajectoryTurn] = []
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
@@ -836,6 +850,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 turns = trajectory.turns
             gaps.extend(trajectory.gaps)
             invocations = trajectory.invocations
+            verifier_invocations = trajectory.verifier_invocations
             tools = trajectory.tool_calls
             model_calls = trajectory.model_calls
         except Exception as exc:
@@ -953,6 +968,24 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected
 
+    # Join returned verifier outcomes with model-call references reconstructed from capture.
+    for raw_invocation in [
+        *(capture.get("verifier_invocations") or []),
+        *(result.get(NG_VERIFIER_INVOCATIONS_KEY) or []),
+    ]:
+        try:
+            invocation = VerifierInvocation.model_validate(raw_invocation)
+            existing = next((i for i in verifier_invocations if i.invocation_id == invocation.invocation_id), None)
+            if existing is None:
+                verifier_invocations.append(invocation)
+            else:
+                existing.model_calls.extend(ref for ref in invocation.model_calls if ref not in existing.model_calls)
+                if invocation.status != "unknown":
+                    existing.status = invocation.status
+                    existing.failure_kind = invocation.failure_kind
+        except Exception:
+            gaps.append(ObservationGap(code="verifier_invocation_invalid"))
+
     for raw_gap in capture.get("gaps") or []:
         if isinstance(raw_gap, dict):
             try:
@@ -962,7 +995,14 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     if not isinstance(raw_trajectory, dict):
         # An agent that sends its own trajectory owns its turns, and an empty list there means no turn
         # completed. Otherwise, build turns only from calls explicitly referenced by invocations.
-        turns = _turns_from_model_calls(task_id, rollout_id, invocations, model_calls, result.get("resolved"))
+        turns = _turns_from_model_calls(
+            task_id,
+            rollout_id,
+            invocations,
+            model_calls,
+            result.get("resolved"),
+            verifier_invocations=verifier_invocations,
+        )
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
     if not turns and not producer_turns_observed:
@@ -978,6 +1018,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         task_id=task_id,
         rollout_id=rollout_id,
         invocations=invocations,
+        verifier_invocations=verifier_invocations,
         turns=turns,
         model_calls=model_calls,
         tool_calls=tools,
@@ -1003,8 +1044,11 @@ def _record_policy_model_server(result: dict[str, Any], global_config: Any, agen
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
+    result.pop(NG_VERIFIER_INVOCATIONS_KEY, None)
     capture = result.get("ng_model_call_capture")
     calls = capture.get("calls") if isinstance(capture, dict) else None
+    if isinstance(capture, dict):
+        capture.pop("verifier_invocations", None)
     for call in calls if isinstance(calls, list) else []:
         if isinstance(call, dict):
             for key in _MODEL_CALL_PAYLOAD_KEYS:
@@ -1099,7 +1143,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
         return None
 
     # Index captured calls by both identities ModelCallRef supports, mirroring
-    # join_model_call_observations: a ref may carry model_call_id, or the exact
+    # join_agent_model_calls: a ref may carry model_call_id, or the exact
     # (model_ref, response_id) pair.
     calls_by_id: dict[str, list[int]] = {}
     calls_by_response: dict[tuple[str, str, str], list[int]] = {}
@@ -1135,7 +1179,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     # De-duplicate by matched call *position* rather than model_call_id; the id is
     # optional because a (model_ref, response_id)-only match has none. One physical call
     # can't be claimed twice even if two invocations' refs both resolve to it (e.g. a
-    # join_model_call_observations conflict that left a ref attached to its losing
+    # join_agent_model_calls conflict that left a ref attached to its losing
     # invocation, unremoved, just gap-flagged).
     seen_positions: set[int] = set()
     owned_calls = []
@@ -3002,6 +3046,22 @@ class _BoundedCompletionIterator:
 
 
 class RolloutCollectionHelper(BaseModel):
+    """Collect rollouts by sending tasks to a running Gym deployment.
+
+    Each rollout batch fetches the deployment's configuration from the head server.
+    A caller that runs many batches against one deployment can set ``reuse_server_client=True``.
+    The helper then fetches the configuration once.
+    Build a new helper after that deployment's configuration changes.
+    """
+
+    reuse_server_client: bool = Field(
+        default=False,
+        description="Reuse one resolved client and configuration per helper. "
+        "Build a new helper after the deployment's configuration changes.",
+    )
+    _cached_server_client: Optional[ServerClient] = PrivateAttr(default=None)
+    _cached_head_server_config: Optional[BaseServerConfig] = PrivateAttr(default=None)
+
     # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
     # so a run stopped by SIGTERM can be accounted for without re-reading that file.
     _landed_keys: set = PrivateAttr(default_factory=set)
@@ -3828,7 +3888,9 @@ class RolloutCollectionHelper(BaseModel):
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
                 # A failed episode that returned agent evidence made model calls worth joining.
-                if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
+                if capture_dirs and (
+                    not no_result or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
+                ):
                     # A cancelled call's capture write runs detached, so drain the claims this
                     # rollout still holds before snapshotting; otherwise a late row is lost.
                     rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
@@ -3844,6 +3906,7 @@ class RolloutCollectionHelper(BaseModel):
                     "ng_model_call_capture" in result
                     or NG_AGENT_OBSERVATIONS_KEY in result
                     or NG_TRAJECTORY_KEY in result
+                    or NG_VERIFIER_INVOCATIONS_KEY in result
                 ):
                     _attach_trajectory_record(row, result)
 
@@ -4426,24 +4489,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         all_agent_metrics.sort(key=lambda entry: entry[AGENT_REF_KEY_NAME]["name"])
 
-        primitive_types = (bool, int, float, str, type(None))
-        metrics_to_log = dict()
-        for agent_entry in all_agent_metrics:
-            agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
-            metrics_to_log.update(
-                {
-                    f"{agent_name}/{k}": v
-                    for k, v in agent_entry["agent_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
-            metrics_to_log.update(
-                {
-                    f"key_metrics/{agent_name}/{k}": v
-                    for k, v in agent_entry["key_metrics"].items()
-                    if isinstance(v, primitive_types)
-                }
-            )
+        metrics_to_log = flatten_aggregate_metrics(all_agent_metrics)
 
         export_metrics(metrics_to_log)
 
@@ -5008,10 +5054,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             )
         )
 
-    def setup_server_client(
-        self, head_server_config: Optional[BaseServerConfig] = None
-    ) -> ServerClient:  # pragma: no cover
-        return setup_server_client_utils(head_server_config)
+    def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
+        """Return a client for the head server, reusing the cached one when the helper opted in.
+
+        Without opt-in, every call fetches the configuration from the head server again.
+        An opted-in helper keeps one client and fetches again only when the head config differs from the cached one.
+        Build a new helper after the configuration behind the same head changes.
+        """
+        if not self.reuse_server_client:
+            return setup_server_client_utils(head_server_config)
+        if self._cached_server_client is None or head_server_config != self._cached_head_server_config:
+            client = setup_server_client_utils(head_server_config)
+            head_snapshot = head_server_config.model_copy(deep=True) if head_server_config is not None else None
+            self._cached_server_client = client
+            self._cached_head_server_config = head_snapshot
+        return self._cached_server_client
 
 
 class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
