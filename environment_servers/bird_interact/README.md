@@ -6,7 +6,7 @@ database sandbox, user simulator and grader; see `resources_servers/bird_interac
 
 | `mode` | Turns | Agent access | `next_user_turn` |
 |---|---|---|---|
-| `c_interact` | Up to `max_turns`. The agent must resume its session across turns. | None | A reply with a ```` ```sql ```` or ```` ```sqlite ```` block is a submission (`/c_interact/submit`); any other reply is a question (`/c_interact/ask`). The next user message is the simulator's answer, the debug prompt or the follow-up question. |
+| `c_interact` | Up to `max_turns`. The agent must resume its session across turns. | None | The reply is the text of the turn's last message, so the messages of a harness's earlier steps don't count. A reply with a ```` ```sql ```` or ```` ```sqlite ```` block is a submission (`/c_interact/submit`); any other reply is a question (`/c_interact/ask`). The next user message is the simulator's answer, the debug prompt or the follow-up question. |
 | `a_interact` | One (`max_turns: 1`). | The Resources Server's tools, over each transport in `resources_tool_transports`: `direct_http` (the default) or `mcp` | `Stop("agent_finished")` |
 
 The first turn's `responses_create_params` has the instructions and the user's ambiguous request. In c-Interact it

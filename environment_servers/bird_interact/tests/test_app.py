@@ -45,21 +45,29 @@ def sandbox_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(LOCAL_SANDBOX["local"], "workspace_root", str(tmp_path / "sandboxes"))
 
 
-def _message(text: str) -> dict:
-    return {
-        "id": f"response-{abs(hash(text))}",
-        "created_at": 0,
-        "model": "model",
-        "object": "response",
-        "output": [
+def _message(*texts: str) -> dict:
+    """A response with one message for each text, and a call to a harness tool between two of them."""
+    output = []
+    for index, text in enumerate(texts):
+        if index:
+            call = {"type": "function_call", "id": f"call-{index}", "call_id": f"call-{index}", "name": "shell"}
+            output.append(call | {"arguments": "{}", "status": "completed"})
+        content = [{"type": "output_text", "text": text, "annotations": []}]
+        output.append(
             {
                 "type": "message",
                 "role": "assistant",
-                "id": "message",
+                "id": f"message-{index}",
                 "status": "completed",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
+                "content": content,
             }
-        ],
+        )
+    return {
+        "id": f"response-{abs(hash(texts))}",
+        "created_at": 0,
+        "model": "model",
+        "object": "response",
+        "output": output,
         "tool_choice": "auto",
         "parallel_tool_calls": False,
         "tools": [],
@@ -102,7 +110,8 @@ def _from_httpx(response: httpx.Response) -> _Reply:
     return _Reply(response.status_code, response.content, dict(response.cookies))
 
 
-AgentTurn = Callable[[dict, TestClient], str | None]
+# A turn returns its reply, or the messages of its steps.
+AgentTurn = Callable[[dict, TestClient], str | list[str] | None]
 
 
 class _Client(ServerClient):
@@ -128,8 +137,9 @@ class _Client(ServerClient):
             return _Reply(200, json.dumps(reply).encode(), {"agent": "cookie"})
         if url_path == "/v1/agent_sessions/close":
             return _Reply(200, json.dumps({"agent_session_id": body["agent_session_id"]}).encode(), {})
-        text = self.agent_turns.pop(0)(body, self.resources)
-        return _Reply(200, json.dumps(_message(text or "Done.")).encode(), {})
+        reply = self.agent_turns.pop(0)(body, self.resources)
+        texts = reply if isinstance(reply, list) else [reply or "Done."]
+        return _Reply(200, json.dumps(_message(*texts)).encode(), {})
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -278,6 +288,23 @@ class TestConversationalMode:
 
         result = response.result
         assert (result.stop_reason, result.reward, result.questions_asked) == ("no_sql_submitted", 0.0, 0)
+        assert result.phases[0].attempts == 1
+
+    async def test_only_the_last_message_of_a_turn_is_the_reply(self) -> None:
+        solution = TASKS["bookshop_1"]["sol_sql"][0]
+        # A harness with its own tools writes a message at each step. The draft before its question is not a submission.
+        draft_then_question = [f"A draft:\n```sqlite\n{solution}\n```", "Which year do you mean?"]
+        environment, _ = _servers(
+            "c_interact",
+            [lambda body, resources: draft_then_question, _sql(solution)],
+            max_turns=10,
+            user_model_replies=["unanswerable()"],
+        )
+
+        response = await environment.run_request(_request("bookshop_1"))
+
+        result = response.result
+        assert (result.questions_asked, len(result.turns), result.reward) == (1, 2, 0.7)
         assert result.phases[0].attempts == 1
 
     async def test_a_task_without_ground_truth_fails_at_seed_for_good(self) -> None:

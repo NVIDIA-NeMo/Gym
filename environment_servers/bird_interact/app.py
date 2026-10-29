@@ -155,6 +155,18 @@ def extract_sql(text: str) -> str | None:
     return blocks[-1].strip() if blocks and blocks[-1].strip() else None
 
 
+def last_message_text(response: NeMoGymResponse) -> str:
+    """The text of a turn's last message: the agent's reply to the user.
+
+    A harness with its own tools, such as a shell, can take several steps in one turn, each with a message. Only the
+    last one answers the user; ``output_text`` would join them all.
+    """
+    for item in reversed(response.output):
+        if item.type == "message":
+            return "".join(part.text for part in item.content if part.type == "output_text")
+    return ""
+
+
 class BirdInteractEnvironmentServer(
     BaseUserSimulationEnvironmentServer[BirdInteractRequest, BirdInteractResponse, _Episode]
 ):
@@ -241,7 +253,7 @@ class BirdInteractEnvironmentServer(
     async def next_user_turn(self, episode: _Episode, turn: TurnRecord) -> UserMessage | Stop:
         if self.config.mode == "a_interact":
             return Stop(reason="agent_finished")
-        reply = turn.response.output_text
+        reply = last_message_text(turn.response)
         sql = extract_sql(reply)
         if sql is None:
             answer = await self._call_resources(
