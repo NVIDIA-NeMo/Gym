@@ -54,10 +54,10 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/cli/ @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/cli_setup_command.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/benchmarks.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/dataset_orchestrator.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/gitlab_utils.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/hf_utils.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/prompt.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/data/dataset_orchestrator.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/data/gitlab_utils.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/data/hf_utils.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/data/prompt.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/metrics/reward_profile.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/verification/judge.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/agents/skills.py @nvidia-nemo/gym_env_benchmarks
@@ -79,7 +79,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/telemetry/profiling.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/config/server_metadata.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_runtime/server_status.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/train_data_utils.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/data/dataset_preparation.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/chat_streaming.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/models/responses_streaming.py @nvidia-nemo/gym_core

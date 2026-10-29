@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationVerifyRequest
 from resources_servers.agentic_turn_simulation.harnesses.claude_code import (
     CC_SUFFIX,

@@ -17,6 +17,7 @@
 import ast
 import importlib
 import importlib.util
+import re
 import subprocess
 import sys
 import warnings
@@ -28,8 +29,12 @@ from scripts.migrate_imports import KEEP_LINE_MARKER
 
 REPO = Path(__file__).resolve().parents[2]
 PACKAGE_DIR = REPO / "nemo_gym"
-# Every package that declares a public API.
-PACKAGES = sorted(path.parent.name for path in PACKAGE_DIR.glob("*/__init__.py") if "_PUBLIC_API" in path.read_text())
+# Every package that declares a public API, including a subpackage with one of its own, such as `data.tasks.harbor`.
+PACKAGES = sorted(
+    ".".join(path.parent.relative_to(PACKAGE_DIR).parts)
+    for path in PACKAGE_DIR.rglob("__init__.py")
+    if path.parent != PACKAGE_DIR and re.search(r"^_PUBLIC_API = ", path.read_text(), re.M)
+)
 
 
 def _public_api(package: str) -> dict[str, str]:
@@ -84,7 +89,7 @@ def test_a_patch_of_the_submodule_shows_through_the_package(
 def test_type_checking_imports_match_the_public_api(package: str) -> None:
     # Type checkers read the TYPE_CHECKING imports; the package serves _PUBLIC_API. A name in one but not the
     # other is Any to a type checker, or invisible to it.
-    tree = ast.parse((PACKAGE_DIR / package / "__init__.py").read_text())
+    tree = ast.parse(PACKAGE_DIR.joinpath(*package.split("."), "__init__.py").read_text())
     block = next(node for node in tree.body if isinstance(node, ast.If) and ast.unparse(node.test) == "TYPE_CHECKING")
     prefix = f"nemo_gym.{package}."
     declared = {

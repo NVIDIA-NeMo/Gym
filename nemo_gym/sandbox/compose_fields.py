@@ -8,7 +8,7 @@ normalisation of deploy resources, devices and gpus, restart, pull_policy, platf
 hooks, networks and the provider service options, and check_compose_fields, which runs them all
 over a document and is a fixed point of its own output. The two Compose scalar and environment
 shape helpers, the memory size parser and the interpolation error class live here because the
-field checks, the resolver and the interpolation code in nemo_gym.tasks.harbor.compose_variables
+field checks, the resolver and the interpolation code in nemo_gym.data.tasks.harbor.compose_variables
 all read them, and this module sits below both. Nothing here reads a task or a record.
 """
 
@@ -111,7 +111,7 @@ def unsupported_compose_fields(document: Any) -> list[str]:
 
     The key allow-list is the first step of :func:`check_compose_fields`, the one field check prepare and the
     adapter run (a refused key is an :class:`UnsupportedComposeFieldError` there). Pure and key-only, so prepare
-    also screens the raw file of a task about to be built with it (``nemo_gym.tasks.harbor.cli``), before
+    also screens the raw file of a task about to be built with it (``nemo_gym.data.tasks.harbor.cli``), before
     interpolation gives the values their shapes.
     """
     return [message for _, message in _unsupported_fields(document)]
@@ -633,7 +633,7 @@ def check_compose_fields(
 ) -> dict:
     """Give every M28 service field its defined meaning, or raise :class:`ComposeFieldError` naming the field.
 
-    The one field check: prepare runs it per task (``nemo_gym.tasks.harbor.image_configs.check_task_compose_fields``)
+    The one field check: prepare runs it per task (``nemo_gym.data.tasks.harbor.image_configs.check_task_compose_fields``)
     and the adapter again at start. A key outside the allow-list (:func:`unsupported_compose_fields`: a sidecar
     ``build:``, ``privileged``, ``logging``, ...) is an :class:`UnsupportedComposeFieldError` before any value is
     read. Mutates and returns ``document``, and applied to its own output returns it unchanged: the server normalizes
