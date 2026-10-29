@@ -137,6 +137,38 @@ python scripts/run_harness_conformance.py --harness codex \
 | `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
 | `judge_verifier` | Final policy answer graded by a separate scripted judge; the saved grade references its verifier-owned call, which has no policy step | TE-1–TE-4, TE-6–TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
+| `context_compaction` | Automatic compaction between shell actions; summary reused, helper retained without becoming a turn | Existing P0 checks plus P1 compaction checks (TE-13) |
+
+The compaction scenario runs for every selected harness. Its five behavioral
+checks require a completed event, reuse of the witnessed summary in the next
+policy request, resolvable helper references with invocation ownership, exclusion
+of the helper from saved turns, and aggregate usage that includes the helper.
+The existing `ContextCompactionObservation` schema validates the event. Checks
+read the collector's saved artifacts; they do not repair or synthesize them.
+
+The shared script executes fourteen shell actions so Hermes has enough history
+outside its protected recent messages. The provider keeps reported input usage
+above 27,000 tokens until it receives an explicit summary request, then lowers
+it. Small context/threshold settings trigger each harness's own compaction path.
+With the pinned runtimes, OpenCode, Kilo, Codex, Stirrup, and Hermes pass; Simple
+and Pi report missing compaction events. Missing events remain failures. The
+no-compaction control is a regression test, not another catalog scenario.
+
+Require the compaction checks explicitly when running the diagnostic scenario:
+
+```bash
+python scripts/run_harness_conformance.py --harness opencode \
+    --scenario context_compaction --gate-tier P1 \
+    --output results/opencode-compaction
+```
+
+The default full run reports all nine scenarios and gates the eight P0
+scenarios. `--gate-tier P1` also requires the compaction scenario, including its
+existing P0 checks. The new checks are P1; existing checks retain their original
+priorities. P1 failures remain visible in the report even when the P0 gate passes.
+Reported usage is synthetic fixture input, not a measurement of compression
+quality. Before/after context token counts and boundary references are outside
+these five checks.
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
 usage includes prompt, completion, reasoning, total, and cached counts. Chat
@@ -194,8 +226,9 @@ tree, including harnesses that start new process groups.
 Exit codes: **0** when all selected gates pass, **1** for evidence or scenario
 failures, and **2** for execution, dependency, input, or checker errors. Existing
 harness evidence gaps are expected to remain visible as failures. This suite
-covers P0 checks, including ownership and call-to-step checks. Multimodal content,
-compaction, parallelism and transport disconnects remain outside its qualification scope.
+covers P0 checks, including ownership and call-to-step checks, and P1 compaction
+checks. Multimodal content, parallelism and transport disconnects remain outside
+its qualification scope.
 
 Run regression checks with:
 
