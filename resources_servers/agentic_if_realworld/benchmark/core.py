@@ -51,9 +51,6 @@ def frozen_policy_bytes(name: str) -> bytes:
             "# Origin: NVIDIA Agentic IF strict-v2.2; NVIDIA-authored code, Apache-2.0.\n"
             f"# Original file: {original_files[name]}\n"
             "# First tracked package revision: df90e68292130bb21ffe8a023fc5d0a6e1be0878\n"
-            "# Public source archive (exact publication revision):\n"
-            "# https://github.com/ericyang0/agentic-if-benchmark/tree/b9b32049d48b3296614df71968a634c07779d5c7\n"
-            f"# Archived file: resources_servers/agentic_if_realworld/benchmark/policy/{name}\n"
         ).encode()
         if not raw.startswith(prefix):
             raise ValueError("Missing or changed frozen policy provenance header")

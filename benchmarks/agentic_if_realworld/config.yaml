@@ -1,6 +1,3 @@
-policy_base_url: ${oc.env:AGENTIC_IF_POLICY_BASE_URL,http://localhost:8000/v1}
-policy_model_name: ${oc.env:AGENTIC_IF_POLICY_MODEL,policy}
-
 config_paths:
   - resources_servers/agentic_if_realworld/configs/agentic_if_realworld.yaml
 rollout_collection_driver: benchmarks.agentic_if_realworld.rollout_driver:run_rollout_collection
@@ -17,13 +14,12 @@ agentic_if_realworld_environment:
     legacy_agent:
       entrypoint: app.py
       agent_server: {type: responses_api_agents, name: agentic_if_realworld_agent}
-      aggregate_metrics_server: {type: resources_servers, name: agentic_if_realworld_resources}
 policy_model:
   responses_api_models:
     agentic_if_text:
       entrypoint: app.py
-      endpoint: ${oc.env:AGENTIC_IF_POLICY_ENDPOINT,${policy_base_url}/chat/completions}
-      model: ${policy_model_name}
+      endpoint: ${oc.env:AGENTIC_IF_POLICY_ENDPOINT,http://localhost:8000/v1/chat/completions}
+      model: ${oc.env:AGENTIC_IF_POLICY_MODEL,policy}
       receipt_dir: ${agentic_if_realworld_resources.resources_servers.agentic_if_realworld.receipt_dir}
       api_key_env: AGENTIC_IF_POLICY_API_KEY
       reasoning_effort: null

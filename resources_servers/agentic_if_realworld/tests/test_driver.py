@@ -8,7 +8,7 @@ import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import OmegaConf
@@ -16,13 +16,14 @@ from omegaconf import OmegaConf
 from benchmarks.agentic_if_realworld import rollout_driver
 from nemo_gym import rollout_collection, server_utils
 from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.path_utils import materialized_path_for
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.secret_utils import recursively_hide_secrets
-from resources_servers.agentic_if_realworld.app import Verifier, VerifyRequest
+from resources_servers.agentic_if_realworld.app import ResourcesConfig, ResourcesServer, Verifier, VerifyRequest
 from resources_servers.agentic_if_realworld.benchmark import core
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create, review
 from resources_servers.agentic_if_realworld.tests.test_transport import Response
@@ -71,6 +72,28 @@ def test_adaptive_capture_selected_parameters_and_resume(
 
     async def post(**kwargs):
         body = kwargs["json"]
+        if kwargs["url_path"] == "/aggregate_metrics":
+            assert isinstance(body, AggregateMetricsRequest)
+            assert all("task_id" in row and "verifier_metadata" in row for row in body.verify_responses)
+            assert all(
+                "ng_model_call_capture" not in row and "ng_trajectory" not in row for row in body.verify_responses
+            )
+            resources = ResourcesServer(
+                config=ResourcesConfig(
+                    host="",
+                    port=0,
+                    name="agentic_if_realworld_resources",
+                    entrypoint="app.py",
+                    dataset_dir=str(dataset.directory),
+                    synthetic=True,
+                    receipt_dir=str(verifier.receipt_dir),
+                    judge_endpoint="http://synthetic.invalid",
+                ),
+                server_client=MagicMock(spec=server_utils.ServerClient),
+            )
+            result = await resources.aggregate_metrics(body)
+            return SimpleNamespace(value=result.model_dump(), release=lambda: None)
+        assert kwargs["url_path"] == "/verify" and kwargs["_max_num_tries"] == 1
         verification.append(copy.deepcopy(body))
         result = await verifier.verify(VerifyRequest.model_validate(body))
         return SimpleNamespace(value=result.model_dump(), release=lambda: None)

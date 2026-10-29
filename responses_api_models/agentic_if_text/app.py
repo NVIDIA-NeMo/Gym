@@ -21,7 +21,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_if_realworld.benchmark.core import PHASES, captured_context, judge, write
-from resources_servers.agentic_if_realworld.benchmark.transport import delivered, wire_call
+from resources_servers.agentic_if_realworld.benchmark.transport import delivered, validate_endpoint, wire_call
 
 
 class TextModelConfig(BaseResponsesAPIModelConfig):
@@ -37,6 +37,9 @@ class TextModel(SimpleResponsesAPIModel):
 
     def setup_webserver(self) -> FastAPI:
         # Fail at startup, before the driver journals any attempt; a dry run returns before this.
+        validate_endpoint(self.config.endpoint)
+        if not self.config.model.strip():
+            raise ValueError("Policy model must be nonempty")
         if not os.environ.get(self.config.api_key_env):
             raise ValueError(f"{self.config.api_key_env} is not set")
         return super().setup_webserver()

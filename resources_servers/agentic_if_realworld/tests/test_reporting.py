@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 
-from benchmarks.agentic_if_realworld.rollout_driver import write_reports
-from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
+from benchmarks.agentic_if_realworld.rollout_driver import write_aggregate_metrics, write_reports
+from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.config_types import AggregateMetricsRequest
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionHelper
@@ -27,14 +29,14 @@ def test_complete_accuracy_stays_null_until_all_tasks_scored(tmp_path):
     try:
         output = tmp_path / "rollouts.jsonl"
         write_reports(output, [], verifier.dataset)
-        metrics = read(tmp_path / "rollouts_aggregate_metrics.json")[0]["key_metrics"]
-        assert metrics["composite/complete_accuracy"] is None
+        metrics = read(tmp_path / "rollouts.summary.json")
+        assert metrics["complete_accuracy"] is None
         assert metrics["not_scored"] == 1 and metrics["scoring_coverage"] == 0
         body = VerifyRequest.model_validate(delivery(verifier.dataset, verifier.receipt_dir, "OK.."))
         result = asyncio.run(verifier.verify(body)).model_dump()
         write_reports(output, [result], verifier.dataset)
-        metrics = read(tmp_path / "rollouts_aggregate_metrics.json")[0]["key_metrics"]
-        assert metrics["composite/complete_accuracy"] == 0
+        metrics = read(tmp_path / "rollouts.summary.json")
+        assert metrics["complete_accuracy"] == 0
         assert metrics["fail"] == 1 and metrics["scoring_coverage"] == 1
     finally:
         verifier.work.cleanup()
@@ -145,24 +147,25 @@ def test_native_aggregation_rejects_inconsistent_saved_results(aggregation, dama
 
 
 @pytest.mark.parametrize("partial", [False, True])
-def test_adaptive_profile_reaggregation_preserves_saved_metrics(aggregation, tmp_path, monkeypatch, partial):
-    server, dataset, record = aggregation
+@pytest.mark.parametrize("with_perf", [False, True])
+def test_driver_aggregation_matches_stock_native_artifact(aggregation, tmp_path, monkeypatch, partial, with_perf):
+    server, _, record = aggregation
+    monkeypatch.setenv(server.config.judge_api_key_env, "synthetic")
     resolved = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
                 GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-                {"config_paths": ["benchmarks/agentic_if_realworld/config.yaml"]},
+                {"config_paths": ["benchmarks/agentic_if_realworld/native.yaml"]},
             ),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
             offline=True,
         )
     )
-    assert resolved.agentic_if_realworld_agent.responses_api_agents.simple_agent.skip_verification is True
     relay_name = "agentic_if_realworld_environment"
-    config = LegacyAgentEnvironmentServerConfig.model_validate(
+    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
         {
-            **OmegaConf.to_container(resolved[relay_name].environment_servers.legacy_agent, resolve=True),
+            **OmegaConf.to_container(resolved[relay_name].environment_servers.single_agent_turn_legacy, resolve=True),
             "name": relay_name,
             "host": "localhost",
             "port": 0,
@@ -170,7 +173,7 @@ def test_adaptive_profile_reaggregation_preserves_saved_metrics(aggregation, tmp
     )
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = resolved
-    relay = LegacyAgentEnvironmentServer(config=config, server_client=client)
+    relay = SingleAgentTurnLegacyEnvironmentServer(config=config, server_client=client)
     apps = {
         relay_name: TestClient(relay.setup_webserver()),
         server.config.name: TestClient(server.setup_webserver()),
@@ -192,21 +195,54 @@ def test_adaptive_profile_reaggregation_preserves_saved_metrics(aggregation, tmp
     )
     for row in rows:
         row["agent_ref"] = {"name": "agentic_if_realworld_agent"}
+        row["_ng_environment_server"] = relay_name
+        row["_ng_rollout_index"] = 0
+        row["response"] = {
+            "output": [{"text": "private generated text"}],
+            "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "metrics": {"latency": 1.0},
+        }
+        for key in ("responses_create_params", "ng_agent_observations", "ng_model_call_capture", "ng_trajectory"):
+            row[key] = {"private": "content"}
+        if with_perf:
+            row["ng_perf"] = {"num_turns": 1, "prompt_tokens": 10, "completion_tokens": 2}
     output = tmp_path / "rollouts.jsonl"
-    write_reports(output, rows, dataset)
+    asyncio.run(write_aggregate_metrics(output, rows, client))
     metrics_path = tmp_path / "rollouts_aggregate_metrics.json"
-    before = read(metrics_path)[0]["key_metrics"]
+    before = read(metrics_path)
+    assert metrics_path.stat().st_mode & 0o077 == 0
+    assert set(before[0]) == {
+        "agent_ref",
+        "_ng_environment_server",
+        "agent_metrics",
+        "key_metrics",
+        "group_level_metrics",
+        "repeat_level_metrics",
+    } | ({"perf_summary"} if with_perf else set())
+    assert len(before[0]["group_level_metrics"]) == (1 if partial else 5)
+    if with_perf:
+        assert before[0]["repeat_level_metrics"]
     saved = asyncio.run(RolloutCollectionHelper()._call_aggregate_metrics(rows, rows, output))
     assert saved == metrics_path
+    assert read(saved) == before
     metrics = read(saved)[0]["key_metrics"]
-    assert metrics == before
     assert metrics["expected_items"] == 5
     assert (metrics["pass"], metrics["fail"], metrics["masked"], metrics["unattempted"]) == (
         (1, 0, 1, 3) if partial else (3, 2, 0, 0)
     )
     assert metrics["composite/complete_accuracy"] == (None if partial else 0.6)
-    assert [call.kwargs["server_name"] for call in client.post.call_args_list] == [relay_name, server.config.name]
-    assert client.post.call_args_list[0].kwargs["json"] == client.post.call_args_list[1].kwargs["json"]
+    assert [call.kwargs["server_name"] for call in client.post.call_args_list] == [
+        server.config.name,
+        relay_name,
+        server.config.name,
+    ]
+    sent = client.post.call_args_list[0].kwargs["json"]
+    assert all(call.kwargs["json"] == sent for call in client.post.call_args_list)
+    assert "private" not in sent.model_dump_json()
+    assert sent.verify_responses[0]["response"] == {
+        key: rows[0]["response"][key] for key in ("usage", "incomplete_details", "metrics")
+    }
 
 
 def test_generic_agent_still_skips_aggregation():
@@ -216,6 +252,32 @@ def test_generic_agent_still_skips_aggregation():
         aggregate = asyncio.run(agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[])))
     assert aggregate.key_metrics == aggregate.agent_metrics == {}
     client.post.assert_not_called()
+
+
+def test_empty_driver_aggregation_and_invalid_reply_preserve_accounting(aggregation, tmp_path):
+    server, _, _ = aggregation
+    client = MagicMock(spec=ServerClient)
+
+    async def post(**kwargs):
+        assert kwargs["json"].verify_responses == []
+        result = await server.aggregate_metrics(kwargs["json"])
+        return _mock_response(result.model_dump())
+
+    client.post = AsyncMock(side_effect=post)
+    output = tmp_path / "empty.jsonl"
+    asyncio.run(write_aggregate_metrics(output, [], client))
+    artifact = tmp_path / "empty_aggregate_metrics.json"
+    saved = artifact.read_bytes()
+    aggregate = read(artifact)[0]
+    assert aggregate["key_metrics"]["expected_items"] == aggregate["key_metrics"]["unattempted"] == 5
+    assert aggregate["key_metrics"]["composite/complete_accuracy"] is None
+    assert aggregate["group_level_metrics"] == aggregate["repeat_level_metrics"] == []
+    response = _mock_response({"agent_metrics": []})
+    client.post = AsyncMock(return_value=response)
+    with pytest.raises(ValidationError):
+        asyncio.run(write_aggregate_metrics(output, [], client))
+    response.release.assert_called_once()
+    assert artifact.read_bytes() == saved
 
 
 @pytest.mark.parametrize(

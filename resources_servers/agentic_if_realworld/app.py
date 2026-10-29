@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """HTTP configuration and routes for frozen Agentic IF verification."""
 
+import os
 from pathlib import Path
 from typing import ClassVar, Literal
+
+from fastapi import FastAPI
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
@@ -14,6 +17,7 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
     summarize,
     summary_metrics,
 )
+from resources_servers.agentic_if_realworld.benchmark.scoring import validate_judge_config
 from resources_servers.agentic_if_realworld.verifier import (
     VERIFIER_FIXTURE as VERIFIER_FIXTURE,
 )
@@ -56,6 +60,13 @@ class ResourcesConfig(BaseResourcesServerConfig):
 
 class ResourcesServer(SimpleResourcesServer):
     config: ResourcesConfig
+
+    def setup_webserver(self) -> FastAPI:
+        # Config construction stays secret-free for Gym's dry run; serving must be ready to judge.
+        validate_judge_config(self.config.judge_endpoint, self.config.judge_model)
+        if not os.environ.get(self.config.judge_api_key_env):
+            raise ValueError(f"{self.config.judge_api_key_env} is not set")
+        return super().setup_webserver()
 
     async def verify(self, body: VerifyRequest) -> VerifyResponse:
         if not self.config.synthetic:

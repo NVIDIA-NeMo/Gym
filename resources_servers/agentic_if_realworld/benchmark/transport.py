@@ -79,18 +79,21 @@ class SSE:
         return result
 
 
-def replay_sse(path: Path) -> dict:
-    parser, event = SSE(), []
+def replay_sse(path: Path, *, require_done: bool = False) -> dict:
+    parser, event, done = SSE(), [], False
     for raw in path.read_bytes().splitlines():
         line = raw.decode("utf-8")
         if not line and event:
-            if parser.event("\n".join(event)):
-                break
+            done = parser.event("\n".join(event))
             event = []
+            if done:
+                break
         elif line.startswith("data:"):
             event.append(line[5:].lstrip(" "))
     if event:
-        parser.event("\n".join(event))
+        done = parser.event("\n".join(event))
+    if require_done and not done:
+        raise ValueError("No complete SSE DONE event")
     return parser.response()
 
 
@@ -108,12 +111,8 @@ def delivered(response: dict) -> dict:
     return {"status": "complete", "finish_reason": "stop", "message": message}
 
 
-async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> dict:
-    """Save before dispatch. Existing started receipts require explicit reconciliation."""
-    from aiohttp import ClientTimeout
-
-    from nemo_gym.server_utils import request
-
+def validate_endpoint(endpoint: str) -> None:
+    """Reject missing, malformed, and credential-bearing HTTP endpoint configuration."""
     url = urlsplit(endpoint)
     if (
         url.scheme not in {"http", "https"}
@@ -122,8 +121,24 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
         or url.password
         or url.query
         or url.fragment
+        or any(character.isspace() for character in endpoint)
     ):
         raise ValueError("Endpoint must be HTTP(S) without embedded credentials or query parameters")
+    # Accessing port also validates nonnumeric and out-of-range ports before dispatch.
+    _ = url.port
+
+
+class RetryableTransportError(ValueError):
+    """A receipted infrastructure failure requires an explicit later retry."""
+
+
+async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> dict:
+    """Save before dispatch. Existing started receipts require explicit reconciliation."""
+    from aiohttp import ClientConnectorError, ClientTimeout, ConnectionTimeoutError
+
+    from nemo_gym.server_utils import request
+
+    validate_endpoint(endpoint)
     if path.exists():
         prior = read(path)
         if (
@@ -152,7 +167,9 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
     }
     for attempt in range(1, 4):
         # Every retry can be interrupted after dispatch, independently of earlier replies.
-        record.update(status="started", http_attempt=attempt)
+        for field in ["http_status", "content_type", "reason"]:
+            record.pop(field, None)
+        record.update(status="started", http_attempt=attempt, response_body_complete=False)
         write(path, record)
         raw_path = path.with_suffix(f".a{attempt}.http")
         raw_path.touch(mode=0o600, exist_ok=False)
@@ -162,6 +179,7 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
                 endpoint,
                 json=body,
                 headers={"Authorization": "Bearer " + key},
+                allow_redirects=False,
                 timeout=ClientTimeout(total=7200, connect=60, sock_read=900),
                 _max_num_tries=1,
                 _resend_after_disconnect=False,
@@ -173,7 +191,10 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
                     async for chunk in response.content.iter_chunked(4096):
                         stream.write(chunk)
                         stream.flush()
-                record["raw_attempts"].append({"path": str(raw_path), "sha256": digest(raw_path)})
+                record["response_body_complete"] = True
+                record["raw_attempts"].append(
+                    {"path": str(raw_path), "sha256": digest(raw_path), "http_status": response.status}
+                )
                 if response.status == 429 or response.status >= 500:
                     record.update(status="delivery_error", reason=f"HTTP_{response.status}")
                     write(path, record)
@@ -182,7 +203,7 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
                         await asyncio.sleep(65 if response.status == 429 else 2**attempt)
                         continue
                     return record
-                if response.status >= 400:
+                if not 200 <= response.status < 300:
                     record.update(
                         status="delivery_error",
                         reason=f"HTTP_{response.status}",
@@ -203,8 +224,26 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
             # The started record remains ambiguous; no automatic redispatch.
             raise
         except Exception as error:  # noqa: BLE001 - deliberate per-cell/transport accounting boundary
-            record["raw_attempts"].append({"path": str(raw_path), "sha256": digest(raw_path)})
-            record.update(status="delivery_error", reason=type(error).__name__)
+            if not record["raw_attempts"] or record["raw_attempts"][-1]["path"] != str(raw_path):
+                record["raw_attempts"].append(
+                    {"path": str(raw_path), "sha256": digest(raw_path), "http_status": record.get("http_status")}
+                )
+            record.update(
+                status="delivery_error",
+                reason=type(error).__name__,
+                dispatch_status="response_received" if record["response_body_complete"] else "unknown",
+            )
+            if "http_status" not in record and isinstance(error, (ClientConnectorError, ConnectionTimeoutError)):
+                record["dispatch_status"] = "not_dispatched"
+            elif 200 <= record.get("http_status", 0) < 300 and "text/event-stream" in record.get("content_type", ""):
+                try:
+                    value = replay_sse(raw_path, require_done=True)
+                except (ValueError, TypeError, KeyError):
+                    pass
+                else:
+                    # EOF/read failure after a saved terminal event cannot discard a completed answer.
+                    record.update(status="generated", response=value)
+                    record.pop("dispatch_status")
             write(path, record)
             return record
     return record

@@ -104,18 +104,16 @@ The validator and companion test are NVIDIA-authored Agentic IF code released
 under **Apache-2.0**, not third-party vendored code. Their authoring-workspace
 files were uncommitted; no original authoring Git revision is claimed. Their
 first tracked package revision is `df90e68292130bb21ffe8a023fc5d0a6e1be0878`.
-The exact bodies were then published in this
-[public source archive](https://github.com/ericyang0/agentic-if-benchmark/tree/b9b32049d48b3296614df71968a634c07779d5c7)
-at revision `b9b32049d48b3296614df71968a634c07779d5c7`:
+The original filenames map to the packaged files as follows:
 
-| Original filename | Archived public file |
+| Original filename | Packaged file |
 | --- | --- |
-| `run_scripts/validate_agentic_if_response_judge_v2_2.py` | [validate_response_judge.py](https://github.com/ericyang0/agentic-if-benchmark/blob/b9b32049d48b3296614df71968a634c07779d5c7/resources_servers/agentic_if_realworld/benchmark/policy/validate_response_judge.py) |
-| `tests/test_agentic_if_response_judge_v2_2.py` | [test_contract.py](https://github.com/ericyang0/agentic-if-benchmark/blob/b9b32049d48b3296614df71968a634c07779d5c7/resources_servers/agentic_if_realworld/benchmark/policy/test_contract.py) |
+| `run_scripts/validate_agentic_if_response_judge_v2_2.py` | [validate_response_judge.py](../../resources_servers/agentic_if_realworld/benchmark/policy/validate_response_judge.py) |
+| `tests/test_agentic_if_response_judge_v2_2.py` | [test_contract.py](../../resources_servers/agentic_if_realworld/benchmark/policy/test_contract.py) |
 
-Both headers carry that origin, revision, filename mapping and license. The
-archive is a public mirror of the frozen code, not a claim that the authoring
-workspace was public. NVIDIA copyright and Apache notices are retained. Original
+Both headers carry that origin, first tracked revision, original filename and
+license. No fork archive is needed to establish authorship. NVIDIA copyright and
+Apache notices are retained. Original
 body SHA-256 values remain
 `67e67f1ebef6594e6ff1fbbe2f84af51b0f0a5f57d5bf1d22d0e3467dded598a`
 and `312f7b61d0a8a1328e9dc180c25da1b196484c939671a9dcf625a7f26fd9dc8f`,

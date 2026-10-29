@@ -8,10 +8,15 @@ from unittest.mock import patch
 
 import pytest
 
-from resources_servers.agentic_if_realworld.benchmark.core import ROOT, Dataset, judge, read, write
+from resources_servers.agentic_if_realworld.benchmark.core import ROOT, Dataset, digest, judge, read, write
 from resources_servers.agentic_if_realworld.benchmark.scoring import score
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create, review
-from resources_servers.agentic_if_realworld.benchmark.transport import wire_call
+from resources_servers.agentic_if_realworld.benchmark.transport import (
+    RetryableTransportError,
+    delivered,
+    verified_response,
+    wire_call,
+)
 
 
 server_utils = pytest.importorskip("nemo_gym.server_utils")
@@ -127,6 +132,7 @@ def test_judge_http_retries_remain_bounded_and_completed_review_is_reused(
     receipt = read(next((kwargs["directory"] / "judges").glob("*/attempt0.json")))
     assert receipt["status"] == "generated"
     assert len(receipt["raw_attempts"]) == 3
+    assert [attempt["http_status"] for attempt in receipt["raw_attempts"]] == [status, status, 200]
 
 
 def test_concurrent_identical_reviews_share_one_judge_call(judge_payload, tmp_path, monkeypatch):
@@ -286,6 +292,238 @@ def test_missing_key_fails_before_any_receipt(tmp_path, monkeypatch):
         )
     # No receipt and no raw attempt: a later call with the key starts from a clean attempt.
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["connect", "connect_timeout", "disconnect", "read_timeout"])
+def test_transport_only_marks_proven_connect_failures_as_not_dispatched(tmp_path, monkeypatch, failure):
+    from aiohttp import ClientConnectorError, ConnectionTimeoutError, ServerDisconnectedError, SocketTimeoutError
+
+    errors = {
+        "connect": ClientConnectorError(None, ConnectionRefusedError()),
+        "connect_timeout": ConnectionTimeoutError(),
+        "disconnect": ServerDisconnectedError(),
+        "read_timeout": SocketTimeoutError(),
+    }
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(1)
+        raise errors[failure]
+
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    path = tmp_path / "receipt.json"
+    args = {"endpoint": "http://synthetic.invalid", "key_env": "SYNTHETIC", "path": path}
+    receipt = asyncio.run(wire_call({"model": "synthetic"}, **args))
+    assert receipt["status"] == "delivery_error"
+    assert receipt["dispatch_status"] == ("not_dispatched" if failure.startswith("connect") else "unknown")
+    assert receipt["raw_attempts"][0]["http_status"] is None
+    saved = path.read_bytes()
+    assert asyncio.run(wire_call({"model": "synthetic"}, **args)) == receipt
+    assert len(calls) == 1 and path.read_bytes() == saved
+
+
+@pytest.mark.parametrize("done", [False, True])
+def test_read_error_preserves_only_a_saved_complete_sse_stream(tmp_path, monkeypatch, done):
+    from aiohttp import ClientPayloadError
+
+    event = {"choices": [{"delta": {"content": "OK."}, "finish_reason": "stop"}]}
+    raw = ("data: " + json.dumps(event) + "\n\n" + ("data: [DONE]\n\n" if done else "")).encode()
+
+    class InterruptedStream(Response):
+        async def iter_chunked(self, size):
+            yield raw
+            raise ClientPayloadError("stream ended after saved bytes")
+
+    response = InterruptedStream(200, None)
+    response.headers = {"content-type": "text/event-stream"}
+
+    async def request(*args, **kwargs):
+        return response
+
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    receipt = asyncio.run(
+        wire_call({}, endpoint="http://synthetic.invalid", key_env="SYNTHETIC", path=tmp_path / "receipt.json")
+    )
+    assert receipt["status"] == ("generated" if done else "delivery_error")
+    assert len(receipt["raw_attempts"]) == 1
+    if done:
+        assert delivered(verified_response(receipt))["message"]["content"] == "OK."
+    else:
+        assert receipt["dispatch_status"] == "unknown"
+
+
+@pytest.mark.parametrize("status", [401, 404, 429, 503])
+@pytest.mark.parametrize("failed_invocations", [1, 2])
+def test_judge_transport_failure_recovery_preserves_receipts_and_review_budget(
+    judge_payload, tmp_path, monkeypatch, status, failed_invocations
+):
+    calls = []
+    healthy = False
+
+    async def request(*args, **kwargs):
+        calls.append(kwargs["headers"]["Authorization"])
+        if not healthy:
+            return Response(status, {"error": "synthetic service unavailable"})
+        content = json.dumps(review(judge_payload))
+        return Response(200, {"choices": [{"finish_reason": "stop", "message": {"content": content}}]})
+
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr("resources_servers.agentic_if_realworld.benchmark.transport.asyncio.sleep", no_sleep)
+    monkeypatch.setenv("SYNTHETIC", "bad-key")
+    kwargs = {
+        "directory": tmp_path / "receipts",
+        "endpoint": "http://synthetic.invalid",
+        "policy_prompt": SYNTHETIC_PROMPT,
+        "key_env": "SYNTHETIC",
+    }
+    for invocation in range(failed_invocations):
+        with pytest.raises(RetryableTransportError, match="explicitly resume"):
+            asyncio.run(score(judge_payload, **kwargs))
+        expected_calls = (invocation + 1) * (3 if status in {429, 503} else 1)
+        assert len(calls) == expected_calls
+    work = next((kwargs["directory"] / "judges").iterdir())
+    original = {path: path.read_bytes() for path in work.glob("attempt*.*")}
+    assert len(list(work.glob("attempt*.json"))) == failed_invocations
+    assert asyncio.run(score(judge_payload, **kwargs, validate_only=True))["scoring_status"] == "not_scored"
+    assert len(calls) == expected_calls
+    # A corrected credential does not change the request fingerprint or regenerate the policy answer.
+    healthy = True
+    monkeypatch.setenv("SYNTHETIC", "corrected-key")
+    result = asyncio.run(score(judge_payload, **kwargs))
+    assert result["item_verdict"] == "pass" and len(calls) == expected_calls + 1
+    assert read(work / "result.json")["receipt_name"] == f"attempt{failed_invocations}.json"
+    assert all(path.read_bytes() == content for path, content in original.items())
+    assert asyncio.run(score(judge_payload, **kwargs, cached_only=True)) == result
+    assert len(calls) == expected_calls + 1
+
+
+def test_valid_cached_grade_after_legacy_ambiguous_attempt_remains_readable(judge_payload, tmp_path, monkeypatch):
+    async def request(*args, **kwargs):
+        return Response(
+            200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(judge_payload))}}]}
+        )
+
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    kwargs = {
+        "directory": tmp_path / "receipts",
+        "endpoint": "http://synthetic.invalid",
+        "policy_prompt": SYNTHETIC_PROMPT,
+        "key_env": "SYNTHETIC",
+    }
+    result = asyncio.run(score(judge_payload, **kwargs))
+    work = next((kwargs["directory"] / "judges").iterdir())
+    successful = read(work / "attempt0.json")
+    (work / "attempt0.json").rename(work / "attempt1.json")
+    raw = work / "legacy-failure.http"
+    raw.write_bytes(b"")
+    write(
+        work / "attempt0.json",
+        {
+            "status": "delivery_error",
+            "reason": "ConnectionError",
+            "endpoint": successful["endpoint"],
+            "request_body": successful["request_body"],
+            "request_sha256": successful["request_sha256"],
+            "raw_attempts": [{"path": str(raw), "sha256": digest(raw)}],
+        },
+    )
+    cached = read(work / "result.json")
+    cached.update(receipt_name="attempt1.json", receipt_sha256=digest(work / "attempt1.json"))
+    write(work / "result.json", cached)
+    saved = {path: path.read_bytes() for path in work.iterdir() if path.is_file()}
+    monkeypatch.setattr(server_utils, "request", lambda *args, **kwargs: pytest.fail("Cache replay cannot dispatch"))
+    assert asyncio.run(score(judge_payload, **kwargs, cached_only=True)) == result
+    assert all(path.read_bytes() == content for path, content in saved.items())
+
+
+def test_two_delivered_judge_reviews_remain_exhausted_after_http_recovery(judge_payload, tmp_path, monkeypatch):
+    outcomes = iter([401, 200, 503, 503, 503, 200])
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(1)
+        status = next(outcomes)
+        return Response(status, {"choices": [{"finish_reason": "stop", "message": {"content": "not JSON"}}]})
+
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr("resources_servers.agentic_if_realworld.benchmark.transport.asyncio.sleep", no_sleep)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    kwargs = {
+        "directory": tmp_path / "receipts",
+        "endpoint": "http://synthetic.invalid",
+        "policy_prompt": SYNTHETIC_PROMPT,
+        "key_env": "SYNTHETIC",
+    }
+    for expected_calls in [1, 5]:
+        with pytest.raises(RetryableTransportError):
+            asyncio.run(score(judge_payload, **kwargs))
+        assert len(calls) == expected_calls
+    result = asyncio.run(score(judge_payload, **kwargs))
+    assert result["scoring_status"] == "not_scored" and result["mask_sample"] is True
+    assert len(calls) == 6
+    saved = {path: path.read_bytes() for path in kwargs["directory"].rglob("attempt*.*")}
+    assert asyncio.run(score(judge_payload, **kwargs)) == result
+    assert len(calls) == 6 and all(path.read_bytes() == value for path, value in saved.items())
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "text/event-stream"])
+@pytest.mark.parametrize("body_complete", [False, True])
+def test_judge_only_spends_review_budget_on_completed_http_bodies(
+    judge_payload, tmp_path, monkeypatch, content_type, body_complete
+):
+    from aiohttp import ClientPayloadError
+
+    calls = []
+
+    class MalformedResponse(Response):
+        async def iter_chunked(self, size):
+            yield b'{"choices":' if content_type == "application/json" else b'data: {"choices":\n\n'
+            if not body_complete:
+                raise ClientPayloadError("Synthetic interrupted response body")
+
+    async def request(*args, **kwargs):
+        calls.append(1)
+        response = MalformedResponse(200, None)
+        response.headers = {"content-type": content_type}
+        return response
+
+    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    kwargs = {
+        "directory": tmp_path / "receipts",
+        "endpoint": "http://synthetic.invalid",
+        "policy_prompt": SYNTHETIC_PROMPT,
+        "key_env": "SYNTHETIC",
+    }
+    if body_complete:
+        assert asyncio.run(score(judge_payload, **kwargs))["scoring_status"] == "not_scored"
+        assert len(calls) == 2
+    else:
+        with pytest.raises(ValueError, match="Ambiguous judge dispatch"):
+            asyncio.run(score(judge_payload, **kwargs))
+        assert len(calls) == 1
+    work = next((kwargs["directory"] / "judges").iterdir())
+    receipts = list(work.glob("attempt*.json"))
+    assert len(receipts) == (2 if body_complete else 1)
+    assert all(read(path)["response_body_complete"] is body_complete for path in receipts)
+    assert all(
+        read(path)["dispatch_status"] == ("response_received" if body_complete else "unknown") for path in receipts
+    )
+    assert not (work / "result.json").exists()
+    saved = {path: path.read_bytes() for path in work.iterdir() if path.is_file()}
+    for validate_only in [True, False]:
+        if body_complete:
+            assert (
+                asyncio.run(score(judge_payload, **kwargs, validate_only=validate_only))["scoring_status"]
+                == "not_scored"
+            )
+        else:
+            with pytest.raises(ValueError, match="Ambiguous judge dispatch"):
+                asyncio.run(score(judge_payload, **kwargs, validate_only=validate_only))
+    assert len(calls) == len(receipts) and all(path.read_bytes() == value for path, value in saved.items())
 
 
 def test_cached_transport_rejects_changed_request_body(tmp_path, monkeypatch):

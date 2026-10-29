@@ -8,6 +8,7 @@ import asyncio
 import fcntl
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,7 +26,26 @@ from .core import (
     write,
 )
 from .registry import private_path
-from .transport import verified_response, wire_call
+from .transport import RetryableTransportError, validate_endpoint, verified_response, wire_call
+
+
+def validate_judge_config(endpoint: str, model: str) -> None:
+    """Validate judge routing before any paid policy generation, without requiring a secret."""
+    validate_endpoint(endpoint)
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Judge model must be nonempty")
+
+
+def _validate_dispatch(receipt: dict) -> None:
+    if receipt["status"] == "generated" or receipt.get("dispatch_status") == "not_dispatched":
+        return
+    status = receipt.get("http_status", 0)
+    if (
+        receipt.get("dispatch_status") == "unknown"
+        or not 200 <= status < 600
+        or (status < 300 and receipt.get("response_body_complete") is not True)
+    ):
+        raise ValueError("Ambiguous judge dispatch; reconcile saved transport before retrying")
 
 
 @asynccontextmanager
@@ -60,6 +80,7 @@ async def score(
     directory = private_path(directory)
     if not isinstance(policy_prompt, str) or not policy_prompt.strip():
         raise ValueError("Explicit judge policy prompt is required")
+    validate_judge_config(endpoint, model)
     judge.validate_payload(payload)
     schema = bounded_schema(provider_schema(read(ROOT / "policy/judge_output.schema.json")), payload)
     body = {
@@ -88,6 +109,19 @@ async def score(
         return unscored(payload["item_id"], "judge_cache_validated_without_scoring")
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     async with _cache_lock(work):
+        for name, expected in [("payload.json", payload), ("transport_schema.json", schema)]:
+            if (work / name).exists() and read(work / name) != expected:
+                raise ValueError("Saved pending judge payload or schema changed")
+        receipt_paths = sorted(work.glob("attempt*.json"), key=lambda path: int(path.stem.removeprefix("attempt")))
+        if [path.name for path in receipt_paths] != [f"attempt{index}.json" for index in range(len(receipt_paths))]:
+            raise ValueError("Saved judge attempt sequence changed")
+        receipts = []
+        for receipt_path in receipt_paths:
+            # Existing paths are read-only: validate every prior receipt before any recovery dispatch.
+            receipt = await wire_call(body, endpoint=endpoint, key_env=key_env, path=receipt_path)
+            if receipt["status"] == "generated":
+                verified_response(receipt)
+            receipts.append(receipt)
         if (work / "result.json").exists():
             cached = read(work / "result.json")
             if (
@@ -97,7 +131,7 @@ async def score(
             ):
                 raise ValueError("Cached judge payload changed")
             name = cached["receipt_name"]
-            if name not in {"attempt0.json", "attempt1.json"}:
+            if not isinstance(name, str) or not re.fullmatch(r"attempt(0|[1-9][0-9]*)\.json", name):
                 raise ValueError("Cached judge receipt path changed")
             receipt_path = work / name
             if digest(receipt_path) != cached["receipt_sha256"]:
@@ -115,33 +149,36 @@ async def score(
             return checked
         if cached_only:
             raise ValueError("Saved judge result missing; cached-only verification cannot dispatch")
+        for receipt in receipts:
+            _validate_dispatch(receipt)
         if validate_only:
-            for name, expected in [("payload.json", payload), ("transport_schema.json", schema)]:
-                if (work / name).exists() and read(work / name) != expected:
-                    raise ValueError("Saved pending judge payload or schema changed")
-            for attempt in range(2):
-                receipt_path = work / f"attempt{attempt}.json"
-                if not receipt_path.exists():
-                    continue
-                # The cache lock and existing receipt keep this on the no-dispatch transport path.
-                receipt = await wire_call(body, endpoint=endpoint, key_env=key_env, path=receipt_path)
-                if receipt["status"] == "generated":
-                    verified_response(receipt)
             return unscored(payload["item_id"], "judge_cache_validated_without_scoring")
         write(work / "payload.json", payload)
         write(work / "transport_schema.json", schema)
-        for attempt in range(2):
+        delivered_reviews = 0
+        # At most two 2xx review deliveries; transport-only failures end this invocation.
+        for attempt in range(len(receipts) + 2):
+            if delivered_reviews == 2:
+                break
             receipt_path = work / f"attempt{attempt}.json"
-            receipt = await wire_call(
-                body,
-                endpoint=endpoint,
-                key_env=key_env,
-                path=receipt_path,
+            saved = attempt < len(receipts)
+            receipt = (
+                receipts[attempt]
+                if saved
+                else await wire_call(body, endpoint=endpoint, key_env=key_env, path=receipt_path)
             )
+            _validate_dispatch(receipt)
             if receipt["status"] != "generated":
-                if receipt.get("terminal"):
-                    break
+                status = receipt.get("http_status", 0)
+                if 200 <= status < 300:
+                    delivered_reviews += 1
+                    continue
+                if not saved:
+                    raise RetryableTransportError(
+                        "Judge transport failed; fix the service or credentials and explicitly resume the saved answer"
+                    )
                 continue
+            delivered_reviews += 1
             response = verified_response(receipt)
             try:
                 review, result = _checked_result(response, payload, schema, body)

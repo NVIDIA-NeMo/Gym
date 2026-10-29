@@ -12,7 +12,10 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME
+from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
+from nemo_gym.server_utils import ServerClient
 from resources_servers.agentic_if_realworld.benchmark.core import (
     PHASES,
     Dataset,
@@ -23,11 +26,11 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
     runtime_identity,
     source_preflight,
     summarize,
-    summary_metrics,
     write,
 )
 from resources_servers.agentic_if_realworld.benchmark.registry import private_path
 from resources_servers.agentic_if_realworld.benchmark.runner import run_cell
+from resources_servers.agentic_if_realworld.benchmark.scoring import validate_judge_config
 from resources_servers.agentic_if_realworld.benchmark.transport import delivered
 
 
@@ -52,6 +55,9 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
     if config.num_repeats != 1 or config.fan_out or config.responses_create_params:
         raise ValueError("Frozen benchmark prohibits repeats, fan-out, or prompt/sampling overrides")
     resource = global_config_dict["agentic_if_realworld_resources"]["resources_servers"]["agentic_if_realworld"]
+    validate_judge_config(resource["judge_endpoint"], resource["judge_model"])
+    if not os.environ.get(resource["judge_api_key_env"]):
+        raise ValueError(f"{resource['judge_api_key_env']} is not set")
     model = global_config_dict["policy_model"]["responses_api_models"]["agentic_if_text"]
     reasoning_effort = model.get("reasoning_effort")
     if reasoning_effort not in (None, "max"):
@@ -184,6 +190,8 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                 return {
                     "complete": complete,
                     "terminal": receipt.get("terminal", False),
+                    "dispatch_status": receipt.get("dispatch_status"),
+                    "reason": receipt.get("reason"),
                     "canonical_response": canonical,
                     "rollout": rollout,
                     "receipt_path": str(path),
@@ -208,6 +216,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                     server_name="agentic_if_realworld_resources",
                     url_path="/verify",
                     json=body,
+                    _max_num_tries=1,
                 )
                 try:
                     await raise_for_status(response)
@@ -259,7 +268,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         _attach_trajectory_record(record, record)
                     async with writing:
                         try:
-                            results.append(result)
+                            results.append(record)
                             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
                             stream.flush()
                             write_reports(staged_output, results, dataset)
@@ -296,10 +305,15 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                 completed = True
             finally:
                 try:
-                    stream.flush()
-                    os.fsync(stream.fileno())
+                    if completed or (not config.resume_from_cache and not writing_failed):
+                        write_reports(staged_output, results, dataset)
+                        await write_aggregate_metrics(staged_output, results, client)
                 finally:
-                    stream.close()
+                    try:
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    finally:
+                        stream.close()
                 # A rejected resume preserves published artifacts; fresh interruptions retain settled rows.
                 if completed or (not config.resume_from_cache and not writing_failed):
                     staged_output.replace(output)
@@ -310,17 +324,52 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
 
 
 def write_reports(output: Path, results: list[dict], dataset: Dataset) -> None:
-    """Expose full-denominator accuracy to Gym/EFB; incomplete accuracy stays null."""
-    summary = summarize(results, dataset)
-    write(output.with_suffix(".summary.json"), summary)
-    metrics = summary_metrics(summary)
+    """Save full-denominator progress while task collection is still running."""
+    write(output.with_suffix(".summary.json"), summarize(results, dataset))
+
+
+async def write_aggregate_metrics(output: Path, records: list[dict], client: ServerClient) -> None:
+    """Aggregate settled full records through the resource server and save Gym's artifact shape."""
+    from nemo_gym.server_utils import get_response_json, raise_for_status
+
+    stripped = []
+    for record in records:
+        entry = {
+            key: value
+            for key, value in record.items()
+            if key
+            not in (
+                "response",
+                "responses_create_params",
+                NG_AGENT_OBSERVATIONS_KEY,
+                "ng_model_call_capture",
+                NG_TRAJECTORY_KEY,
+            )
+        }
+        response = record.get("response") or {}
+        metadata = {
+            key: response[key] for key in ("usage", "incomplete_details", "metrics") if response.get(key) is not None
+        }
+        if metadata:
+            entry["response"] = metadata
+        stripped.append(entry)
+    response = await client.post(
+        server_name="agentic_if_realworld_resources",
+        url_path="/aggregate_metrics",
+        json=AggregateMetricsRequest(verify_responses=stripped),
+    )
+    try:
+        await raise_for_status(response)
+        aggregate = AggregateMetrics.model_validate(await get_response_json(response))
+    finally:
+        response.release()
     write(
         output.with_name(output.stem + "_aggregate_metrics.json"),
         [
             {
                 "agent_ref": {"name": "agentic_if_realworld_agent"},
-                "agent_metrics": metrics,
-                "key_metrics": metrics,
+                "_ng_environment_server": "agentic_if_realworld_environment",
+                **aggregate.model_dump(exclude_none=True),
             }
         ],
     )

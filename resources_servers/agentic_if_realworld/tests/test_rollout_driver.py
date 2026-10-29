@@ -26,7 +26,9 @@ class FakeDataset:
         return [{"task_id": i, "verifier_metadata": {}, "responses_create_params": {}} for i in TASKS]
 
 
-def collect(tmp_path, monkeypatch, seen, *, parallel, failing=None, failing_write=None, delays=None):
+def collect(
+    tmp_path, monkeypatch, seen, *, parallel, failing=None, failing_write=None, delays=None, judge_override=None
+):
     seen.update(active=0, peak=0, started=[], finished=[])
 
     async def run_cell(dataset, identifier, *, directory, **_):
@@ -42,8 +44,11 @@ def collect(tmp_path, monkeypatch, seen, *, parallel, failing=None, failing_writ
         return {"item_id": identifier, "scoring_status": "scored"}
 
     def write_reports(output, results, dataset):
-        if results[-1]["item_id"] == failing_write:
+        if results and results[-1]["item_id"] == failing_write:
             raise OSError("Disk quota exceeded")
+
+    async def write_aggregate_metrics(output, records, client):
+        seen["aggregated"] = [row["task_id"] for row in records]
 
     monkeypatch.setattr(rollout_driver, "Dataset", FakeDataset)
     monkeypatch.setattr(
@@ -51,6 +56,7 @@ def collect(tmp_path, monkeypatch, seen, *, parallel, failing=None, failing_writ
     )
     monkeypatch.setattr(rollout_driver, "run_cell", run_cell)
     monkeypatch.setattr(rollout_driver, "write_reports", write_reports)
+    monkeypatch.setattr(rollout_driver, "write_aggregate_metrics", write_aggregate_metrics)
     monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda self: None)
     monkeypatch.setattr(RolloutCollectionHelper, "preprocess_examples", lambda self, rows, **_: rows)
     config = SimpleNamespace(
@@ -64,7 +70,14 @@ def collect(tmp_path, monkeypatch, seen, *, parallel, failing=None, failing_writ
         num_samples_in_parallel=parallel,
     )
     resource = {"dataset_dir": "", "synthetic": True, "receipt_dir": str(tmp_path / "receipts")}
-    resource |= {k: "" for k in ["judge_endpoint", "judge_model", "judge_api_key_env", "judge_reasoning"]}
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    resource |= {
+        "judge_endpoint": "http://synthetic.invalid",
+        "judge_model": "synthetic-judge",
+        "judge_api_key_env": "SYNTHETIC",
+        "judge_reasoning": "medium",
+    }
+    resource.update(judge_override or {})
     global_config = {
         "agentic_if_realworld_resources": {"resources_servers": {"agentic_if_realworld": resource}},
         "policy_model": {
@@ -81,6 +94,7 @@ def test_tasks_run_concurrently_up_to_the_limit_with_one_row_each(tmp_path, monk
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert seen["peak"] == 3
     assert sorted(r["task_id"] for r in rows) == TASKS
+    assert sorted(seen["aggregated"]) == TASKS
 
 
 def test_unset_parallelism_stays_sequential(tmp_path, monkeypatch):
@@ -96,6 +110,7 @@ def test_failure_stops_admission_and_lets_started_tasks_settle(tmp_path, monkeyp
     # task-1 started before task-0 failed and still finishes; nothing starts after the failure.
     assert seen["started"] == ["task-0", "task-1"]
     assert seen["finished"] == ["task-1"]
+    assert seen["aggregated"] == ["task-1"]
 
 
 def test_write_failure_lets_started_tasks_settle(tmp_path, monkeypatch):
@@ -104,3 +119,17 @@ def test_write_failure_lets_started_tasks_settle(tmp_path, monkeypatch):
         collect(tmp_path, monkeypatch, seen, parallel=2, failing_write="task-0", delays={"task-0": 0, "task-1": 0.05})
     # task-1 was generating when task-0's row failed to write; it still finishes.
     assert seen["finished"] == ["task-0", "task-1"]
+    assert "aggregated" not in seen
+
+
+@pytest.mark.parametrize(
+    "judge_override",
+    [{"judge_endpoint": ""}, {"judge_model": ""}, {"judge_api_key_env": "UNSET_SYNTHETIC_JUDGE_KEY"}],
+)
+def test_invalid_judge_config_fails_before_policy_dispatch(tmp_path, monkeypatch, judge_override):
+    monkeypatch.delenv("UNSET_SYNTHETIC_JUDGE_KEY", raising=False)
+    seen = {}
+    with pytest.raises(ValueError):
+        collect(tmp_path, monkeypatch, seen, parallel=1, judge_override=judge_override)
+    assert seen["started"] == []
+    assert not (tmp_path / "receipts").exists()

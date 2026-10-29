@@ -4,15 +4,20 @@ import asyncio
 import json
 import tempfile
 from copy import deepcopy
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 import nemo_gym.server_utils
+from nemo_gym.server_utils import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.agentic_if_realworld.app import (
     VERIFIER_FIXTURE,
     FixtureVerifier,
+    ResourcesConfig,
+    ResourcesServer,
     Verifier,
     VerifyRequest,
     project_gym_response,
@@ -20,6 +25,7 @@ from resources_servers.agentic_if_realworld.app import (
 from resources_servers.agentic_if_realworld.benchmark import scoring
 from resources_servers.agentic_if_realworld.benchmark.core import digest, read, write
 from resources_servers.agentic_if_realworld.benchmark.synthetic import delivery, review
+from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
 
 
 @pytest.fixture
@@ -41,6 +47,78 @@ def test_verifier_fixture():
             determinism="stochastic",
         )
     )
+
+
+@pytest.mark.parametrize(
+    "endpoint,model,error",
+    [
+        ("", "synthetic", "Endpoint"),
+        ("ftp://synthetic.invalid", "synthetic", "Endpoint"),
+        ("http://synthetic.invalid:bad", "synthetic", "Port"),
+        ("http://secret@synthetic.invalid", "synthetic", "Endpoint"),
+        ("http://synthetic.invalid", " ", "Judge model"),
+    ],
+)
+def test_judge_startup_validates_routing_without_changing_dry_run(endpoint, model, error, monkeypatch):
+    monkeypatch.delenv("SYNTHETIC_MISSING_KEY", raising=False)
+    server = ResourcesServer.model_construct(
+        config=SimpleNamespace(judge_endpoint=endpoint, judge_model=model, judge_api_key_env="SYNTHETIC_MISSING_KEY")
+    )
+    with pytest.raises(ValueError, match=error):
+        server.setup_webserver()
+
+
+def test_judge_startup_requires_key_only_when_serving(monkeypatch):
+    monkeypatch.delenv("SYNTHETIC_MISSING_KEY", raising=False)
+    server = ResourcesServer.model_construct(
+        config=SimpleNamespace(
+            judge_endpoint="http://synthetic.invalid",
+            judge_model="synthetic",
+            judge_api_key_env="SYNTHETIC_MISSING_KEY",
+        )
+    )
+    with pytest.raises(ValueError, match="SYNTHETIC_MISSING_KEY is not set"):
+        server.setup_webserver()
+
+
+def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, monkeypatch):
+    from resources_servers.agentic_if_realworld.tests.test_transport import Response
+
+    calls = []
+
+    async def request(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            return Response(401, {"error": "bad credentials"})
+        payload = json.loads(kwargs["json"]["messages"][0]["content"].split("UNTRUSTED_EVALUATION_PAYLOAD:\n", 1)[1])
+        return Response(
+            200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(payload))}}]}
+        )
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "bad-key")
+    config = ResourcesConfig(
+        host="",
+        port=0,
+        entrypoint="app.py",
+        name="agentic_if_realworld_resources",
+        dataset_dir=str(verifier.dataset.directory),
+        synthetic=True,
+        receipt_dir=str(verifier.receipt_dir),
+        judge_endpoint="http://synthetic.invalid",
+        judge_api_key_env="SYNTHETIC",
+    )
+    server = ResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    body = delivery(verifier.dataset, verifier.receipt_dir, "OK.")
+    saved = {path: path.read_bytes() for path in (verifier.receipt_dir / "model").iterdir()}
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/verify", json=body)
+        assert response.status_code == 500 and len(calls) == 1
+        assert not list(verifier.receipt_dir.glob("judges/*/result.json"))
+        monkeypatch.setenv("SYNTHETIC", "corrected-key")
+        response = client.post("/verify", json=body)
+        assert response.status_code == 200 and response.json()["item_verdict"] == "pass"
+        assert len(calls) == 2 and all(path.read_bytes() == value for path, value in saved.items())
 
 
 @pytest.mark.parametrize(
@@ -96,13 +174,15 @@ def test_production_verifier_rejects_damaged_delivery(verifier, damage, error):
 
 @pytest.mark.parametrize("outcome", ["outage", "malformed"])
 @pytest.mark.parametrize("response_source", ["raw_receipt", "gym_response"])
-def test_production_verifier_masks_judge_technical_failures(verifier, monkeypatch, outcome, response_source):
+def test_production_verifier_distinguishes_judge_outage_from_delivered_invalid_review(
+    verifier, monkeypatch, outcome, response_source
+):
     calls = []
 
     async def wire(body, *, path, **kwargs):
         calls.append(1)
         if outcome == "outage":
-            return {"status": "delivery_error"}
+            return {"status": "delivery_error", "http_status": 401}
         response = {"choices": [{"finish_reason": "stop", "message": {"content": "not JSON"}}]}
         raw = path.with_suffix(".http")
         write(raw, response)
@@ -126,6 +206,11 @@ def test_production_verifier_masks_judge_technical_failures(verifier, monkeypatc
     if response_source == "gym_response":
         body["response"]["metadata"] = {}
         body["response"]["status"] = "completed"
+    if outcome == "outage":
+        with pytest.raises(RetryableTransportError):
+            asyncio.run(production.verify(VerifyRequest.model_validate(body)))
+        assert len(calls) == 1
+        return
     result = asyncio.run(production.verify(VerifyRequest.model_validate(body)))
     assert result.scoring_status == "not_scored"
     assert result.item_verdict is None and result.mask_sample is True
@@ -152,7 +237,7 @@ class JudgeResponse:
 
 
 @pytest.mark.parametrize("first_outcomes", [["transport", "transport"], ["malformed", "transport"]])
-def test_judge_attempt_budget_is_preserved_on_resume(verifier, monkeypatch, first_outcomes):
+def test_ambiguous_judge_dispatch_stays_blocked_on_resume(verifier, monkeypatch, first_outcomes):
     calls = []
 
     async def request(method, url, **kwargs):
@@ -173,14 +258,16 @@ def test_judge_attempt_budget_is_preserved_on_resume(verifier, monkeypatch, firs
         dataset=verifier.dataset, receipt_dir=verifier.receipt_dir, endpoint="http://synthetic.invalid"
     )
     body = VerifyRequest.model_validate(delivery(verifier.dataset, verifier.receipt_dir, "OK."))
-    # Neither attempt gives a grade: the item is masked.
-    assert asyncio.run(production.verify(body)).scoring_status == "not_scored" and len(calls) == 2
+    with pytest.raises(ValueError, match="Ambiguous judge dispatch"):
+        asyncio.run(production.verify(body))
+    dispatched = first_outcomes.index("transport") + 1
+    assert len(calls) == dispatched
     saved = {path: digest(path) for path in verifier.receipt_dir.glob("judges/*/attempt*.*")}
-    assert len(list(verifier.receipt_dir.glob("judges/*/attempt*.json"))) == 2
+    assert len(list(verifier.receipt_dir.glob("judges/*/attempt*.json"))) == dispatched
     for _ in range(2):
-        result = asyncio.run(production.verify(body))
-        assert result.scoring_status == "not_scored" and result.mask_sample is True
-        assert result.item_verdict is None and len(calls) == 2
+        with pytest.raises(ValueError, match="Ambiguous judge dispatch"):
+            asyncio.run(production.verify(body))
+        assert len(calls) == dispatched
         assert {path: digest(path) for path in verifier.receipt_dir.glob("judges/*/attempt*.*")} == saved
 
 
@@ -193,7 +280,9 @@ def test_pending_judge_cache_validation_is_readonly(verifier, monkeypatch, respo
 
     async def request(*args, **kwargs):
         calls.append(1)
-        raise ConnectionError("synthetic judge unavailable")
+        response = JudgeResponse(b'{"error":"synthetic rejected credentials"}')
+        response.status = 401
+        return response
 
     monkeypatch.setattr(nemo_gym.server_utils, "request", request)
     monkeypatch.setenv("AGENTIC_IF_JUDGE_API_KEY", "synthetic")
@@ -220,10 +309,11 @@ def test_pending_judge_cache_validation_is_readonly(verifier, monkeypatch, respo
     assert not calls and saved_files() == before
     assert not (verifier.receipt_dir / "judges").exists()
 
-    assert asyncio.run(production.verify(VerifyRequest.model_validate(row))).scoring_status == "not_scored"
-    assert len(calls) == 2
+    with pytest.raises(RetryableTransportError):
+        asyncio.run(production.verify(VerifyRequest.model_validate(row)))
+    assert len(calls) == 1
     work = next((verifier.receipt_dir / "judges").iterdir())
-    assert len(list(work.glob("attempt*.json"))) == 2
+    assert len(list(work.glob("attempt*.json"))) == 1
     assert not (work / "result.json").exists()
     attempt_path = work / "attempt0.json"
     attempt = read(attempt_path)
@@ -251,7 +341,7 @@ def test_pending_judge_cache_validation_is_readonly(verifier, monkeypatch, respo
         for _ in range(2):
             result = asyncio.run(production.verify(validate))
             assert result.scoring_status == "not_scored" and result.mask_sample is True
-    assert len(calls) == 2 and saved_files() == before
+    assert len(calls) == 1 and saved_files() == before
 
 
 def test_judge_cache_validation_rechecks_successful_review(verifier, monkeypatch):

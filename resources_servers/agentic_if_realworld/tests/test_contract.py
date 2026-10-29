@@ -254,6 +254,109 @@ def test_terminal_delivery_stops_profile(dataset, tmp_path):
     assert len(calls) == 1
 
 
+def test_connect_failure_stops_and_explicit_resume_retries_same_phase(dataset, tmp_path, monkeypatch):
+    from aiohttp import ClientConnectorError
+
+    import nemo_gym.server_utils
+    from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError, wire_call
+    from resources_servers.agentic_if_realworld.tests.test_transport import Response
+
+    calls, receipt_ids = [], []
+
+    async def request(*args, **kwargs):
+        calls.append((kwargs["json"]["seed"], kwargs["json"]["max_tokens"]))
+        if len(calls) == 1:
+            raise ClientConnectorError(None, ConnectionRefusedError())
+        return Response(200, {"choices": [{"finish_reason": "stop", "message": {"content": "OK."}}]})
+
+    async def generate(row, seed, cap, receipt_id):
+        receipt_ids.append(receipt_id)
+        path = tmp_path / "model" / (receipt_id + ".json")
+        receipt = await wire_call(
+            {**dataset.request("synthetic"), "seed": seed, "max_tokens": cap},
+            endpoint="http://synthetic.invalid",
+            key_env="SYNTHETIC",
+            path=path,
+        )
+        return {
+            "complete": receipt["status"] == "generated",
+            "dispatch_status": receipt.get("dispatch_status"),
+            "receipt_path": str(path),
+            "receipt_sha256": digest(path),
+        }
+
+    async def verify(*args, **kwargs):
+        p = payload(dataset)
+        return judge.validate_review(review(p), p)
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    args = {"directory": tmp_path / "run", "settings": {}, "generate": generate, "verify": verify}
+    with pytest.raises(RetryableTransportError):
+        asyncio.run(run_cell(dataset, "synthetic", **args))
+    journal = next((tmp_path / "run" / "cells").glob("*.json"))
+    state = read(journal)
+    assert len(state["attempts"]) == 1 and "selected" not in state and "result" not in state
+    old = {path: path.read_bytes() for path in (tmp_path / "model").iterdir()}
+    asyncio.run(run_cell(dataset, "synthetic", **args, resume=True, validate_only=True))
+    assert len(calls) == 1
+    result = asyncio.run(run_cell(dataset, "synthetic", **args, resume=True))
+    assert result["item_verdict"] == "pass" and calls == [PHASES[0], PHASES[0]]
+    assert receipt_ids[0] != receipt_ids[1]
+    state = read(journal)
+    assert len(state["attempts"]) == len(state["transport_failures"]) == 1
+    assert all(path.read_bytes() == value for path, value in old.items())
+    damaged = next(path for path in old if path.suffix == ".http")
+    damaged.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="Raw transport binding changed"):
+        asyncio.run(run_cell(dataset, "synthetic", **args, resume=True))
+    assert len(calls) == 2
+
+
+def test_judge_transport_recovery_never_regenerates_selected_answer(dataset, tmp_path, monkeypatch):
+    import nemo_gym.server_utils
+    from resources_servers.agentic_if_realworld.benchmark.scoring import score
+    from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
+    from resources_servers.agentic_if_realworld.tests.test_transport import Response
+
+    generations, judges = [], []
+
+    async def generate(*args):
+        generations.append(1)
+        return {"complete": True, "canonical_response": "OK."}
+
+    async def request(*args, **kwargs):
+        judges.append(1)
+        if len(judges) == 1:
+            return Response(401, {"error": "bad credentials"})
+        return Response(
+            200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(payload(dataset)))}}]}
+        )
+
+    async def verify(*args, **kwargs):
+        return await score(
+            payload(dataset),
+            directory=tmp_path / "receipts",
+            endpoint="http://synthetic.invalid",
+            policy_prompt=dataset.judge_prompt(),
+            key_env="SYNTHETIC",
+            **kwargs,
+        )
+
+    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "bad")
+    args = {"directory": tmp_path / "run", "settings": {}, "generate": generate, "verify": verify}
+    with pytest.raises(RetryableTransportError):
+        asyncio.run(run_cell(dataset, "synthetic", **args))
+    journal = next((tmp_path / "run" / "cells").glob("*.json"))
+    selected = read(journal)["selected"]
+    assert "result" not in read(journal)
+    monkeypatch.setenv("SYNTHETIC", "corrected")
+    result = asyncio.run(run_cell(dataset, "synthetic", **args, resume=True))
+    assert result["item_verdict"] == "pass" and len(generations) == 1 and len(judges) == 2
+    assert read(journal)["selected"] == selected
+
+
 def test_duplicate_and_invented_checks_rejected(dataset):
     p = payload(dataset)
     for change in ["duplicate", "invented", "wrong_hash"]:
@@ -299,18 +402,18 @@ def test_judge_malformed_and_outage_are_unscored(dataset, tmp_path, monkeypatch)
     assert result["scoring_status"] == "not_scored" and result["mask_sample"] and len(calls) == 2
 
     async def unavailable(*args, **kwargs):
-        return {"status": "delivery_error"}
+        return {"status": "delivery_error", "http_status": 401}
 
     monkeypatch.setattr(scoring, "wire_call", unavailable)
-    result = asyncio.run(
-        scoring.score(
-            payload(dataset),
-            directory=tmp_path / "outage",
-            endpoint="http://synthetic.invalid",
-            policy_prompt=dataset.judge_prompt(),
+    with pytest.raises(ValueError, match="Judge transport failed"):
+        asyncio.run(
+            scoring.score(
+                payload(dataset),
+                directory=tmp_path / "outage",
+                endpoint="http://synthetic.invalid",
+                policy_prompt=dataset.judge_prompt(),
+            )
         )
-    )
-    assert result["model_verdict"] is None and result["scoring_status"] == "not_scored"
 
 
 def test_sse_replay_terminal_and_native_rejection(tmp_path):

@@ -61,7 +61,7 @@ synthetic prompt is separately identified and is only for plumbing checks;
 it does not replace the benchmark's prompt or establish judge quality. Original
 source hashes remain distinct from public packaging hashes.
 All checks passing yields reward 1; an established violation yields reward 0.
-Incomplete delivery, a failed judge or an unresolved review is unscored with
+Exhausted delivery attempts or unresolved delivered reviews are unscored with
 `mask_sample: true`, a failure kind and a reason. The numeric placeholder is
 excluded from quality metrics. Set an approved judge model and endpoint through
 `AGENTIC_IF_JUDGE_MODEL` and `AGENTIC_IF_JUDGE_ENDPOINT`; credentials come from
@@ -72,9 +72,13 @@ The default `adaptive_first_complete_v1` protocol uses temperature 0.7, streamin
 and these (seed, maximum-output-token) attempts:
 `(17,32768), (17,65536), (17,131072), (29,131072), (43,131072)`.
 Advance only after incomplete delivery. Keep the first complete answer regardless
-of its grade. Judge recovery never regenerates that answer. Two judge attempts
-are allowed across resumes, with bounded transport retries and the existing
-timeouts. After both attempts are exhausted, unresolved scoring stays unscored.
+of its grade. Judge recovery never regenerates that answer. Two HTTP 2xx judge
+deliveries are allowed across resumes, with bounded transport retries and the
+existing timeouts. Malformed reviews consume that budget; failed connections and
+non-2xx judge responses do not. Those infrastructure failures stop the run so the
+operator can fix the service or credentials and explicitly resume the saved
+answer. After two delivered reviews, unresolved scoring stays unscored. Judge
+endpoint, model and credential presence are checked before policy generation.
 
 For a vLLM-backed model requiring maximum reasoning effort, set
 `policy_model.responses_api_models.agentic_if_text.reasoning_effort=max` in the
@@ -118,10 +122,11 @@ inventory and never replaces it. Older runs without one require a new run direct
 `rollouts.summary.json` reports both views, subtype overlap, expected tasks,
 pass/fail/unscored counts and coverage. `rollouts_aggregate_metrics.json` exposes
 `composite/complete_accuracy`, which stays null until every declared task has a
-valid grade. Gym's standard aggregation endpoint uses the same full-dataset
-accounting for native collection, reverification and reaggregation, including
-masked and unattempted tasks. Never substitute resolved-only mean reward for
-complete accuracy.
+valid grade. The driver calls the Resources Server's standard aggregation
+endpoint and saves Gym's task/repeat metrics, baseline statistics and environment
+identity alongside the benchmark metrics. Native collection and reverification
+use that same endpoint, including masked and unattempted tasks. Never substitute
+resolved-only mean reward for complete accuracy.
 
 ## Run
 
@@ -148,15 +153,20 @@ Repeat the final command with `--resume` and the same paths to resume generation
 and judging independently. Preserve saved response hashes and receipts.
 `--concurrency N` runs up to N tasks at once, each with its own journal. A policy
 transport error (429, 5xx, timeout) moves a task to its next attempt, as an
-incomplete delivery does, so keep N within what the policy server serves without
-errors. A run stopped mid-generation leaves its in-flight tasks ambiguous, and
-resume rejects them until their receipts are reconciled.
+incomplete delivery does, only when a response establishes the delivery outcome.
+A connection refusal or connect timeout stops the run; explicit resume retries
+the same seed and token cap while retaining the failed receipt. A complete saved
+SSE answer remains selected even if the connection fails after its final event.
+Uncertain dispatch or a run stopped mid-generation requires receipt reconciliation
+before resume. Keep N within the policy server's capacity.
 
 ### Private YAML configuration
 
 Model endpoints, model names and the receipt directory are ordinary Gym/Hydra
 configuration fields. Environment variables above are optional defaults for those
-fields. To keep a reusable run configuration, save this YAML outside Git, for
+fields. The adaptive profile reads `AGENTIC_IF_POLICY_ENDPOINT` and
+`AGENTIC_IF_POLICY_MODEL` directly; unrelated quickstart `policy_base_url` and
+`policy_model_name` values do not override them. To keep a reusable run configuration, save this YAML outside Git, for
 example as `/private/agentic-if/run-01/config.yaml`:
 
 ```yaml
@@ -204,6 +214,25 @@ reverification without policy generation.
 For a local native run, also save a redacted config using `gym env resolve` with
 the same config and overrides, or use `gym eval submit`, which saves the config
 and job record. Keep all native outputs, captures and judge receipts outside Git.
+
+To recompute metrics from saved adaptive rollouts without policy or judge calls,
+start the native profile's servers with the same private dataset configuration,
+then aggregate through its standard environment route:
+
+```bash
+gym env start --config benchmarks/agentic_if_realworld/native.yaml --model-type vllm_model
+# In another terminal with the same private data/judge environment:
+gym eval aggregate --config benchmarks/agentic_if_realworld/native.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  --input-glob /private/agentic-if/run-01/rollouts.jsonl \
+  --output /private/agentic-if/run-01/rollouts.jsonl \
+  ++policy_model_name=policy ++policy_base_url=http://localhost:8000/v1
+```
+
+Aggregation reads saved results only. Keep the judge configuration available for
+server startup validation. The stock model config satisfies Gym's reference
+validation; aggregation never calls its placeholder endpoint. The adaptive profile's legacy relay remains unchanged;
+use the native profile above for the standalone aggregation command.
 
 ## Architecture review
 
