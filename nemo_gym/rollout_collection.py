@@ -3452,7 +3452,10 @@ class RolloutCollectionHelper(BaseModel):
         # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
         resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
         budget_used: Counter = Counter()
-        terminal_keys: set = set()
+        # A rollout is sidecar-terminal when its latest row is a terminal failure, picked by the rule scoring uses
+        # (`_latest_failure_rows`): a later interrupted attempt supersedes an older terminal failure, the evidence of
+        # an unrouted /run and a never-started row do not.
+        latest_by_key: Dict[Tuple, Dict[str, Any]] = {}
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
@@ -3461,17 +3464,17 @@ class RolloutCollectionHelper(BaseModel):
                     if not line:
                         continue
                     fr = orjson.loads(line)
-                    # A rollout that produced no result used no attempt; resume runs it again.
-                    if is_omitted_rollout_row(fr):
-                        continue
                     if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
+                    if not is_non_superseding_rollout_row(fr):
+                        latest_by_key[k] = fr
+                    # A rollout that produced no result used no attempt; resume runs it again.
+                    if is_omitted_rollout_row(fr):
+                        continue
                     attempts_by_key[k] += 1
                     if line_index >= resubmit_offset:
                         budget_used[k] += 1
-                    if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
-                        terminal_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -3479,6 +3482,12 @@ class RolloutCollectionHelper(BaseModel):
                     if observed is not None:
                         elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
+        terminal_keys = {
+            k
+            for k, fr in latest_by_key.items()
+            if not is_omitted_rollout_row(fr)
+            and is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts)
+        }
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
         gated = successes_seen | terminal_keys | maxed_out

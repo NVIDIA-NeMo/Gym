@@ -12901,3 +12901,88 @@ def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(with_
     # Do not repair conflicting ownership silently: the checker must still see both claims.
     assert [ref.model_call_id for ref in trajectory.invocations[0].model_calls] == call_ids
     assert trajectory.verifier_invocations[0].model_calls[0].model_dump(exclude_none=True) == judge_ref
+
+
+class TestResumeTerminalGateUsesTheLatestAttempt:
+    """Resume gates a rollout as sidecar-terminal by its latest row, picked by the rule scoring uses.
+
+    A terminal judge failure followed by a real interrupted attempt (an omitted row without
+    the unrouted-/run marker). Scoring left the rollout missing, but resume gated it from the older judge row, so it
+    never ran again and require_complete stayed short forever.
+    """
+
+    @staticmethod
+    def _resume(
+        tmp_path: Path, sidecar: list[dict], *, scored: tuple[int, ...] = (0,)
+    ) -> tuple[RolloutCollectionConfig, dict]:
+        output = tmp_path / "output.jsonl"
+        materialized_path_for(output).write_bytes(b"".join(orjson.dumps(failing_row(t)) + b"\n" for t in range(3)))
+        output.write_bytes(b"".join(orjson.dumps({**failing_row(t), "reward": 1.0}) + b"\n" for t in scored))
+        _failures_path_for(output).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in sidecar))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="in.jsonl", output_jsonl_fpath=str(output), resume_from_cache=True, require_complete=True
+        )
+        dispatched, *_ = RolloutCollectionHelper()._load_from_cache(config)
+        return config, {row[TASK_INDEX_KEY_NAME]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched}
+
+    _JUDGE = {NG_FAILURE_CLASS_KEY: "judge_failed", NG_TERMINAL_KEY: True, "reward": 0.0}
+    _INTERRUPTED = {NG_OMITTED_ROLLOUT_KEY: True, NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS}
+
+    @pytest.mark.parametrize(
+        ("later", "dispatched"),
+        [
+            # A real interruption supersedes the terminal judge failure: the rollout runs again as its second
+            # attempt (the judge failure stays one used attempt; the interruption used none).
+            pytest.param(_INTERRUPTED, {1: 1, 2: None}, id="interrupted-supersedes"),
+            # The evidence of an unrouted /run is no new outcome: the judge failure stands and stays terminal.
+            pytest.param(
+                {**_INTERRUPTED, NG_UNROUTED_RUN_ERROR_KEY: True}, {2: None}, id="unrouted-evidence-does-not"
+            ),
+            # A row the dispatch budget never started is no execution either.
+            pytest.param({**_INTERRUPTED, NG_DISPATCH_DRAINED_KEY: True}, {2: None}, id="unstarted-does-not"),
+            pytest.param(None, {2: None}, id="judge-failure-alone-stays-terminal"),
+        ],
+    )
+    def test_only_a_real_later_attempt_lifts_the_terminal_gate(self, tmp_path: Path, later, dispatched) -> None:
+        judge = {**failing_row(1), **self._JUDGE}
+        sidecar = [judge] + ([{**failing_row(1), **later}] if later else [])
+        _, got = self._resume(tmp_path, sidecar)
+        # Task 0 scored stays done, task 2 (never run) runs as a first attempt.
+        assert got == dispatched
+        # Scoring agrees: the judge failure is counted exactly when resume still treats it as standing.
+        counted = _failure_rows_counted_as_zero(
+            [_failures_path_for(tmp_path / "output.jsonl")], ["judge_failed"], {(0, 0)}
+        )
+        assert [row[TASK_INDEX_KEY_NAME] for row in counted] == ([] if 1 in got else [1])
+
+    def test_a_final_failure_after_the_interruption_is_terminal_again(self, tmp_path: Path) -> None:
+        judge = {**failing_row(1), **self._JUDGE}
+        sidecar = [
+            judge,
+            {**failing_row(1), **self._INTERRUPTED},
+            judge,
+            {**failing_row(1), **self._INTERRUPTED, NG_UNROUTED_RUN_ERROR_KEY: True},
+        ]
+        assert self._resume(tmp_path, sidecar)[1] == {2: None}
+
+    def test_the_lifted_rollout_keeps_its_used_attempts_and_cap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+        sidecar = [{**failing_row(1), **self._JUDGE}, {**failing_row(1), **self._INTERRUPTED}]
+        # The judge failure used the only attempt: the interruption lifts the terminal gate, not the attempt cap.
+        assert self._resume(tmp_path, sidecar)[1] == {2: None}
+
+    def test_the_rerun_completes_the_run_once(self, tmp_path: Path) -> None:
+        sidecar = [{**failing_row(1), **self._JUDGE}, {**failing_row(1), **self._INTERRUPTED}]
+        config, got = self._resume(tmp_path, sidecar, scored=(0, 2))
+        assert got == {1: 1}
+        scored = [{**failing_row(t), "reward": 1.0} for t in (0, 2)]
+        with pytest.raises(RuntimeError, match="EVAL FAILED: 2/3 samples completed"):
+            config.check_completion(expected=3, results=scored)
+        # The rerun scores; a duplicate scored row and the older sidecar rows add no sample and need no new dispatch.
+        rerun = scored + [{**failing_row(1), "reward": 0.0}] * 2
+        config.check_completion(expected=3, results=rerun)
+        output = Path(config.output_jsonl_fpath)
+        output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rerun))
+        assert RolloutCollectionHelper()._load_from_cache(config)[0] == []
