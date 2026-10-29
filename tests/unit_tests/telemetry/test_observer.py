@@ -311,7 +311,7 @@ def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(colle
 
     from nemo_gym import server_utils
     from nemo_gym.base_responses_api_model import _CaptureMiddleware
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.server_runtime import RolloutContextMiddleware
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
@@ -410,7 +410,7 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 
     from nemo_gym import server_utils
     from nemo_gym.base_responses_api_model import _CaptureMiddleware
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.server_runtime import RolloutContextMiddleware
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 

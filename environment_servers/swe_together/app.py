@@ -41,12 +41,6 @@ from environment_servers.swe_together.task import SOURCE_REVISION, TaskData, loa
 from nemo_gym.agent_activation_types import (
     AgentContinuationRequirements,
 )
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    HandledEpisodeError,
-)
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
@@ -65,7 +59,6 @@ from nemo_gym.config import (
     get_first_server_config_dict,
 )
 from nemo_gym.core import JUDGE_FAILED, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.episode_types import EpisodeFailure
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -74,6 +67,13 @@ from nemo_gym.sandbox import (
     SandboxResources,
     SandboxSpec,
     resolve_provider_config,
+)
+from nemo_gym.server_runtime import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    EpisodeFailure,
+    HandledEpisodeError,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 

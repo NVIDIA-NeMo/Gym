@@ -82,7 +82,7 @@ from nemo_gym.registry import (
     read_environment_details,
     resolve_catalog_entry,
 )
-from nemo_gym.server_status import StatusCommand
+from nemo_gym.server_runtime.server_status import StatusCommand
 from nemo_gym.server_utils import (
     HeadServer,
     ServerInstanceDisplayConfig,

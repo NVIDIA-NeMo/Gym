@@ -9,8 +9,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.indic.ifeval import prepare as module
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.server_runtime import BaseRunRequest
 from nemo_gym.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
 
 

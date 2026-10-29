@@ -28,13 +28,13 @@ from typing import Any
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
 )
-from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.example_session_state_mgmt.nooa_app import NOOAStatefulCounterResourcesServer
 

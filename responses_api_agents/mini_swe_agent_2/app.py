@@ -31,11 +31,6 @@ from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -44,6 +39,7 @@ from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.server_utils import (
     get_first_server_config_dict,
 )

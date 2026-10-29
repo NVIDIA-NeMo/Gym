@@ -146,7 +146,7 @@ def test_masked_numeric_reward_is_valid_evidence(record, reward):
 
 @pytest.mark.asyncio
 async def test_judge_failsafe_response_satisfies_te6(record):
-    from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+    from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse
     from nemo_gym.verification import JudgeError, judge_failsafe
 
     @judge_failsafe

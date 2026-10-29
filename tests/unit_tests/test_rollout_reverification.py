@@ -24,7 +24,6 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -72,6 +71,7 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils import aggregation_sources_path_for
 

@@ -13,9 +13,9 @@ from fastapi.testclient import TestClient
 
 import nemo_gym.client.http_client
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,

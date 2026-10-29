@@ -18,7 +18,8 @@ from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -27,7 +28,6 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):

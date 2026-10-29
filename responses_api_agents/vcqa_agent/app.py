@@ -39,10 +39,6 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import Body, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -58,6 +54,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from responses_api_agents.vcqa_agent.judge import grade as judge_grade
 from responses_api_agents.vcqa_agent.materialize import materialize_working_tree
 from responses_api_agents.vcqa_agent.sandbox import (

@@ -57,7 +57,6 @@ from nemo_gym.artifacts.rollout_rows import (
     _strip_capture_payloads,
 )
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import BatchStatusTracker
 from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
@@ -95,7 +94,6 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
-from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -106,6 +104,8 @@ from nemo_gym.observability.model_calls import (
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (

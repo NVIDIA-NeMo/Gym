@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.server_runtime import RolloutContextMiddleware
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 from responses_api_agents.miniswe_sandboxed_agent.models import MiniSWERunRequest, SeedSessionResponse

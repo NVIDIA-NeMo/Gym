@@ -30,7 +30,6 @@ from omegaconf import OmegaConf
 import nemo_gym.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.base_resources_server import lost_session_verification
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
@@ -48,6 +47,7 @@ from nemo_gym.rollout_collection import (
     SharedRolloutCollectionConfig,
     is_terminal_failure,
 )
+from nemo_gym.server_runtime import lost_session_verification
 from nemo_gym.utils import aggregation_sources_path_for, failures_path_for
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
 from resources_servers.gdpval.multistage_orchestrator import (

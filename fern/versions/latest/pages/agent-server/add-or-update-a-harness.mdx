@@ -243,7 +243,7 @@ A harness can get tools from two sources:
 | `direct_http` | `DirectHTTPToolAccess` | The Resources Server base URL and session cookies, for trusted Python agents that call typed tool routes. The cookies identify the episode's Resources Server session, so they also reach its routes other than tools. |
 | `mcp` | `MCPToolAccess` | A streamable-HTTP MCP endpoint, usually the Resources Server's `/mcp`, with the headers returned by the Resources Server's seed. |
 
-Grants in the agent configuration's `tool_accesses` are merged with the episode's grants by name. Call `effective_tool_accesses(body)` to get the merged list. The grant types are defined in [`nemo_gym/tool_access.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/tool_access.py).
+Grants in the agent configuration's `tool_accesses` are merged with the episode's grants by name. Call `effective_tool_accesses(body)` to get the merged list. The grant types are defined in [`nemo_gym/server_runtime/tool_access.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/tool_access.py).
 
 An adapter must handle grants as follows:
 

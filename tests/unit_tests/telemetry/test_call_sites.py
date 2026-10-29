@@ -240,9 +240,9 @@ def test_server_type_is_derived_from_the_class_hierarchy():
     Matched against the MRO by name rather than by import, because the base server
     modules import `server_utils` and importing them back would be circular.
     """
-    from nemo_gym.base_resources_server import SimpleResourcesServer
     from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
     from nemo_gym.base_responses_api_model import SimpleResponsesAPIModel
+    from nemo_gym.server_runtime import SimpleResourcesServer
     from nemo_gym.server_utils import _telemetry_server_type
 
     assert _telemetry_server_type(SimpleResourcesServer) == "resources_servers"
@@ -252,7 +252,7 @@ def test_server_type_is_derived_from_the_class_hierarchy():
 
 def test_server_type_survives_subclassing():
     """Every real Gym server is a subclass, so the lookup has to walk the MRO."""
-    from nemo_gym.base_resources_server import SimpleResourcesServer
+    from nemo_gym.server_runtime import SimpleResourcesServer
     from nemo_gym.server_utils import _telemetry_server_type
 
     class MyWeatherServer(SimpleResourcesServer):

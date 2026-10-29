@@ -28,9 +28,9 @@ from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
 from pytest import MonkeyPatch
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 
 
@@ -385,7 +385,8 @@ def test_a_lost_verify_ignores_response_fields_the_caller_sent(browsers) -> None
 
 def test_mcp_tool_calls_reach_the_browser_opened_under_the_callers_id(browsers) -> None:
     """With MCP exposure on, the token minted at seed must name the caller's id, not a fresh one."""
-    from nemo_gym.mcp_auto_exposure import NEMO_GYM_MCP_SESSION_TOKEN_HEADER, maybe_auto_expose
+    from nemo_gym.server_runtime import NEMO_GYM_MCP_SESSION_TOKEN_HEADER
+    from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 
     server = _server(expose_tools_over_mcp=True)
     app = server.setup_webserver()

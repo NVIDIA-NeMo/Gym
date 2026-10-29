@@ -42,15 +42,15 @@ from typing import List, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.core import NeMoGymResponse
-from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 
 
 # ---------------------------------------------------------------------------

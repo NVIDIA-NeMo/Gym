@@ -32,7 +32,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import apply_rollout_prefix, trace_context_path_segment
 from nemo_gym.client.server_client import _TRACEPARENT_PATTERN
 from nemo_gym.core import current_rollout_id
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.server_runtime import RolloutContextMiddleware
 from nemo_gym.server_utils import (
     TraceContextPathMiddleware,
     install_request_context_isolation,

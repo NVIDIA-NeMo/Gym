@@ -3092,7 +3092,7 @@ class TestSWEBenchWrapperRun:
         )
 
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
+            from nemo_gym.server_runtime import BaseRunRequest
 
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -3136,7 +3136,7 @@ class TestSWEBenchWrapperRun:
         )
 
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
+            from nemo_gym.server_runtime import BaseRunRequest
 
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(

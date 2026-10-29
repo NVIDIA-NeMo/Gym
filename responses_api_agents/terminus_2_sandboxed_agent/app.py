@@ -27,7 +27,6 @@ from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -53,6 +52,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ContextCompactionObservation, TrajectoryRecord
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint

@@ -54,7 +54,7 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
     correlate_via_user_field: bool = False
-    """Forward the current rollout id (see ``nemo_gym.rollout_correlation``) as
+    """Forward the current rollout id (see ``nemo_gym.server_runtime.request_handling.rollout_context``) as
     the outbound request's standard OpenAI ``user`` field, so a downstream
     provider that inspects it can correlate per-turn calls back to the same
     rollout. A no-op for any provider that ignores ``user``. Never overrides

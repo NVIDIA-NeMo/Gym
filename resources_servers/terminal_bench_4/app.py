@@ -16,14 +16,10 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import Field
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import VERIFIER_ERROR, rollout_context
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.server_runtime import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.environment import EnvironmentConfig, ExecLimitConfigurationError

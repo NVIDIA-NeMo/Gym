@@ -35,7 +35,6 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -58,6 +57,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.skills import stage_skills
 from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, ObservationGap, SandboxObservation
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations

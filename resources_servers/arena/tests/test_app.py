@@ -1667,7 +1667,7 @@ class TestJudgeHttpError:
         from aiohttp import web
         from aiohttp.test_utils import TestServer
 
-        from nemo_gym.base_resources_server import judge_failsafe
+        from nemo_gym.verification import judge_failsafe
 
         body = "Error code: 429 - rate limit exceeded"
         hits = []

@@ -23,7 +23,6 @@ from math_verify.errors import TimeoutException
 from pytest import approx, fixture, mark, raises, skip
 from sympy import sympify
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -35,6 +34,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
+from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.telemetry.resources_operations import ResourcesOperation
 from nemo_gym.verification import JudgeError
 from resources_servers.math_with_judge.app import (
@@ -1255,8 +1255,7 @@ class TestAggregateMetrics:
     """Test the full aggregate_metrics route on the math server."""
 
     async def test_produces_symbolic_and_judge_accuracy(self) -> None:
-        from nemo_gym.base_resources_server import AggregateMetricsRequest
-        from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+        from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 
         config = LibraryJudgeMathResourcesServerConfig(
             host="127.0.0.1",

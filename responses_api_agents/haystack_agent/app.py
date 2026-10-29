@@ -31,23 +31,27 @@ from haystack import Pipeline, logging
 from haystack.tools import Toolset, flatten_tools_or_toolsets, warm_up_tools
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    NEMO_GYM_MCP_METADATA_KEY,
-    NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_first_server_config_dict,
+)
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
 from responses_api_agents.haystack_agent import chat_generator
 from responses_api_agents.haystack_agent.chat_generator import (
     NeMoGymResponsesChatGenerator,

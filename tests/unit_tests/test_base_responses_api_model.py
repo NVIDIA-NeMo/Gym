@@ -1381,7 +1381,7 @@ def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
     from nemo_gym.core import maybe_rollout_id_from_run_body
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.server_runtime import RolloutContextMiddleware
 
     # The id becomes a path segment.
     # Middleware must return every accepted id unchanged.

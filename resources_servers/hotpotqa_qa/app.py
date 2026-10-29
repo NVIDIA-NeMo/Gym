@@ -32,14 +32,14 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from resources_servers.hotpotqa_qa.scoring import (
     answer_exact_match,
     answer_f1_score,

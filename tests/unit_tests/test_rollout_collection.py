@@ -48,7 +48,6 @@ import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.artifacts.rollout_rows import _rollout_for_export
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
@@ -58,6 +57,8 @@ from nemo_gym.config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
     BaseServerConfig,
 )
 from nemo_gym.config.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
@@ -12314,7 +12315,7 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     """An Environment Server's failure kind (Harbor's ``harbor:task_deadline``) reaches the sidecar row as it left
     the wire, under the key the metrics label reads; a failure that names no kind adds no key."""
     import nemo_gym.rollout_collection as rollout_collection
-    from nemo_gym.episode_types import EpisodeFailure
+    from nemo_gym.server_runtime import EpisodeFailure
 
     failure = EpisodeFailure(
         failure_reason="Episode exceeded the time budget",

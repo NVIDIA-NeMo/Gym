@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from nemo_gym.base_resources_server import BaseSeedSessionResponse, BaseVerifyResponse
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
+from nemo_gym.server_runtime import BaseSeedSessionResponse, BaseVerifyResponse, SingleAgentTurnResult
 
 
 def test_empty_seed_response_preserves_legacy_wire_shape() -> None:

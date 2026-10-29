@@ -20,7 +20,10 @@ from typing import Any, ClassVar, Literal
 from aiohttp import ClientTimeout
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import Domain, ModelServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -28,9 +31,6 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import Domain, ModelServerRef
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.verification import reraise_judge_errors
 from resources_servers.arena.arena import (
     _extract_thinking_content,

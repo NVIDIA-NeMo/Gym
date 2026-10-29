@@ -63,11 +63,11 @@ jobs:
         with:
           base_sha: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}
           files: |
-            nemo_gym/session_routing.py
+            nemo_gym/server_runtime/request_handling/session_routing.py
             nemo_gym/server_utils.py
             nemo_gym/base_responses_api_agent.py
-            nemo_gym/base_resources_server.py
-            nemo_gym/mcp_auto_exposure.py
+            nemo_gym/server_runtime/base_resources_server.py
+            nemo_gym/server_runtime/mcp_auto_exposure.py
             tests/e2e/session_routing/**
 
   # Core library unit tests (run once on a full run) + the changed-servers path. The full

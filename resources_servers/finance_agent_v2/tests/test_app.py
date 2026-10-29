@@ -31,10 +31,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.finance_agent_v2.app import (
     FinanceAgentV2ResourcesServer,
     FinanceAgentV2ResourcesServerConfig,

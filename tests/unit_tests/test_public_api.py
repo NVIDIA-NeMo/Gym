@@ -116,9 +116,9 @@ def test_top_level_import_is_lazy():
     script = (
         "import sys\n"
         "import nemo_gym\n"
-        "assert 'nemo_gym.base_resources_server' not in sys.modules, 'import was not lazy'\n"
+        "assert 'nemo_gym.server_runtime.base_resources_server' not in sys.modules, 'import was not lazy'\n"
         "assert nemo_gym.SimpleResourcesServer is not None\n"
-        "assert 'nemo_gym.base_resources_server' in sys.modules, 'access did not import module'\n"
+        "assert 'nemo_gym.server_runtime.base_resources_server' in sys.modules, 'access did not import module'\n"
     )
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

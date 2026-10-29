@@ -39,15 +39,15 @@ from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_skills.mcp.utils import locate
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ResourcesServerRef
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.config import ResourcesServerRef
 
 
 logger = logging.getLogger(__name__)

@@ -10,7 +10,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse
 from resources_servers.example_single_tool_call.app import SimpleWeatherResourcesServer
 
 

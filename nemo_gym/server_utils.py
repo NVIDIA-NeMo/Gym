@@ -86,8 +86,8 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.core.episode import rollout_context
-from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, scope_with_routed_path
-from nemo_gym.session_routing import (
+from nemo_gym.server_runtime.request_handling.rollout_context import ROUTED_PATH_STATE_KEY, scope_with_routed_path
+from nemo_gym.server_runtime.request_handling.session_routing import (
     SESSION_CLAIM_SCOPE_KEY,
     SESSION_ID_SCOPE_KEY,
     SESSION_SOCKET_DIR_ENV,
@@ -861,7 +861,7 @@ class SimpleServer(BaseServer):
     ray_enabled: ClassVar[bool] = False
     # Whether this server keeps state per session,
     # so that with several uvicorn workers a session's requests must reach the worker that created it.
-    # See nemo_gym.session_routing.
+    # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
 
     def claimed_session_routing(self) -> dict[str, Any]:
@@ -952,7 +952,7 @@ class SimpleServer(BaseServer):
         @app.middleware("http")
         async def add_session_id(request: Request, call_next):  # pragma: no cover
             # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
-            # A new session takes the ID the session router chose, if any (see nemo_gym.session_routing):
+            # A new session takes the ID the session router chose, if any (see nemo_gym.server_runtime.request_handling.session_routing):
             # a typed resources seed's resources_session_id, or an ID the router minted.
             new_session_id = request.scope.get(SESSION_ID_SCOPE_KEY) or str(uuid4())
             claim = request.scope.get(SESSION_CLAIM_SCOPE_KEY)
@@ -1151,7 +1151,11 @@ repr(e): {repr(e)}"""
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
-            from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
+            from nemo_gym.server_runtime.mcp_auto_exposure import (
+                TOKEN_HEADER,
+                maybe_auto_expose,
+                session_token_serializer,
+            )
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")

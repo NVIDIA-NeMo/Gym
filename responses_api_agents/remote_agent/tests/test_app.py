@@ -1018,7 +1018,7 @@ class TestReviewFindingPins:
         server_client.post = AsyncMock(side_effect=_post)
         agent = make_agent(server_client=server_client)
 
-        from nemo_gym.base_resources_server import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
         assert result.key_metrics == {"mean/reward": 1.0}
@@ -1037,6 +1037,6 @@ class TestReviewFindingPins:
         with pytest.raises(asyncio.TimeoutError):
             await agent.aggregate_metrics(
                 __import__(
-                    "nemo_gym.base_resources_server", fromlist=["AggregateMetricsRequest"]
+                    "nemo_gym.server_runtime.base_resources_server", fromlist=["AggregateMetricsRequest"]
                 ).AggregateMetricsRequest(verify_responses=[])
             )

@@ -33,7 +33,8 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -41,7 +42,6 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.metrics import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 from resources_servers.assaybench.gene_parsing import (
     extract_genes_from_raw_response,
     parse_dspy_completion,

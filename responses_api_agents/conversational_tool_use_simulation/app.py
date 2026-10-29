@@ -22,11 +22,6 @@ from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -45,6 +40,7 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.responses_converter import split_responses_input_output_items
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from responses_api_agents.conversational_tool_use_simulation.prompt import (
     AGENT_PARALLEL_SYSTEM_MESSAGE_TEMPLATE,
     AGENT_SYSTEM_MESSAGE_TEMPLATE,

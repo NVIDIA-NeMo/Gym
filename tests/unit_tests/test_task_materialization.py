@@ -16,7 +16,8 @@ from nemo_gym.rollout_collection import (
     _environment_server_for_config_row,
     _episode_request_body,
 )
-from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.server_runtime import SingleAgentTurnRequest
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 from nemo_gym.task_data import TaskDataValidator
 from nemo_gym.task_materialization import materialize_task
 from nemo_gym.train_data_utils import TrainDataProcessor
@@ -343,7 +344,7 @@ class CustomTaskInput(BaseModel):
 
 
 def test_custom_task_collation_metrics_validation_and_dispatch(tmp_path):
-    from nemo_gym.episode_types import BaseEpisodeRequest
+    from nemo_gym.server_runtime import BaseEpisodeRequest
 
     row = {"scenario": "order", "user_profile": {"name": "Example"}}
     source = tmp_path / "custom.jsonl"

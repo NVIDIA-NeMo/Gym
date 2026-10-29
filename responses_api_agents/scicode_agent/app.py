@@ -42,14 +42,19 @@ from step_utils import (
     process_problem_steps,
 )
 
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import raise_for_status
-from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import (
+    ROLLOUT_INDEX_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -59,6 +64,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.metrics import Stat
 from nemo_gym.prompt import PromptConfig, load_prompt_config
+from nemo_gym.server_runtime import BaseRunRequest
 from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
 
 
