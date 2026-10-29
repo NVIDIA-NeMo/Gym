@@ -133,7 +133,7 @@ async def test_rewritten_turn_resolves_original_tokens_or_custody(stores) -> Non
     else:
         assert result.match.cumulative_token_ids == tuple(TOKENS)
         if kind == "local-file":
-            assert reader._cache["r"][2].by_call_id["a"].cum_tokens is None
+            assert reader._cache["r"][2][(None, None)].by_call_id["a"].cum_tokens is None
 
 
 @pytest.mark.asyncio

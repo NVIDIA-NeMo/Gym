@@ -59,7 +59,10 @@ RootReason = Literal[
     "non_user_suffix",
     "render_options_changed",
     "worker_rooted",
+    # More than one recorded call of the request's own agent instance and model server is a candidate.
     "ambiguous_candidate",
+    # The only matching call was served by another model server for the same agent instance.
+    "model_server_changed",
 ]
 Identifier = Annotated[StrictStr, Field(min_length=1)]
 NonNegativeInt = Annotated[StrictInt, Field(ge=0)]

@@ -336,6 +336,51 @@ def token_id_capture_config(global_config_dict: Any) -> TokenIdCaptureConfig:
     return TokenIdCaptureConfig.model_validate(global_config_dict or {})
 
 
+def check_one_capture_directory(global_config_dict: Any) -> None:
+    """Refuse a run whose capturing model servers would write to different capture directories.
+
+    Every model server that captures for an episode must write one ledger, or the manifest, close
+    admission and retire each see only part of the episode. The directory is the global
+    ``token_id_capture.dir``, falling back to ``model_call_capture_dir``. A model server instance block that
+    sets either key for itself would split the ledger, so it is refused unless it resolves to the same
+    directory. A configured custom sink owns its own namespace and is exempt.
+    """
+    if not isinstance(global_config_dict, Mapping):
+        return
+    run = token_id_capture_config(global_config_dict)
+    if not run.enabled or run.token_id_capture.sink is not None:
+        return
+    directories: dict[str, Path | None] = {}
+    for server_name, server_entry in global_config_dict.items():
+        models = server_entry.get("responses_api_models") if isinstance(server_entry, Mapping) else None
+        if not isinstance(models, Mapping):
+            continue
+        for instance in models.values():
+            if not isinstance(instance, Mapping):
+                continue
+            overrides = {
+                key: instance[key] for key in ("token_id_capture", "model_call_capture_dir") if key in instance
+            }
+            if not overrides:
+                directories[server_name] = run.resolved_dir()
+                continue
+            merged = {**dict(global_config_dict), **overrides}
+            if isinstance(overrides.get("token_id_capture"), Mapping):
+                merged["token_id_capture"] = {
+                    **dict(global_config_dict.get("token_id_capture") or {}),
+                    **dict(overrides["token_id_capture"]),
+                }
+            server = token_id_capture_config(merged)
+            if server.enabled and server.token_id_capture.sink is None:
+                directories[server_name] = server.resolved_dir()
+    distinct = {str(directory) for directory in directories.values()}
+    if len(distinct) > 1:
+        raise ValueError(
+            "model servers with token_id_capture enabled must share one capture directory, so each episode has "
+            f"one ledger; they resolve to {dict(sorted((name, str(path)) for name, path in directories.items()))}"
+        )
+
+
 def token_id_capture_enabled_for_agent(
     global_config_dict: Any,
     agent_name: str | None,

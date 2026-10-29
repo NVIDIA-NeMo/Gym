@@ -337,13 +337,15 @@ async def test_has_rows_is_false_for_untouched_rollout(store):
     assert RolloutManifest.model_validate(await store.manifest("r-none")).records == []
 
 
-async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
+async def _admit(store, request_items, rollout_id="r1", model_call_id="c2", identity=None):
     context = CaptureContext(
         capture_key=rollout_id,
         model_call_id=model_call_id,
         token_sink=None,
         lineage_store=store,
         external_staging=True,
+        agent_instance=identity.agent_instance if identity is not None else None,
+        model_ref=identity.model_ref if identity is not None else None,
     )
     token = set_token_sink(context)
     try:
@@ -1012,3 +1014,81 @@ async def test_a_failure_without_an_intent_or_a_name_stays_episode_wide(store):
     [failure] = RolloutManifest.model_validate(await store.manifest("r1")).failures
 
     assert failure.agent_instance is None and failure.model_ref is None
+
+
+# --- per agent instance and model server ---
+
+
+def _named(record: CallRecord, identity: CallIdentity) -> CallRecord:
+    return record.model_copy(
+        update={
+            "agent_instance": identity.agent_instance,
+            "agent_kind": identity.agent_kind,
+            "model_ref": identity.model_ref,
+        }
+    )
+
+
+async def _record_assistant_call(store) -> None:
+    await store.begin_call("r1", "c1", identity=ASSISTANT)
+    await store.record(_commit(_named(_call_record("c1"), ASSISTANT), [USER_1], [ASSISTANT_1]))
+
+
+async def test_a_judge_prompt_with_the_assistant_transcript_is_admitted_as_its_own_root(store):
+    await _record_assistant_call(store)
+
+    judge = await _admit(store, [USER_1, ASSISTANT_1, USER_2], model_call_id="j1", identity=JUDGE)
+    assistant = await _admit(store, [USER_1, ASSISTANT_1, USER_2], model_call_id="c2", identity=ASSISTANT)
+
+    assert judge.capture_admission.mode == "text" and judge.capture_admission.parent_call_id is None
+    assert assistant.capture_admission.mode == "token_in" and assistant.capture_admission.parent_call_id == "c1"
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.failures == []
+
+
+async def test_a_continuation_on_another_model_server_is_admitted_as_a_root_with_its_reason(store):
+    await _record_assistant_call(store)
+    moved = CallIdentity(agent_instance="assistant", model_ref=ModelRef(name="policy-b"))
+
+    context = await _admit(store, [USER_1, ASSISTANT_1, USER_2], identity=moved)
+
+    assert context.capture_admission.mode == "text"
+    assert context.capture_admission.root_reason == "model_server_changed"
+
+
+async def test_has_rows_counts_only_the_call_s_own_group(store):
+    await _record_assistant_call(store)
+
+    assert await store.has_rows("r1")
+    assert await store.has_rows("r1", identity=ASSISTANT)
+    assert not await store.has_rows("r1", identity=JUDGE)
+
+
+async def _two_agent_ledger(store) -> None:
+    await _record_assistant_call(store)
+    await store.begin_call("r1", "j1", identity=JUDGE)
+    await store.record_failure("r1", "j1", "worker_capture_failed")
+    await store.begin_call("r1", "j2", identity=JUDGE)
+    await store.record_failure("r1", "lost", "worker_capture_failed")
+
+
+@pytest.mark.parametrize(
+    "filters, records, failures, attempted, pending",
+    [
+        ({}, ["c1"], ["j1", "lost"], ["c1", "j1", "j2"], ["j1", "j2"]),
+        ({"agent_instance": "assistant"}, ["c1"], ["lost"], ["c1"], []),
+        ({"agent_kind": "judge"}, [], ["j1", "lost"], ["j1", "j2"], ["j1", "j2"]),
+        ({"agent_instance": "judge.1"}, [], ["j1", "lost"], ["j1", "j2"], ["j1", "j2"]),
+        ({"model_ref": "policy"}, ["c1"], ["j1", "lost"], ["c1", "j1", "j2"], ["j1", "j2"]),
+        ({"model_ref": "elsewhere"}, [], ["lost"], [], []),
+    ],
+)
+async def test_manifest_filters_keep_episode_wide_failures(store, filters, records, failures, attempted, pending):
+    await _two_agent_ledger(store)
+
+    manifest = RolloutManifest.model_validate(await store.manifest("r1", **filters))
+
+    assert [record.model_call_id for record in manifest.records] == records
+    assert [failure.model_call_id for failure in manifest.failures] == failures
+    assert manifest.attempted_call_ids == attempted
+    assert manifest.pending_call_ids == pending

@@ -158,7 +158,9 @@ def _client_over(client_app, monkeypatch) -> RolloutControlClient:
     """A control client whose requests reach the real routes and ledger."""
 
     async def request(method, path, **kwargs):
-        response = client_app.request(method, f"{CONTROL_ROUTE_PREFIX}{path}", json=kwargs.get("json"), headers=AUTH)
+        response = client_app.request(
+            method, f"{CONTROL_ROUTE_PREFIX}{path}", json=kwargs.get("json"), params=kwargs.get("params"), headers=AUTH
+        )
         return _Response(response.status_code, response.json())
 
     control = RolloutControlClient("http://model", auth_token=TOKEN, request_timeout_s=1.0)
@@ -258,3 +260,22 @@ async def test_closing_a_retired_rollout_does_not_recreate_its_ledger(client, le
     assert response.status_code == 410
     with pytest.raises(RolloutRetiredError):
         await ledger.manifest("r1")
+
+
+@pytest.mark.asyncio
+async def test_client_and_route_filter_a_manifest_by_agent_instance(client, ledger, monkeypatch):
+    from nemo_gym.token_id_capture.records import CallIdentity, ModelRef
+
+    judge = CallIdentity(agent_instance="judge.1", model_ref=ModelRef(name="policy"))
+    await ledger.record_failure("r1", "a1", "worker_capture_failed", identity=CallIdentity(agent_instance="assistant"))
+    await ledger.record_failure("r1", "j1", "worker_capture_failed", identity=judge)
+    await ledger.record_failure("r1", "lost", "worker_capture_failed")
+    control = _client_over(client, monkeypatch)
+
+    unfiltered = await control.manifest("r1")
+    by_kind = await control.manifest("r1", agent_kind="judge")
+    by_server = await control.manifest("r1", model_ref="policy")
+
+    assert [failure.model_call_id for failure in unfiltered.failures] == ["a1", "j1", "lost"]
+    assert [failure.model_call_id for failure in by_kind.failures] == ["j1", "lost"]
+    assert [failure.model_call_id for failure in by_server.failures] == ["j1", "lost"]

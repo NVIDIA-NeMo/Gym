@@ -35,7 +35,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
-from nemo_gym.token_id_capture.lineage import stamp_continuation
+from nemo_gym.token_id_capture.groups import group_key, row_group, same_agent_other_server
+from nemo_gym.token_id_capture.lineage import MODEL_SERVER_CHANGED_REASON, stamp_continuation
 from nemo_gym.token_id_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
@@ -65,7 +66,14 @@ from nemo_gym.token_id_capture.records import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, CaptureLedgerCommit
+    from nemo_gym.token_id_capture.staging.records import (
+        CallRecord,
+        CaptureAdmission,
+        CaptureLedgerCommit,
+        ReplayContext,
+        ReplaySummary,
+        RootReason,
+    )
 
 # Wire field names between the Gym model server and a framework inference
 # worker: the typed admission rides the engine-bound request under
@@ -274,7 +282,9 @@ async def resolve_parent(request_messages: list | None) -> None:
                     "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
                 )
         else:
-            context.parent_resolution = await context.lineage_store.resolve(context.capture_key, request_messages)
+            context.parent_resolution = await context.lineage_store.resolve(
+                context.capture_key, request_messages, identity=context.identity
+            )
         _count_resolution(context.parent_resolution.status.value)
     except Exception as error:
         # Worker custody fails closed: an unresolved parent would silently
@@ -332,7 +342,8 @@ async def resolve_parent(request_messages: list | None) -> None:
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
     try:
-        has_rows = await ledger.has_rows(context.capture_key)
+        # Only the call's own group counts: another agent instance's calls never make this one a continuation.
+        has_rows = await ledger.has_rows(context.capture_key, identity=context.identity)
     except RolloutRetiredError:
         # A late call of an abandoned attempt, or the first call of a duplicate run. Admitting it would stage
         # tokens that the ledger then refuses to record, so no manifest would ever name them.
@@ -343,10 +354,12 @@ async def resolve_parent(request_messages: list | None) -> None:
         )
         return
     if is_root or not has_rows:
+        reason = context.parent_resolution.reason if context.parent_resolution is not None else ""
         context.capture_admission = CaptureAdmission(
             capture_key=context.capture_key,
             model_call_id=context.model_call_id,
             mode="text",
+            root_reason=MODEL_SERVER_CHANGED_REASON if reason == MODEL_SERVER_CHANGED_REASON else None,
         )
         return
     logger.warning(
@@ -362,31 +375,17 @@ async def resolve_parent(request_messages: list | None) -> None:
     )
 
 
-async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -> None:
-    """Select a source-prefix candidate or a root for rewritten history.
+def _source_history_matches(
+    records: list[CallRecord],
+    request_replay: ReplayContext,
+    prefixes: dict[int, ReplaySummary],
+    root_reason: RootReason,
+) -> tuple[list[CallRecord], RootReason]:
+    """Return the recorded calls whose source history the request extends with only user or tool items."""
+    from nemo_gym.token_id_capture.replay import same_replay_source, summarize_replay
 
-    Match source-prefix evidence, including an older accepted call after a retry.
-    RL still verifies the renderer and converted-message boundary.
-    """
-    # Deferred to avoid the staging records/sink import cycle.
-    from nemo_gym.token_id_capture.replay import replay_context, same_replay_source, summarize_replay
-    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, RolloutManifest, RootReason
-
-    if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
-        raise ValueError("Source-history parent resolution requires an external capture ledger")
-    try:
-        manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.capture_key))
-    except RolloutRetiredError as error:
-        raise CaptureAdmissionError(str(error)) from error
-    predecessor = None
-    root_reason: RootReason = "first_call" if not manifest.records else "no_prefix_match"
-    try:
-        request_replay = replay_context(request_items)
-    except ValueError as error:
-        raise CaptureInputError(str(error)) from error
-    prefixes = {}
     matches = []
-    for record in manifest.records:
+    for record in records:
         replay = record.replay
         if replay is None:
             raise CaptureAdmissionError("Captured call is missing source replay evidence")
@@ -404,6 +403,42 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
                 matches.append(record)
             else:
                 root_reason = "non_user_suffix"
+    return matches, root_reason
+
+
+async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -> None:
+    """Select a source-prefix candidate or a root for rewritten history.
+
+    Match source-prefix evidence, including an older accepted call after a retry.
+    RL still verifies the renderer and converted-message boundary.
+    """
+    # Deferred to avoid the staging records/sink import cycle.
+    from nemo_gym.token_id_capture.replay import replay_context, same_replay_source
+    from nemo_gym.token_id_capture.staging.records import CaptureAdmission, RolloutManifest
+
+    if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
+        raise ValueError("Source-history parent resolution requires an external capture ledger")
+    try:
+        manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.capture_key))
+    except RolloutRetiredError as error:
+        raise CaptureAdmissionError(str(error)) from error
+    # Candidates come only from the call's own group: the same agent instance on the same model server.
+    group = group_key(context.identity)
+    own_records = [record for record in manifest.records if row_group(record) == group]
+    predecessor = None
+    root_reason: RootReason = "first_call" if not own_records else "no_prefix_match"
+    try:
+        request_replay = replay_context(request_items)
+    except ValueError as error:
+        raise CaptureInputError(str(error)) from error
+    prefixes = {}
+    matches, root_reason = _source_history_matches(own_records, request_replay, prefixes, root_reason)
+    if not matches and any(
+        _source_history_matches([record], request_replay, prefixes, root_reason)[0]
+        for record in manifest.records
+        if same_agent_other_server(group, row_group(record))
+    ):
+        root_reason = "model_server_changed"
     if matches:
         # Prefer the longest complete prefix; use identity to break ties when available.
         longest = max(record.replay.item_count for record in matches)

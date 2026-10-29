@@ -63,6 +63,16 @@ from nemo_gym.token_id_capture.fingerprint import (
 from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
 )
+from nemo_gym.token_id_capture.groups import (
+    GroupKey,
+    entry_group,
+    group_key,
+    inherited_identity_columns,
+    is_episode_wide,
+    matches_filter,
+    row_group,
+    same_agent_other_server,
+)
 from nemo_gym.token_id_capture.protocols import (
     CaptureAdmissionError,
     LineageMatch,
@@ -134,12 +144,22 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
     }
 
 
-def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
+def _manifest_from_rows(
+    capture_key: str,
+    rows: list[dict],
+    *,
+    agent_instance: str | None = None,
+    agent_kind: str | None = None,
+    model_ref: str | None = None,
+) -> dict:
     """Build the token-free ``RolloutManifest`` payload from ledger rows.
 
     Committed custody rows become ``CallRecord`` payloads; failure rows become
     ``failures`` entries. Lineage-only rows (local capture) carry no custody
     columns and are not part of a capture manifest.
+
+    The filters keep the rows of matching calls; a failure that applies to the whole episode
+    (``groups.is_episode_wide``) is kept under every filter. No filter keeps everything.
     """
     # Deferred: staging.records pulls in the digest module; lineage stays light.
     from nemo_gym.token_id_capture.records import (
@@ -155,9 +175,23 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
     records = []
     failures = []
     # A failure row written without an identity inherits it from its call's intent row.
-    intent_identity = {
-        row["model_call_id"]: CallIdentity.from_columns(row).columns() for row in rows if row.get("intent")
-    }
+    all_rows, all_columns = rows, inherited_identity_columns(rows)
+    filters = {"agent_instance": agent_instance, "agent_kind": agent_kind, "model_ref": model_ref}
+    if any(value is not None for value in filters.values()):
+        named_episode = any("agent_instance" in columns for columns in all_columns)
+        kept = [
+            (row, columns)
+            for row, columns in zip(all_rows, all_columns)
+            if matches_filter(columns, **filters)
+            or (
+                row.get("failure_reason") is not None
+                and is_episode_wide(row.get("model_call_id"), columns, named_episode=named_episode)
+            )
+        ]
+        rows = [row for row, _ in kept]
+        identities = {id(row): columns for row, columns in kept}
+    else:
+        identities = {id(row): columns for row, columns in zip(all_rows, all_columns)}
     refused = {row["model_call_id"] for row in rows if row.get("refused_before_generation")}
     completed = {row["model_call_id"] for row in rows if row.get("staging_key")} | refused
     attempted = list(dict.fromkeys(row["model_call_id"] for row in rows if row.get("intent")))
@@ -167,9 +201,7 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
     for row in rows:
         if row.get("intent"):
             continue
-        identity = CallIdentity.from_columns(row).columns()
-        if "agent_instance" not in identity:
-            identity = {**intent_identity.get(row.get("model_call_id"), {}), **identity}
+        identity = identities[id(row)]
         if row.get("failure_reason") is not None:
             failures.append(
                 ManifestFailure(
@@ -241,6 +273,18 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
         pending_call_ids=pending,
     )
     return manifest.model_dump(mode="json")
+
+
+def _rows_of_group(rows: list[dict], identity: CallIdentity | None) -> list[dict]:
+    """The rows of the calls of one group, with failure rows inheriting their intent's identity.
+
+    Without an identity, every call row of the rollout.
+    """
+    calls = [(row, columns) for row, columns in zip(rows, inherited_identity_columns(rows)) if "model_call_id" in row]
+    if identity is None:
+        return [row for row, _ in calls]
+    group = group_key(identity)
+    return [row for row, columns in calls if row_group(columns) == group]
 
 
 def _intent_row(model_call_id: str, identity: CallIdentity | None) -> dict:
@@ -493,12 +537,37 @@ class RolloutLineage:
         self._index_tool_call_turn(call_id, list((messages or [])[node.context_len :]))
 
 
+MODEL_SERVER_CHANGED_REASON = "model_server_changed"
+
+
+def resolve_within_group(
+    lineages: Mapping[GroupKey, RolloutLineage], group: GroupKey, request_items: list[dict]
+) -> tuple[ParentResolutionStatus, LineageNode | None, str]:
+    """Resolve a request's parent among its own group's calls only.
+
+    A request whose only match was served by another model server for the same agent instance is a root
+    with reason ``model_server_changed``: its context is the other server's output, which this server's
+    tokens cannot continue.
+    """
+    lineage = lineages.get(group) or RolloutLineage()
+    status, node, reason = lineage.resolve_node(request_items)
+    if status == ParentResolutionStatus.UNRESOLVED and reason == "no_match":
+        for other, other_lineage in lineages.items():
+            if same_agent_other_server(group, other) and (
+                other_lineage.resolve_node(request_items)[0] == ParentResolutionStatus.RESOLVED
+            ):
+                return ParentResolutionStatus.ROOT, None, MODEL_SERVER_CHANGED_REASON
+    return status, node, reason
+
+
 class LineageIndex:
     """Bound worker-local lineage by rollout and cumulative token counts.
 
     This index backs the single-worker fallback.
     Shared stores provide cross-worker visibility.
-    Eviction removes the oldest rollout.
+    Each rollout keeps one ``RolloutLineage`` per group (agent instance and model server), so parent search
+    never crosses agent instances; the groups of a rollout count once against ``max_rollouts``.
+    Eviction removes the oldest rollout with all its groups.
     An evicted parent leaves later continuations unresolved and the builder masks them.
     The only live rollout is never evicted.
     """
@@ -506,15 +575,19 @@ class LineageIndex:
     def __init__(self, max_rollouts: int = 512, max_tokens: int = 8_000_000) -> None:
         self._max_rollouts = max_rollouts
         self._max_tokens = max_tokens
-        self._rollouts: dict[str, RolloutLineage] = {}
+        self._rollouts: dict[str, dict[GroupKey, RolloutLineage]] = {}
 
-    def for_rollout(self, rollout_id: str) -> RolloutLineage:
-        lineage = self._rollouts.get(rollout_id)
-        if lineage is None:
-            lineage = RolloutLineage()
-            self._rollouts[rollout_id] = lineage
+    def for_rollout(self, rollout_id: str, group: GroupKey = (None, None)) -> RolloutLineage:
+        return self.groups(rollout_id).setdefault(group, RolloutLineage())
+
+    def groups(self, rollout_id: str) -> dict[GroupKey, RolloutLineage]:
+        """Every group's lineage of one rollout, creating the rollout if needed."""
+        groups = self._rollouts.get(rollout_id)
+        if groups is None:
+            groups = {}
+            self._rollouts[rollout_id] = groups
         self._evict()
-        return lineage
+        return groups
 
     def _evict(self) -> None:
         # Check after every access because existing rollouts can grow.
@@ -527,7 +600,7 @@ class LineageIndex:
 
     @property
     def total_tokens(self) -> int:
-        return sum(lineage.total_tokens for lineage in self._rollouts.values())
+        return sum(lineage.total_tokens for groups in self._rollouts.values() for lineage in groups.values())
 
     def drop(self, rollout_id: str) -> None:
         """Release a rollout's lineage early.
@@ -565,12 +638,18 @@ class InMemoryLineageStore:
         self._retired: set[str] = set()
         self._started: set[str] = set()
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        return self.index.for_rollout(rollout_id).resolve(request_items)
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, identity: CallIdentity | None = None
+    ) -> LineageResolution:
+        group = group_key(identity)
+        status, node, reason = resolve_within_group(self.index.groups(rollout_id), group, request_items)
+        if status != ParentResolutionStatus.RESOLVED:
+            return LineageResolution(status, reason=reason)
+        return self.index.for_rollout(rollout_id, group).resolve(request_items)
 
     async def put(self, entry: TokenEntry) -> None:
         """Publish one committed entry to the worker-local index."""
-        self.index.for_rollout(entry.rollout_id).add_entry(entry)
+        self.index.for_rollout(entry.rollout_id, entry_group(entry)).add_entry(entry)
 
     def is_process_shared(self) -> bool:
         return False
@@ -622,7 +701,7 @@ class InMemoryLineageStore:
                 raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
             return
         if record.fingerprint_version == FINGERPRINT_VERSION:
-            self.index.for_rollout(commit.capture_key).record(
+            self.index.for_rollout(commit.capture_key, row_group(row)).record(
                 record.model_call_id,
                 list(commit.request_items) + list(commit.response_items),
                 [],
@@ -646,17 +725,34 @@ class InMemoryLineageStore:
         if not any(existing == row for existing in rows):
             rows.append(row)
 
-    async def manifest(self, capture_key: str) -> dict:
+    async def manifest(
+        self,
+        capture_key: str,
+        *,
+        agent_instance: str | None = None,
+        agent_kind: str | None = None,
+        model_ref: str | None = None,
+    ) -> dict:
         if capture_key in self._retired:
             raise RolloutRetiredError(f"rollout {capture_key} is retired")
-        return _manifest_from_rows(capture_key, list(self._ledgers.get(capture_key) or []))
+        return _manifest_from_rows(
+            capture_key,
+            list(self._ledgers.get(capture_key) or []),
+            agent_instance=agent_instance,
+            agent_kind=agent_kind,
+            model_ref=model_ref,
+        )
 
-    async def has_rows(self, rollout_id: str) -> bool:
-        if self._ledgers.get(rollout_id):
+    async def has_rows(self, rollout_id: str, *, identity: CallIdentity | None = None) -> bool:
+        rows = self._ledgers.get(rollout_id) or []
+        if _rows_of_group(rows, identity):
             return True
-        if rollout_id in self._retired:
+        if not rows and rollout_id in self._retired:
             raise RolloutRetiredError(f"rollout {rollout_id} is retired")
-        return bool(self.index.for_rollout(rollout_id).by_call_id)
+        groups = self.index.groups(rollout_id)
+        if identity is None:
+            return any(lineage.by_call_id for lineage in groups.values())
+        return bool(groups.get(group_key(identity), RolloutLineage()).by_call_id)
 
     async def retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
@@ -735,8 +831,9 @@ class IncrementalLineageStore:
             raise ValueError("max_cached_rollouts must be positive")
         if max_cached_tokens < 1:
             raise ValueError("max_cached_tokens must be positive")
-        # (cursor, refs, lineage): lineage stays at index 2 for diagnostics/tooling.
-        self._cache: dict[str, tuple[Any, dict[str, Any], RolloutLineage]] = {}
+        # (cursor, refs, lineages): one lineage per group (agent instance, model server), at index 2 for
+        # diagnostics/tooling. A rollout's groups share one cache row, so they count once against the bound.
+        self._cache: dict[str, tuple[Any, dict[str, Any], dict[GroupKey, RolloutLineage]]] = {}
         self._max_cached_rollouts = max_cached_rollouts
         # Keep only the latest materialized parent for each rollout.
         # The global token bound avoids recreating full-record memory growth.
@@ -771,7 +868,7 @@ class IncrementalLineageStore:
     def _rollout_lock(self, rollout_id: str):
         return self._rollout_locks[hash(rollout_id) % len(self._rollout_locks)]
 
-    def _cache_put(self, rollout_id: str, value: tuple[Any, dict[str, Any], RolloutLineage]) -> None:
+    def _cache_put(self, rollout_id: str, value: tuple[Any, dict[str, Any], dict[GroupKey, RolloutLineage]]) -> None:
         """Insert or touch a cache row with LRU semantics.
 
         Reinsert a touched row so dictionary order tracks recency.
@@ -807,21 +904,23 @@ class IncrementalLineageStore:
                 evicted = self._materialized.pop(oldest)
                 self._materialized_tokens -= len(evicted[1])
 
-    def _refresh(self, rollout_id: str) -> tuple[dict[str, Any], RolloutLineage]:
+    def _refresh(self, rollout_id: str) -> tuple[dict[str, Any], dict[GroupKey, RolloutLineage]]:
         with self._cache_guard:
             cached = self._cache.get(rollout_id)
-        cursor, refs, lineage = cached if cached is not None else (None, {}, RolloutLineage())
+        cursor, refs, lineages = cached if cached is not None else (None, {}, {})
         try:
             items, cursor = self._fetch_new_entries(rollout_id, cursor)
         except IncrementalLineageStore.CursorReset:
-            refs, lineage = {}, RolloutLineage()
+            refs, lineages = {}, {}
             items, cursor = self._fetch_new_entries(rollout_id, None)
         for entry, ref in items:
             refs[entry.model_call_id] = ref
             # Metadata-only: tokens stay in the backend behind ``ref``.
-            lineage.add_entry(entry, store_tokens=False, entry_offset=ref if isinstance(ref, int) else -1)
-        self._cache_put(rollout_id, (cursor, refs, lineage))
-        return refs, lineage
+            lineages.setdefault(entry_group(entry), RolloutLineage()).add_entry(
+                entry, store_tokens=False, entry_offset=ref if isinstance(ref, int) else -1
+            )
+        self._cache_put(rollout_id, (cursor, refs, lineages))
+        return refs, lineages
 
     def _materialize(
         self, rollout_id: str, node: LineageNode, refs: dict[str, Any], lineage: RolloutLineage
@@ -880,15 +979,20 @@ class IncrementalLineageStore:
         self._remember_materialized(rollout_id, node.call_id, materialized)
         return materialized
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        return await asyncio.to_thread(self._resolve, rollout_id, request_items)
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, identity: CallIdentity | None = None
+    ) -> LineageResolution:
+        return await asyncio.to_thread(self._resolve, rollout_id, request_items, group_key(identity))
 
-    def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    def _resolve(
+        self, rollout_id: str, request_items: list[dict], group: GroupKey = (None, None)
+    ) -> LineageResolution:
         with self._rollout_lock(rollout_id), self._read_locked(rollout_id):
-            refs, lineage = self._refresh(rollout_id)
-            status, node, reason = lineage.resolve_node(request_items)
+            refs, lineages = self._refresh(rollout_id)
+            status, node, reason = resolve_within_group(lineages, group, request_items)
             if status != ParentResolutionStatus.RESOLVED:
                 return LineageResolution(status, reason=reason)
+            lineage = lineages[group]
             tokens = (
                 node.cum_tokens if node.cum_tokens is not None else self._materialize(rollout_id, node, refs, lineage)
             )
@@ -1031,11 +1135,15 @@ class FileLineageStore(IncrementalLineageStore):
         return self._store._locked(rollout_id)
 
     def _ledger_cache_pop(self, rollout_id: str) -> None:
-        # Forget a rollout's cached rows. Every removal goes through here, so that a cache that also tracks
-        # its size (NVIDIA-NeMo/Gym#4268) stays consistent. Different rollouts are removed concurrently from
-        # worker threads, so the dictionary needs the guard.
+        # Forget a rollout's cached rows and every group's cached lineage. Every removal goes through here, so
+        # that a cache that also tracks its size (NVIDIA-NeMo/Gym#4268) stays consistent. Different rollouts are
+        # removed concurrently from worker threads, so the dictionaries need the guard.
         with self._cache_guard:
             self._ledger_cache.pop(rollout_id, None)
+            self._cache.pop(rollout_id, None)
+            materialized = self._materialized.pop(rollout_id, None)
+            if materialized is not None:
+                self._materialized_tokens -= len(materialized[1])
 
     def _read(self, rollout_id: str) -> list[dict]:
         path = self._ledger_path(rollout_id)
@@ -1086,13 +1194,17 @@ class FileLineageStore(IncrementalLineageStore):
         records.append(record)
         self._ledger_cache[rollout_id] = (inode, offset, records)
 
-    def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        resolution = super()._resolve(rollout_id, request_items)
+    def _resolve(
+        self, rollout_id: str, request_items: list[dict], group: GroupKey = (None, None)
+    ) -> LineageResolution:
+        resolution = super()._resolve(rollout_id, request_items, group)
         if resolution.status != ParentResolutionStatus.UNRESOLVED or resolution.reason != "no_match":
             return resolution
-        return self._resolve_row(rollout_id, request_items)
+        return self._resolve_row(rollout_id, request_items, group)
 
-    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    def _resolve_row(
+        self, rollout_id: str, request_items: list[dict], group: GroupKey = (None, None)
+    ) -> LineageResolution:
         """Apply the shared matcher to versioned, token-free custody metadata.
 
         Older ledgers lack ``tool_call_turn_fingerprint`` and remain strict-only:
@@ -1105,8 +1217,10 @@ class FileLineageStore(IncrementalLineageStore):
                 for record in self._read(rollout_id)
                 if record.get("fingerprint") and record.get("fingerprint_version") == FINGERPRINT_VERSION
             }
-        lineage = RolloutLineage()
+        # Every model server of an episode writes this one ledger, so match only the request's own group.
+        lineages: dict[GroupKey, RolloutLineage] = {}
         for call_id, record in records.items():
+            lineage = lineages.setdefault(row_group(record), RolloutLineage())
             lineage.by_call_id[call_id] = LineageNode(
                 call_id=call_id,
                 cum_tokens=None,
@@ -1118,7 +1232,7 @@ class FileLineageStore(IncrementalLineageStore):
             lineage.by_fingerprint.setdefault(record["fingerprint"], []).append(call_id)
             if key := record.get("tool_call_turn_fingerprint"):
                 lineage.by_tool_call_turn.setdefault(key, []).append(call_id)
-        status, node, reason = lineage.resolve_node(request_items)
+        status, node, reason = resolve_within_group(lineages, group, request_items)
         if status != ParentResolutionStatus.RESOLVED:
             return LineageResolution(status, reason=reason)
         record = records[node.call_id]
@@ -1236,30 +1350,40 @@ class FileLineageStore(IncrementalLineageStore):
                 return
             self._append(capture_key, record, records)
 
-    async def manifest(self, capture_key: str) -> dict:
-        return await asyncio.to_thread(self._manifest, capture_key)
+    async def manifest(
+        self,
+        capture_key: str,
+        *,
+        agent_instance: str | None = None,
+        agent_kind: str | None = None,
+        model_ref: str | None = None,
+    ) -> dict:
+        filters = {"agent_instance": agent_instance, "agent_kind": agent_kind, "model_ref": model_ref}
+        return await asyncio.to_thread(self._manifest, capture_key, filters)
 
-    def _manifest(self, capture_key: str) -> dict:
+    def _manifest(self, capture_key: str, filters: dict[str, str | None] | None = None) -> dict:
+        filters = filters or {}
         # Do not mint a lock just to measure an unused rollout. An existing lock
         # may belong to a writer before its first row, so still wait for it below.
         if not self._ledger_path(capture_key).exists() and not self._store.lock_path_for(capture_key).exists():
             if self._is_retired(capture_key):
                 raise RolloutRetiredError(f"rollout {capture_key} is retired")
-            return _manifest_from_rows(capture_key, [])
+            return _manifest_from_rows(capture_key, [], **filters)
         with self._locked(capture_key):
             rows = list(self._read(capture_key))
             if not rows and self._is_retired(capture_key):
                 raise RolloutRetiredError(f"rollout {capture_key} is retired")
-        return _manifest_from_rows(capture_key, rows)
+        return _manifest_from_rows(capture_key, rows, **filters)
 
-    async def has_rows(self, rollout_id: str) -> bool:
-        return await asyncio.to_thread(self._has_rows, rollout_id)
+    async def has_rows(self, rollout_id: str, *, identity: CallIdentity | None = None) -> bool:
+        return await asyncio.to_thread(self._has_rows, rollout_id, identity)
 
-    def _has_rows(self, rollout_id: str) -> bool:
+    def _has_rows(self, rollout_id: str, identity: CallIdentity | None = None) -> bool:
         with self._locked(rollout_id):
-            if self._read(rollout_id):
+            rows = self._read(rollout_id)
+            if _rows_of_group(rows, identity):
                 return True
-            if self._is_retired(rollout_id):
+            if not rows and self._is_retired(rollout_id):
                 raise RolloutRetiredError(f"rollout {rollout_id} is retired")
             return False
 
