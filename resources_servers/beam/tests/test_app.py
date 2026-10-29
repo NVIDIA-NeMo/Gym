@@ -27,7 +27,7 @@ from pytest import approx
 from nemo_gym import judge as judge_module
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, judge_failsafe
+from nemo_gym.judge import is_judge_failure, judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -35,6 +35,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.beam.app import (
     ABILITIES,
     BEAMResourcesServer,
@@ -111,7 +112,7 @@ def _mock_judge(
 ) -> List[Dict[str, Any]]:
     """Route /v1/responses to ``judge(messages)``; the first calls get ``statuses`` (e.g. 500) instead.
 
-    Patches the HTTP helpers ``nemo_gym.judge.call_judge`` uses, so failures surface as ``JudgeError``.
+    Patches the HTTP helpers ``nemo_gym.judge.call_judge`` uses, so failures surface as judge failures (``is_judge_failure``).
     """
     calls: List[Dict[str, Any]] = []
     pending = list(statuses)
@@ -287,8 +288,9 @@ def test_request_rejects_bad_metadata(ability: str, rubric: Any) -> None:
 def test_verify_judge_failure_raises_judge_error(monkeypatch) -> None:
     server = _server()
     _mock_judge(server, _score_reply(1.0), monkeypatch, statuses=[500])
-    with pytest.raises(JudgeError, match="HTTP 500"):
+    with pytest.raises(NgFailureEvent, match="HTTP 500") as failure:
         asyncio.run(server.verify(_request("March 29")))
+    assert is_judge_failure(failure.value)
 
 
 def test_judge_failure_is_masked_by_judge_failsafe(monkeypatch) -> None:
@@ -327,8 +329,9 @@ def test_judge_failure_cancels_sibling_calls(monkeypatch) -> None:
     monkeypatch.setattr(judge_module, "raise_for_status", fake_raise_for_status)
     monkeypatch.setattr(judge_module, "get_response_json", fake_get_response_json)
     start = time.monotonic()
-    with pytest.raises(JudgeError):
+    with pytest.raises(NgFailureEvent) as failure:
         asyncio.run(server.verify(_request("x", ability="summarization", rubric=["slow 1", "fail", "slow 2"])))
+    assert is_judge_failure(failure.value)
     assert time.monotonic() - start < 1.0
     assert finished == []
 
