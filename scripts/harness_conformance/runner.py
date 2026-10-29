@@ -20,9 +20,11 @@ from nemo_gym.harness_capabilities.behavior import inspect_behavior
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
 from nemo_gym.harness_capabilities.health import inspect_health
+from nemo_gym.harness_capabilities.media import image_payloads, inspect_media
 from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
 
 from .episode import HARNESSES
+from .media_fixture import PROMPT_BYTES, TOOL_BYTES, image_part
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
 
 
@@ -121,7 +123,9 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     else:
         delivery = "missing"
 
-    scope = EvidenceScope(tools=scenario.tool_steps > 0, steps=scenario.steps, verifier=not scenario.terminal_error)
+    scope = EvidenceScope(
+        tools=scenario.tool_steps > 0 or scenario.media, steps=scenario.steps, verifier=not scenario.terminal_error
+    )
     artifact = inspect_record(record, scope=scope)
     checks = artifact["checks"] + inspect_behavior(
         witness,
@@ -139,6 +143,13 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
         expectations=scenario.health_expectations,
         steps=scenario.steps,
     )
+    checks += inspect_media(
+        witness,
+        record,
+        applies=scenario.media,
+        prompt_images=tuple(image_payloads([image_part(data) for data in PROMPT_BYTES])),
+        tool_image=image_payloads(image_part(TOOL_BYTES))[0],
+    )
     summary, report = None, None
     if record is not None:
         destination, summary = inspect_bundle(bundle, output=directory / "evidence", scope=scope)
@@ -151,8 +162,9 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     behavior_passed = all(c["status"] in ("pass", "not_applicable") for c in behavioral)
     return {
         "scenario": scenario.name,
+        "tier": scenario.tier,
         "exercised": record is not None,
-        "verdict": "fulfilled" if gate_passes(checks) else "not_fulfilled",
+        "verdict": "fulfilled" if gate_passes(checks) and gate_passes(checks, tier=scenario.tier) else "not_fulfilled",
         "issues": [reason for c in checks if c["status"] == "fail" for reason in c["reasons"]],
         "checks": checks,
         "behavioral_status": "pass" if behavior_passed else "fail",
@@ -201,6 +213,10 @@ def run_suite(
     )
     (output / "suite.json").write_text(_json(manifest))
     rows = {}
+    # Additional scenarios exercise optional capabilities. Keep their failures
+    # visible without making them prerequisites for the existing P0 suite.
+    # An explicitly selected P1-only diagnostic still fails on P1 errors.
+    gate_tier = min(s.tier for s in scenarios)
     execution_error = False
     for harness in harnesses:
         results = []
@@ -222,17 +238,19 @@ def run_suite(
                 str(timeout),
             ]
             execution = run_process(command, directory=directory, timeout=timeout + 30)
-            execution_error |= execution["returncode"] != 0 or execution["timed_out"]
+            execution_error |= scenario.tier == gate_tier and (execution["returncode"] != 0 or execution["timed_out"])
             try:
                 result = inspect_episode(scenario, directory, execution)
             except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
-                execution_error = True
+                execution_error |= scenario.tier == gate_tier
                 result = {
                     "scenario": scenario.name,
+                    "tier": scenario.tier,
                     "exercised": False,
                     "verdict": "not_fulfilled",
                     "execution": execution,
                     "checker_error": type(exc).__name__,
+                    "checks": [],
                     "issues": ["could not inspect this episode's artifacts"],
                     "artifact_report": None,
                     "evidence": {
@@ -253,7 +271,9 @@ def run_suite(
         rows[harness] = {
             "scenarios": results,
             "evidence": counts,
-            "verdict": "fulfilled" if all(r["verdict"] == "fulfilled" for r in results) else "not_fulfilled",
+            "verdict": "fulfilled"
+            if all(r["verdict"] == "fulfilled" for r in results if r["tier"] == gate_tier)
+            else "not_fulfilled",
         }
     passed = all(row["verdict"] == "fulfilled" for row in rows.values())
     summary = {
@@ -261,13 +281,14 @@ def run_suite(
         "suite": SUITE,
         "runner_status": "completed",
         "full_suite": scenarios == SCENARIOS,
+        "gate_tier": gate_tier,
         "verdict": "fulfilled" if passed else "not_fulfilled",
         "suite_sha256": digest_file(output / "suite.json"),
         "harnesses": rows,
         "limits": [
             "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
-            "all current checks are P0, including ownership and call-to-step checks",
-            "multimodal, compaction, parallelism and deployment health are outside this suite",
+            "media_round_trip is P1; existing general evidence checks retain their individual tiers",
+            "image delivery and recording only; audio/video, compaction, parallelism and deployment health are outside this suite",
         ],
     }
     (output / "conformance_report.md").write_text(render_matrices(rows))

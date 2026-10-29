@@ -17,12 +17,15 @@ from starlette.middleware.sessions import SessionMiddleware
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.chat_streaming import synthesize_chat_completion_sse
+from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
     restore_namespace_tool_calls,
     synthesize_responses_sse,
 )
 
+from .media_fixture import TOOL_BYTES
 from .scenarios import Scenario
 
 
@@ -45,6 +48,8 @@ class Probe:
     closed: int = 0
     finished: bool = False
     finish_call: dict | None = None
+    media_tool: dict | None = None
+    backend_requests: list[dict] = field(default_factory=list)
 
     def save(self) -> None:
         """Persist independent observations even if collection fails."""
@@ -58,8 +63,31 @@ class Probe:
             "closed": self.closed,
             "finished": self.finished,
             "finish_call": self.finish_call,
+            "media_tool": self.media_tool,
+            "backend_requests": self.backend_requests,
         }
         (self.directory / "witness.json").write_text(json.dumps(witness, indent=2) + "\n")
+
+    def _image_tool(self, body: dict) -> tuple[str, dict, dict]:
+        # The local sandbox shares this filesystem. This is fixture input, not
+        # fabricated harness output or a substitute for observing the next request.
+        image_path = self.directory / "workspace" / "tool-image.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(TOOL_BYTES)
+        tools, namespaces = flatten_namespace_tools(body.get("tools"))
+        for tool in tools:
+            function = tool.get("function", tool)
+            name = function.get("name", "")
+            if name.rsplit("__", 1)[-1].lower() not in ("read", "read_file", "view_image"):
+                continue
+            parameters = function.get("parameters") or {}
+            properties = parameters.get("properties", {})
+            for key in ("path", "filePath", "file_path", "absolute_path"):
+                if key in properties and not set(parameters.get("required", [])) - {key}:
+                    args = {key: str(image_path)}
+                    self.media_tool = {"id": f"call_{uuid4().hex}", "name": name, "arguments": args}
+                    return name, args, namespaces
+        raise ValueError("harness did not advertise a supported native image-reading tool")
 
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
@@ -151,6 +179,9 @@ class Probe:
 
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
         body = await request.json()
+        wire_body = body
+        converted_input = None
+        converter = ResponsesConverter(return_token_id_information=False)
         self._observe_tool_results(body)
         index = len(self.attempts)
         status = 200
@@ -166,13 +197,29 @@ class Probe:
             }
         else:
             try:
+                if self.scenario.media:
+                    if request.url.path.endswith("/responses"):
+                        converted_input = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+                            {**body, "stream": False}
+                        )
+                        body = converter.responses_to_chat_completion_create_params(converted_input).model_dump(
+                            exclude_none=True
+                        )
+                    # The scripted response below consumes this post-conversion request.
+                    self.backend_requests.append(body)
                 if self.finished:
                     raise ValueError("unexpected model request after the scripted final answer")
                 if any(not call["result_seen"] or not call.get("executed") for call in self.tool_calls):
                     raise ValueError("tool execution or model-visible result was not witnessed")
-                if len(self.tool_calls) < self.scenario.tool_steps:
-                    name, arguments, namespaces = self._tool(body)
-                    call = self.tool_calls[-1]
+                if (self.scenario.media and self.media_tool is None) or len(
+                    self.tool_calls
+                ) < self.scenario.tool_steps:
+                    if self.scenario.media:
+                        name, arguments, namespaces = self._image_tool(body)
+                        call = self.media_tool
+                    else:
+                        name, arguments, namespaces = self._tool(body)
+                        call = self.tool_calls[-1]
                     output = [
                         {
                             "type": "function_call",
@@ -209,7 +256,7 @@ class Probe:
                     ]
                     self.finished = True
                 calls_tool = output[0]["type"] == "function_call"
-                if request.url.path.endswith("/chat/completions"):
+                if request.url.path.endswith("/chat/completions") or converted_input is not None:
                     message = {
                         "role": "assistant",
                         "content": None if calls_tool else ANSWER,
@@ -266,15 +313,21 @@ class Probe:
                             "input_tokens_details": {"cached_tokens": 3},
                             "output_tokens_details": {"reasoning_tokens": 2},
                         }
-            except ValueError as exc:
+                if converted_input is not None:
+                    payload = converter.chat_completion_to_response(
+                        responses_create_params=converted_input,
+                        chat_completion=NeMoGymChatCompletion.model_validate(payload),
+                        preserve_envelope_id=True,
+                    ).model_dump(mode="json")
+            except (ValueError, NotImplementedError) as exc:
                 status = 409
                 self.violations.append(str(exc))
                 payload = {"error": {"message": str(exc), "type": "probe_protocol_error"}}
         self.attempts.append(
-            {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": status}
+            {"attempt_id": f"attempt-{index}", "request": wire_body, "response": payload, "status_code": status}
         )
         self.save()
-        if status != 200 or not body.get("stream"):
+        if status != 200 or not wire_body.get("stream"):
             return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})
         events = (
             synthesize_chat_completion_sse(payload, include_usage=True)

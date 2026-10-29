@@ -37,6 +37,8 @@ def render_ci(*, artifacts: Path, commit: str, output: Path, run_url: str) -> No
             row = summary["harnesses"][harness]
             if [s["scenario"] for s in row["scenarios"]] != [s.name for s in SCENARIOS]:
                 raise ValueError("incomplete scenario coverage")
+            if [s.get("tier", "P0") for s in row["scenarios"]] != [s.tier for s in SCENARIOS]:
+                raise ValueError("incorrect scenario priority")
             if row["verdict"] != ("fulfilled" if statuses[harness] == "passed" else "not_fulfilled"):
                 raise ValueError("summary differs from CI result")
             validate_row(row)
