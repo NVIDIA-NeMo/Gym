@@ -144,7 +144,9 @@ env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=
 _gym_driver_pid=$!
 _gym_service_exited() {
     # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
-    if ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+    # Once the evaluation has succeeded (a driver with exports writes the marker then), a service that is lost
+    # costs nothing the exports need, so the driver is left to finish and its status stands.
+    if [ -e "${GYM_EVAL_SUCCEEDED_MARKER:-}" ] || ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
         wait "$_gym_driver_pid"
         return
     fi

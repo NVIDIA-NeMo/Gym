@@ -402,6 +402,42 @@ class TestExportTail:
 
         assert completed.returncode == 3
 
+    def test_the_marker_is_created_when_the_run_succeeds_and_not_when_it_fails(self, tail_env: dict[str, Any]) -> None:
+        marker = tail_env["bench"] / "eval.succeeded.1"
+
+        _run_tail(tail_env, [("evalrdl", [])], GYM_EVAL_SUCCEEDED_MARKER=str(marker), FAKE_RUN_RC="3")
+        assert not marker.exists()
+
+        completed = _run_tail(tail_env, [("evalrdl", [])], GYM_EVAL_SUCCEEDED_MARKER=str(marker))
+        assert completed.returncode == 0
+        assert marker.exists()
+
+    def test_the_marker_exists_before_the_first_export_starts(self, tail_env: dict[str, Any]) -> None:
+        marker = tail_env["bench"] / "eval.succeeded.1"
+        (Path(tail_env["env"]["PATH"].split(":")[0]) / "gym").write_text(
+            f'#!/bin/bash\n[ -e "{marker}" ] && echo "marker-first" >> "$FAKE_GYM_LOG"\n'
+        )
+
+        _run_tail(tail_env, [("evalrdl", [])], GYM_EVAL_SUCCEEDED_MARKER=str(marker))
+
+        assert "marker-first" in _calls(tail_env)
+
+    def test_without_a_marker_variable_the_tail_works_as_before(self, tail_env: dict[str, Any]) -> None:
+        completed = _run_tail(tail_env, [("evalrdl", [])])
+
+        assert completed.returncode == 0
+        assert _calls(tail_env) == ["run", "eval export evalrdl"]
+
+    def test_an_unwritable_marker_does_not_stop_the_exports_or_change_the_exit_code(
+        self, tail_env: dict[str, Any]
+    ) -> None:
+        completed = _run_tail(
+            tail_env, [("evalrdl", [])], GYM_EVAL_SUCCEEDED_MARKER=str(tail_env["bench"] / "missing" / "marker")
+        )
+
+        assert completed.returncode == 0
+        assert _calls(tail_env) == ["run", "eval export evalrdl"]
+
     def test_a_failing_export_neither_changes_the_exit_code_nor_stops_the_others(
         self, tail_env: dict[str, Any]
     ) -> None:
