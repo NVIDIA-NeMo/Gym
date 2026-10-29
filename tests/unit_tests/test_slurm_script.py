@@ -31,6 +31,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
 from nemo_gym.orchestration.executors.script_templates import (
+    ENSURE_RAY_INSTALLED,
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
     render_gym_cmd,
@@ -568,6 +569,9 @@ def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_en
         "ray symmetric-run",
         'fake_symmetric_run() { for a in "$@"; do echo "ARG:$a"; done; }; fake_symmetric_run',
     ).replace("if ray symmetric-run --help", "if true")
+    # The real install step would pip-download ray, which is slow and needs network; stub it out.
+    assert ENSURE_RAY_INSTALLED in script
+    script = script.replace(ENSURE_RAY_INSTALLED, "true")
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
 
     assert result.returncode == 0, result.stderr
