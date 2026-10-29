@@ -118,7 +118,7 @@ class ResourcesSessionHooks(Protocol):
 
     A sandbox per session plugs in here:
 
-    - ``export_session_states`` runs at commit.
+    - ``export_session_states`` runs at commit, with the ID of the checkpoint being written.
       Prepare stops agents before resources servers, so no episode step is using a sandbox by then.
       Return what a restore needs to rebuild each sandbox as of this checkpoint, such as a snapshot id.
       A descriptor of the live sandbox is not enough on its own: the sandbox keeps changing after the checkpoint.
@@ -128,18 +128,23 @@ class ResourcesSessionHooks(Protocol):
     - ``retire_session_state`` runs when an attempt is discarded, whatever the server's mode.
       Stop its sandbox.
       It runs again for the same session if a retire was cut short, so it must tolerate state it already freed.
+    - ``release_external_state`` runs when the controller names the checkpoints it may still restore.
+      Delete what the export of any other checkpoint kept outside Gym, such as snapshots.
+      Optional: a server whose checkpoints keep nothing outside Gym leaves it out.
 
     Whatever a checkpoint keeps outside Gym, such as snapshots,
     is the server's to delete once no checkpoint the controller may restore refers to it.
     """
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         """Return the state of each session; leave out a session the server no longer holds."""
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
         """Validate every state, then install all of them; never install a partial set."""
 
     async def retire_session_state(self, session_id: str) -> None: ...
+
+    async def release_external_state(self, kept: frozenset[str]) -> None: ...
 
 
 class ResourcesParticipant(CheckpointParticipant):
@@ -301,6 +306,12 @@ class ResourcesParticipant(CheckpointParticipant):
     async def open_admission(self) -> None:
         self.accepting = True
         self._open.set()
+
+    async def release(self, kept: frozenset[str]) -> None:
+        release = getattr(self.hooks, "release_external_state", None)
+        # Optional: a server whose checkpoints keep nothing outside Gym leaves it out.
+        if self.mode == "exported" and release is not None:
+            await release(kept)
 
     def readiness(self) -> PrepareReport:
         # A seed in flight is a restart too: its reply always says so, and prepare does not wait for it.
@@ -500,7 +511,7 @@ class ResourcesParticipant(CheckpointParticipant):
         if counted:
             self.inflight -= 1
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         if self.mode == "restart_only":
             return []
         # Only sessions within the commit's scope:
@@ -520,7 +531,9 @@ class ResourcesParticipant(CheckpointParticipant):
                 ResourcesSessionRecord(session_id=session_id, episode_id=episode_id, state=None)
                 for session_id, episode_id in sessions
             ]
-        states = await self.hooks.export_session_states([session_id for session_id, _ in sessions])
+        states = await self.hooks.export_session_states(
+            [session_id for session_id, _ in sessions], checkpoint_id=checkpoint_id
+        )
         records = []
         for session_id, episode_id in sessions:
             if session_id not in states:

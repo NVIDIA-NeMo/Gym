@@ -69,7 +69,9 @@ class AgentHooks:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, JsonValue]] = {}
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {key: self.sessions.get(key, {}) for key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -83,7 +85,7 @@ class SessionStates:
     def __init__(self) -> None:
         self.states: dict[str, JsonValue] = {}
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         return {session_id: self.states[session_id] for session_id in session_ids if session_id in self.states}
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
@@ -178,8 +180,8 @@ class Deployment:
     def _remember_exports(self, kind: str, participant: CheckpointParticipant) -> None:
         export = participant.export
 
-        async def remembering(episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
-            records = await export(episode_ids)
+        async def remembering(episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
+            records = await export(episode_ids, checkpoint_id=checkpoint_id)
             self.first_exports.setdefault((self.exporting, kind), [record.to_json_record() for record in records])
             return records
 

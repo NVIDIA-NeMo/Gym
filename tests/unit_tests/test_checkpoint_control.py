@@ -1465,7 +1465,7 @@ async def test_an_export_that_outlives_its_commit_is_awaited_by_the_retry_not_re
     release = asyncio.Event()
 
     class SlowExport(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append("started")
             await release.wait()
             return self.export_records(episode_ids)
@@ -1562,7 +1562,7 @@ def test_the_control_connection_pool_refuses_negative_limits() -> None:
 
 async def test_resume_does_not_wait_for_an_export_nothing_will_use(tmp_path: Path) -> None:
     class HungExport(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             await asyncio.Event().wait()
             return []
 
@@ -1633,7 +1633,7 @@ async def test_a_failed_export_is_final_for_its_checkpoint_and_a_new_one_commits
     exports: list[None] = []
 
     class FailingOnce(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append(None)
             if len(exports) == 1:
                 raise RuntimeError("export failed")
@@ -2137,7 +2137,7 @@ async def test_an_export_that_outlives_its_commit_and_then_fails_is_final_for_it
     release = asyncio.Event()
 
     class SlowThenFailing(FakeParticipant):
-        async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[BaseModel]:
+        async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[BaseModel]:
             exports.append(None)
             if len(exports) == 1:
                 await release.wait()

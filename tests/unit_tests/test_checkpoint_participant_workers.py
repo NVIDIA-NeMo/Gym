@@ -84,7 +84,9 @@ class AgentHooks:
     def __init__(self) -> None:
         self.restored: list[RestoredAgentSession] = []
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: {"key": session_key} for session_key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -419,13 +421,13 @@ async def test_a_worker_lost_between_readiness_and_export_fails_the_commit(socke
         await deployment.controller.prepare(CheckpointRequest(**control()))
         export = participant.export
 
-        async def export_after_the_worker_left(episode_ids: Optional[list[EpisodeId]]) -> list:
+        async def export_after_the_worker_left(episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list:
             # The commit has checked readiness; the worker holding r2 leaves before the export.
             await second.disconnect()
             async with asyncio.timeout(5):
                 while len(participant.workers) > 1:
                     await asyncio.sleep(0.01)
-            return await export(episode_ids)
+            return await export(episode_ids, checkpoint_id=checkpoint_id)
 
         participant.export = export_after_the_worker_left
         request = CommitRequest(
@@ -631,7 +633,7 @@ class SessionStates:
     def __init__(self) -> None:
         self.states: dict[str, JsonValue] = {}
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         return {session_id: self.states[session_id] for session_id in session_ids if session_id in self.states}
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
@@ -1626,7 +1628,7 @@ class SlowTeardown:
         self.peak = 0
         self.finished = 0
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, Any]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, Any]:
         return dict.fromkeys(session_ids, {})
 
     async def restore_session_states(self, states: dict[str, Any]) -> None:
@@ -1671,13 +1673,15 @@ async def test_a_slow_export_is_stopped_on_every_worker_before_resume_returns(so
     exporting: list[str] = []
 
     class SlowExport(AgentHooks):
-        async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        async def export_agent_sessions(
+            self, session_keys: list[str], *, checkpoint_id: str
+        ) -> dict[str, dict[str, JsonValue]]:
             exporting.append("start")
             try:
                 await asyncio.sleep(5)
             finally:
                 exporting.append("stop")
-            return await super().export_agent_sessions(session_keys)
+            return await super().export_agent_sessions(session_keys, checkpoint_id=checkpoint_id)
 
     def slow_agent_worker() -> tuple[AgentSessionParticipant, FastAPI]:
         app = FastAPI()
@@ -2053,7 +2057,9 @@ class CheckpointedSessionAgent(SimpleResponsesAPIAgent):
         self.closes.append(state.request.agent_session_id)
         return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {key: {"request": self._session_state(key).request.model_dump(mode="json")} for key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:

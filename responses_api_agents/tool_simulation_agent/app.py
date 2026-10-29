@@ -74,7 +74,9 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
     # exports it. Keep its reply until /run records the verification boundary.
     _model_replies: dict[str, _ModelReply] = PrivateAttr(default_factory=dict)
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         states = {}
         for key in session_keys:
             reply = self._model_replies.get(key, _ModelReply())

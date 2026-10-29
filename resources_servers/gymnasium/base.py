@@ -115,7 +115,7 @@ class GymnasiumServer(SimpleResourcesServer):
         """Release state owned by a session. Safe to call repeatedly."""
         self.session_state.pop(session_id, None)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         return {
             session_id: self.export_env_state(self.session_state[session_id])
             for session_id in session_ids

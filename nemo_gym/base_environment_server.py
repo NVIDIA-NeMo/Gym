@@ -207,6 +207,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     # They are restarts, which never hold up a checkpoint and start over from their input after a crash.
     checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
 
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better."""
+        return self.checkpoint_mode
+
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._admission = (
@@ -288,7 +292,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                                 request.episode_id,
                                 request.task.model_dump(mode="json"),
                                 deadline,
-                                restart=self.checkpoint_mode == "restart_only",
+                                restart=self._checkpoint.mode == "restart_only",
                             )
                             begun = True
                         response = await self.run(request, cleanup)
@@ -352,7 +356,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        self._checkpoint = EnvironmentParticipant(mode=self.checkpoint_mode)
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in _ENVIRONMENT_CHECKPOINT_MODES:
+            raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        self._checkpoint = EnvironmentParticipant(mode=mode)
         install_server_participant(
             app,
             self._checkpoint,
@@ -384,6 +391,19 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """
         if self._checkpoint is not None:
             await self._checkpoint.boundary(request.episode_id, state() if callable(state) else state)
+
+    def checkpoint_elapsed(self, request: EpisodeRequestT) -> float | None:
+        """Seconds of this episode's time budget spent so far, not counting time parked for checkpoints.
+
+        Record it in each boundary, and pass it to ``checkpoint_charge_elapsed`` when continuing that boundary,
+        so a replacement attempt has only what is left of the budget. ``None`` without checkpointing or a deadline.
+        """
+        return self._checkpoint.elapsed(request.episode_id) if self._checkpoint is not None else None
+
+    def checkpoint_charge_elapsed(self, request: EpisodeRequestT, seconds: float) -> None:
+        """Count ``seconds`` the attempt this one continues already spent against this episode's deadline."""
+        if self._checkpoint is not None:
+            self._checkpoint.charge(request.episode_id, seconds)
 
     async def checkpoint_restart(self, request: EpisodeRequestT) -> None:
         """Mark this episode as a restart: a server it uses cannot capture its part, such as a restart-only agent.

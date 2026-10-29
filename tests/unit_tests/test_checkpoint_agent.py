@@ -48,7 +48,9 @@ class Hooks:
         self.restored: list[RestoredAgentSession] = []
         self.retired: list[str] = []
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: self.sessions.get(session_key, {}) for session_key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -89,7 +91,7 @@ async def test_activation_parks_at_its_next_boundary_and_resumes() -> None:
 
     step_done.set()
     prepared = await prepare
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await controller.resume(CheckpointRequest(**control()))
     for _ in range(2):
         await asyncio.sleep(0.01)
@@ -134,7 +136,7 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
             assert participant.readiness().blockers == ["r"]
         async with run.step("replay"):
             assert participant.readiness().ready
-            [record] = await participant.export(None)
+            [record] = await participant.export(None, checkpoint_id="c")
 
     assert participant.readiness().ready
     assert record.episode == {"next": "verify"}
@@ -306,7 +308,7 @@ async def test_awaiting_a_model_call_counts_as_parked_at_the_last_boundary() -> 
     task = asyncio.create_task(loop())
     await asyncio.sleep(0.01)
     prepared = await controller.prepare(CheckpointRequest(**control()))
-    [record] = await participant.export(None)
+    [record] = await participant.export(None, checkpoint_id="c")
     response.set()
     await asyncio.sleep(0.01)
     # The call returned during the checkpoint, so the activation parks at its next boundary.
@@ -408,7 +410,7 @@ async def test_an_agent_without_session_hooks_reports_its_rollouts_as_restarts_t
     assert refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
     assert committed.status_code == 200
     assert running and stopped
-    assert await agent._restart_only.export(None) == []
+    assert await agent._restart_only.export(None, checkpoint_id="c") == []
 
 
 async def test_status_reports_an_agents_checkpoint_mode() -> None:
@@ -562,14 +564,16 @@ async def test_a_session_woken_by_resume_stays_parked_if_a_new_checkpoint_closes
 
 async def test_an_agent_that_leaves_a_session_out_of_its_export_fails_the_commit() -> None:
     class ForgetfulHooks(Hooks):
-        async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        async def export_agent_sessions(
+            self, session_keys: list[str], *, checkpoint_id: str
+        ) -> dict[str, dict[str, JsonValue]]:
             return {}
 
     participant = AgentSessionParticipant(ForgetfulHooks())
     participant.open_session("s", EpisodeId(rollout_id="r"))
 
     with pytest.raises(ControlError, match="did not export sessions"):
-        await participant.export(None)
+        await participant.export(None, checkpoint_id="c")
 
 
 async def test_closing_a_session_stops_its_running_activation() -> None:
@@ -676,7 +680,7 @@ async def test_a_session_whose_retire_hook_was_cut_short_stays_blocking_until_a_
         await asyncio.wait_for(participant.retire(episode_id), 0.05)
 
     report = participant.readiness()
-    exported = await participant.export(None)
+    exported = await participant.export(None, checkpoint_id="c")
     release.set()
     await participant.retire(episode_id)
 
@@ -726,7 +730,7 @@ async def test_a_seed_in_progress_when_admission_closes_holds_up_prepare_and_is_
     assert not blocked.ready and blocked.blockers == ["r"]
     assert participant.readiness().ready
     # The environment may record its boundary after the seed before the commit, so the session is exported.
-    assert [record.session_key for record in await participant.export(None)] == ["s"]
+    assert [record.session_key for record in await participant.export(None, checkpoint_id="c")] == ["s"]
 
 
 async def _until(condition: Any) -> None:
@@ -987,7 +991,9 @@ class _SandboxAgent(SimpleResponsesAPIAgent):
         await self.release.wait()
         return AgentSessionState(request=body)
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: {} for session_key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -1124,7 +1130,7 @@ async def test_live_sessions_outside_the_commit_scope_are_not_exported() -> None
     participant.open_session("t", EpisodeId(rollout_id="q"))
 
     # Another participant reported q as a restart, so the coordinator commits r alone.
-    records = await participant.export([EpisodeId(rollout_id="r")])
+    records = await participant.export([EpisodeId(rollout_id="r")], checkpoint_id="c")
 
     assert [record.session_key for record in records] == ["s"]
 

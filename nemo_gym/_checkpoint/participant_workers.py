@@ -327,6 +327,11 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
         # As long as the deletion takes, as in a single process; a resume waits for it within its own deadline.
         await self.broadcast("delete_restored", {"episode_id": episode_id.model_dump(mode="json")}, timeout=None)
 
+    async def release(self, kept: frozenset[str]) -> None:
+        """Release on every worker: each holds the hooks of the sessions it serves, and any of them may hold the
+        external state a release frees. Bounded by the release request's deadline."""
+        await self.broadcast("release", {"kept": sorted(kept)}, timeout=None)
+
     def handle_now(self, worker_index: int, kind: str, body: dict[str, Any]) -> Optional[dict[str, Any]]:
         if kind != "claim":
             return None
@@ -385,12 +390,13 @@ class CoordinatedServerParticipant(CoordinatedParticipant[PrepareReport]):
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         raise NotImplementedError("a coordinated participant exports its workers' records through export()")
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         self._next_export += 1
         export = self._next_export
         body = {
             "episode_ids": None if episode_ids is None else [e.model_dump(mode="json") for e in episode_ids],
             "export": export,
+            "checkpoint_id": checkpoint_id,
         }
         # Each worker sends its records in chunks before it replies; they are kept here only while this export runs.
         self._exports[export] = {}
@@ -779,13 +785,17 @@ class ParticipantWorkerLink(WorkerLink):
                 raise InvalidPhaseError(f"{self.participant.kind} worker is no longer ready to commit")
             episode_ids = body["episode_ids"]
             records = await self.participant.export(
-                None if episode_ids is None else [EpisodeId.model_validate(e) for e in episode_ids]
+                None if episode_ids is None else [EpisodeId.model_validate(e) for e in episode_ids],
+                checkpoint_id=body["checkpoint_id"],
             )
             unclaimed = self.participant.unclaimed_sessions()
             await self._send_export(records, body["export"])
             return {"count": len(records), "unclaimed": unclaimed}
         if kind == "delete_restored":
             await self.participant.delete_restored(EpisodeId.model_validate(body["episode_id"]))
+            return {}
+        if kind == "release":
+            await self.participant.release(frozenset(body["kept"]))
             return {}
         if kind == "delete_unclaimed":
             limit = asyncio.Semaphore(_DELETE_CONCURRENCY)
