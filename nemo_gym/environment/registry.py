@@ -23,9 +23,9 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym import PARENT_DIR, component_search_roots
-from nemo_gym.benchmarks import MANIFEST_FILENAME, _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.discovery import iter_server_configs, read_config_metadata
+from nemo_gym.environment.benchmarks import MANIFEST_FILENAME, _benchmark_config_name, _benchmark_config_paths
+from nemo_gym.environment.discovery import iter_server_configs, read_config_metadata
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     ManifestError,
@@ -355,7 +355,7 @@ def resolve_catalog_entry(
 def read_environment_details(config_path: Path) -> Dict[str, object]:
     """Deep-parse an environment config for the ``gym list environments <name>`` inspect view.
 
-    Returns ``domain``, ``description`` (via :func:`~nemo_gym.discovery.read_config_metadata`), plus
+    Returns ``domain``, ``description`` (via :func:`~nemo_gym.environment.discovery.read_config_metadata`), plus
     ``value``, ``resources_servers`` (names), ``agent`` (the agent type), and dataset ``names`` read from
     the config's server blocks. Never raises: an unreadable config yields empty/None fields.
     """

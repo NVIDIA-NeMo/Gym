@@ -9,8 +9,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.sciknoweval import prepare
-from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.environment.benchmarks import BenchmarkConfig
 
 
 GYM_ROOT = Path(__file__).resolve().parents[3]

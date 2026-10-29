@@ -41,7 +41,7 @@ def test_ioi26_prepare_imports_as_a_package_module() -> None:
 
 
 def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
-    repo_root = Path(__file__).parents[2]
+    repo_root = Path(__file__).parents[3]
     benchmark = safe_load((repo_root / "benchmarks/pinchbench/config.yaml").read_text())
     agent = safe_load((repo_root / "responses_api_agents/pinchbench/configs/pinchbench.yaml").read_text())
 
@@ -65,7 +65,7 @@ class TestListBenchmarks:
         # Discovery is content-based (a `type: benchmark` dataset), not filename-based: any yaml that
         # declares such a dataset is a candidate (e.g. tau2's `configs/tau2.yaml`), and yamls that don't
         # are skipped — regardless of filename.
-        from nemo_gym.benchmarks import _benchmark_config_paths
+        from nemo_gym.environment.benchmarks import _benchmark_config_paths
 
         (tmp_path / "standard").mkdir()
         (tmp_path / "standard" / "config.yaml").write_text("x:\n  datasets:\n  - type: benchmark\n")
@@ -80,7 +80,7 @@ class TestListBenchmarks:
     def test_prefilter_rejects_the_benchmarks_manifest(self, tmp_path) -> None:
         # A benchmark's manifest.yaml mirrors the config's `type: benchmark` dataset, so by content it would
         # read as a second config of the same benchmark; it is catalog metadata and is rejected by name.
-        from nemo_gym.benchmarks import _benchmark_config_paths, _is_benchmark_config
+        from nemo_gym.environment.benchmarks import _benchmark_config_paths, _is_benchmark_config
 
         (tmp_path / "bench").mkdir()
         (tmp_path / "bench" / "config.yaml").write_text("x:\n  datasets:\n  - name: bench\n    type: benchmark\n")
@@ -92,9 +92,9 @@ class TestListBenchmarks:
         assert found == {"bench/config.yaml"}
 
     def test_config_paths_exclude_repo_manifests_but_include_executable_config(self) -> None:
-        from nemo_gym.benchmarks import _benchmark_config_paths
+        from nemo_gym.environment.benchmarks import _benchmark_config_paths
 
-        benchmark_dir = Path(__file__).parents[2] / "benchmarks" / "aime24"
+        benchmark_dir = Path(__file__).parents[3] / "benchmarks" / "aime24"
         manifest_path = benchmark_dir / "manifest.yaml"
         config_path = benchmark_dir / "config.yaml"
         manifest = safe_load(manifest_path.read_text())
@@ -124,7 +124,7 @@ class TestListBenchmarks:
         # The prefilter parses each file, so any YAML spelling of a `type: benchmark` dataset is found
         # (quotes, spacing, flow style) while lookalikes that aren't that value (a longer token, or the
         # string only inside a comment) are rejected.
-        from nemo_gym.benchmarks import _is_benchmark_config
+        from nemo_gym.environment.benchmarks import _is_benchmark_config
 
         config_path = tmp_path / "config.yaml"
         config_path.write_text(text)
@@ -133,7 +133,7 @@ class TestListBenchmarks:
     def test_prefilter_rejects_a_multi_benchmark_suite(self, tmp_path) -> None:
         # A config declaring several benchmark datasets is an eval suite: it has no single name, agent, or
         # repeat count, so it is not a valid `--benchmark` argument and must not reach the catalog.
-        from nemo_gym.benchmarks import _benchmark_config_paths
+        from nemo_gym.environment.benchmarks import _benchmark_config_paths
 
         (tmp_path / "single").mkdir()
         (tmp_path / "single" / "config.yaml").write_text("x:\n  datasets:\n  - name: a\n    type: benchmark\n")
@@ -148,7 +148,7 @@ class TestListBenchmarks:
     def test_prefilter_keeps_unparseable_yaml_as_candidate(self, tmp_path) -> None:
         # A file we can't parse can't be classified, so it is kept as a candidate for the resolve step to
         # diagnose rather than silently dropped.
-        from nemo_gym.benchmarks import _benchmark_config_paths
+        from nemo_gym.environment.benchmarks import _benchmark_config_paths
 
         (tmp_path / "broken").mkdir()
         (tmp_path / "broken" / "config.yaml").write_text("x:\n  - : : not valid yaml : :\n")
@@ -230,7 +230,7 @@ class TestListBenchmarks:
 
     def test_inspect_shows_absolute_config_path(self, capsys) -> None:
         # Real discovery: the config line must be the config's absolute path, not a cwd-relative one.
-        from nemo_gym.benchmarks import BENCHMARKS_DIR
+        from nemo_gym.environment.benchmarks import BENCHMARKS_DIR
 
         expected = (BENCHMARKS_DIR / "aime24" / "config.yaml").resolve()
         with patch(
@@ -245,7 +245,7 @@ class TestDiscoverBenchmarksInDir:
     def test_skips_configs_that_fail_to_resolve_with_warning(self, tmp_path: Path, capsys) -> None:
         # A candidate that still can't be resolved even with tolerance (e.g. a multi-benchmark suite) must
         # be skipped with a warning — not crash the whole listing, and not vanish silently.
-        from nemo_gym.benchmarks import BenchmarkConfig, _discover_benchmarks_in_dir
+        from nemo_gym.environment.benchmarks import BenchmarkConfig, _discover_benchmarks_in_dir
 
         for name in ("bad", "good"):
             (tmp_path / name).mkdir()
@@ -273,7 +273,7 @@ class TestDiscoverBenchmarksInDir:
         # Resolving `config_paths` can surface several benchmark datasets even when the file itself declares
         # one. Reporting the first would publish the suite under another benchmark's name, agent, and repeat
         # count, so `--benchmark <suite>` would silently run that other benchmark instead.
-        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.environment.benchmarks import BenchmarkConfig
 
         # Chains two real benchmarks the way `benchmarks/nemotron_3.5_super/` chains its eval suite.
         suite = tmp_path / "suite.yaml"
@@ -321,7 +321,7 @@ class TestDiscoverBenchmarksInDir:
         expected_config_paths: list[str],
         expected_concurrency: int,
     ) -> None:
-        repo_root = Path(__file__).parents[2]
+        repo_root = Path(__file__).parents[3]
         suite = safe_load((repo_root / "benchmarks/nemotron_3.5_super" / suite_name).read_text())
 
         assert suite == {
@@ -340,14 +340,14 @@ class TestDiscoverBenchmarksInDir:
     def test_nemotron_3_5_super_suite_resolves_every_member(
         self, suite_name: str, expected_benchmark_count: int, capsys, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.environment.benchmarks import BenchmarkConfig
 
         monkeypatch.setattr(
             nemo_gym.config.global_config,
             "_nemo_gym_openai_requirement",
             lambda: f"openai=={nemo_gym.config.global_config.openai_version}",
         )
-        repo_root = Path(__file__).parents[2]
+        repo_root = Path(__file__).parents[3]
         suite_path = repo_root / "benchmarks/nemotron_3.5_super" / suite_name
 
         assert BenchmarkConfig.from_config_path(suite_path, strict=False) is None
@@ -359,7 +359,11 @@ class TestDiscoverBenchmarksInDir:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
         # no silent drop from a name collision (the name-keyed dict is last-writer-wins) or a resolve
         # failure. Mirrors the content-based discovery in `list_benchmarks`.
-        from nemo_gym.benchmarks import BENCHMARKS_DIR, _benchmark_config_paths, _discover_benchmarks_in_dir
+        from nemo_gym.environment.benchmarks import (
+            BENCHMARKS_DIR,
+            _benchmark_config_paths,
+            _discover_benchmarks_in_dir,
+        )
 
         config_paths = _benchmark_config_paths(BENCHMARKS_DIR)
         assert config_paths, "no benchmark configs discovered under BENCHMARKS_DIR"
@@ -383,7 +387,7 @@ class TestBenchmarkConfigName:
         ],
     )
     def test_name_matches_the_benchmark_selector(self, rel: str, expected: str) -> None:
-        from nemo_gym.benchmarks import _benchmark_config_name
+        from nemo_gym.environment.benchmarks import _benchmark_config_name
 
         assert _benchmark_config_name(Path(rel)) == expected
 
@@ -391,8 +395,8 @@ class TestBenchmarkConfigName:
         # The point of keying by token: every value `gym list benchmarks` prints must resolve back to its own
         # config via `--benchmark`, using the same `_asset_config_path` mapping the CLI uses. This covers the
         # benchmarks whose `dataset.name` diverges from their on-disk path (e.g. tau2, livecodebench).
-        from nemo_gym.benchmarks import discover_benchmarks
         from nemo_gym.cli.main import _asset_config_path
+        from nemo_gym.environment.benchmarks import discover_benchmarks
 
         benchmarks = discover_benchmarks()
         assert benchmarks, "no benchmarks discovered"
@@ -407,7 +411,7 @@ class TestBenchmarkConfigStrictParsing:
         # still get a hard error on an unresolved `${...}` rather than a silent placeholder.
         from omegaconf.errors import InterpolationKeyError
 
-        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.environment.benchmarks import BenchmarkConfig
 
         cfg = OmegaConf.create({"foo": "${runtime_only_value}"})
         with pytest.raises(InterpolationKeyError):
@@ -790,7 +794,7 @@ class TestPrepareBenchmark:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Older prepared rows keep their own limits unless the cache check sends them back through prepare()."""
-        repo_root = Path(__file__).parents[2]
+        repo_root = Path(__file__).parents[3]
         output = tmp_path / "lmarena_v2_validation.jsonl"
         old_row = {"responses_create_params": {"input": [], "temperature": 0.2, "max_output_tokens": 65536}}
         output.write_text(json.dumps(old_row) + "\n")
@@ -904,7 +908,7 @@ class TestBenchmarkAgentResolution:
         return {"environment_servers": {"legacy_agent": {"agent_server": {"name": agent_name}}}}
 
     def _config(self, **top_level):
-        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.environment.benchmarks import BenchmarkConfig
 
         return BenchmarkConfig.from_initial_config_dict(
             path=Path("bench/config.yaml"), initial_config_dict=OmegaConf.create(top_level), strict=False
@@ -1075,8 +1079,8 @@ class TestMaterializedTasksetBenchmark:
     def test_discover_prepare_collate_and_dispatch(self, config, tmp_path, monkeypatch):
         import json
 
-        from nemo_gym.benchmarks import BenchmarkConfig
         from nemo_gym.data.dataset_preparation import TrainDataProcessor
+        from nemo_gym.environment.benchmarks import BenchmarkConfig
         from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
         benchmark = BenchmarkConfig.from_initial_config_dict(
@@ -1287,7 +1291,7 @@ class TestMaterializedTasksetBenchmark:
         assert loaded[0]["task_input"]["answer"] == "expected"
 
     def test_listing_names_the_environment_server_without_a_single_agent(self, multi_agent_config, tmp_path):
-        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.environment.benchmarks import BenchmarkConfig
 
         benchmark = BenchmarkConfig.from_initial_config_dict(
             path=tmp_path / "config.yaml", initial_config_dict=multi_agent_config, strict=False
@@ -1309,9 +1313,9 @@ class TestAgentPinDiscoveryCollateRollout:
     def test_pin_survives_discovery_collate_and_rollout(self, tmp_path: Path, monkeypatch) -> None:
         import json
 
-        from nemo_gym.benchmarks import BenchmarkConfig
         from nemo_gym.config.config_types import maybe_get_server_instance_config
         from nemo_gym.data.dataset_preparation import TrainDataProcessor
+        from nemo_gym.environment.benchmarks import BenchmarkConfig
         from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
         data_fpath = tmp_path / "bench.jsonl"

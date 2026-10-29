@@ -16,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.registry as registry_module
+import nemo_gym.environment.registry as registry_module
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.environment.manifest import dump_manifest
-from nemo_gym.registry import (
+from nemo_gym.environment.registry import (
     RegistryError,
     _discover_environments_in_dir,
     discover_environment_catalog,
@@ -480,7 +480,7 @@ class TestEnvironmentCatalog:
 
 class TestReadEnvironmentDetails:
     def test_extracts_resources_servers_agent_datasets_and_value(self, tmp_path: Path) -> None:
-        from nemo_gym.registry import read_environment_details
+        from nemo_gym.environment.registry import read_environment_details
 
         cfg = tmp_path / "config.yaml"
         cfg.write_text(

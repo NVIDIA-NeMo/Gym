@@ -60,6 +60,7 @@ from nemo_gym.config.config_types import (
     ResourcesServerInstanceConfig,
 )
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
+from nemo_gym.environment.registry import EnvironmentCatalogEntry
 from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.orchestration.server_supervisor import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
@@ -67,7 +68,6 @@ from nemo_gym.orchestration.server_supervisor import (
     RunHelper,
     _resolve_server_dir,
 )
-from nemo_gym.registry import EnvironmentCatalogEntry
 
 
 class TestSelectShard:
