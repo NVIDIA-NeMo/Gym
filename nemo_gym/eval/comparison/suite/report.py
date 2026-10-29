@@ -109,16 +109,21 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
             "",
             "## Metric normalization",
             "",
+            "Each benchmark shares its metric scales across all models.",
             "Each benchmark averages its selected metrics within each repeat before variance estimation.",
             "",
-            "| Model | Benchmark | Metric | Theoretical low | Theoretical high | Higher is better | Definition source |",
-            "| --- | --- | --- | ---: | ---: | --- | --- |",
+            "| Benchmark | Metric | Theoretical low | Theoretical high | Higher is better | Definition source |",
+            "| --- | --- | ---: | ---: | --- | --- |",
         ]
     )
+    rendered_benchmarks: set[str] = set()
     for cell in result.cells:
+        if cell.benchmark in rendered_benchmarks:
+            continue
+        rendered_benchmarks.add(cell.benchmark)
         for metric in cell.metrics:
             lines.append(
-                f"| {_text(cell.model)} | {_text(cell.benchmark)} | {_text(metric.name)} "
+                f"| {_text(cell.benchmark)} | {_text(metric.name)} "
                 f"| {_number(metric.low)} | {_number(metric.high)} | {metric.higher_is_better} "
                 f"| {_text(metric.definition_source)} |"
             )
