@@ -98,6 +98,17 @@ class TestApp:
     async def test_sanity(self) -> None:
         self._setup_server()
 
+    async def test_api_key_from_environment(self, monkeypatch):
+        monkeypatch.setenv("TEST_JUDGE_KEY", "runtime-credential")
+        server = self._setup_server(openai_api_key_env_var="TEST_JUDGE_KEY")
+        assert server._client.api_key == "runtime-credential"
+        assert server.config.openai_api_key == "dummy_key"
+
+    async def test_missing_api_key_environment_fails_startup(self, monkeypatch):
+        monkeypatch.delenv("TEST_JUDGE_KEY", raising=False)
+        with pytest.raises(KeyError, match="TEST_JUDGE_KEY"):
+            self._setup_server(openai_api_key_env_var="TEST_JUDGE_KEY")
+
     async def test_retry_configuration_is_scoped_to_model_server(self):
         judge = self._setup_server(max_http_attempts=5)
         policy = self._setup_server()

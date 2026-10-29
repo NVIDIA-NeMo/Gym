@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import os
 import random
 from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
@@ -102,6 +103,10 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_base_url: str
     openai_api_key: str
     openai_model: str
+    openai_api_key_env_var: Optional[str] = Field(
+        default=None,
+        description="Read the API key from this environment variable when the server starts.",
+    )
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
@@ -224,7 +229,11 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     def model_post_init(self, context):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.openai_base_url,
-            api_key=self.config.openai_api_key,
+            api_key=(
+                os.environ[self.config.openai_api_key_env_var]
+                if self.config.openai_api_key_env_var
+                else self.config.openai_api_key
+            ),
             default_headers=self.config.openai_default_headers,
             max_num_tries=self.config.upstream_max_num_tries,
             request_timeout_seconds=self.config.upstream_request_timeout_seconds,
