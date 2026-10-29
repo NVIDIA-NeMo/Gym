@@ -55,13 +55,14 @@ An environment is the complete system an agent interacts with to complete a task
 
 ## Architecture
 
-Environments decompose into four concepts:
+Environments decompose into these concepts:
 
 | Concept | NeMo Gym Component |
 |---------|-------------------|
-| Dataset | JSONL: one row per task |
+| Episode order | FastAPI Environment Server (`environment_servers/`): receives each episode and orders seed, agent turn, verification and cleanup; the default `legacy_agent` relays `/run` to the agent |
+| Dataset | JSONL: one row per task, or a folder of task folders (see below) |
 | Agent Harness | FastAPI Agent Server (`responses_api_agents/`) |
-| Verifier + State | FastAPI Resources Server (`resources_servers/`) |
+| Verifier + State | FastAPI Resources Server (`resources_servers/`), or for a task folder its own verifier and the sandbox the `harbor` Environment Server seeds from it |
 | Model | FastAPI Model Server (`responses_api_models/`) or your own |
 
 Base class hierarchy:
@@ -84,6 +85,8 @@ The typical workflow is to create your own environments tailored to your evaluat
 3. **Agent Harness** — reuse a built-in agent harness (e.g. OpenHands) or bring your own
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
 5. **YAML config** — wires the resources server, agent, and model server together
+
+The second way to define tasks is task folders in the Harbor format (`task.toml`, `instruction.md`, `environment/`, `tests/`, `solution/`), run by the `harbor` Environment Server: it seeds a sandbox from the folder, runs the agent, then runs the task's own verifier, with no Resources Server. Copy `environments/hello_world`, then read `fern/versions/latest/pages/data/harbor-tasks.mdx` (tutorial), `data/task-folder-format.mdx` (canonical spec), `data/task-folder-verifiers.mdx` and `agent-interactions/harbor.mdx`. For where a new task-folder benchmark goes, its name and the checks before a PR, follow "Task-folder benchmarks" in `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`; `gym dataset validate <folder>`, the oracle run of every `solution/`, must pass.
 
 For guidance on how to build environments, see `fern/versions/latest/pages/environment-tutorials/`. For evaluation, see `fern/versions/latest/pages/get-started/quickstart.mdx`. For training framework integrations, see `fern/versions/latest/pages/training-tutorials/`.
 

@@ -20,7 +20,7 @@ NeMo Gym implements environments as composable FastAPI servers that communicate 
 |---------|---------------|
 | Dataset | JSONL: Responses API input — each row is a task (a single problem or challenge) for the agent to solve |
 | Agent Harness | FastAPI Agent Server |
-| Verifier + State | FastAPI Resources Server |
+| Verifier + State | FastAPI Resources Server, or a task folder's own verifier, run by the `harbor` Environment Server |
 | Model | FastAPI Model Server or managed by your own agent harness |
 | Episode orchestration | FastAPI Environment Server, which receives each episode and either decides the order of its calls or relays it to the agent |
 
@@ -69,11 +69,13 @@ When an Environment Server drives agent sessions, the Agent Server does not deci
 
 Most shipped configurations still use the `legacy_agent` Environment Server, which Gym also generates by default for any agent that no Environment Server names. It relays `/run` to the agent, and the agent runs the whole episode itself, including any `seed_session` and `verify` calls. Cleanup then depends on the agent, so Resources Servers on this path usually release per-task state in `verify()` (see [Session Cleanup](/main/environment-tutorials/resources-server-apis#session-cleanup)). For that request flow, see [System Design](/main/infrastructure/engineering-notes/system-design).
 
+The `harbor` Environment Server runs tasks defined as task folders in the [Harbor](https://github.com/harbor-framework/harbor) format, and no Resources Server takes part. It keeps the same order: seed, activate, close, verify, clean up. At seed it starts the task's sandbox itself and hands the agent access to it. After it closes the agent session, it runs the task's own verifier from `tests/` in that sandbox, or in a fresh one, and reads the reward the verifier wrote. It then stops every sandbox it started. To choose between Environment Servers, see [Design Agent Interactions](/main/agent-interactions).
+
 ## Server Types
 
 ### Environment Server
 
-Receives each episode: rollout collection submits tasks to its `/run` endpoint. An Environment Server that drives agent sessions, such as `single_agent_turn`, binds an agent and a Resources Server by reference and decides the order of calls: it seeds the Resources Server and Agent Server sessions, activates the agent, closes the agent session, verifies, and cleans up, including on failure. `legacy_agent` binds only an agent and relays `/run` to it. An Environment Server does not implement tools, agent logic, or scoring.
+Receives each episode: rollout collection submits tasks to its `/run` endpoint. An Environment Server that drives agent sessions, such as `single_agent_turn`, binds an agent and a Resources Server by reference and decides the order of calls: it seeds the Resources Server and Agent Server sessions, activates the agent, closes the agent session, verifies, and cleans up, including on failure. `legacy_agent` binds only an agent and relays `/run` to it. `harbor` also binds only an agent: it owns the task's sandbox and runs the task folder's own verifier. An Environment Server implements no tools, agent logic, or scoring of its own. See [Design Agent Interactions](/main/agent-interactions).
 
 ### Agent Server
 
@@ -85,7 +87,7 @@ A stateless LLM inference endpoint that standardizes different model providers b
 
 ### Resources Server
 
-Manages environment-specific tools, per-task state isolation, and verification:
+Manages environment-specific tools, per-task state isolation, and verification for tasks defined as JSONL rows. Task folders carry their own verifier and need no Resources Server. For JSONL rows, the Resources Server provides:
 
 - **Environment-Specific Tools** — capabilities the environment provides to any agent (e.g., code execution, database queries, API calls)
 - **State Isolation** — each rollout gets its own session, so attempts never interfere with each other. Environments range from lightweight (verify a math answer, no setup needed) to heavyweight (provision a Docker container with a specific repo checkout for SWE-Bench-style tasks).

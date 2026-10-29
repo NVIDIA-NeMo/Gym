@@ -1,0 +1,155 @@
+---
+title: "Task Folder Files and Storage"
+description: "Where task-folder runs write their files, which digests identify a task and a dataset, what a rerun reuses and what you can delete."
+position: 6
+---
+
+# Task Folder Files and Storage
+
+A task-folder run writes to three places: the dataset folder, the image records beside its task folders, and the
+run's results folder. This page lists what each file is for and what you can delete.
+
+| Location | What lives there |
+| --- | --- |
+| `environments/harbor/<dataset>/` | Pulled task folders and `manifest.toml` |
+| `<dataset folder>/compose-images.json`, `built-images.json` | Image records |
+| `results/harbor/<taskset>/` | Rows, run config, rollouts, run summary and verifier logs of `gym eval run` |
+| `results/harbor/validation/<taskset>/` | The same, for `gym dataset validate` |
+
+`<taskset>` is the dataset folder's name. `results/harbor/` is relative to the directory you run `gym` from.
+
+## Pulled datasets
+
+Pulled datasets live in the **datasets folder**: `environments/harbor/` in the Gym checkout, or under the working
+directory for a package install. Set `NEMO_GYM_DATASETS_DIR` to move it. Earlier versions pulled into `datasets/` at the checkout root; a checkout
+that still holds datasets there refetches them at the new default, so move each one with
+`mv datasets/<dataset> environments/harbor/<dataset>` or keep the old folder with `NEMO_GYM_DATASETS_DIR=datasets`.
+Each fetched dataset is one folder there:
+
+| Reference | Folder |
+| --- | --- |
+| `harbor:<org>/<name>` (the store's `latest`) | `<name>/` |
+| `harbor:<org>/<name>@<tag>` | `<name>-<tag>/` |
+| `harbor:<org>/<name>@sha256:<digest>` | `<name>-<first 12 digest characters>/` |
+| `harbor:<dataset>@<version>` (registry dataset) | `<dataset>-<version>/` |
+| A reference that a committed entry declares as its `[gym] source` | The entry's folder, such as `terminal_bench_4/` |
+
+A committed entry under `environments/harbor/<entry>/` keeps a README, YAML overlays and a `dataset.toml`; git
+ignores the task folders a pull adds beside them. An entry installed elsewhere, such as under `site-packages`, is
+pulled into `<entry>/` under the datasets folder with copies of its Gym files, recorded in a hidden
+`.gym-layer.json`. Edit the entry's own files, not the copies.
+
+`manifest.toml` beside the task folders holds derived facts only, so equal manifests mean identical inputs:
+
+- `[dataset]`: `source` (`harbor-registry`, `harbor-package-store`, `git` or `local`), `ref` (the fetched
+  reference), `digest`, `dataset_toml_digest`, and `dataset_files_digest` when `task_data.py` or `verifier.py` exist.
+- `[tasks."<id>"]`: the task's folder digest and its upstream pin.
+
+Prepare writes a `manifest.toml` with `source = "local"` for a dataset you author, unless git tracks the folder. A
+later fetch downloads only the task folders the manifest does not record. Registry references
+(`harbor:<dataset>[@<version>]`) resolve through Harbor's registry, cached at `.harbor/registry.json` in the
+datasets folder; nothing refreshes it, so move it aside to see datasets added since.
+
+## Image records
+
+Prepare writes two record files at the dataset root, beside the task folders:
+
+| File | What it holds |
+| --- | --- |
+| `compose-images.json` | The configuration (`Entrypoint`, `Env`, `User`, `WorkingDir` and more) of every image a task starts from, pinned to a digest. |
+| `built-images.json` | Every built image, keyed by the hash of its build context: the image per Compose service, the tool, whether it was pushed, and the tasks that use it. |
+
+A record found on disk is reused without asking the registry. Each built image is recorded once it is built (and
+pushed, with a repository), so an interrupted prepare resumes at the next build. Both files are replaced atomically under a
+lock file beside them (`compose-images.json.lock`, `built-images.json.lock`), so concurrent commands keep each
+other's entries.
+
+## Run outputs
+
+| File under `results/harbor/<taskset>/` | What it is |
+| --- | --- |
+| `tasks_<agent>.jsonl` | The rows of a run with one harness. Each row carries `_ng_digest`, `_ng_dataset_digest` and `task_source`. |
+| `run_config_<agent>.yaml` | The generated run config: the task mapping, the dataset digests and the generated server instances. |
+| `skipped.json` | Task ID to reason, for every task that did not load or build. |
+| `images.json` | Every distinct image a run of the prepared tasks starts, for pre-pulling. |
+| `rendered/` | Rendered task folders of a parameterized dataset. |
+| `rollouts.jsonl` | One result row per episode. |
+| `rollouts_failures.jsonl`, `rollouts_materialized_inputs.jsonl`, `rollouts_aggregate_metrics.json` | Failed episodes, the inputs `--resume` reads, and aggregate metrics. |
+| `rollouts_run_summary.json` | The run summary. |
+| `quality_summary.json`, `rollout_verdicts.jsonl` | The health check's reports. |
+| `verifier/session-<id>/` | One folder per verification. |
+
+`<agent>` is the instance name in the harness's config. The `rollouts` stem follows `--output`:
+`--output results/harbor/x/full.jsonl` writes `full_run_summary.json`, `full_failures.jsonl` and so on.
+
+## The run summary
+
+`rollouts_run_summary.json` explains a results folder on its own. It holds:
+
+- `command`, `target`, `taskset`, `agent` and `dataset` (folder, source and digests).
+- `task_source`: the dataset label the rows carry.
+- `files`: every file of the run by relative path. A file this run did not write is `null`; one an earlier run left
+  under the same name is listed under `stale_files`.
+- `counts`: selected, results, masked, failed and missing.
+- `tasks`: per task and repeat, its `status` (`result`, `failed` or `missing`), `reward`, `mask_sample`,
+  `failure_kind`, verifier mode, wall time and return code, the relative paths of its verifier logs, and the input
+  its row carried. A path missing on disk is listed under `missing_paths`.
+- `skipped`: the tasks that did not load. `unvalidated`: the tasks `gym dataset validate` left out because they have
+  no `solution/`.
+
+Paths are relative to the summary's folder, so a results folder can move as a whole. The summary is written
+whatever the run did.
+
+## Verifier log folders
+
+Each verification gets a fresh `verifier/session-<id>/` folder; the row's `verifier_logs_dir` is its absolute path.
+It holds what the sandbox's `/logs/verifier` held:
+
+- `reward.txt` or `reward.json`.
+- `test-stdout.txt`: everything `test.sh` printed.
+- `trajectory.json`: the transcript the verifier read, in the Agent Trajectory Interchange Format (ATIF).
+- `entrypoint-stdout.txt`: the image entrypoint's output, when it ran.
+- `artifacts/`: the collected artifacts.
+
+## Digests
+
+| Digest | Covers | Changes when |
+| --- | --- | --- |
+| Task digest (`_ng_digest`) | `task.toml`, `instruction.md`, `README.md`, `trajectory.json`, `task_data.json` and everything under `environment/`, `tests/`, `solution/` and `steps/`; plus the dataset's `[gym.defaults]` and the task's override when `dataset.toml` sets them, and a dataset-level `verifier.py` that grades the task | A covered file or setting changes. Byte-code caches and editor leftovers do not count, and neither does `num_repeats`. |
+| Dataset digest (`_ng_dataset_digest`) | The sorted task folder digests, `dataset.toml`, and `task_data.py` and `verifier.py` when present | Any of those changes. |
+| Context hash (`hb__<hash>`) | Harbor's hash of a Dockerfile build context | A file in the context changes. |
+
+The `harbor` Environment Server refuses a row whose task folder no longer matches its digest, so run the command
+again after editing a task. Every `rollouts.jsonl` row carries both digests, and the run config records the
+dataset digest under `tasksets.<name>.dataset_digest`.
+
+## What a rerun reuses
+
+| Item | Reused when |
+| --- | --- |
+| Pulled task folders | The manifest records them and their digests match. A changed folder is refused, not fetched over. |
+| Image configuration records | Always, once recorded for the run's platform. A pull-mode or overlay-mode task starts from the digest recorded there, so a tag that moves later is not picked up. |
+| Built images | The context hash and build inputs match, and the record fits the run: a pushed image serves every run, a local one only runs that push nothing. |
+| Rows and run config | Never. Each run writes them again. |
+| Rollouts | Only with `--resume`, and only when the task selection and digests match. |
+
+## What is safe to delete
+
+- **A results folder**, once you no longer need its results.
+- **A pulled dataset folder**, for a fresh fetch. The image records live there too, so every task that needs a
+  build is built again. In a committed entry's folder, delete only the task folders and `manifest.toml`.
+- **`.harbor/registry.json`**, to refresh the registry.
+- **One entry of `built-images.json`**, to force that image to rebuild. A changed Dockerfile or context gets a new
+  hash and rebuilds on its own.
+- **One entry of `compose-images.json`**, keyed by the image reference as written, to pick up a tag that moved, such
+  as a republished `FROM myorg/env:latest`. The next prepare reads that image again. Moving the whole file aside
+  reads every image again and also rebuilds every built image.
+- **The buildah storage folder** (`/raid/scratch/<user>/nemo-gym-buildah`, or `nemo-gym-buildah` in the system temp
+  folder), when no build runs.
+
+Otherwise keep `compose-images.json` and `built-images.json` with the task folders while you still run the dataset.
+
+<Tip>
+On a cluster, put the datasets folder and results that must outlive the job on shared storage, and keep buildah
+layers and build contexts on node-local disk.
+</Tip>

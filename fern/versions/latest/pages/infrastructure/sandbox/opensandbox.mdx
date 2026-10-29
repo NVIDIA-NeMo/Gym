@@ -175,6 +175,21 @@ sandbox:
         - "command -v python3 >/dev/null || ! command -v apt-get >/dev/null || (apt-get update && apt-get install -y --no-install-recommends python3)"
 ```
 
+## Task folders
+
+When the `harbor` Environment Server runs [task folders](/main/data/harbor-tasks) on OpenSandbox:
+
+- Prepare reads the configuration of private images with the same `images.auth` credentials the provider pulls them
+  with. The provider matches each prefix against the reference it pulls, after `images.rewrites`. A declared
+  `docker_image` is pulled as written; a Dockerfile's `FROM` image and every Compose service image are pulled at their
+  recorded digest, which spells a Docker Hub image without `docker.io/`. So key a Docker Hub image as `myorg/` (prepare
+  also accepts `docker.io/myorg/` for its own reads), and an image on another registry by its host prefix.
+- Images built from a task's Dockerfile must be pushed to a registry, so set `builds.repository` (see
+  [Harbor image builds](/main/reference/configuration#harbor-image-builds)).
+- Compose tasks need `networking.enabled: true`, and `networking.loopback_forwarding: true` when a service uses
+  `network_mode: service:<name>`. Named volumes need `shared_storage`. See
+  [Run on OpenSandbox](/main/data/compose-tasks#run-on-opensandbox) for every setting a Compose task needs.
+
 ## SandboxSpec Provider Options
 
 Set OpenSandbox-specific create options under `SandboxSpec.provider_options`, or under `sandbox_spec.provider_options` in an agent config:
@@ -227,7 +242,7 @@ What the control plane does with it, verified live with the OpenSandbox 0.1.15 S
 - A sandbox created with a policy keeps its `defaultAction` for life. The SDK's `patch_egress_rules` and `delete_egress_rules` change the rules of a running sandbox and the change is enforced within seconds, but no call changes `defaultAction`, and `*` is not a catch-all target: a `deny *` rule under `defaultAction: allow` blocks nothing, and an `allow *` rule under `deny` opens nothing.
 - Under `defaultAction: deny`, name resolution failed and a connection to a raw IP timed out on the deployment probed. The probes did not establish which layer caused the timeout: `dns` filters name resolution only, so a hard-coded IP bypasses the policy and a `no-network` phase is weaker there, while `dns+nft` additionally enforces at the IP layer; confirm which mode your cluster runs before relying on it. An `allow` rule for a host name, a `*.domain` wildcard or an IP literal opened exactly that target.
 
-A public sandbox therefore cannot be switched to a restricted policy once it runs. A workload with a restricted phase creates that phase's sandbox restricted: the Harbor environment server applies a task's `[verifier].network_mode` to the separate verifier's own sandbox at creation (see the Harbor environment server README), which restricts that sandbox for its whole life, image entrypoint and artifact staging included, where Harbor restricts only the verify call itself; and a harness that needs a restricted agent sandbox passes the policy at create as the sandboxed agents do.
+A public sandbox therefore cannot be switched to a restricted policy once it runs. A workload with a restricted phase creates that phase's sandbox restricted: the Harbor environment server applies a task's `[verifier].network_mode` to the separate verifier's own sandbox at creation (see [Shared and separate verification](/main/data/task-folder-verifiers#shared-and-separate-verification)), which restricts that sandbox for its whole life, image entrypoint and artifact staging included, where Harbor restricts only the verify call itself; and a harness that needs a restricted agent sandbox passes the policy at create as the sandboxed agents do.
 
 ## Relevant SandboxSpec Fields
 

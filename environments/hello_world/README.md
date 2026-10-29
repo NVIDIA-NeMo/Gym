@@ -27,15 +27,11 @@ These files form one complete task directory.
 ## Run it
 
 ```bash
-export OPENAI_API_KEY="<api-key>"
-
-gym eval run environments/hello_world \
-  --agent opencode \
-  --model openai/gpt-5 \
-  --sandbox docker
+gym eval run environments/hello_world --agent opencode_agent --sandbox docker \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
-The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
+The command uses OpenCode (`opencode_agent`; the short name `opencode` matches two harnesses and is refused) because it can work with files and tools in the task sandbox while keeping model choice separate. OpenCode calls the model from inside the sandbox, so `<url>`, the base URL of any OpenAI-compatible endpoint, must be reachable from there. The command uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
 
 ### What NeMo Gym starts
 
@@ -46,7 +42,7 @@ For this tutorial and the common task-authoring workflow, you can treat these se
 - The **Environment Server** coordinates setup, agent execution, verification, and cleanup for each rollout.
 - The **Agent Server** runs the agent harness.
 - The **Model Server** provides inference.
-- The **Resources Server** makes task-defined tools, state, and verification capabilities available at runtime.
+- The task's own `tests/test.sh` does the scoring, inside the sandbox. No Resources Server takes part.
 
 ## Validate it
 
@@ -54,12 +50,16 @@ Every task ships a `solution/` (a `solve.sh` here; the parameterized dataset shi
 row instead). The oracle plays it through the task's verifier and expects reward 1:
 
 ```bash
-gym dataset validate environments/hello_world --sandbox opensandbox
+gym dataset validate environments/hello_world --sandbox docker
 ```
+
+On a cluster, pass `--sandbox opensandbox` instead.
 
 ## Check the result
 
-TODO: After runtime integration is available, add the literal successful CLI output and identify the exact result fields and artifacts a user should inspect to verify the score.
+`gym dataset validate` ends with one line per task. The task passed when its line reads `hello_world [repeat 0]`, `oracle solved` and reward `1.0`; the command then exits 0.
+
+Each command writes its results to its own folder: `results/harbor/validation/hello_world/` for validate and `results/harbor/hello_world/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what `tests/test.sh` wrote.
 
 ## Other examples
 

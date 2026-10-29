@@ -1,0 +1,200 @@
+---
+title: "Harbor Environment Server"
+description: "Run task folders with the harbor Environment Server, which seeds a sandbox from each folder, runs the agent in it and scores the attempt with the task's own verifier."
+position: 2
+---
+
+# Harbor Environment Server
+
+The `harbor` Environment Server (`environment_servers/harbor/`) runs tasks written as task folders in the
+[Harbor](https://github.com/harbor-framework/harbor) format. A task folder holds everything one episode needs: the
+settings in `task.toml`, the instruction in `instruction.md`, the software environment in `environment/`, the
+verifier in `tests/` and an optional reference solution in `solution/`. No Resources Server takes part. To write
+task folders, see [Author Task Folders](/main/data/harbor-tasks).
+
+## One episode
+
+`gym eval run` turns each task folder into a row that carries the instruction and a digest of the folder. For each
+row, the server runs one episode:
+
+1. **Seed.** Refuse the row if the task folder changed since the row was written. Start the task's image as a
+   sandbox through the sandbox provider (a group of sandboxes for a Compose task), apply the Dockerfile's `RUN`
+   lines when needed, create the working directory and wait for the health check.
+2. **Activate.** Open an agent session on the configured Agent Server, hand it access to the sandbox and send it
+   the instruction. The harness works in the sandbox until it finishes or runs out of time.
+3. **Close.** Close the agent session and keep what the agent observed. The agent leaves the sandbox to the server.
+4. **Verify.** Write the agent's transcript to `/logs/agent/trajectory.json`, upload the task's `tests/` and run
+   the verifier in the same sandbox, or in a fresh one when the task asks for separate verification. Read the
+   reward from `/logs/verifier/reward.json` or `/logs/verifier/reward.txt`.
+5. **Clean up.** Stop every sandbox of the episode, whatever happened before.
+
+Once the verifier has run, the attempt counts: a missing or invalid reward file scores 0 with a `failure_kind`.
+Only a failure on Gym's side, such as a lost sandbox, sets `mask_sample` and leaves the attempt out of the score. A
+task with several steps runs one turn per step; see [Multi-Step Task Folders](/main/data/multi-step-tasks).
+
+## Task folders or a Resources Server
+
+Choose task folders when each task needs its own image, when the verifier checks what the agent left in the sandbox,
+or to run published Harbor datasets as they are. Choose JSONL rows and a Resources Server when tasks share one
+environment or need no sandbox, when the verifier scores the response in Python on the host, or when the environment
+serves tools to any agent over HTTP or MCP.
+
+## Run task folders
+
+Check the reference solutions first. `gym dataset validate` runs each task's `solution/` through its verifier and
+exits non-zero unless every solution scores 1:
+
+```bash
+gym dataset validate <target> --sandbox docker
+```
+
+Then run a model:
+
+```bash
+gym eval run <target> --agent hermes_agent --sandbox docker \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+```
+
+`<target>` is a task folder, a folder of task folders, a `harbor:` reference to a dataset on the Harbor hub, or the
+name of a committed entry under `environments/harbor/` after `gym dataset pull`. The target folder's name is the
+*taskset*. `gym eval run` loads every task, records image configurations, builds Dockerfiles that need a build,
+writes the rows and a run configuration, then starts the servers and collects rollouts. `--only-tasks` and
+`--exclude-tasks` take comma-separated task names or globs.
+
+### Harnesses
+
+The harness must accept a sandbox when its agent session is seeded and leave the sandbox to the server when the
+session closes. A harness that refuses a sandbox, such as `simple_agent`, fails every episode at seed.
+
+| Harness | How it works |
+| --- | --- |
+| `hermes_agent`, `pi_agent`, `codex_agent`, `opencode_agent`, `openclaw_agent`, `miniswe_sandboxed_agent` | Runs inside the sandbox and calls the model from there, so the sandbox needs network access to the Model Server. |
+| `terminus_2_sandboxed_agent` | Runs on the host and sends its commands into the sandbox. |
+| `harbor_oracle_agent` | Runs the task's reference solution instead of a model. `gym dataset validate` uses it. |
+
+A dataset can limit its harnesses with `allowed_agents` in its `dataset.toml`; `--allow-unsupported-pairing`
+waives the check. A task that declares its own MCP servers needs a harness that can take them; see
+[A task with its own MCP tool](/main/data/task-folder-patterns#a-task-with-its-own-mcp-tool).
+
+## Configure the server
+
+Deployment settings stay out of task and dataset files, so a dataset runs unchanged on every deployment:
+
+| Home | Holds |
+| --- | --- |
+| `task.toml` | Image, resources, timeouts and verifier mode. See [Task settings](/main/data/task-folder-format#task-settings). |
+| `dataset.toml` | Split, license, admitted harnesses, repeats and per-task overrides. See [Dataset settings](/main/data/task-folder-format#dataset-settings). |
+| Server config, a YAML file passed with `--config` | The `harbor` server block, the `sandbox:` provider block and the `builds:` block. |
+| Command line | Harness, sandbox provider, task selection, repeats and `++<key>=<value>` overrides. |
+
+The shipped server block is `environment_servers/harbor/configs/harbor.yaml`, instance `harbor_environment_server`.
+For each taskset, `run_config_<agent>.yaml` defines `harbor_<taskset>_environment`, which inherits from that instance,
+and `harbor_<taskset>_agent`, which inherits from the harness's shipped config. Each byte of the taskset's UTF-8 name
+other than an ASCII letter, digit or `-` is written as `_` and two hex digits, so `terminal_bench_2_1` gives
+`harbor_terminal_5fbench_5f2_5f1_environment`; copy exact names from that file. A key set on the shipped instance
+applies to every taskset:
+
+```yaml
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      image_pull_retries: 4
+      max_concurrent_episodes: 64
+      queue_timeout_seconds: 3600
+```
+
+Pass the file with `--config <file>`, or set one key with
+`++harbor_environment_server.environment_servers.harbor.<key>=<value>`.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `gpu_sandbox_provider` | none | The provider block for tasks that declare GPUs. |
+| `request_gpu_type` | `false` | Pass a task's `gpu_types` to the provider. |
+| `sandbox_ready_timeout_s` | `900` | Bound on one sandbox start. |
+| `image_pull_retries` | `2` | Retries of a sandbox start that failed on an image pull. |
+| `sandbox_provider_options` | `{}` | Provider options for every sandbox. |
+| `sandbox_metadata` | `{benchmark: harbor}` | Metadata added to every sandbox. |
+| `sandbox_resources_override` | none | Replaces task resources: `cpu`, `memory_mib`, `disk_gib`. |
+| `enforce_task_timeouts` | `true` | Bound each episode by its task's own timeouts, from the moment the sandbox is ready. `false` uses `default_episode_timeout_seconds` alone. |
+| `harness_setup_allowance_s` | `300` | Harness setup time before the agent's budget starts. |
+| `verifier_grace_s` | `30` | Extra seconds for a timed-out verifier to stop. |
+| `step_setup_timeout_s` | none | Bound on a step's setup script. Unset, the step's agent budget. |
+| `default_episode_timeout_seconds` | `21600` | Run-wide bound on one episode. A larger multi-step task bound replaces it; see [Episode time budget](/main/data/multi-step-tasks#episode-time-budget). |
+| `cleanup_timeout_seconds` | `180` | Bound on each cleanup step. |
+| `sandbox_ttl_slack_s` | `900` | Extra sandbox lifetime beyond the episode and cleanup budgets. |
+| `max_concurrent_episodes` | none | Cap on episodes at once. Requires `queue_timeout_seconds`. |
+| `queue_timeout_seconds` | none | How long an episode may wait for a slot. |
+| `separate_verifier_for_artifacts` | `false` | Verify tasks that declare `artifacts` in a fresh sandbox. See [Shared and separate verification](/main/data/task-folder-verifiers#shared-and-separate-verification). |
+| `secrets` | `{}` | Secrets by variable name. They fill `${NAME}` in a task's `[verifier].env` only. |
+| `task_mcp_grants` | `off` | Grant a task's `streamable-http` MCP servers to the agent: `optional` or `required`. |
+| `turn_sessions` | `fresh` | Multi-step tasks: `fresh` opens a session per step, `continue` keeps one. See [Continue one harness session](/main/data/multi-step-tasks#continue-one-harness-session). |
+| `compose_variables` | `{}` | Values for `${NAME}` that a task's Compose file leaves unset. See [Template variables](/main/data/compose-tasks#template-variables). |
+| `compose_overlay` | none | Compose files, MCP servers and a prompt template for every task. See [Job-level Compose overlay](/main/data/compose-tasks#job-level-compose-overlay). |
+| `agent_outcome_policy` | built-in rules | Verify, retry or fail a classified agent failure. See [Report a cause; let the environment decide](/main/agent-server/add-or-update-a-harness#report-a-cause-let-the-environment-decide). |
+| `artifacts_dir` | `${results_dir}/harbor/verifier` | Where verifier logs go. `gym eval run` uses the run's `verifier/` folder. |
+| `agent_server`, `tasksets`, `sandbox_provider` | set by `gym eval run` | The harness, the task mapping and the provider block, always the top-level `sandbox:` block. Do not set them. |
+
+### Harness settings
+
+Gym sets these keys on the generated `harbor_<taskset>_agent` instance, where they win over the harness's shipped
+config:
+
+| Harness | Keys Gym sets |
+| --- | --- |
+| `hermes_agent` | `enabled_toolsets: [terminal]`, `chat_template_kwargs_enabled: false`, `sandbox_provider: null` |
+| `terminus_2_sandboxed_agent` | `num_workers: 1`, `resources_server: null` |
+| `miniswe_sandboxed_agent` | `num_workers: 1` |
+
+Change these keys on the generated instance, not the shipped one. With `chat_template_kwargs_enabled: false`, Hermes
+does not add `truncate_history_thinking: false`, the vLLM chat template argument that keeps a reasoning model's earlier
+thinking in its history. For a vLLM Model Server, turn it back on:
+
+```bash
+gym eval run terminal_bench_2_1 --agent hermes_agent --sandbox docker \
+  --model-type vllm_model --model <model> --model-url <url> --model-api-key <key> \
+  ++harbor_terminal_5fbench_5f2_5f1_agent.responses_api_agents.hermes_agent.chat_template_kwargs_enabled=true
+```
+
+### Sandbox providers
+
+`--sandbox <provider>` loads `nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml`, which defines the
+top-level `sandbox:` block. Use `docker` on one machine and `opensandbox` on a cluster, and add provider settings in
+a `--config` file that repeats the `sandbox:` block. See [Sandbox API](/main/infrastructure/sandbox) for the
+providers, [Multi-Container Tasks](/main/data/compose-tasks) for what Compose tasks need, and
+[Harbor image builds](/main/reference/configuration#harbor-image-builds) for Dockerfiles that need a build.
+
+## What the server writes
+
+A run writes under `results/harbor/<taskset>/`, relative to the directory you run `gym` from, and
+`gym dataset validate` writes under `results/harbor/validation/<taskset>/`:
+
+| Path | What it holds |
+| --- | --- |
+| `tasks_<agent>.jsonl`, `run_config_<agent>.yaml` | The rows and the generated run configuration. `<agent>` is the harness's instance name, such as `hermes_agent`. |
+| `rollouts.jsonl` | One result per task and repeat. |
+| `rollouts_run_summary.json` | What ran, every file of the run, and each task's status, reward and log paths. |
+| `verifier/` | One folder per verification, written by the server, with `test-stdout.txt`, the reward file and `trajectory.json`. |
+| `skipped.json` | The tasks that did not load, with the reasons. |
+
+Each result carries `reward`, `verifier_rewards`, `mask_sample`, `failure_kind`, `verifier_mode` and
+`verifier_logs_dir`, the episode's folder under `verifier/`. See
+[The run summary](/main/reference/task-folder-storage#the-run-summary) for every field and
+[What is safe to delete](/main/reference/task-folder-storage#what-is-safe-to-delete) before you clean up.
+
+## Next steps
+
+<Cards>
+
+<Card title="Author Task Folders" href="/main/data/harbor-tasks">
+Scaffold a dataset, add tasks and check them with the oracle.
+</Card>
+
+<Card title="Evaluate Terminal-Bench 2.1" href="/main/tutorials/evaluation-tutorials/terminal-bench-2-1-harbor">
+Run a published Harbor dataset end to end.
+</Card>
+
+<Card title="Troubleshoot Task Folders" href="/main/troubleshooting/task-folders">
+Fix preparation, sandbox and verifier failures.
+</Card>
+
+</Cards>

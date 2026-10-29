@@ -171,6 +171,8 @@ The Environment Server drives an agent session through three HTTP endpoints. `Si
 | `POST /ng-rollout/<capture_key>[/training-token-capture]/v1/responses` | The task's `responses_create_params` | `NeMoGymResponse` | Session branch of `responses()` |
 | `POST /v1/agent_sessions/close` | `AgentCloseSessionRequest` | `AgentCloseSessionResponse` | `_close_agent_session_state()` |
 
+Every Environment Server that drives sessions uses these endpoints: `single_agent_turn` for a Resources Server task, and `harbor` for a task folder, where the Environment Server creates the sandbox itself and passes it in `sandbox_access`. See [Design Agent Interactions](/main/agent-interactions).
+
 `AgentSeedSessionRequest` carries `agent_session_id`, `episode_id`, `task_id`, `tool_accesses`, and an optional `sandbox_access`. `AgentCloseSessionResponse` returns `agent_observations`, an optional `trajectory` (the harness's own turns, which the Environment Server forwards as `ng_trajectory` on the result and on a failure row alike), and an optional `resources_cookies` jar.
 
 The base class in [`nemo_gym/base_responses_api_agent.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/base_responses_api_agent.py) enforces the seed, cookie, and close rules below. The adapter implements the activation rules in `responses()`, as Hermes, Pi, Codex, OpenCode, and OpenClaw do. Every adapter must preserve all of them:

@@ -1,0 +1,214 @@
+---
+title: "Multi-Container Tasks"
+description: "Author a task folder whose environment runs sidecar containers beside the agent's sandbox, described with Docker Compose."
+position: 9
+---
+
+# Multi-Container Tasks
+
+Some tasks need more than one container: a database the agent queries, an API it calls, a simulated user, or a
+service that records what the agent did. Describe them with a Docker Compose file in the task's `environment/`
+folder. The `harbor` Environment Server starts each service as its own sandbox, joins them into one group for the
+episode, and stops the group when the episode ends.
+
+Use Compose when the task needs a process with its own image, or one the agent must not control. A tool the agent
+calls can often run in the agent's sandbox instead (see
+[A task with its own MCP tool](/main/data/task-folder-patterns#a-task-with-its-own-mcp-tool)).
+
+<Note>
+A Compose task needs a sandbox provider that connects the sandboxes of a group. On main, that is OpenSandbox. Other
+providers, Docker included, refuse to start a Compose group, so its episodes fail at seed. A `compose_overlay`
+that names Compose `files` makes every task of the run a group.
+</Note>
+
+## Layout
+
+```text
+my-task/
+├── task.toml
+├── instruction.md
+├── environment/
+│   ├── Dockerfile
+│   ├── docker-compose.yaml
+│   └── seed.json
+├── tests/test.sh
+└── solution/solve.sh
+```
+
+Name the file `environment/docker-compose.yaml`, the name Harbor reads. Service `main` is the agent's sandbox, and
+every other service is a sidecar:
+
+```yaml
+services:
+  main:
+    image: ${MAIN_IMAGE_NAME}
+    depends_on:
+      - api
+  api:
+    image: ghcr.io/example/aw-api:1.0
+    volumes:
+      - ./seed.json:/app/seed.json:ro
+    expose:
+      - "8080"
+```
+
+`${MAIN_IMAGE_NAME}` is the task's own image. Services reach each other by name, so the agent calls
+`http://api:8080`. A sidecar with a `build:` section is built once at prepare, like a build-mode Dockerfile (see
+[Dockerfile modes](/main/data/task-folder-format#dockerfile-modes) and
+[Harbor image builds](/main/reference/configuration#harbor-image-builds)).
+
+Prepare (`gym eval run` or `gym dataset validate`) resolves the file, checks every service, and records each image's
+configuration in `compose-images.json` at the dataset root. A task it cannot run is left out and listed in
+`skipped.json` with the reason, and `gym eval run` stops unless you pass `--skip-unloadable`. The server checks the
+document again at seed.
+
+`artifacts` entries and `[[verifier.collect]]` hooks can name a `service`. A sidecar that writes a file for `test.sh`
+needs [Sidecar inputs](/main/data/task-folder-verifiers#sidecar-inputs).
+
+## Run on OpenSandbox
+
+The shipped OpenSandbox config does not enable networking between sandboxes. Add a deployment file and pass it with
+`--config`:
+
+```yaml
+sandbox:
+  opensandbox:
+    networking:
+      enabled: true
+    runtime_requirements:
+      shm_size_metadata_key: <cluster label for shm size>
+    shared_storage:
+      host_path: /mnt/shared
+  volume_sources:
+    pgdata: datasets/pgdata
+```
+
+```bash
+gym dataset validate my-dataset --sandbox opensandbox --config compose-deployment.yaml
+```
+
+| Setting | Needed when |
+| --- | --- |
+| `networking.enabled` | Always. |
+| `networking.loopback_forwarding` | A service uses `network_mode: service:<name>`. |
+| `runtime_requirements.shm_size_metadata_key` | A service sets `shm_size`. Your cluster operator knows the label. |
+| `runtime_requirements.capability_probes` | A service uses `cap_add`: one probe command per capability. |
+| `shared_storage.host_path` | A service mounts a named volume, or a sidecar binds a `/logs` path. |
+| `volume_sources` | A volume is `external: true`, or a bind source sits outside the task. |
+| `images.auth` | A service image is private. Prepare reads its configuration with the same credentials. Compose images are pulled at their recorded digest, so key a Docker Hub image as `myorg/`, whether the file writes `myorg/img` or `docker.io/myorg/img`, and an image on another registry by its host prefix (see [OpenSandbox Provider](/main/infrastructure/sandbox/opensandbox#task-folders)). |
+
+See [OpenSandbox](/main/infrastructure/sandbox/opensandbox) and
+[Compose Services](/main/infrastructure/sandbox/compose#networking-and-shared-storage).
+
+## Template variables
+
+Prepare resolves `${NAME}` the way Harbor's `docker compose` does, and the server resolves it again at seed. The first
+source that defines a name wins:
+
+1. Gym's infrastructure variables, below.
+2. The task's `[environment].env`. A whole value `${VAR}` or `${VAR:-default}` reads the process environment.
+3. The process environment of the command that runs prepare or the server.
+4. `environment/.env`, read as Compose reads it.
+5. At seed only, the server's `compose_variables`.
+6. The default in the expression, such as `${VAR:-default}`.
+
+At prepare, a name no source sets becomes an empty string, with a warning. At seed it fails the episode before any
+sandbox starts.
+
+| Variable | Value |
+| --- | --- |
+| `MAIN_IMAGE_NAME` | The task's resolved image. |
+| `CONTEXT_DIR` | The task's `environment/` folder. |
+| `TEST_DIR` | `/tests` |
+| `COMPOSE_PROJECT_NAME` | `hb__<hash>`, stable per task. Not the runtime project name. |
+| `PREBUILT_IMAGE_NAME` | `[environment].docker_image`, when declared. |
+| `CPUS`, `MEMORY` | `[environment].cpus`, and `memory_mb` as `<n>M`, when declared. |
+| `HOST_VERIFIER_LOGS_PATH`, `HOST_AGENT_LOGS_PATH`, `HOST_ARTIFACTS_PATH` | The `/logs` paths. `ENV_` spellings hold the same values. |
+
+<Warning>
+A task's Compose file can read any variable of the process environment, an API key included. Run third-party
+datasets from an environment that exports only what they need, and run prepare and the server with the same
+variables.
+</Warning>
+
+Values that belong to the deployment, such as a sidecar's model endpoint, go in the server's `compose_variables`.
+Each entry takes one source: a literal `value`, a server process variable `env`, or a `model_server`, whose
+sandbox-reachable URL becomes the value:
+
+```yaml
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      compose_variables:
+        SIM_USER_BASE_URL: {model_server: user_model}
+        SIM_USER_API_KEY: {env: USER_MODEL_API_KEY}
+        SIM_USER_MODEL: {value: gpt-5.5}
+```
+
+A service's `env_file` entries are read at prepare and inlined into its `environment`, which wins over them. The file
+must sit under the task's `environment/` folder and must not be a symbolic link. A missing file leaves the task out
+unless the entry says `required: false`.
+
+## Service fields
+
+Beyond `image`, `command`, `entrypoint`, `environment`, `working_dir`, `user`, `depends_on`, `healthcheck`, `expose`,
+`labels`, `cap_add`, `shm_size` and `network_mode: service:<name>`, these fields have a defined meaning. Any other key,
+such as `privileged` or `secrets`, leaves the task out.
+
+| Field | Meaning in a sandbox group |
+| --- | --- |
+| `deploy.resources` | `limits.cpus` and `limits.memory` size the sandbox. A numeric GPU `count` routes the service to the server's `gpu_sandbox_provider`, when set. `count: all` and `limits.pids` fail. |
+| `restart` | Accepted. Nothing restarts. |
+| `pull_policy` | `always`, `missing` or `never`. |
+| `platform` | Must match the deployment platform, `linux/amd64` by default. |
+| `networks` | Become name scopes on the group's one network. `internal: true`, `ipam`, `driver_opts` and static addresses fail. |
+| `ports` | A container port alone. Fixed published ports, `host_ip`, non-TCP protocols and ranges fail. |
+| `extra_hosts` | Host-to-IP entries. `host-gateway` fails, and a non-root sidecar cannot take them. |
+| `post_start` | Run once the command starts. `privileged` hooks and `pre_stop` fail. |
+| `tmpfs`, `ulimits`, `sysctls`, `security_opt` | Not supported on OpenSandbox, the only provider that starts a group, so the task is left out. |
+
+## Volumes
+
+| Volume | How the group runs it |
+| --- | --- |
+| Bind of a task file or folder | Uploaded before the service's command runs. Keep the source under `environment/`, `tests/`, `solution/` or `steps/`. `:ro` is not enforced, since the upload is a copy. |
+| Named volume under top-level `volumes:` | A folder on shared storage, mounted into each service that names it and removed when the group stops. |
+| `external: true` volume, or a host path outside the task | Mapped through `volume_sources` to a folder under the shared storage root, which outlives the group. |
+| A `/logs` path | Created in `main`. A sidecar that binds one shares it with `main` through shared storage. |
+
+Anonymous volumes, `tmpfs` volumes, bind `propagation` and volume drivers leave the task out. Keep data that `test.sh`
+must trust in `tests/`, which the server uploads after the agent's turn.
+
+## Job-level Compose overlay
+
+The `compose_overlay` setting of the `harbor` Environment Server attaches services, tools and a prompt template to
+every task of a run without editing the tasks, as Harbor's `extra_docker_compose`, `agents[].mcp_servers` and
+`prompt_template_path` job settings do. Use it to run one backend, such as an agent memory service, beside every
+task. It goes in the server block (see [Configure the server](/main/agent-interactions/harbor#configure-the-server)):
+
+```yaml
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      compose_overlay:
+        files: [/abs/path/memory-compose.yaml, /abs/path/memory-glue.yaml]
+        mcp_servers:
+          - {name: memory, transport: streamable-http, url: "http://memory:8888/mcp/"}
+        prompt_template: /abs/path/memory_prompt.md.j2
+```
+
+| Key | What it does |
+| --- | --- |
+| `files` | Merged in order onto each task's Compose document, as Compose merges `-f` files, `!reset` and `!override` included. An image-only task first becomes a one-service group, `main`. |
+| `mcp_servers` | Merged by name with the task's `[[environment.mcp_servers]]`. The overlay wins on a name. |
+| `prompt_template` | A Jinja2 file using `{{ instruction }}`, rendered around the first turn's instruction. |
+
+- Write absolute paths. Relative paths inside an overlay file resolve against the task's `environment/` folder.
+- In an overlay file, `compose_variables` win over the task's own sources, so a task cannot redirect an overlay
+  sidecar.
+- A task service with an overlay service's name merges with it, with a warning. Tag the overlay service `!override`
+  to use its definition alone.
+- Prepare reads the block too, records the overlay's images and checks each merged document. Put it in `env.yaml` or
+  a `--config` file that both prepare and the server read, and prepare again after you change it. Image references
+  must resolve at prepare, without `compose_variables`.
+- Restart the servers after you edit the template. Prepare needs Jinja2: install the `ray` extra.
