@@ -234,7 +234,7 @@ class TestConversationalMode:
         client = TestClient(server.setup_webserver())
         _seed(client, "bookshop_1")
 
-        answer = client.post("/ask", json={"question": "What counts as a bestseller?"}).json()
+        answer = client.post("/c_interact/ask", json={"question": "What counts as a bestseller?"}).json()
 
         assert answer == {"reply": "At least 10 copies.", "answered": True, "questions_left": 4}
         responder_prompt = server_client.post.await_args_list[1].kwargs["json"].input[0].content
@@ -247,7 +247,7 @@ class TestConversationalMode:
         client = TestClient(server.setup_webserver())
         _seed(client, "bookshop_1")
 
-        answer = client.post("/ask", json={"question": "Just give me the SQL?"}).json()
+        answer = client.post("/c_interact/ask", json={"question": "Just give me the SQL?"}).json()
 
         assert answer["reply"] == UNANSWERABLE_REPLY
         assert server_client.post.await_count == 1
@@ -258,7 +258,7 @@ class TestConversationalMode:
         client = TestClient(server.setup_webserver())
         _seed(client, "bookshop_1")
 
-        answers = [client.post("/ask", json={"question": "?"}).json() for _ in range(3)]
+        answers = [client.post("/c_interact/ask", json={"question": "?"}).json() for _ in range(3)]
 
         assert [answer["answered"] for answer in answers] == [True, True, False]
         assert "last question" in answers[1]["reply"]
@@ -267,9 +267,9 @@ class TestConversationalMode:
         server, server_client = _server()
         client = TestClient(server.setup_webserver())
         _seed(client, "bookshop_1")
-        client.post("/submit", json={"sql": "SELECT name FROM authors"})
+        client.post("/c_interact/submit", json={"sql": "SELECT name FROM authors"})
 
-        answer = client.post("/ask", json={"question": "What did I get wrong?"}).json()
+        answer = client.post("/c_interact/ask", json={"question": "What did I get wrong?"}).json()
 
         assert answer["answered"] is False
         server_client.post.assert_not_awaited()
@@ -278,8 +278,8 @@ class TestConversationalMode:
         client = TestClient(_server()[0].setup_webserver())
         _seed(client, "bookshop_1")
 
-        first = client.post("/submit", json={"sql": "SELECT name FROM authors"}).json()
-        second = client.post("/submit", json={"sql": CORRECT_1}).json()
+        first = client.post("/c_interact/submit", json={"sql": "SELECT name FROM authors"}).json()
+        second = client.post("/c_interact/submit", json={"sql": CORRECT_1}).json()
 
         assert (first["passed"], first["finished"], "one more attempt" in first["feedback"]) == (False, False, True)
         assert (second["passed"], second["finished"]) == (True, True)
@@ -291,8 +291,8 @@ class TestConversationalMode:
         client = TestClient(_server()[0].setup_webserver())
         _seed(client, "bookshop_1")
 
-        client.post("/submit", json={"sql": "SELECT nope"})
-        last = client.post("/submit", json={"sql": "SELECT name FROM authors"}).json()
+        client.post("/c_interact/submit", json={"sql": "SELECT nope"})
+        last = client.post("/c_interact/submit", json={"sql": "SELECT name FROM authors"}).json()
 
         assert (last["passed"], last["finished"]) == (False, True)
         assert _verify(client)["reward"] == 0.0
@@ -301,8 +301,8 @@ class TestConversationalMode:
         client = TestClient(_server()[0].setup_webserver())
         _seed(client, "bookshop_3")
 
-        first = client.post("/submit", json={"sql": TASKS["bookshop_3"]["sol_sql"][0]}).json()
-        second = client.post("/submit", json={"sql": TASKS["bookshop_3"]["follow_up"]["sol_sql"][0]}).json()
+        first = client.post("/c_interact/submit", json={"sql": TASKS["bookshop_3"]["sol_sql"][0]}).json()
+        second = client.post("/c_interact/submit", json={"sql": TASKS["bookshop_3"]["follow_up"]["sol_sql"][0]}).json()
 
         assert TASKS["bookshop_3"]["follow_up"]["query"] in first["feedback"]
         assert (first["finished"], second["finished"], second["phase"]) == (False, True, 2)
@@ -312,10 +312,23 @@ class TestConversationalMode:
         client = TestClient(_server(phase_rewards=[{"first_attempt": 1.0, "after_debug": 0.5}])[0].setup_webserver())
         _seed(client, "bookshop_3")
 
-        result = client.post("/submit", json={"sql": TASKS["bookshop_3"]["sol_sql"][0]}).json()
+        result = client.post("/c_interact/submit", json={"sql": TASKS["bookshop_3"]["sol_sql"][0]}).json()
 
         assert result["finished"] is True
         assert _verify(client)["reward"] == 1.0
+
+    def test_an_a_interact_session_refuses_the_c_interact_routes(self) -> None:
+        server, server_client = _server()
+        client = TestClient(server.setup_webserver())
+        _seed(client, "bookshop_1", mode="a_interact")
+
+        # Without the check, this submission would be graded without its BIRD-COIN cost.
+        assert client.post("/c_interact/submit", json={"sql": CORRECT_1}).status_code == 409
+        assert client.post("/c_interact/ask", json={"question": "?"}).status_code == 409
+
+        server_client.post.assert_not_awaited()
+        verification = _verify(client)
+        assert (verification["reward"], verification["phases"], verification["questions_asked"]) == (0.0, [], 0)
 
 
 class TestAgenticMode:
@@ -419,7 +432,7 @@ class TestSessionSandbox:
         broken = _sandbox_root(server, "bookshop_1")
         (broken / "grading.py").unlink()
 
-        submitted = client.post("/submit", json={"sql": CORRECT_1})
+        submitted = client.post("/c_interact/submit", json={"sql": CORRECT_1})
 
         assert submitted.json()["passed"] is True
         assert _sandbox_root(server, "bookshop_1") != broken
@@ -431,7 +444,7 @@ class TestSessionSandbox:
         _seed(client, "bookshop_1")
         (_sandbox_root(server, "bookshop_1") / "grading.py").unlink()
 
-        submitted = client.post("/submit", json={"sql": CORRECT_1})
+        submitted = client.post("/c_interact/submit", json={"sql": CORRECT_1})
 
         assert submitted.status_code == 503
         assert "grading.py grade failed in the sandbox" in submitted.json()["detail"]

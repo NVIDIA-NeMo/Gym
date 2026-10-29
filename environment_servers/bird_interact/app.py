@@ -230,11 +230,13 @@ class BirdInteractEnvironmentServer(
         sql = extract_sql(reply)
         if sql is None:
             answer = await self._call_resources(
-                episode, "/ask", AskRequest(question=reply), AskResponse, stage="agent"
+                episode, "/c_interact/ask", AskRequest(question=reply), AskResponse, stage="agent"
             )
             # A question the protocol does not allow ends the episode without a submission.
             return UserMessage(content=answer.reply) if answer.answered else Stop(reason="no_sql_submitted")
-        result = await self._call_resources(episode, "/submit", SubmitRequest(sql=sql), SubmitResponse, stage="agent")
+        result = await self._call_resources(
+            episode, "/c_interact/submit", SubmitRequest(sql=sql), SubmitResponse, stage="agent"
+        )
         if result.finished:
             return Stop(reason="solved" if result.passed else "failed")
         return UserMessage(content=result.feedback)

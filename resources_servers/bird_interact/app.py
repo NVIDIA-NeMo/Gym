@@ -4,10 +4,10 @@
 """BIRD-Interact episode state: the database sandbox, the user simulator, the grader and the budgets.
 
 One session holds one task. Its database lives in a sandbox that the session starts at seed and stops at close; the
-agent's SQL and the grading run there (``grading.py``). The Environment Server calls ``/ask`` and ``/submit`` in
-c-Interact. In a-Interact the agent calls the same actions as tools under ``/a_interact/``, where each one costs
-BIRD-COIN. Only that prefix is granted to the agent, so it cannot reach ``/verify`` or the c-Interact routes, and the
-agent never gets the sandbox itself.
+agent's SQL and the grading run there (``grading.py``). In c-Interact the Environment Server calls the routes under
+``/c_interact/``. In a-Interact the agent calls the same actions as tools under ``/a_interact/``, where each one costs
+BIRD-COIN. Only that prefix is granted to the agent, and the agent never gets the sandbox itself. Each mode's routes
+refuse a session of the other mode.
 """
 
 import asyncio
@@ -223,8 +223,8 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
 
         app.router.lifespan_context = lifespan
         app.post("/episode_context")(self.episode_context)
-        app.post("/ask")(self.ask)
-        app.post("/submit")(self.submit)
+        app.post("/c_interact/ask")(self.ask)
+        app.post("/c_interact/submit")(self.submit)
         app.post("/a_interact/ask")(self.tool_ask)
         app.post("/a_interact/submit")(self.tool_submit)
         app.post("/a_interact/execute")(self.tool_execute)
@@ -437,6 +437,12 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             raise ResourcesSessionLostError("No BIRD-Interact session; seed_session must be called first")
         return session
 
+    def _c_interact_session(self, request: Request) -> _Session:
+        session = self._session(request)
+        if session.mode != "c_interact":
+            raise ResourcesSessionConflictError("c-Interact routes are not available in an a-Interact session")
+        return session
+
     # ----- routes for the Environment Server ----- #
 
     async def episode_context(self, request: Request) -> EpisodeContext:
@@ -456,7 +462,7 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
 
     async def ask(self, request: Request, body: AskRequest) -> AskResponse:
         """Answer a c-Interact clarifying question: in phase 1, before the first submission, within the budget."""
-        session = self._session(request)
+        session = self._c_interact_session(request)
         async with session.lock:
             budget = session.task.ambiguity_count + self.config.question_patience
             # As in BIRD-Interact, the debug turn after a failed submission is one more SQL attempt, not a question.
@@ -470,7 +476,7 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             return AskResponse(reply=reply, questions_left=questions_left)
 
     async def submit(self, request: Request, body: SubmitRequest) -> SubmitResponse:
-        session = self._session(request)
+        session = self._c_interact_session(request)
         async with session.lock:
             return await self._submit(session, body.sql)
 
