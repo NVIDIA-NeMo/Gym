@@ -69,7 +69,7 @@ from nemo_gym._checkpoint.model_workers import (
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.correlation import CorrelationPathError, resolve
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -1229,15 +1229,6 @@ def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str
     return None
 
 
-# Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
-# <id>. The constant + producer (apply_rollout_prefix) are in server_utils.
-_ROLLOUT_PATH_RE = re.compile(
-    rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)"
-    rf"(?:/(?P<token_capture>{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)}))?"
-    rf"(?P<rest>/.*)$"
-)
-
-
 def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
     """Build a CaptureStore when observability is enabled; otherwise None."""
     if not config.observability_enabled:
@@ -1639,12 +1630,22 @@ class _CaptureMiddleware:
         rollout_from_path: Optional[str] = None
         token_capture_requested = False
         capture_prefix = ""
-        prefix_match = _ROLLOUT_PATH_RE.match(path)
-        if prefix_match:
-            rollout_from_path = prefix_match.group("rollout_id")
-            token_capture_requested = prefix_match.group("token_capture") is not None
-            capture_prefix = path[: prefix_match.start("rest")]
-            path = prefix_match.group("rest")
+        try:
+            # The outermost middleware has already resolved this path; this reads its result.
+            resolved = resolve(scope)
+        except CorrelationPathError as error:
+            await Response(
+                content=json.dumps({"detail": str(error)}),
+                status_code=400,
+                media_type="application/json",
+            )(scope, receive, send)
+            return
+        if resolved is not None and resolved[0].capture_key is not None:
+            correlation, rest = resolved
+            rollout_from_path = correlation.capture_key
+            token_capture_requested = correlation.token_capture
+            capture_prefix = path[: len(path) - len(rest)]
+            path = rest
             scope = scope_with_routed_path(scope, path)
 
         method = str(scope.get("method") or "").upper()
