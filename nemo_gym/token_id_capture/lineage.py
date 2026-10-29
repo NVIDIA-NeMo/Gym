@@ -46,7 +46,7 @@ import json
 import logging
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -69,6 +69,7 @@ from nemo_gym.token_id_capture.protocols import (
     RolloutRemovalPayload,
     RolloutRetiredError,
 )
+from nemo_gym.token_id_capture.reasoning_witness import ReasoningWitness, make_witness, select_witness
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
 
 
@@ -77,6 +78,26 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _load_reasoning_witness(payload: object) -> ReasoningWitness | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        fields = dict(payload)
+        fields["output_ids"] = tuple(fields["output_ids"])
+        witness = ReasoningWitness(**fields)
+        if not isinstance(witness.context_len, int) or witness.context_len < 0:
+            return None
+        if not all(isinstance(value, str) and value for value in witness.output_ids):
+            return None
+        if not isinstance(witness.call_id, str) or not all(
+            isinstance(value, str) and len(value) == 64 for value in [witness.context_digest, witness.output_digest]
+        ):
+            return None
+        return witness
+    except (TypeError, ValueError, KeyError):
+        return None
 
 
 def _log_late_write_dropped(rollout_id: str, model_call_id: str, staging_key: str | None = None) -> None:
@@ -236,6 +257,7 @@ class LineageNode:
     cum_tokens: list[int] | None
     cum_len: int
     digest: str
+    reasoning_witness: ReasoningWitness | None = None
     entry_offset: int = -1
     # These fields describe the request context sent for this call.
     # They exclude the model's response.
@@ -298,6 +320,18 @@ class RolloutLineage:
             digests = {(node.digest, node.cum_len) for node in candidates}
             if len(digests) == 1 and candidates[0].digest:
                 candidates = [min(candidates, key=lambda node: node.call_id)]
+        if len(candidates) > 1:
+            witnessed = select_witness(
+                messages,
+                [
+                    node.reasoning_witness
+                    for node in candidates
+                    if node.reasoning_witness is not None and node.reasoning_witness.call_id == node.call_id
+                ],
+            )
+            if witnessed is not None:
+                candidates = [node for node in candidates if node.call_id == witnessed]
+                reason = "reasoning_output_witness"
         if len(candidates) != 1:
             return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
         return ParentResolutionStatus.RESOLVED, candidates[0], reason
@@ -421,6 +455,11 @@ class RolloutLineage:
         """
         node = LineageNode(
             call_id=call_id,
+            reasoning_witness=make_witness(
+                call_id, list((messages or [])[:context_len]), list((messages or [])[context_len:])
+            )
+            if context_len is not None
+            else None,
             cum_tokens=list(cum_tokens),
             cum_len=cum_len if cum_len is not None else len(cum_tokens),
             digest=digest,
@@ -1031,6 +1070,7 @@ class FileLineageStore(IncrementalLineageStore):
         for call_id, record in records.items():
             lineage.by_call_id[call_id] = LineageNode(
                 call_id=call_id,
+                reasoning_witness=_load_reasoning_witness(record.get("reasoning_witness")),
                 cum_tokens=None,
                 cum_len=int(record.get("cum_len") or len(record.get("cumulative_token_ids") or ())),
                 digest=str(record["digest"]),
@@ -1076,6 +1116,9 @@ class FileLineageStore(IncrementalLineageStore):
             "digest": commit.record.cumulative_hash,
             **_custody_columns(commit.record, commit.staging_chain),
         }
+        witness = make_witness(model_call_id, request_items, list(commit.response_items))
+        if witness is not None:
+            record["reasoning_witness"] = {**asdict(witness), "output_ids": list(witness.output_ids)}
         with self._locked(commit.rollout_id):
             records = self._read(commit.rollout_id)
             if not records and self._is_retired(commit.rollout_id):
@@ -1091,6 +1134,11 @@ class FileLineageStore(IncrementalLineageStore):
                     if "tool_call_turn_fingerprint" in existing
                     else {key: value for key, value in record.items() if key != "tool_call_turn_fingerprint"}
                 )
+                if "reasoning_witness" not in existing:
+                    comparable = {key: value for key, value in comparable.items() if key != "reasoning_witness"}
+                else:
+                    # Match the JSON representation after reloading a durable row.
+                    comparable = json.loads(json.dumps(comparable))
                 if existing != comparable:
                     raise ValueError(f"conflicting lineage record for model call {model_call_id}")
                 return
