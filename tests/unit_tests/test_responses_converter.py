@@ -16,6 +16,7 @@
 
 import json
 import logging
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -653,6 +654,77 @@ def test_responses_to_chat_completion_still_rejects_other_function_output_parts_
     ):
         converter.responses_to_chat_completion_create_params(
             responses_params, drop_unrepresentable_request_fields=True
+        )
+
+
+PNG_URL = "data:image/png;base64,iVBORw0KGgo="
+
+
+def _tool_output_params(*parts: dict) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"type": "function_call_output", "call_id": "call_1", "output": list(parts)}]
+    )
+
+
+@pytest.fixture
+def inlining_converter() -> ResponsesConverter:
+    return ResponsesConverter(return_token_id_information=False, inline_tool_output_images=True)
+
+
+def test_inline_tool_output_images_keeps_each_image_in_the_tool_message(inlining_converter: ResponsesConverter):
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params(
+            {"type": "input_text", "text": "plot:"},
+            {"type": "input_image", "image_url": PNG_URL, "detail": "high"},
+            {"type": "input_image", "image_url": PNG_URL},
+        )
+    )
+
+    assert params.messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "text", "text": "plot:"},
+                {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}},
+                {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "auto"}},
+            ],
+        }
+    ]
+
+
+def test_inline_tool_output_images_takes_precedence_over_the_placeholder(inlining_converter: ResponsesConverter):
+    # The Codex CLI needs drop_unrepresentable_request_fields for its other fields; its images still reach the model.
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params({"type": "input_image", "image_url": PNG_URL, "detail": "high"}),
+        drop_unrepresentable_request_fields=True,
+    )
+
+    assert params.messages[0]["content"] == [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}]
+
+
+def test_inline_tool_output_images_sends_original_detail_as_high(inlining_converter: ResponsesConverter):
+    # The Codex CLI's view_image with detail "original" (full resolution), which Chat Completions lacks.
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params({"type": "input_image", "image_url": PNG_URL, "detail": "original"})
+    )
+
+    assert params.messages[0]["content"] == [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}]
+
+
+def test_inline_tool_output_images_rejects_an_image_without_a_url(inlining_converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match="file_id"):
+        inlining_converter.responses_to_chat_completion_create_params(
+            _tool_output_params({"type": "input_image", "file_id": "file_123"})
+        )
+
+
+def test_inline_tool_output_images_leaves_other_parts_unrepresentable(inlining_converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match=r"content part type\(s\) 'input_file'$"):
+        inlining_converter.responses_to_chat_completion_create_params(
+            _tool_output_params(
+                {"type": "input_image", "image_url": PNG_URL}, {"type": "input_file", "file_id": "file_123"}
+            )
         )
 
 
@@ -1543,6 +1615,30 @@ def test_chat_tool_image_to_responses_becomes_input_image(converter: ResponsesCo
     ]
 
 
+def test_chat_tool_image_parts_round_trip_through_responses_items(inlining_converter: ResponsesConverter):
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": [
+            {"type": "text", "text": "plot:"},
+            {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}},
+        ],
+    }
+
+    items = inlining_converter.chat_completions_messages_to_responses_items([deepcopy(tool_message)])
+    output = items[0].model_dump(exclude_none=True)["output"]
+    assert output == [
+        {"type": "input_text", "text": "plot:"},
+        {"type": "input_image", "image_url": PNG_URL, "detail": "high"},
+    ]
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"type": "function_call_output", "call_id": "call_1", "output": output}]
+        )
+    )
+    assert params.messages == [tool_message]
+
+
 def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: ResponsesConverter):
     with pytest.raises(NotImplementedError):
         converter.chat_completions_messages_to_responses_items([{"role": "alien", "content": "x"}])
@@ -2020,11 +2116,49 @@ def test_downconverting_drops_reporting_only_reasoning_fields_when_configured(
 
 
 @pytest.mark.parametrize("context", ["auto", "current_turn", "all_turns"])
-def test_downconverting_still_rejects_a_reasoning_context_when_configured(converter: ResponsesConverter, context: str):
-    """`reasoning.context` tells the provider which earlier reasoning items to render back to the
-    model. The conversion renders every item and leaves the rest to the chat template, so it honors
-    no value of the field and refuses it even with the switch on."""
+def test_downconverting_rejects_a_reasoning_context_by_default(converter: ResponsesConverter, context: str):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={"effort": "high", "context": context})
+
+    with pytest.raises(NotImplementedError, match="context"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+@pytest.mark.parametrize("context", ["auto", "all_turns"])
+def test_downconverting_drops_a_reasoning_context_the_conversion_behaves_as_when_configured(
+    converter: ResponsesConverter, context: str, caplog: pytest.LogCaptureFixture
+):
+    """The conversion passes every replayed reasoning item to the backend and leaves what is rendered
+    to its chat template: what `all_turns` and `auto` ask for. The Codex CLI sends `all_turns` with
+    a model catalog that enables reasoning context."""
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "user", "content": "fix the test"},
+            {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Look first."}]},
+            {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": '{"command":"ls"}'},
+            {"type": "function_call_output", "call_id": "call_1", "output": "a.py"},
+        ],
+        reasoning={"effort": "high", "summary": "auto", "context": context},
+    )
+
+    with caplog.at_level("DEBUG", logger="nemo_gym.responses_converter"):
+        converted = converter.responses_to_chat_completion_create_params(
+            params, drop_unrepresentable_request_fields=True
+        )
+
+    assert converted.reasoning_effort == "high"
+    # The earlier turn's reasoning still reaches the backend with the call it led to.
+    assert converted.messages[1]["content"] == "<think>Look first.</think>"
+    assert "['summary', 'context']" in caplog.text
+
+
+def test_downconverting_still_rejects_a_current_turn_reasoning_context_when_configured(
+    converter: ResponsesConverter,
+):
+    """`current_turn` asks the provider to leave the earlier turns' reasoning out of the prompt. The
+    conversion passes every reasoning item on, so it refuses the value even with the switch on."""
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi", reasoning={"effort": "high", "context": "current_turn"}
+    )
 
     with pytest.raises(NotImplementedError, match="context"):
         converter.responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=True)

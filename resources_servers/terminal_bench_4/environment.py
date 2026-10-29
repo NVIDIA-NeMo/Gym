@@ -27,7 +27,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
     rewrite_image,
 )
-from resources_servers.terminal_bench_4.compose_config import prebuilt_compose, resolve_compose
+from resources_servers.terminal_bench_4.compose_config import merge_patch, prebuilt_compose, resolve_compose
 from resources_servers.terminal_bench_4.task import Settings, Task, resolve_env
 
 
@@ -98,6 +98,9 @@ class EnvironmentConfig(Settings):
     # Compose service settings (or ``networks``) that the deployment cannot
     # enforce and that are removed instead of rejected.
     compose_ignored_settings: list[str] = Field(default_factory=list)
+    # Short task name -> Compose service -> JSON merge patch (RFC 7396) for that service in the agent
+    # environment's generated Compose YAML: mappings merge and a null value removes the setting.
+    compose_service_overrides: dict[str, dict[str, dict[str, Any]]] = Field(default_factory=dict)
     sandbox_ttl_s: float = Field(gt=0)
     sandbox_ready_timeout_s: float = Field(gt=0)
     default_exec_timeout_s: float = Field(gt=0)
@@ -282,33 +285,13 @@ class Environment:
                 task=self.task.name.split("/")[-1],
             )
             if self.log_role == "agent":
-                if self.task.name == "terminal-bench/medical-claims-processing":
-                    # pwuser cannot edit /etc/hosts; its only peer URL is the
-                    # browser's initial workspace page (which uses relative URLs).
-                    document["services"]["playwright-mcp"]["x-sandbox"] = {
-                        "hosts": [],
-                        "resolve_environment": ["BROWSER_URL"],
-                    }
-                    # Use the image's default pwuser without an explicit su.
-                    document["services"]["playwright-mcp"].pop("user", None)
-                elif self.task.name == "terminal-bench/payments-pipeline-fix":
-                    # This single broker uses localhost for its controller.
-                    # Clients still resolve its advertised kafka:9092 address.
-                    document["services"]["kafka"]["x-sandbox"] = {"hosts": []}
-                    # Use the image's default appuser without an explicit su.
-                    document["services"]["kafka"].pop("user", None)
-                elif self.task.name == "terminal-bench-science/protein-active-learning":
-                    # The non-root submission service cannot edit /etc/hosts. Its
-                    # one peer URL is passed in ASSAY_STATUS (with the v0.1 default),
-                    # resolved to the assay sandbox IP; see the benchmark README.
-                    submission = document["services"]["submission"]
-                    submission["environment"] = {
-                        **submission.get("environment", {}),
-                        "ASSAY_STATUS": "http://assay:8080/status",
-                    }
-                    submission["x-sandbox"] = {"hosts": [], "resolve_environment": ["ASSAY_STATUS"]}
-                    # Use the image's default submission user without an explicit su.
-                    submission.pop("user", None)
+                overrides = self.config.compose_service_overrides.get(self.task.name.split("/")[-1], {})
+                if missing := sorted(overrides.keys() - document["services"].keys()):
+                    raise ValueError(
+                        f"environment.compose_service_overrides names services that {self.task.name} lacks: {missing}"
+                    )
+                for name, patch in overrides.items():
+                    document["services"][name] = merge_patch(document["services"][name], patch)
             if "opensandbox" in self.provider_config:
                 for service in document["services"].values():
                     if service.get("shm_size") is not None:

@@ -21,12 +21,39 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 | Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared |
 | Pi (`pi_agent`) | Chat Completions | None | Not wired up; evaluation only | Declared | Declared |
 | Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared |
+| Kilo (`kilocode_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Not declared |
 | OpenCode (`opencode_agent`) | Chat Completions | None | Off by default; the session path is evaluation only | Not declared | Declared |
 | OpenClaw (`openclaw_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Declared |
 
 *Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. Gym rejects any other pairing unless you pass `--allow-unsupported-pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
 
 The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
+
+### Kilo MCP and sandbox ownership
+
+Kilo's session adapter accepts remote MCP grants from Resources. Set the Environment Server's `resources_tool_transports: [mcp]` to expose Resources tools through MCP. Grant URLs and headers must be reachable and valid from the task sandbox. Required direct HTTP grants are still rejected; this does not make a recipe configured with `[direct_http]` compatible with Kilo.
+
+The adapter configures Kilo's remote MCP clients with each grant's URL and headers and disables interactive OAuth. Before accepting a session with required MCP grants, it runs a supervised CLI check that connects to those servers and discovers tools without requesting a model completion. The activation's CLI process connects again, and the bundled plugin confirms the required connections before its first model request. Kilo does not refresh connection status after that, so a server lost mid-run surfaces as failed tool calls. A failed connection or a missing readiness receipt fails the session or activation. Optional MCP connection failures do not fail this readiness check. Kilo cancels an MCP tool call after `kilo_config.experimental.mcp_timeout` milliseconds; `kilocode_sandboxed.yaml` sets 300000 (five minutes) instead of the MCP SDK's 60-second default, so keep it above your slowest Resources tool and within `timeout`. Static servers in `kilo_config.mcp` remain available, but their names must not collide with grant names, including after Kilo replaces punctuation other than `-` and `_` with `_`.
+
+When Resources supplies `sandbox_access`, Kilo borrows that sandbox and leaves its destruction to Resources. When Resources supplies no sandbox, configure an agent-owned sandbox explicitly. For example, add these imports and overrides to an experiment that already defines `policy_model`, `policy_model_name`, and the Environment Server's Resources/agent bindings:
+
+```yaml
+config_paths:
+  - responses_api_agents/kilocode_agent/configs/kilocode_sandboxed.yaml
+  - nemo_gym/sandbox/providers/docker/configs/docker.yaml
+
+kilocode_agent:
+  responses_api_agents:
+    kilocode_agent:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        workdir: /app
+```
+
+The Docker provider needs a local Docker daemon. Configure the Gym host and network so the sandbox can reach both the Gym Model Server and the MCP endpoints; a host loopback URL is not reachable from Docker's default bridge network. The Linux image must meet Kilo's [runtime requirements](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/kilocode_agent/README.md#runtime-and-ownership), including network access for the pinned CLI installation.
+
+Agent-owned sandboxes inherit provider metadata defaults, then `sandbox_config.metadata`, with Gym's agent/session/rollout labels taking precedence. The agent stops its sandbox on close or failed setup. If neither Resources sandbox access nor `sandbox_provider` is available, seed fails with a configuration error.
 
 ## Run an integrated agent on a benchmark
 
@@ -150,7 +177,7 @@ The taskset route selects the Environment Server, and its `agent_server` referen
 
 Before you increase concurrency, inspect the response, reward, failure sidecar, and cleanup evidence. When you raise `--concurrency`, raise `max_concurrent_episodes` to match and set `queue_timeout_seconds` above the expected episode duration; otherwise queued episodes fail admission after 60 seconds. A configuration that resolves has not yet been validated: resolution does not check task-image installation, model and tool behavior, or verification.
 
-For callers that still submit flat rows, `single_agent_turn_legacy` wraps the same session lifecycle as a migration adapter. The separate `legacy_agent` implementation delegates to the agent's old `/run` endpoint. New experiments should use the taskset configuration above.
+For callers that still submit flat rows, `single_agent_turn_legacy` wraps the same session lifecycle as a migration adapter. Name both `resources_server` and `agent_server` in its block. The separate `legacy_agent` implementation delegates to the agent's old `/run` endpoint and names only `agent_server`. New experiments should use the taskset configuration above.
 
 ### Swap the agent or the benchmark
 

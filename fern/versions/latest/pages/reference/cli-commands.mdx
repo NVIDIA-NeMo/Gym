@@ -34,7 +34,9 @@ gym dataset rm                # delete a dataset from GitLab
 gym dataset migrate           # move a dataset from GitLab to HF
 gym dataset render            # generate a dataset preview (materialize prompts)
 gym dataset collate           # validate and collate a dataset
-gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task)
+gym dataset init <name>       # scaffold a Harbor-format dataset (dataset.toml plus one task; --parameterized for a template)
+gym dataset publish --harbor <target> --output <dir>  # write a Gym-authored dataset as plain Harbor task folders
+gym dataset pull <target>     # fetch a Harbor dataset (hub reference or committed entry) into environments/harbor/
 gym dataset validate <target> # run each Harbor task's reference solution through its verifier
 
 # Environments
@@ -354,6 +356,26 @@ instruction, a verifier and a reference solution. Refer to [Harbor Tasks](/main/
 gym dataset init my-dataset --image ubuntu:24.04   # dataset.toml names it local/my-dataset
 ```
 
+### `gym dataset pull`
+
+Fetch a Harbor dataset into `environments/harbor/` of the Gym checkout, or under the working directory when Gym is
+installed as a package (`$NEMO_GYM_DATASETS_DIR` when set), and print where it landed, its task count and its
+dataset digest. Nothing is prepared, built or run. The fetch is the
+one `gym eval run` and `gym dataset validate` make for a `harbor:` target, so a folder that was edited by hand,
+left by an interrupted fetch of another version, or written for another package is refused in the same words;
+a second pull of an unchanged dataset downloads nothing and says so. Refer to
+[Harbor Tasks](/main/data/harbor-tasks#gym-dataset-pull-and-committed-entries).
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | `harbor:<org>/<name>[@<tag> \| @sha256:<digest>]` (a package-store dataset), `harbor:<dataset>[@<version>]` (a registry dataset), or the name of a committed entry under `environments/harbor/` whose `dataset.toml` declares `[gym] source` (for example `terminal_bench_4`). A reference an entry declares as its source lands in that entry's folder when the entry is under the working root (the checkout, or the working directory of a package install) and is not installed; an installed entry (one a package install ships under `site-packages`, a project-local `.venv` included) or one committed outside the working root is pulled, by name and by reference alike, into `environments/harbor/<entry>/` under the working directory (`$NEMO_GYM_DATASETS_DIR` when set), leaving the installation untouched. That copy folder never shadows the installed entry (its `.gym-layer.json` tells it apart), so an edit of the installed entry's `dataset.toml` reaches the next pull, while an entry of the same name the checkout commits itself keeps precedence. An entry name is found from any working directory (the pull takes no path). |
+
+```bash
+gym dataset pull terminal_bench_4                                  # the entry's source, into environments/harbor/terminal_bench_4/
+gym dataset pull harbor:terminal-bench/terminal-bench@4.0.0        # the same folder: the entry declares this reference
+gym dataset pull harbor:terminal-bench/terminal-bench-2-1          # no entry declares `latest`: environments/harbor/terminal-bench-2-1/
+```
+
 ### `gym dataset validate`
 
 Run each Harbor task's reference solution (`solution/solve.sh`) through its verifier with the oracle harness
@@ -366,7 +388,7 @@ selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-t
 
 | Option | Description |
 | --- | --- |
-| `TARGET` | A task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. |
+| `TARGET` | A task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. |
 | `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--only-tasks PATTERNS` | Comma-separated task names or globs; only matching tasks are validated. |
@@ -378,6 +400,7 @@ selected task had a solution to run. Refer to [Harbor Tasks](/main/data/harbor-t
 ```bash
 gym dataset validate my-dataset --sandbox opensandbox
 gym dataset validate harbor:terminal-bench/terminal-bench@4.0.0 --sandbox opensandbox --only-tasks 'hello-*'
+gym dataset validate terminal_bench_4 --sandbox opensandbox      # the committed entry, after `gym dataset pull terminal_bench_4`
 ```
 
 ### `gym dataset upload`
@@ -799,7 +822,7 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
-In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, or a `harbor:<dataset>[@<version>]` hub reference. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
 
 | Option | Description |
 | --- | --- |

@@ -248,8 +248,23 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 datasets/
 
 # Pulled Harbor datasets (nemo_gym/tasks/harbor/hub.py) land in environments/harbor/<dataset>/ next to the
-# committed per-dataset entries, which keep only their README and YAML files.
+# committed per-dataset entries, which keep only their README, YAML files and dataset.toml (whose [gym] source
+# names the dataset `gym dataset pull <entry>` fetches into the entry's folder). The three names are kept in every
+# folder here, a pulled hub folder included: a dataset.toml written into one by hand shows as untracked, on purpose.
 environments/harbor/*/*
 !environments/harbor/*/README.md
 !environments/harbor/*/*.yaml
+!environments/harbor/*/dataset.toml
 environments/harbor/.harbor/
+
+# Files prepare writes beside the example Harbor datasets under environments/ (recorded image configurations,
+# built images, the local manifest); the datasets' sources are tracked, the records are not.
+environments/compose-images.json
+environments/compose-images.json.lock
+environments/built-images.json
+environments/built-images.json.lock
+environments/hello_*/compose-images.json
+environments/hello_*/compose-images.json.lock
+environments/hello_*/built-images.json
+environments/hello_*/built-images.json.lock
+environments/hello_*/manifest.toml
