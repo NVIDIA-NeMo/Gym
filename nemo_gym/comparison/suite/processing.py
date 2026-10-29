@@ -77,6 +77,12 @@ def _task_sets(run: LoadedSuiteRun) -> tuple[dict[int, frozenset[int]], list[str
     return {repeat: frozenset(indices) for repeat, indices in tasks.items()}, notes, has_all_infos
 
 
+def _task_indices(tasks: set[int]) -> str:
+    """Keep task indices useful for locating missing inputs without overwhelming reports."""
+    preview = ", ".join(str(task) for task in sorted(tasks)[:10])
+    return f"{preview}, ... (+{len(tasks) - 10} more)" if len(tasks) > 10 else preview
+
+
 def _coverage(run: LoadedSuiteRun) -> SuiteCoverage:
     recorded, notes, complete_identities = _task_sets(run)
     incomplete = bool(notes)
@@ -121,14 +127,38 @@ def _coverage(run: LoadedSuiteRun) -> SuiteCoverage:
         group_tasks = {group[TASK_INDEX_KEY_NAME] for group in run.groups}
         if run.groups and group_tasks != planned_tasks:
             incomplete = True
-            notes.append("Recorded task groups do not cover the materialized input task set exactly.")
+            missing_tasks = planned_tasks - group_tasks
+            unplanned_tasks = group_tasks - planned_tasks
+            if missing_tasks:
+                notes.append(
+                    f"Results are missing {len(missing_tasks)} of {planned_count} planned tasks "
+                    f"(task indices: {_task_indices(missing_tasks)})."
+                )
+            if unplanned_tasks:
+                noun = "task" if len(unplanned_tasks) == 1 else "tasks"
+                notes.append(
+                    f"Results include {len(unplanned_tasks)} unplanned {noun} "
+                    f"(task indices: {_task_indices(unplanned_tasks)})."
+                )
         if len(set(planned.values())) > 1:
             incomplete = True
             notes.append("Planned task sets differ between repeats.")
         if complete_identities:
             if recorded != planned:
                 incomplete = True
-                notes.append("Recorded task/repeat identities do not cover the materialized inputs exactly.")
+                missing_rollouts = sum(
+                    len(tasks - recorded.get(repeat, frozenset())) for repeat, tasks in planned.items()
+                )
+                unplanned_rollouts = sum(
+                    len(tasks - planned.get(repeat, frozenset())) for repeat, tasks in recorded.items()
+                )
+                if missing_rollouts:
+                    notes.append(
+                        f"Results are missing {missing_rollouts} of {sum(map(len, planned.values()))} planned rollouts."
+                    )
+                if unplanned_rollouts:
+                    noun = "rollout" if unplanned_rollouts == 1 else "rollouts"
+                    notes.append(f"Results include {unplanned_rollouts} unplanned {noun}.")
             else:
                 verified = True
         else:
@@ -157,7 +187,10 @@ def _check_paired_coverage(
     candidate_set = {group[TASK_INDEX_KEY_NAME] for group in candidate.groups} if candidate.groups else None
     reasons = []
     if baseline_set is not None and candidate_set is not None and baseline_set != candidate_set:
-        reasons.append("Baseline and candidate recorded task sets differ.")
+        reasons.append(
+            "Candidate and baseline have results for different tasks "
+            f"(candidate: {len(candidate_set)} tasks; baseline: {len(baseline_set)} tasks)."
+        )
     if baseline.planned_tasks_by_repeat is not None and candidate.planned_tasks_by_repeat is not None:
         planned_baseline = set().union(*baseline.planned_tasks_by_repeat.values())
         planned_candidate = set().union(*candidate.planned_tasks_by_repeat.values())
