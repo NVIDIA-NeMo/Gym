@@ -175,6 +175,7 @@ def inspect_behavior(
     tool_steps: int,
     expected_reward: float,
     fingerprint: Callable,
+    judge_verifier: bool = False,
 ) -> list[dict]:
     """Check saved evidence and observations against explicit test expectations."""
     results = Results()
@@ -331,9 +332,38 @@ def inspect_behavior(
             applies=not terminal_error,
         )
     )
+    judges = (witness or {}).get("judge_calls", [])
+    judge_id = (judges[0].get("response") or {}).get("id") if len(judges) == 1 else None
+    trajectory = _mapping((record or {}).get("ng_trajectory"))
+    judge_calls = [
+        call
+        for call in _objects(trajectory.get("model_calls"))
+        if judge_id is not None and _mapping(call.get("response_metadata")).get("response_id") == judge_id
+    ]
+    verifier_refs = {
+        ref.get("model_call_id")
+        for inv in _objects(trajectory.get("verifier_invocations"))
+        for ref in _objects(inv.get("model_calls"))
+    }
+    results.run(
+        BehavioralCheck(
+            id="verifier.judge_reference",
+            tier="P1",
+            evidence=("TE-6", "TE-8"),
+            location="$.judgement_id",
+            reason="the grade must reference the witnessed judge response with explicit verifier ownership",
+            predicate=lambda: judge_id is not None
+            and len(judge_calls) == 1
+            and (record or {}).get("judgement_id") == judge_id
+            and judge_calls[0].get("model_call_id") in verifier_refs
+            and "CONFORMANCE_DONE" in json.dumps(judges[0].get("request")),
+            available=available and record is not None,
+            applies=judge_verifier,
+        )
+    )
     return (
         results.dump()
-        + model_checks(record, attempts, fingerprint=fingerprint, available=available)
+        + model_checks(record, attempts + judges, fingerprint=fingerprint, available=available)
         + tool_checks(
             record,
             tools,

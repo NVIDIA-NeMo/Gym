@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agent_utils.process_supervisor import CleanupReceipt
+from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.nooa_agent.result import finalize_run_result
@@ -88,8 +88,8 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int
     assert "'/opt/nooa env/bin/python'" in command
     assert "-I -m responses_api_agents.nooa_agent.sandbox_entrypoint" in command
     assert "sandbox_supervisor" not in command
-    assert "/process_supervisor " in command
-    assert r.directory + "/process_supervisor" in s.files
+    assert "/process_supervisor.sh" in command
+    assert r.directory + "/process_supervisor.sh" in s.files
     launch_command = await r._stage_activation(request)
     assert launch_command.argv[-2:] == [r.directory + "/input.json", r.directory + "/result.json"]
     assert len(launch_command.argv) == 6
@@ -393,7 +393,7 @@ async def test_close_fences_inflight_staging_without_launch() -> None:
     with pytest.raises(asyncio.CancelledError):
         await execution
     assert not r.session.launch_started
-    assert all("process_supervisor" not in call.args[0] for call in s.exec.await_args_list)
+    assert all("process_supervisor.sh" not in call.args[0] for call in s.exec.await_args_list)
     s.disconnect.assert_awaited_once()
 
 
@@ -551,7 +551,7 @@ async def test_execution_failure_retains_checkpoint_despite_slow_optional_log() 
         await original_download(source, destination)
 
     async def execute(command: str, **kwargs) -> SandboxExecResult:
-        if "process_supervisor" in command:
+        if "process_supervisor.sh" in command:
             raise original_error
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
@@ -697,7 +697,7 @@ async def test_cancelling_active_worker_captures_checkpoint_before_release() -> 
     execution_stopped = asyncio.Event()
 
     async def execute(command: str, **kwargs) -> SandboxExecResult:
-        if "process_supervisor" in command:
+        if "process_supervisor.sh" in command:
             active.set()
             try:
                 await asyncio.Event().wait()
@@ -896,7 +896,7 @@ async def test_cancel_without_any_artifact_preserves_bare_cancellation() -> None
     active = asyncio.Event()
 
     async def execute(command: str, **kwargs) -> SandboxExecResult:
-        if "process_supervisor" in command:
+        if "process_supervisor.sh" in command:
             active.set()
             await asyncio.Event().wait()
         elif command.startswith("[ -f "):
@@ -984,7 +984,7 @@ async def test_provider_execution_failure_is_not_replaced_by_a_capture_error() -
         await download(source, destination)
 
     async def execute(command: str, **kwargs) -> SandboxExecResult:
-        if "process_supervisor" in command:
+        if "process_supervisor.sh" in command:
             raise provider_error
         return SandboxExecResult("", "", 0)
 

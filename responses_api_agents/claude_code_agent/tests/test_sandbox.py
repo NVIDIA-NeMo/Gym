@@ -4,6 +4,7 @@
 import asyncio
 import io
 import json
+import subprocess
 import tarfile
 import threading
 from types import SimpleNamespace
@@ -71,6 +72,19 @@ async def test_seed_installs_inside_sandbox_and_preserves_ownership(monkeypatch,
     if borrowed:
         constructor.connect.assert_awaited_once_with({"id": "borrowed"}, provider=provider)
         assert not any(command.startswith("mkdir -p -- /app") for command in commands)
+
+
+def test_setup_without_bash_names_it(tmp_path):
+    # A non-root image without bash must fail at setup with a message, not with a bare 127 later.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "id").write_text("#!/bin/sh\necho 1000\n")
+    (bindir / "id").chmod(0o755)
+    result = subprocess.run(
+        ["/bin/sh", "-c", app._BASH_BOOTSTRAP], env={"PATH": str(bindir)}, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 1
+    assert "require bash" in result.stderr
 
 
 @pytest.mark.asyncio
@@ -481,7 +495,6 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
         request=seed(), runtime="/runtime", session=SimpleNamespace(session_dir="/tmp/session", sandbox=remote)
     )
     payload = {
-        "directory": "/tmp/session",
         "command": ["/runtime/claude"],
         "cwd": "/app",
         "env": {},
@@ -494,7 +507,8 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
     command = await state.stage_activation(payload)
     assert files["/tmp/session/config/skills/example/helper.sh"] == b"echo helper\n"
     assert "SKILL.md" in " ".join(files)
-    assert command.python == "python3"
+    assert command.argv == ["bash", "/tmp/session/harness_runner.sh", "/tmp/session/params.sh"]
+    assert "/runtime/claude" in files["/tmp/session/params.sh"].decode()
     runner_payload = staged.await_args.args[1]
     assert "skills_path" not in runner_payload
     instance = agent()

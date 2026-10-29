@@ -3,6 +3,7 @@
 
 import json
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,7 +11,7 @@ import pytest
 import yaml
 
 from resources_servers.terminal_bench_4 import environment as module
-from resources_servers.terminal_bench_4.compose_config import resolve_compose
+from resources_servers.terminal_bench_4.compose_config import merge_patch, resolve_compose
 from resources_servers.terminal_bench_4.environment import (
     Environment,
     EnvironmentConfig,
@@ -18,6 +19,15 @@ from resources_servers.terminal_bench_4.environment import (
     TaskImages,
 )
 from resources_servers.terminal_bench_4.task import TaskSettings
+
+
+REPOSITORY = Path(__file__).resolve().parents[3]
+
+
+def profile_compose_overrides(benchmark):
+    """The ``compose_service_overrides`` that a benchmark profile ships."""
+    resources = yaml.safe_load((REPOSITORY / "benchmarks" / benchmark / "resources.yaml").read_text())
+    return resources[benchmark]["resources_servers"]["terminal_bench_4"]["environment"]["compose_service_overrides"]
 
 
 def environment_config(**overrides):
@@ -223,7 +233,10 @@ async def test_compose_specs_startup_metadata_sidecar_operations(tmp_path, monke
 async def test_nonroot_compose_adaptations_are_scoped_to_agent_tasks(
     tmp_path, monkeypatch, task_name, service, user, extension, scope
 ):
-    env, _, _, create = make_environment(tmp_path, monkeypatch, compose=True)
+    overrides = profile_compose_overrides("terminal_bench_4")
+    env, _, _, create = make_environment(
+        tmp_path, monkeypatch, compose=True, config={"compose_service_overrides": overrides}
+    )
     env.task.name = "terminal-bench/" + (task_name if scope != "other-task" else "unrelated")
     if scope == "verifier":
         env.log_role = "verifier"
@@ -264,6 +277,24 @@ async def test_nonroot_compose_adaptations_are_scoped_to_agent_tasks(
     assert generated == expected
     assert generated["services"][service].get("user") == (None if scope == "agent" else user)
     assert source.read_bytes() == original
+
+
+def test_compose_service_overrides_merge_mappings_and_remove_nulls():
+    service = {"user": "app", "environment": {"A": "1"}, "x-sandbox": {"hosts": ["db"]}, "expose": ["80"]}
+    patch = {"user": None, "environment": {"B": "2"}, "x-sandbox": {"hosts": []}, "expose": ["90"], "absent": None}
+    assert merge_patch(service, patch) == {
+        "environment": {"A": "1", "B": "2"},
+        "x-sandbox": {"hosts": []},
+        "expose": ["90"],
+    }
+    assert service == {"user": "app", "environment": {"A": "1"}, "x-sandbox": {"hosts": ["db"]}, "expose": ["80"]}
+
+
+async def test_compose_service_overrides_must_name_task_services(tmp_path, monkeypatch):
+    overrides = {"test": {"db": {"user": None}, "cache": {"user": None}}}
+    env, *_ = make_environment(tmp_path, monkeypatch, compose=True, config={"compose_service_overrides": overrides})
+    with pytest.raises(ValueError, match=r"names services that terminal-bench/test lacks: \['cache'\]"):
+        await env.start()
 
 
 async def test_environment_upload_without_build_spec(tmp_path, monkeypatch):
@@ -550,7 +581,13 @@ async def test_protein_submission_resolves_its_assay_url_without_hosts(tmp_path,
     }
     images = {"agent": "registry/{task}", "service": "registry/{task}-{service}"}
     env, compose_create = dockerfile_compose_environment(
-        tmp_path, monkeypatch, name, compose, records, task_images=images
+        tmp_path,
+        monkeypatch,
+        name,
+        compose,
+        records,
+        task_images=images,
+        compose_service_overrides=profile_compose_overrides("terminal_bench_science"),
     )
     await env.start()
     services = yaml.safe_load(compose_create.call_args.args[1].read_text())["services"]

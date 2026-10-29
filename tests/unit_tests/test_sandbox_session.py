@@ -3,12 +3,14 @@
 
 import asyncio
 import json
+import shutil
+import subprocess
 from unittest.mock import AsyncMock
 
 import pytest
 
 from nemo_gym.agent_utils import supervisor_client
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession, shell_assignments
 from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.typed_exceptions import NgFailureEvent
@@ -34,8 +36,7 @@ def session(receipt_reader):
 
 async def execute(session, *, collect=None, stage_activation=None, timeout=1):
     return await session.execute(
-        stage_activation=stage_activation
-        or AsyncMock(return_value=SandboxCommand(argv=["worker"], python="/runtime/python")),
+        stage_activation=stage_activation or AsyncMock(return_value=SandboxCommand(argv=["worker"])),
         collect=collect or AsyncMock(return_value="transcript"),
         timeout=10,
         close_timeout=timeout,
@@ -75,7 +76,7 @@ async def test_interruption_captures_before_transport_cancellation_and_release(s
     events = []
 
     async def provider_exec(command, **kwargs):
-        if "trap '' TERM" in command:
+        if "exec bash " in command:
             launched.set()
             try:
                 await asyncio.Future()
@@ -194,8 +195,7 @@ async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session)
     first.assert_awaited_once()
     second.assert_awaited_once()
     uploads = [c.args[1] for c in session.sandbox.upload.await_args_list]
-    supervisor = supervisor_client.SUPERVISOR_FILE
-    assert uploads == [f"/session/activation-1/{supervisor}", f"/session/activation-2/{supervisor}"]
+    assert uploads == ["/session/activation-1/process_supervisor.sh", "/session/activation-2/process_supervisor.sh"]
     await session.close(timeout=1)
     assert "mv /session /session.closed" in session.sandbox.exec.await_args.args[0]
     with pytest.raises(RuntimeError, match="closing"):
@@ -233,6 +233,24 @@ async def test_deadline_during_staging_never_launches(session, receipt_reader):
     assert cancelled.is_set() and not session.launch_started
     session.sandbox.exec.assert_not_awaited()
     receipt_reader.assert_not_awaited()
+    collect.assert_not_awaited()
+    await session.close(timeout=1)
+
+
+async def test_deadline_shorter_than_supervisor_resolution_never_launches(session, receipt_reader):
+    from time import monotonic
+
+    collect = AsyncMock()
+    with pytest.raises(TimeoutError, match="expired before launch"):
+        await session.execute(
+            stage_activation=AsyncMock(return_value=SandboxCommand(argv=["true"])),
+            collect=collect,
+            timeout=0.004,
+            close_timeout=1,
+            deadline=monotonic() + 10,
+        )
+    assert not session.launch_started
+    session.sandbox.exec.assert_not_awaited()
     collect.assert_not_awaited()
     await session.close(timeout=1)
 
@@ -445,9 +463,9 @@ async def test_nonzero_worker_exit_still_passes_artifacts_to_adapter(session, re
 
 async def test_bootstrap_failure_preserves_stderr_and_still_releases(session, receipt_reader):
     receipt_reader.return_value = json.dumps(RECEIPT | {"return_code": None})
-    session.sandbox.exec.return_value = SandboxExecResult("", "/runtime/python: not found", 127)
+    session.sandbox.exec.return_value = SandboxExecResult("", "sh: 1: bash: not found", 127)
     collector = AsyncMock(side_effect=FileNotFoundError("no worker output"))
-    with pytest.raises(RuntimeError, match="sandbox execution failed.*127.*python: not found") as error:
+    with pytest.raises(RuntimeError, match="sandbox execution failed.*127.*bash: not found") as error:
         await execute(session, collect=collector)
     assert isinstance(error.value.__cause__, FileNotFoundError)
     assert session.cleanup["cleanup_confirmed"] is True
@@ -462,13 +480,12 @@ async def test_bootstrap_failure_preserves_stderr_and_still_releases(session, re
 async def test_session_uploads_supervisor_before_launch(session):
     from pathlib import Path
 
-    from nemo_gym.agent_utils import process_supervisor
-    from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
+    from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE, SUPERVISOR_SCRIPT
 
     events = []
 
     async def upload(source, destination):
-        assert Path(source).read_bytes() == Path(process_supervisor.__file__).read_bytes()
+        assert Path(source).read_bytes() == SUPERVISOR_SCRIPT.read_bytes()
         assert destination == f"/session/{SUPERVISOR_FILE}"
         events.append("upload")
 
@@ -586,3 +603,30 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.cleanup == RECEIPT
     await session.close(timeout=1)
     assert session.closed
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
+def test_shell_assignments_round_trip_through_bash(tmp_path):
+    tricky = 'it\'s $(touch unintended) `x` "q" \\ \n new line'
+    script = tmp_path / "params.sh"
+    script.write_text(
+        shell_assignments({"cwd": tricky, "command": ["cli", tricky, ""], "env": {"KEY": tricky, "EMPTY": ""}})
+    )
+    printed = subprocess.run(
+        ["bash", "-c", 'source "$1"; printf "%s\\0" "$cwd" "${#command[@]}" "${command[@]}" "${env[@]}"', "_", script],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=tmp_path,
+    ).stdout.split("\0")[:-1]
+    assert printed == [tricky, "3", "cli", tricky, "", f"KEY={tricky}", "EMPTY="]
+    assert not (tmp_path / "unintended").exists()
+
+
+@pytest.mark.parametrize(
+    "values",
+    [{"bad-name": "x"}, {"env": {"BAD KEY": "x"}}, {"cwd": "a\0b"}, {"command": ["cli", 1]}, {"env": {"K": None}}],
+)
+def test_shell_assignments_reject_names_bash_cannot_assign(values):
+    with pytest.raises(ValueError, match="Invalid"):
+        shell_assignments(values)
