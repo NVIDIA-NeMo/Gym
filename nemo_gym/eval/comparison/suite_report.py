@@ -61,7 +61,7 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
     """Render suite statistics, effective membership, metric scales, and source evidence."""
     confidence = f"{100 * result.confidence_level:g}%"
     lines = [
-        "# gym eval compare --level suite",
+        "# gym eval compare-suite",
         "",
         f"Generated: {_text(result.generated_at)} | Gym: {_text(result.nemo_gym_version)}",
         "",

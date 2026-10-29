@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Exercise suite CLI dispatch and real rendered artifacts."""
+"""Exercise the suite comparison command and real rendered artifacts."""
 
 import json
 from pathlib import Path
@@ -80,37 +80,24 @@ def suite_path(tmp_path: Path) -> Path:
 
 def test_suite_flags_survive_the_hydra_translation() -> None:
     args, unknown = build_parser().parse_known_args(
-        ["eval", "compare", "--level", "suite", "--suite", "results/[v2] suite.yaml", "--confidence-level", "0.95"]
+        ["eval", "compare-suite", "--suite", "results/[v2] suite.yaml", "--confidence-level", "0.95"]
     )
     assert unknown == []
     tokens = [token for flag in args._command.flags for token in flag.translate_to_hydra(args)]
     parsed = OverridesParser.create().parse_overrides(tokens)
     values = {override.key_or_group: override.value() for override in parsed}
     assert values == {
-        "comparison_level": "suite",
         "suite_fpath": "results/[v2] suite.yaml",
         "confidence_level": 0.95,
     }
 
 
-@pytest.mark.parametrize(
-    ("config", "message"),
-    [
-        ({"suite_fpath": "suite.yaml"}, "require --level suite"),
-        ({"confidence_level": 0.9}, "require --level suite"),
-        ({"comparison_level": "suite"}, "requires --suite PATH"),
-        (
-            {"comparison_level": "suite", "suite_fpath": "suite.yaml", "baseline_rollouts_jsonl_fpath": "base.jsonl"},
-            "omit the run comparison input flags",
-        ),
-    ],
-)
-def test_mode_mistakes_fail_before_loading_artifacts(config: dict, message: str, monkeypatch, capsys) -> None:
-    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+def test_missing_suite_reports_the_required_flag(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: {})
     with pytest.raises(SystemExit) as error:
-        cli_eval.compare()
+        cli_eval.compare_suite()
     assert error.value.code == 1
-    assert message in " ".join(capsys.readouterr().out.split())
+    assert "gym eval compare-suite requires --suite PATH" in " ".join(capsys.readouterr().out.split())
 
 
 def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
@@ -122,7 +109,16 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     existing.write_text("existing run report")
     monkeypatch.setattr(
         "sys.argv",
-        ["gym", "eval", "compare", "--level", "suite", "--suite", str(suite_path), "--output-dir", str(output)],
+        [
+            "gym",
+            "eval",
+            "compare-suite",
+            "--suite",
+            str(suite_path),
+            "--output-dir",
+            str(output),
+            "++policy_api_key=sk-suite-example",
+        ],
     )
     main()
     result = SuiteComparisonResult.model_validate_json((output / "suite_compare_report.json").read_bytes())
@@ -131,7 +127,13 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     assert result.overall.statistics.candidate_mean == pytest.approx(65)
     assert result.confidence_level == 0.9
     assert result.overall.weights == [0.5, 0.5]
+    assert result.command.startswith("gym eval compare-suite ")
+    assert "comparison_level" not in result.command
+    assert "++policy_api_key=****" in result.command
+    assert "sk-suite-example" not in (output / "suite_compare_report.json").read_text()
     markdown = (output / "suite_compare_report.md").read_text()
+    assert markdown.startswith("# gym eval compare-suite\n")
+    assert "sk-suite-example" not in markdown
     assert "| model-a | 2 | 50.0000 | 65.0000 | 15.0000 |" in markdown
     assert "90% CI for gap" in markdown
     assert "95% CI for gap" not in markdown
@@ -148,9 +150,7 @@ def test_adjustable_confidence_and_json_only_output(suite_path: Path, monkeypatc
         [
             "gym",
             "eval",
-            "compare",
-            "--level",
-            "suite",
+            "compare-suite",
             "--suite",
             str(suite_path),
             "--output-dir",
@@ -187,9 +187,7 @@ def test_report_destination_cannot_overwrite_an_input(suite_path: Path, monkeypa
         [
             "gym",
             "eval",
-            "compare",
-            "--level",
-            "suite",
+            "compare-suite",
             "--suite",
             str(suite_path),
             "--output-dir",
