@@ -70,7 +70,8 @@ The session starts a sandbox at seed and stops it at close; at shutdown the serv
 `sandbox_config.ttl_s` lets the provider reclaim one that a crashed server left. The server uploads `grading.py` and
 the database source to the sandbox and runs `python3 grading.py <setup|execute|grade> <request.json>` there, so the
 image needs only `python3` (default `python:3.12-slim`). The agent's SQL and the grading run in the sandbox, never in
-the server process, and the agent never gets the sandbox itself.
+the server process, and the agent never gets the sandbox itself. `grading.py` deletes each request file once it has
+read it, so the solution SQL in a grade request does not stay in the sandbox.
 
 `sandbox_provider: sandbox` names the provider block that a provider config binds, such as
 `nemo_gym/sandbox/providers/docker/configs/docker.yaml`. The local provider

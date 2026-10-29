@@ -166,7 +166,12 @@ def main(argv: list[str]) -> None:
     The agent's SQL failing is a result. A non-zero exit means the command itself did not run.
     """
     command, request_path = argv
-    request = json.loads(Path(request_path).read_text())
+    request_file = Path(request_path)
+    try:
+        request = json.loads(request_file.read_text())
+    finally:
+        # A grade request holds the solution SQL, which must not stay in the sandbox.
+        request_file.unlink(missing_ok=True)
     database = Path(request["database"])
     if command == "setup":
         create_database(Path(request["source"]), database, request["preprocess_sql"])

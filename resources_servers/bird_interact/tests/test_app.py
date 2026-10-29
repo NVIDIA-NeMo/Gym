@@ -156,6 +156,7 @@ class TestGrading:
             request_path = tmp_path / f"{command}.json"
             request_path.write_text(json.dumps(request | {"database": str(tmp_path / "episode.sqlite")}))
             main([command, str(request_path)])
+            assert not request_path.exists()  # A grade request holds the solution SQL.
             return json.loads(capsys.readouterr().out)
 
         source = str(DATA / "example_databases/bookshop/bookshop.sql")
@@ -476,6 +477,16 @@ class TestSessionSandbox:
 
         assert closed.status_code == 200
         assert not first.parent.exists() and second.exists()
+
+    def test_no_request_stays_in_the_sandbox(self) -> None:
+        server, _ = _server()
+        client = TestClient(server.setup_webserver())
+        _seed(client, "bookshop_1")
+
+        client.post("/c_interact/submit", json={"sql": "SELECT name FROM authors"})
+
+        # The grade request held the solution SQL.
+        assert not list(_sandbox_root(server, "bookshop_1").glob("request-*.json"))
 
     def test_preprocess_sql_runs_in_the_sandbox_before_the_episode(self) -> None:
         client = TestClient(_server()[0].setup_webserver())
