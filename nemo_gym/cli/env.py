@@ -38,7 +38,6 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -74,7 +73,8 @@ from nemo_gym.environment.onboarding import (
 from nemo_gym.environment.publication import finalize_publication
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
 from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
-from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
+from nemo_gym.orchestration.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
+from nemo_gym.orchestration.server_venv import get_venv_path, run_command, setup_env_command
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
     RegistryError,

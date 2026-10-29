@@ -10,7 +10,7 @@ from pathlib import Path
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
-from nemo_gym.cli.setup_command import setup_env_command
+from nemo_gym.orchestration.server_venv import setup_env_command
 
 
 ROOT = Path(__file__).resolve().parents[3]

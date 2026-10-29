@@ -866,7 +866,7 @@ layers = [
     # eval/
     "nemo_gym.comparison : nemo_gym.eval_plan : nemo_gym.rollout_compare : nemo_gym.rollout_reverification",
     # orchestration/
-    "nemo_gym.cli.setup_command : nemo_gym.h2_ping_sidecar : nemo_gym.orchestration",
+    "nemo_gym.orchestration",
     # rollouts/
     "nemo_gym.rollouts",
     # data/
@@ -904,7 +904,7 @@ ignore_imports = [
     "nemo_gym.client.server_client -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.server_runtime._checkpoint.settings",
     "nemo_gym.config.global_config -> nemo_gym.artifacts.exporters",
-    "nemo_gym.config.global_config -> nemo_gym.h2_ping_sidecar.config",
+    "nemo_gym.config.global_config -> nemo_gym.orchestration.h2_ping_sidecar.config",
     "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.data.tasks.harbor.digest",

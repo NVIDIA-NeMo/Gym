@@ -338,6 +338,11 @@ redirects:
     destination: "/nemo/gym/nemo-gym/nemo_gym/server_runtime/testing/session_conformance"
   - source: "/nemo/gym/nemo-gym/nemo_gym/testing/agent_session_conformance"
     destination: "/nemo/gym/nemo-gym/nemo_gym/agents/testing/agent_session_conformance"
+  # Library reference pages of modules moved into nemo_gym/orchestration (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/h2_ping_sidecar"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/orchestration/h2_ping_sidecar"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/cli/setup_command"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/orchestration/server_venv"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).
