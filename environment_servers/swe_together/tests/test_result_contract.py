@@ -21,7 +21,7 @@ LONG_PATCH = "diff --git a/x b/x\n" + "+line\n" * 40
 
 async def verify(tmp_path, monkeypatch, *, patch=LONG_PATCH, judge=None):
     environment = server(tmp_path)
-    environment.server_client = SimpleNamespace()
+    environment.server_client = SimpleNamespace(global_config_dict={})
     episode, _ = state(tmp_path, [])
     episode.snapshots.final_patch = patch
     episode.snapshots.baseline = {}

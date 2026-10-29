@@ -20,7 +20,13 @@ from pydantic import Field, PrivateAttr
 from environment_servers.swe_together.artifacts import RepositorySnapshots
 from environment_servers.swe_together.context import INCREMENTAL_NOTICE, project_turn
 from environment_servers.swe_together.egress import DependencyAccess, install_trust_bundle
-from environment_servers.swe_together.evaluation import PASS_THRESHOLD, interaction_metrics, run_judge
+from environment_servers.swe_together.evaluation import (
+    ASSISTANT_AGENT_INSTANCE,
+    JUDGE_AGENT_INSTANCE,
+    PASS_THRESHOLD,
+    interaction_metrics,
+    run_judge,
+)
 from environment_servers.swe_together.guidance import session_analysis
 from environment_servers.swe_together.metrics import aggregate
 from environment_servers.swe_together.model_client import AuxiliaryModel, error_evidence
@@ -55,7 +61,6 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
 )
 from nemo_gym.config_types import (
-    TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -69,7 +74,13 @@ from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_utils import (
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+    rollout_path_prefix,
+)
+from nemo_gym.token_id_capture.config import agent_instance_carries_training_tag
 
 
 LOGGER = logging.getLogger(__name__)
@@ -262,6 +273,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                             workdir=task.workdir,
                         ),
                         continuation=required,
+                        agent_instance=ASSISTANT_AGENT_INSTANCE,
                     ),
                     cookies=cookies,
                 )
@@ -294,7 +306,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     async with asyncio.timeout_at(collection_deadline) as timer:
                         response = await self.server_client.post(
                             self.config.agent_server.name,
-                            self._activation_path(request),
+                            self._activation_path(request, self.config.agent_server.name, ASSISTANT_AGENT_INSTANCE),
                             json=next_input.model_copy(
                                 update={
                                     "metadata": {"agent_timeout_sec": str(max(0.001, turn_deadline - monotonic()))},
@@ -388,12 +400,26 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             return SWETResponse(episode_id=request.episode_id, task_id=request.task.task_id, failure=failure)
         return super().failure_response(request, failure)
 
-    def _activation_path(self, request: SWETRequest) -> str:
-        block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
-        config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
-        capture = bool(block.get("enabled")) and (block.get("all_agents") or config.get("token_id_capture"))
-        segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{segment}/v1/responses"
+    def _activation_path(self, request: SWETRequest, agent_name: str, agent_instance: str) -> str:
+        """The activation path of an agent session seeded as ``agent_instance`` in this episode.
+
+        It carries the training tag when the agent captures and ``token_id_capture.training_agent_instances``
+        selects the agent instance (by default only the assistant, not the judge).
+        """
+        global_config = self.server_client.global_config_dict
+        block = global_config.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        capture = (
+            bool(block.get("enabled"))
+            and bool(
+                block.get("all_agents")
+                or get_first_server_config_dict(global_config, agent_name).get("token_id_capture")
+            )
+            and agent_instance_carries_training_tag(global_config, agent_instance)
+        )
+        prefix = rollout_path_prefix(
+            request.episode_id.capture_key, token_capture=capture, agent_instance=agent_instance
+        )
+        return f"{prefix}/v1/responses"
 
     async def _new_sandbox(self, state: Episode, *, judge: bool = False) -> AsyncSandbox:
         sandbox_config = self.config.sandbox_config | (self.config.judge_sandbox_config if judge else {})
@@ -750,6 +776,9 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         patch=patch,
                         workdir=state.task.workdir,
                         episode=state.request.episode_id,
+                        activation_path=self._activation_path(
+                            state.request, self.config.judge_agent.name, JUDGE_AGENT_INSTANCE
+                        ),
                         task_id=state.request.task.task_id,
                         timeout=state.task_metadata["judge_timeout"],
                         cookies={},

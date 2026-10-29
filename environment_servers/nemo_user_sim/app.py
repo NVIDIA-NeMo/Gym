@@ -32,6 +32,7 @@ from nemo_gym.base_environment_server import (
     dependency_failure,
     is_retryable_dependency_error,
     is_retryable_dependency_status,
+    require_distinct_agent_instances,
 )
 from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
@@ -45,7 +46,6 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
 )
 from nemo_gym.config_types import (
-    TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -63,8 +63,14 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_correlation import agent_instance_context
 from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
-from nemo_gym.server_utils import format_exception_with_response_body, get_response_json, raise_for_status
+from nemo_gym.server_utils import (
+    format_exception_with_response_body,
+    get_response_json,
+    raise_for_status,
+    rollout_path_prefix,
+)
 from nemo_gym.server_utils import request as http_request
+from nemo_gym.token_id_capture.config import agent_instance_carries_training_tag
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,
@@ -264,7 +270,7 @@ class _ConversationBridge:
                     url_path=self.environment_server.responses_path(
                         target.name,
                         self.request,
-                        capture_training_tokens=alias == "assistant_model",
+                        agent_instance=_INVOCATION_ROLE_BY_ALIAS[alias],
                     ),
                     json=request_params,
                     cookies=agent_session.cookies,
@@ -421,6 +427,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             "user_model": self.config.user_agent,
             "assistant_model": self.config.assistant_agent,
         }
+        require_distinct_agent_instances(_INVOCATION_ROLE_BY_ALIAS[alias] for alias in agent_targets)
         for alias, target in agent_targets.items():
             agent_session_id = f"agent-session-{alias}-{uuid4().hex}"
             session = _AgentSession(
@@ -453,6 +460,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     task_id=request.task.task_id,
                     tool_accesses=[],
                     sandbox_access=seed.sandbox_access if alias == "assistant_model" else None,
+                    agent_instance=_INVOCATION_ROLE_BY_ALIAS[alias],
                 )
                 session_http_response = await self.server_client.post(
                     server_name=target.name,
@@ -597,17 +605,24 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         target_name: str,
         request: UserSimEpisodeRequest,
         *,
-        capture_training_tokens: bool,
+        agent_instance: str,
     ) -> str:
+        """The activation path of one agent session: it names the agent instance the session was seeded as.
+
+        It carries the training tag when the target agent captures and ``token_id_capture.training_agent_instances``
+        selects the agent instance (by default only the assistant).
+        """
         block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
         target_config = get_first_server_config_dict(self.server_client.global_config_dict, target_name)
         token_capture = (
-            capture_training_tokens
-            and bool(block.get("enabled", False))
+            bool(block.get("enabled", False))
             and (bool(block.get("all_agents", False)) or bool(target_config.get("token_id_capture", False)))
+            and agent_instance_carries_training_tag(self.server_client.global_config_dict, agent_instance)
         )
-        capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        prefix = rollout_path_prefix(
+            request.episode_id.capture_key, token_capture=token_capture, agent_instance=agent_instance
+        )
+        return f"{prefix}/v1/responses"
 
     @staticmethod
     def _failure(
