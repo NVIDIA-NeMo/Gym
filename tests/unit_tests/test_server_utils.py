@@ -2249,6 +2249,11 @@ class TestServerUtils:
         self, monkeypatch: MonkeyPatch, tracing_enabled: bool
     ) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_trace_exporter_active", lambda: tracing_enabled)
+        monkeypatch.setattr("nemo_gym.telemetry.spans.client_span", lambda _: nullcontext(None))
+        monkeypatch.setattr("nemo_gym.telemetry.contrib.inject_trace_context", lambda headers: None)
+        traced = MagicMock(wraps=nemo_gym.server_utils._traced_request)
+        monkeypatch.setattr(nemo_gym.server_utils, "_traced_request", traced)
         async with ClientSession() as session:
             monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
             started = time.monotonic()
@@ -2260,6 +2265,7 @@ class TestServerUtils:
                 )
             elapsed = time.monotonic() - started
         assert 1.0 <= elapsed < 1.8
+        assert traced.call_count == int(tracing_enabled)
 
     async def test_request_to_a_refused_port_retries_forever_without_a_window(self, monkeypatch: MonkeyPatch) -> None:
         async with ClientSession() as session:

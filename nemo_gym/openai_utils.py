@@ -1836,6 +1836,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             if tries >= max_num_tries:
                 await raise_for_status(response, content)
 
+            # A connection error already opened the window: a status wait must not outlast it.
+            window = request_kwargs.get("_connection_retry_window")
+            remaining = window.remaining() if window is not None else None
+            if remaining is not None:
+                wait = max(0.0, min(wait, remaining))
+
             kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
             print(
                 f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} wait_s={wait:.1f} error_msg={content.decode('utf-8', errors='replace')[:200]}]",

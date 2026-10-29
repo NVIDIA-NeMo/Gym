@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
+import time
 from copy import deepcopy
 from types import SimpleNamespace, UnionType
 from typing import (
@@ -28,12 +29,12 @@ from typing import (
     get_origin,
     get_type_hints,
 )
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 
 import openai
 import orjson
 import pytest
-from aiohttp import ClientResponseError, ClientTimeout
+from aiohttp import ClientOSError, ClientResponseError, ClientTimeout
 from openai.types.chat import ChatCompletionToolChoiceOptionParam
 from openai.types.chat.chat_completion import ChatCompletion
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
@@ -762,6 +763,45 @@ class TestProviderBackoff:
         # The 503 retry keeps the call's window; the next call gets its own.
         assert windows[0] is windows[1]
         assert windows[2] is not windows[0]
+
+    async def test_an_opened_window_cuts_a_status_wait_short(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        connection_error = ClientOSError(111, "refused")
+        transport = MagicMock()
+        transport.request = AsyncMock(side_effect=[connection_error, _busy(status=503, retry_after="60")])
+        monkeypatch.setattr("nemo_gym.server_utils.get_global_aiohttp_client", lambda: transport)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.com/v1",
+            request_timeout_seconds=30,
+            max_rate_limit_wait_seconds=0,
+            connection_retry_timeout_s=1.0,
+        )
+
+        started = time.monotonic()
+        with pytest.raises(ClientOSError) as raised:
+            await client._request(method="POST", url="https://example.com/v1/responses")
+        elapsed = time.monotonic() - started
+
+        # The 60 s Retry-After is cut to the window's remainder, then the saved error is raised without reconnecting.
+        assert raised.value is connection_error
+        assert transport.request.await_count == 2
+        assert 0.9 <= elapsed < 1.8
+
+    async def test_an_unopened_window_keeps_the_full_status_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        success = SimpleNamespace(status=200)
+        request = AsyncMock(side_effect=[_busy(status=503, retry_after="60"), success])
+        sleep = AsyncMock()
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", sleep)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.com/v1",
+            max_rate_limit_wait_seconds=0,
+            connection_retry_timeout_s=1.0,
+        )
+
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+        sleep.assert_awaited_once_with(60.0)
 
     async def test_no_connection_retry_window_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         request = AsyncMock(return_value=SimpleNamespace(status=200))
