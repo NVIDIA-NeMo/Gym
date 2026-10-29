@@ -53,6 +53,21 @@ with a vision-capable policy model.
 `--benchmark gdp_pdf/python` runs the same tasks with a `python` tool over the source PDF in a
 per-rollout sandbox; see "Python Tool" in the resources server README.
 
+## Python variant onboarding checks
+
+After `gym eval prepare --benchmark gdp_pdf/python`, run:
+
+```bash
+gym env validate gdp_pdf/python
+gym env test gdp_pdf/python
+gym env publish gdp_pdf/python
+```
+
+The verifier fixture uses fixed judge replies to exercise the real scoring implementation offline.
+It checks full and zero reward, empty answers, missing rubrics, and malformed input. These checks
+need no API credentials or sandbox; real-model rollouts separately validate Python execution and
+the quality of the LLM judge. `publish` checks local readiness and catalog discovery without uploading data.
+
 ## Comparability
 
 Absolute scores are not directly comparable to Surge's published numbers. Surge's harness hands the

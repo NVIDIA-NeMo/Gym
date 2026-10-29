@@ -85,12 +85,14 @@ from nemo_gym.openai_utils import (
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.gdp_pdf.python_sandbox import (
     PythonSandboxConfig,
     run_python,
     start_python_sandbox,
     stop_python_sandbox,
 )
+from resources_servers.gdp_pdf.verifier_fixture import create_server, invoke
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +533,14 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=score_names))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=score_names))
         return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_server,
+    request_model=GdpPdfVerifyRequest,
+    cases_path=Path(__file__).parent / "tests/verifier_cases.jsonl",
+    invoke=invoke,
+)
 
 
 if __name__ == "__main__":
