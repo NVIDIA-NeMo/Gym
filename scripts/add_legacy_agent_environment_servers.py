@@ -32,7 +32,10 @@ or reports it when `error_on_agent_without_environment_server` is enabled.
 with a `single_agent_turn_legacy` server of the same name, so rows keep their routing.
 That server runs the episode in steps, so a crash repeats only the current step instead of the whole episode.
 It binds the agent's own Resources Server, as the relay did, and grants the agent direct HTTP access to its tools,
-the routes the agent's `/run` called. The server names no Resources Server itself, so it follows an agent rename.
+the routes the agent's `/run` called. The server explicitly names its Resources Server; Gym retargets that
+reference for an unambiguous top-level Resources Server rename. A child that rebinds Resources without such
+a rename must declare its Environment Server's `resources_server` too; the script refuses a migration that
+would leave that child bound to different Resources.
 A relay stays when its agent binds no Resources Server, would get a grant `simple_agent` sessions reject
 (a required MCP tool access, or more than one direct HTTP tool access), or binds a Resources Server whose
 `seed_session` accepts only the legacy body, not the `ResourcesSeedSessionRequest` an Environment Server sends,
@@ -83,7 +86,6 @@ RESOURCES_SERVERS_ROOT = REPO / "resources_servers"
 TYPED_SEED = "ResourcesSeedSessionRequest"
 RELAY = "legacy_agent"
 SWITCHED_AGENT_TYPE = "simple_agent"
-# Without a resources_server, the server binds its agent's, so it follows an `_inherit_from` agent rename.
 # The timeouts are the relay's own defaults, which the relay did not enforce and this server does.
 SWITCHED = """\
 {server}:
@@ -93,6 +95,9 @@ SWITCHED = """\
       agent_server:
         type: responses_api_agents
         name: {agent}
+      resources_server:
+        type: resources_servers
+        name: {resources}
       resources_tool_transports:
       - direct_http
       default_episode_timeout_seconds: 21600
@@ -107,6 +112,9 @@ SWITCHED_CHILD = """\
     single_agent_turn_legacy:
       agent_server:
         name: {agent}
+      resources_server:
+        type: resources_servers
+        name: {resources}
 """
 # The keys a switched stanza writes; a relay that sets any other key stays, so nothing it configures is dropped.
 SWITCHED_RELAY_KEYS = {"entrypoint", AGENT_SERVER}
@@ -365,12 +373,25 @@ def _without_deleted_keys(instance: dict) -> tuple[dict, set[str]]:
     return body, deferred
 
 
+def _inherit_from(instance: object) -> str | None:
+    if isinstance(instance, dict):
+        source = instance.get("_inherit_from")
+        return source if isinstance(source, str) else None
+    if isinstance(instance, str) and instance.startswith("${inherit_from:") and instance.endswith("}"):
+        return instance.removeprefix("${inherit_from:").removesuffix("}")
+    return None
+
+
 def resolved_instances(documents: list[dict]) -> dict[str, dict]:
-    """Map each top-level instance of one run to its body, merged across files and through `_inherit_from`."""
+    """Map each top-level instance to its body, merged across files and through inheritance or copying."""
     raw: dict[str, dict] = {}
     for document in documents:
         for name, instance in document.items():
-            if isinstance(instance, dict):
+            if isinstance(instance, str) and (source := _inherit_from(instance)) is not None:
+                raw[name] = {"_inherit_from": source}
+            elif isinstance(instance, str) and instance.startswith("${copy:") and instance.endswith("}"):
+                raw[name] = {"_copy": instance.removeprefix("${copy:").removesuffix("}")}
+            elif isinstance(instance, dict):
                 raw[name] = _merged(raw.get(name, {}), instance)
             elif instance is None:
                 # A later file removes an instance by setting it to null.
@@ -384,8 +405,8 @@ def resolved_instances(documents: list[dict]) -> dict[str, dict]:
         # Gym applies deletions after all files merge, before following inheritance. In particular,
         # deleting _inherit_from detaches a same-name harness override from the benchmark template.
         instance, deferred = _without_deleted_keys(raw.get(name, {}))
-        source = instance.get("_inherit_from")
-        own = {key: value for key, value in instance.items() if key != "_inherit_from"}
+        source = instance.get("_inherit_from", instance.get("_copy"))
+        own = {key: value for key, value in instance.items() if key not in {"_inherit_from", "_copy"}}
         base = resolve(source, (*seen, name)) if isinstance(source, str) and source not in seen else {}
         resolved[name] = _merged(base, own)
         if isinstance(source, str):
@@ -502,14 +523,14 @@ def extra_keys(instance: dict) -> list[str]:
 
 def switch_plan(
     documents: dict[Path, dict], loaded: dict[Path, dict | None]
-) -> tuple[dict[Path, list[tuple[str, str, str | None]]], list[tuple[Path, str, str]]]:
+) -> tuple[dict[Path, list[tuple[str, str, str, str | None]]], list[tuple[Path, str, str]]]:
     """Return ``(switches, kept)`` for the `simple_agent` relays declared in ``documents``.
 
-    ``switches`` maps each file to its ``(relay, agent, parent)`` replacements,
+    ``switches`` maps each file to its ``(relay, agent, resources, parent)`` replacements,
     where ``parent`` is the relay's own `_inherit_from`, if any.
     ``kept`` lists each ``(file, relay, reason)`` that stays on the relay.
     """
-    switches: dict[Path, list[tuple[str, str, str | None]]] = {}
+    switches: dict[Path, list[tuple[str, str, str, str | None]]] = {}
     kept: list[tuple[Path, str, str]] = []
     for path, document in documents.items():
         run = run_documents(path, loaded)
@@ -517,6 +538,9 @@ def switch_plan(
         # A run that cannot load an include cannot be resolved, so none of its relays switch.
         missing = [display(file) for file, _ in run if loaded[file] is None]
         for name in document:
+            # A pure string alias has no relay settings to rewrite; it inherits the parent's switch.
+            if not isinstance(document[name], dict):
+                continue
             agent_name = relayed_agent(instances.get(name, {}))
             agent = instances.get(agent_name or "", {})
             if agent_name is None or not (missing or SWITCHED_AGENT_TYPE in (agent.get("responses_api_agents") or {})):
@@ -530,7 +554,8 @@ def switch_plan(
                 kept.append((path, name, blocker))
                 continue
             parent = document[name].get("_inherit_from") if isinstance(document[name], dict) else None
-            switches.setdefault(path.resolve(), []).append((name, agent_name, parent))
+            resources = agent["responses_api_agents"][SWITCHED_AGENT_TYPE]["resources_server"]["name"]
+            switches.setdefault(path.resolve(), []).append((name, agent_name, resources, parent))
     return switches, kept
 
 
@@ -556,9 +581,11 @@ def unpaired_relays(
     return unpaired
 
 
-def stanza(relay: str, agent: str, parent: str | None) -> str:
+def stanza(relay: str, agent: str, resources: str, parent: str | None) -> str:
     """The block that replaces a relay, still inheriting its parent when it had one."""
-    return (SWITCHED if parent is None else SWITCHED_CHILD).format(server=relay, agent=agent, parent=parent)
+    return (SWITCHED if parent is None else SWITCHED_CHILD).format(
+        server=relay, agent=agent, resources=resources, parent=parent
+    )
 
 
 def _inheritance(name: str, documents: list[dict]) -> list[str]:
@@ -567,9 +594,9 @@ def _inheritance(name: str, documents: list[dict]) -> list[str]:
     while True:
         source = next(
             (
-                document[chain[-1]].get("_inherit_from")
+                _inherit_from(document[chain[-1]])
                 for document in reversed(documents)
-                if isinstance(document.get(chain[-1]), dict) and "_inherit_from" in document[chain[-1]]
+                if _inherit_from(document.get(chain[-1])) is not None
             ),
             None,
         )
@@ -579,20 +606,20 @@ def _inheritance(name: str, documents: list[dict]) -> list[str]:
 
 
 def split_servers(
-    planned: dict[tuple[Path, str], tuple[str, str | None]], paths: list[Path], loaded: dict[Path, dict | None]
+    planned: dict[tuple[Path, str], tuple[str, str, str | None]], paths: list[Path], loaded: dict[Path, dict | None]
 ) -> tuple[dict[tuple[Path, str], str], list[str]]:
     """Find the runs where the planned stanzas leave one instance with two environment server types.
 
     Another config can merge a relay with a `legacy_agent` server of the same name, such as a benchmark
     variant that points it at another harness, or inherit a switched relay without declaring a server.
-    ``planned`` maps each ``(file, relay)`` to its ``(agent, parent)``.
+    ``planned`` maps each ``(file, relay)`` to its ``(agent, resources, parent)``.
     Returns ``(keep, refused)``: each planned relay that can stay on the relay, with the reason, and a message
     for each split that keeping a relay cannot fix, because a relay the instance inherits switches.
     """
     after = dict(loaded)
-    for (file, relay), (agent, parent) in planned.items():
+    for (file, relay), (agent, resources, parent) in planned.items():
         document = dict(after.get(file) or {})
-        document.update(yaml.safe_load(stanza(relay, agent, parent)))
+        document.update(yaml.safe_load(stanza(relay, agent, resources, parent)))
         after[file] = document
     keep: dict[tuple[Path, str], str] = {}
     refused: list[str] = []
@@ -626,6 +653,95 @@ def split_servers(
     return keep, refused
 
 
+def changed_resources_bindings(
+    planned: dict[tuple[Path, str], tuple[str, str, str | None]],
+    paths: list[Path],
+    loaded: dict[Path, dict | None],
+) -> list[str]:
+    """Refuse runs whose migrated server would use different Resources from the relay's agent.
+
+    A top-level inheritance move can retarget the Environment Server reference. Copies and agent-only
+    overrides cannot: those runs need their own explicit Environment Server binding before migrating.
+    """
+    after = dict(loaded)
+    for (file, relay), (agent, resources, parent) in planned.items():
+        document = dict(after.get(file) or {})
+        document.update(yaml.safe_load(stanza(relay, agent, resources, parent)))
+        after[file] = document
+    refused = []
+    for path in paths:
+        run = run_documents(path, after)
+        files = [file for file, _ in run]
+        if not any((file, relay) in planned for file in files for relay in after.get(file) or {}):
+            continue
+        documents = [document for _, document in run]
+        instances = resolved_instances(documents)
+        original_documents = [document for _, document in run_documents(path, loaded)]
+        raw = {}
+        for document in documents:
+            raw = _merged(raw, document)
+        destinations: dict[str, list[str]] = {}
+        for name, instance in raw.items():
+            source = _inherit_from(instance)
+            if source is not None:
+                destinations.setdefault(source, []).append(name)
+
+        def final_targets(name: str, server_type: str) -> set[str]:
+            original = raw.get(name)
+            if (
+                name not in destinations
+                or not isinstance(original, dict)
+                or not isinstance(original.get(server_type), dict)
+            ):
+                return {name}
+            # Match config resolution: only surviving instances of the same server kind
+            # are rename candidates. A child can delete its inherited server block.
+            return {
+                target
+                for target in destinations[name]
+                if target not in destinations and isinstance(instances.get(target, {}).get(server_type), dict)
+            }
+
+        for name, instance in instances.items():
+            if name in destinations or not any(
+                (file, ancestor) in planned for ancestor in _inheritance(name, documents) for file in files
+            ):
+                continue
+            server = (instance.get("environment_servers") or {}).get("single_agent_turn_legacy")
+            if not isinstance(server, dict):
+                continue
+            if any(
+                "resources_server"
+                in (
+                    ((document.get(ancestor) or {}).get("environment_servers") or {}).get("single_agent_turn_legacy")
+                    or {}
+                )
+                for ancestor in _inheritance(name, documents)
+                for document in original_documents
+                if isinstance(document.get(ancestor), dict)
+            ):
+                # An existing Environment Server binding is intentional, even when the agent differs.
+                continue
+            agent_targets = final_targets((server.get("agent_server") or {}).get("name"), "responses_api_agents")
+            if len(agent_targets) != 1:
+                # Gym's existing ambiguous agent rename error handles this independently of Resources.
+                continue
+            agent = instances.get(next(iter(agent_targets)), {})
+            body = (agent.get("responses_api_agents") or {}).get(SWITCHED_AGENT_TYPE)
+            if not isinstance(body, dict):
+                continue
+            expected = (body.get("resources_server") or {}).get("name")
+            resources = (server.get("resources_server") or {}).get("name")
+            if final_targets(resources, "resources_servers") != {expected}:
+                refused.append(
+                    f"{name} in a run of {display(path)} would bind Resources {resources!r}, "
+                    f"but its relay's agent uses {expected!r}; declare "
+                    f"{name}.environment_servers.single_agent_turn_legacy.resources_server.name: {expected} "
+                    "in that config, or give its agent a separate relay and migrate both together"
+                )
+    return refused
+
+
 def replace_stanza(text: str, name: str, block: str) -> str:
     """Return ``text`` with top-level instance ``name`` replaced by ``block``.
 
@@ -654,9 +770,9 @@ def switch(documents: dict[Path, dict], *, check: bool) -> int:
         return 2
 
     planned = {
-        (path, relay): (agent, parent)
+        (path, relay): (agent, resources, parent)
         for path, replacements in switches.items()
-        for relay, agent, parent in replacements
+        for relay, agent, resources, parent in replacements
     }
     # Keeping one relay can split a relay that inherits it, so repeat until no run splits.
     while True:
@@ -671,11 +787,18 @@ def switch(documents: dict[Path, dict], *, check: bool) -> int:
             del planned[(path, relay)]
             kept.append((path, relay, reason))
 
+    if refused := changed_resources_bindings(planned, paths, loaded):
+        for message in dict.fromkeys(refused):
+            print(message, file=sys.stderr)
+        return 2
+
     # Every rewrite is built before any is written, so a failure leaves no file half switched.
     texts: dict[Path, str] = {}
-    for (path, relay), (agent, parent) in planned.items():
+    for (path, relay), (agent, resources, parent) in planned.items():
         try:
-            texts[path] = replace_stanza(texts.get(path) or path.read_text(), relay, stanza(relay, agent, parent))
+            texts[path] = replace_stanza(
+                texts.get(path) or path.read_text(), relay, stanza(relay, agent, resources, parent)
+            )
         except ValueError as error:
             print(f"could not rewrite {display(path)}: {error}", file=sys.stderr)
             return 2

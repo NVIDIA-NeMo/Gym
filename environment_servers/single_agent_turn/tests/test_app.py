@@ -623,34 +623,29 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
     assert client.calls == []
 
 
-def _unbound_config(environment_server: SingleAgentTurnEnvironmentServer) -> SingleAgentTurnEnvironmentServerConfig:
-    return SingleAgentTurnEnvironmentServerConfig.model_validate(
-        {**environment_server.config.model_dump(), "resources_server": None}
-    )
-
-
-async def test_an_unset_resources_server_is_the_agents_own() -> None:
-    # A server that replaced a legacy_agent relay binds the resources server the agent's /run used.
-    configured, client = _environment_server(resources_tool_transports=["direct_http"])
+async def test_environment_resources_binding_is_independent_of_the_agents() -> None:
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     client.global_config_dict.agent.responses_api_agents.test.update(
         {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
     )
-    environment_server = SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
 
     result = await environment_server.run_request(_request())
 
     assert result.result.reward == 1.0
-    resources_calls = [path for server, path, _ in client.calls if server == "agents_resources"]
+    resources_calls = [path for server, path, _ in client.calls if server == "resources"]
     assert resources_calls == ["/seed_session", "/verify", "/close_session"]
+    assert not any(server == "agents_resources" for server, _, _ in client.calls)
     create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
-    assert [access.name for access in create_body.tool_accesses] == ["agents_resources.direct_http"]
+    assert [access.name for access in create_body.tool_accesses] == ["resources.direct_http"]
 
 
-def test_a_server_whose_agent_names_no_resources_server_does_not_start() -> None:
-    configured, client = _environment_server()
+@pytest.mark.parametrize("resources", [{}, {"resources_server": None}])
+def test_environment_requires_its_own_resources_binding(resources: dict) -> None:
+    configured, _ = _environment_server()
+    config = configured.config.model_dump(exclude={"resources_server"})
 
-    with pytest.raises(ValueError, match="sets no resources_server"):
-        SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
+    with pytest.raises(ValidationError, match="resources_server"):
+        SingleAgentTurnEnvironmentServerConfig.model_validate({**config, **resources})
 
 
 @pytest.mark.parametrize("close_cookies", [{}, None])
