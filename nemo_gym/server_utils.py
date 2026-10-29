@@ -1558,6 +1558,9 @@ def install_trace_context_path(app: FastAPI) -> None:
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
 
+    # Direct MCP dispatch has no client connection to monitor.
+    skipped_on_direct_mcp_dispatch = True
+
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
         self.num_cancelled = 0
@@ -1881,6 +1884,9 @@ class SimpleServer(BaseServer):
                 del session[SESSION_ID_KEY]
             return response
 
+        # Direct MCP dispatch materializes the session itself.
+        add_session_id.skipped_on_direct_mcp_dispatch = True
+
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
@@ -1913,6 +1919,9 @@ repr(e): {repr(e)}"""
                     f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
+
+        # Direct MCP dispatch handles exceptions in the /mcp request itself.
+        exception_handling_middleware.skipped_on_direct_mcp_dispatch = True
 
     def setup_cancellation_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ClientDisconnectCancellationMiddleware)
