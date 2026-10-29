@@ -1458,7 +1458,7 @@ def _tool_calling_agent() -> Any:
 
 async def test_a_session_reports_the_tools_the_agent_executed_as_run_does(monkeypatch: pytest.MonkeyPatch) -> None:
     from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.rollout_collection import _attach_trajectory_record, _build_ng_perf
+    from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record, _build_ng_perf
     from responses_api_agents.simple_agent import app as simple_agent_app
     from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
 
@@ -1707,7 +1707,7 @@ async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) ->
 async def test_verifier_evidence_reaches_collector_through_result_or_failure(outcome, tmp_path):
     from fastapi.testclient import TestClient
 
-    from nemo_gym.rollout_collection import _attach_trajectory_record, _episode_record
+    from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record, _episode_record
     from nemo_gym.server_runtime import BaseResourcesServerConfig, BaseVerifyResponse, SimpleResourcesServer
     from nemo_gym.verification import JudgeError
 

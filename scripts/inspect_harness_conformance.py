@@ -5,7 +5,7 @@
 
 import sys
 
-from nemo_gym.harness_capabilities.cli import main
+from nemo_gym.rollouts import main
 
 
 if __name__ == "__main__":

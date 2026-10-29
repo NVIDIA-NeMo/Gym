@@ -17,9 +17,9 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-import nemo_gym.rollout_collection
+import nemo_gym.rollouts.rollout_collection
+import tests.unit_tests.rollouts.test_rollout_collection as collection_tests
 import tests.unit_tests.test_harbor_package_store as test_harbor_package_store
-import tests.unit_tests.test_rollout_collection as collection_tests
 from nemo_gym.data.tasks.harbor.build_options import BuildOptions
 from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig, apply_dataset_config, read_dataset_config
 from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY, content_hash
@@ -40,7 +40,7 @@ from nemo_gym.data.tasks.harbor.manifest import (
 from nemo_gym.data.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.data.tasks.harbor.prepare import build_run, prepare_target, resolve_agent
 from nemo_gym.data.tasks.harbor.task import MAX_DISCOVERY_DEPTH, iter_task_folders, load_task
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from tests.unit_tests.test_harbor_tasks import (  # noqa: F401  (fixtures)
     commit_repo,
     registry_dataset,
@@ -1322,7 +1322,7 @@ class TestPrepareOrderAndTrackedFolders:
 class TestResultsRowsCarryTheDatasetDigest:
     async def test_written_rollout_rows_carry_the_task_and_dataset_digests(self, tmp_path, monkeypatch):
         """The collector copies a materialized row's `_ng_*` task data onto the record it writes, result or failure."""
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: {})
         task_data = {DIGEST_KEY: "1" * 64, DATASET_DIGEST_KEY: "2" * 64}
         rows = [
             {

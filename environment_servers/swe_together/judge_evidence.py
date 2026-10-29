@@ -9,14 +9,10 @@ from pathlib import Path
 
 from nemo_gym.agents import AgentCloseSessionResponse
 from nemo_gym.models import CaptureStore
-from nemo_gym.observability.model_calls import (
-    ModelCallRecord,
-    await_model_call_capture_quiescence,
-    build_model_call_record,
-    model_call_capture_dirs_from_config,
-)
+from nemo_gym.rollouts import await_model_call_capture_quiescence, model_call_capture_dirs_from_config
 from nemo_gym.trajectory import (
     AgentInvocation,
+    ModelCallRecord,
     ModelCallRef,
     ObservationGap,
     TrajectoryModelCall,
@@ -24,6 +20,7 @@ from nemo_gym.trajectory import (
     TrajectoryResponseMetadata,
     TrajectoryTokenStats,
     VerifierInvocation,
+    build_model_call_record,
 )
 
 

@@ -7,8 +7,9 @@ import pytest
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.models import CaptureStore
-from nemo_gym.observability.model_calls import merge_model_call_capture_into_record, read_model_call_records
-from nemo_gym.rollout_collection import _build_trajectory_record
+from nemo_gym.rollouts import merge_model_call_capture_into_record
+from nemo_gym.rollouts.model_calls import read_model_call_records
+from nemo_gym.rollouts.rollout_collection import _build_trajectory_record
 from nemo_gym.trajectory import AgentObservationBundle, ContextCompactionObservation, TrajectoryRecord
 from nemo_gym.trajectory.trajectory_record import join_agent_model_calls, join_assistant_message_calls
 from responses_api_agents.opencode_agent.app import _parse_opencode_session
@@ -298,7 +299,7 @@ def test_message_join_failure_preserves_invocation_ownership(tmp_path, parse, mo
         def fail_association(*_args, **_kwargs):
             raise RuntimeError("message association failed")
 
-        monkeypatch.setattr("nemo_gym.observability.model_calls.join_assistant_message_calls", fail_association)
+        monkeypatch.setattr("nemo_gym.rollouts.model_calls.join_assistant_message_calls", fail_association)
 
     merge_model_call_capture_into_record(record, [store.root], include_payloads=True)
 
