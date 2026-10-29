@@ -183,9 +183,10 @@ class TestAnthropicConverter:
         assert response.output[2].call_id == "toolu_123"
         assert response.output[2].name == "get_weather"
         assert json.loads(response.output[2].arguments) == {"city": "San Francisco"}
-        assert response.usage.input_tokens == 10
+        # Anthropic reports the 3 cache reads apart from input_tokens; Responses counts them inside it.
+        assert response.usage.input_tokens == 13
         assert response.usage.output_tokens == 20
-        assert response.usage.total_tokens == 30
+        assert response.usage.total_tokens == 33
         assert response.usage.input_tokens_details.cached_tokens == 3
 
     def test_anthropic_to_responses_preserves_unknown_usage_details(self) -> None:

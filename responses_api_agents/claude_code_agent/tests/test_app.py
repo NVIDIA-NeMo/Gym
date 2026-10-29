@@ -53,8 +53,7 @@ from responses_api_agents.claude_code_agent.app import (
     _invocation_outcome,
     parse_stream_json,
 )
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
-from responses_api_agents.claude_code_agent.parsing import transcript_usage_from_dir, transcript_usage_from_tar
+from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations, read_transcripts
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -368,7 +367,7 @@ class TestObservability:
                 "is_error": False,
                 "compaction_attempts": [{"invocation_id": "session-1", "outcome": "failed"}],
             }
-            observation_collector(tmp_path, run_metadata)
+            observation_collector(read_transcripts(tmp_path), run_metadata)
             return (
                 _output(_event("assistant", message={"content": [{"type": "text", "text": "done"}]})),
                 "model",
@@ -563,13 +562,19 @@ class TestRunClaudeCode:
             async def fake_exec(*cmd, **kwargs):
                 return SlowProc()
 
-            def collect(config_dir: Path, metadata: dict) -> None:
+            def read(config_dir: Path):
+                # The transcripts are read once the CLI has stopped and before its config dir is removed.
                 assert config_dir.exists()
+                state.append("read")
+                return read_transcripts(config_dir)
+
+            def collect(transcripts, metadata: dict) -> None:
                 state.append("collect")
 
             with (
                 patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
                 patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+                patch("responses_api_agents.claude_code_agent.app.read_transcripts", side_effect=read),
             ):
                 task = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
                 await communicating.wait()
@@ -579,7 +584,7 @@ class TestRunClaudeCode:
 
         asyncio.run(run())
 
-        assert state == ["communicate", "kill", "stopped", "collect"]
+        assert state == ["communicate", "kill", "stopped", "read", "collect"]
 
     def test_collects_observations_before_cleanup(self, tmp_path: Path) -> None:
         agent = _make_agent()
@@ -614,10 +619,10 @@ class TestRunClaudeCode:
             captured["config_dir"] = config_dir
             return FakeProc()
 
-        def collect(config_dir: Path, run_metadata: dict) -> None:
+        def collect(transcripts, run_metadata: dict) -> None:
             captured["collector_thread"] = threading.get_ident()
             captured["observations"] = extract_claude_code_observations(
-                config_dir,
+                transcripts=transcripts,
                 root_status=run_metadata["status"],
             )
 
@@ -928,7 +933,7 @@ class TestParseStreamJson:
     def test_empty(self) -> None:
         items, usage = parse_stream_json("")
         assert items == []
-        assert usage == {"input_tokens": 0, "cached_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "cached_tokens": None, "output_tokens": 0}
 
     def test_text_message(self) -> None:
         line = self._assistant([{"type": "text", "text": "hello"}])
@@ -1042,7 +1047,7 @@ class TestParseStreamJson:
         _, usage = parse_stream_json(result)
         assert usage == {
             "input_tokens": 1,
-            "cached_tokens": 0,
+            "cached_tokens": None,
             "output_tokens": 1,
             "num_turns": 9,
             "subtype": "success",
@@ -1119,14 +1124,56 @@ def _server_count(capture: dict, *, as_claude_code_merges: bool = True) -> tuple
     return totals
 
 
-def _counts(usage: dict) -> tuple[int, int, int]:
+def _started_input(call: dict) -> int:
+    start = call["message_start_usage"]
+    return sum(
+        start.get(key) or 0 for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+    )
+
+
+def _named_calls(capture: dict, transcripts: dict | None = None) -> set[str]:
+    """The message ids the stream or a transcript names; a call cut off before Claude Code wrote either is unseen."""
+    transcripts = capture["transcripts"] if transcripts is None else transcripts
+    return {event["message"]["id"] for event in capture["stream"] if event["type"] == "assistant"} | {
+        entry["message"]["id"]
+        for entries in transcripts.values()
+        for entry in entries
+        if entry.get("type") == "assistant"
+    }
+
+
+def _killed_count(capture: dict) -> tuple[int, int, int]:
+    """The finished calls as the server sent them, plus the input of each call cut off in flight that is named."""
+    finished = _server_count(capture)
+    named = _named_calls(capture)
+    in_flight = sum(
+        _started_input(call)
+        for call in capture["proxy_calls"]
+        if not call["message_stop"] and call["message_id"] in named
+    )
+    return finished[0] + in_flight, finished[1], finished[2]
+
+
+def _records(config_dir: Path):
+    return read_transcripts(config_dir).usage_records
+
+
+def _counts(usage: dict) -> tuple[int, int | None, int]:
     return usage["input_tokens"], usage["cached_tokens"], usage["output_tokens"]
 
 
-def _response_counts(response) -> tuple[int, int, int]:
+def _response_counts(response) -> tuple[int, int | None, int]:
     usage = response.usage
     assert usage.total_tokens == usage.input_tokens + usage.output_tokens
+    assert usage.output_tokens_details.reasoning_tokens is None
     return usage.input_tokens, usage.input_tokens_details.cached_tokens, usage.output_tokens
+
+
+def _archive(config_dir: Path) -> bytes:
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+        archive.add(config_dir / "projects", arcname="projects")
+    return archive_bytes.getvalue()
 
 
 class TestCapturedUsage:
@@ -1153,67 +1200,81 @@ class TestCapturedUsage:
         served, merged = _server_count(capture, as_claude_code_merges=False), _server_count(capture)
         assert merged[0] - served[0] == call["message_start_usage"]["input_tokens"]
         _write_transcripts(capture, tmp_path)
-        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
+        _, usage = parse_stream_json(_capture_stream(capture), transcript_records=_records(tmp_path))
         assert _counts(usage) == merged
 
     @pytest.mark.parametrize("name", KILLED)
-    def test_killed_session_counts_the_calls_that_finished(self, tmp_path: Path, name: str) -> None:
+    def test_killed_session_counts_finished_calls_and_the_input_of_calls_in_flight(
+        self, tmp_path: Path, name: str
+    ) -> None:
         capture = USAGE_CAPTURES[name]
         assert not any(event["type"] == "result" for event in capture["stream"])
         _write_transcripts(capture, tmp_path)
-        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
-        assert _counts(usage) == _server_count(capture)
+        _, usage = parse_stream_json(_capture_stream(capture), transcript_records=_records(tmp_path))
+        assert _counts(usage) == _killed_count(capture)
+
+    def test_a_call_in_flight_named_only_by_its_transcript_counts_its_input(self, tmp_path: Path) -> None:
+        # killed-sub was cut off during a subagent call that its transcript names but the stream does not.
+        capture = USAGE_CAPTURES["killed-sub"]
+        streamed = {event["message"]["id"] for event in capture["stream"] if event["type"] == "assistant"}
+        [call] = [call for call in capture["proxy_calls"] if not call["message_stop"]]
+        assert call["message_id"] in _named_calls(capture) - streamed
+        assert (
+            _killed_count(capture)[0] == _server_count(capture)[0] + _started_input(call) > _server_count(capture)[0]
+        )
 
     def test_killed_session_without_transcripts_counts_the_streamed_input(self) -> None:
         capture = USAGE_CAPTURES["killed-mid"]
         streamed = {event["message"]["id"] for event in capture["stream"] if event["type"] == "assistant"}
-        started = sum(
-            call["message_start_usage"]["input_tokens"]
-            for call in capture["proxy_calls"]
-            if call["message_id"] in streamed
-        )
-        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: None)
-        assert _counts(usage) == (started, 0, 0)
+        started = sum(_started_input(call) for call in capture["proxy_calls"] if call["message_id"] in streamed)
+        _, usage = parse_stream_json(_capture_stream(capture))
+        # vLLM's message_start reports no cache counts.
+        assert _counts(usage) == (started, None, 0)
 
     @pytest.mark.parametrize("name", KILLED)
     def test_transcripts_read_the_same_from_the_sandbox_archive(self, tmp_path: Path, name: str) -> None:
         _write_transcripts(USAGE_CAPTURES[name], tmp_path)
-        archive_bytes = io.BytesIO()
-        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
-            archive.add(tmp_path / "projects", arcname="projects")
-        assert transcript_usage_from_tar(archive_bytes.getvalue()) == transcript_usage_from_dir(tmp_path)
+        from_archive = adapter.read_artifact_transcripts(adapter.ClaudeCodeArtifacts("", _archive(tmp_path)))
+        from_dir = read_transcripts(tmp_path)
+        assert (from_archive.records, from_archive.files_read) == (from_dir.records, from_dir.files_read)
 
-    def test_missing_or_unreadable_transcripts_are_none(self, tmp_path: Path) -> None:
-        assert transcript_usage_from_dir(tmp_path) is None
-        assert transcript_usage_from_tar(b"not a tar") is None
-        (tmp_path / "projects" / "session.jsonl").mkdir(parents=True)  # read_text raises IsADirectoryError
-        assert transcript_usage_from_dir(tmp_path) is None
+    def test_missing_or_unreadable_transcripts_are_unavailable(self, tmp_path: Path) -> None:
+        assert read_transcripts(tmp_path).files_read == 0
+        assert adapter.read_artifact_transcripts(adapter.ClaudeCodeArtifacts("")) is None
+        assert adapter.read_artifact_transcripts(adapter.ClaudeCodeArtifacts("", b"not a tar")) is None
+        (tmp_path / "projects" / "session.jsonl").mkdir(parents=True)  # open() raises IsADirectoryError
+        unreadable = read_transcripts(tmp_path)
+        assert unreadable.files_read == 0
+        assert [gap.code for gap in unreadable.gaps] == ["transcript_unreadable"]
 
     def test_unreadable_transcripts_fall_back_to_the_streamed_input(self, tmp_path: Path) -> None:
         capture = USAGE_CAPTURES["killed-mid"]
-        _, without = parse_stream_json(_capture_stream(capture), transcript=lambda: None)
+        _, without = parse_stream_json(_capture_stream(capture))
         (tmp_path / "projects" / "session.jsonl").mkdir(parents=True)
-        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
-        assert _counts(usage) == _counts(without) != (0, 0, 0)
+        _, usage = parse_stream_json(_capture_stream(capture), transcript_records=_records(tmp_path))
+        assert _counts(usage) == _counts(without) != (0, None, 0)
 
-    def test_a_read_transcript_with_no_finished_call_counts_nothing(self, tmp_path: Path) -> None:
+    def test_a_read_transcript_with_no_finished_call_counts_the_input_of_its_calls(self, tmp_path: Path) -> None:
         capture = USAGE_CAPTURES["killed-sub"]
         unfinished = {
             name: [entry for entry in entries if not (entry.get("message") or {}).get("stop_reason")]
             for name, entries in capture["transcripts"].items()
         }
         assert any(entry.get("type") == "assistant" for entries in unfinished.values() for entry in entries)
+        named = _named_calls(capture, unfinished)
+        started = sum(_started_input(call) for call in capture["proxy_calls"] if call["message_id"] in named)
         _write_transcripts({"transcripts": unfinished}, tmp_path)
-        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
-        assert _counts(usage) == (0, 0, 0)
+        _, usage = parse_stream_json(_capture_stream(capture), transcript_records=_records(tmp_path))
+        assert _counts(usage) == (started, None, 0)
+        assert started > 0
 
     @pytest.mark.parametrize("name", KILLED)
     def test_an_unreadable_transcript_beside_readable_ones_is_skipped(self, tmp_path: Path, name: str) -> None:
         capture = USAGE_CAPTURES[name]
         _write_transcripts(capture, tmp_path)
         (tmp_path / "projects" / "unreadable.jsonl").mkdir()
-        _, usage = parse_stream_json(_capture_stream(capture), transcript=lambda: transcript_usage_from_dir(tmp_path))
-        assert _counts(usage) == _server_count(capture)
+        _, usage = parse_stream_json(_capture_stream(capture), transcript_records=_records(tmp_path))
+        assert _counts(usage) == _killed_count(capture)
 
     def test_endpoint_without_cache_fields(self, tmp_path: Path) -> None:
         # No proxy recorded this session; the server's per-call usage is the stream's (one value per message).
@@ -1221,10 +1282,11 @@ class TestCapturedUsage:
         started = {e["message"]["id"]: e["message"]["usage"] for e in capture["stream"] if e["type"] == "assistant"}
         assert all(set(usage) == {"input_tokens", "output_tokens"} for usage in started.values())
         _, usage = parse_stream_json(_capture_stream(capture))
+        # The server sends no cache counts; Claude Code's result and transcripts report them as 0.
         assert (usage["input_tokens"], usage["cached_tokens"]) == (sum(u["input_tokens"] for u in started.values()), 0)
         _write_transcripts(capture, tmp_path)
         _, killed = parse_stream_json(
-            _capture_stream(capture, drop_result=True), transcript=lambda: transcript_usage_from_dir(tmp_path)
+            _capture_stream(capture, drop_result=True), transcript_records=_records(tmp_path)
         )
         assert _counts(killed) == _counts(usage)
 
@@ -1247,17 +1309,14 @@ class TestCapturedUsage:
             patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", new=run_claude),
         ):
             response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="fix it")))
-        assert _response_counts(response) == _server_count(capture)
+        assert _response_counts(response) == (_killed_count(capture) if killed else _server_count(capture))
 
     @pytest.mark.parametrize("name", ["subagent", "killed-sub"])
     def test_sandbox_run_reports_server_usage(self, tmp_path: Path, monkeypatch, name: str) -> None:
         capture = USAGE_CAPTURES[name]
         killed = name.startswith("killed")
         _write_transcripts(capture, tmp_path)
-        archive_bytes = io.BytesIO()
-        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
-            archive.add(tmp_path / "projects", arcname="projects")
-        artifacts = adapter.ClaudeCodeArtifacts(_capture_stream(capture), archive_bytes.getvalue())
+        artifacts = adapter.ClaudeCodeArtifacts(_capture_stream(capture), _archive(tmp_path))
         state = adapter.ClaudeCodeSandboxSession(
             request=AgentSeedSessionRequest(
                 agent_session_id="session",
@@ -1273,13 +1332,122 @@ class TestCapturedUsage:
             ),
         )
         monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
+        read = MagicMock(side_effect=adapter.read_artifact_transcripts)
+        monkeypatch.setattr("responses_api_agents.claude_code_agent.app.read_artifact_transcripts", read)
         agent = _make_agent()
         response = asyncio.run(
             agent._sandbox_response(
                 state, NeMoGymResponseCreateParamsNonStreaming(input="fix it"), prompt="fix it", system=None
             )
         )
-        assert _response_counts(response) == _server_count(capture)
+        assert _response_counts(response) == (_killed_count(capture) if killed else _server_count(capture))
+        # One read of the archive serves the usage and the observations.
+        read.assert_called_once_with(artifacts)
+
+    def test_sandbox_run_without_transcripts_reports_the_streamed_usage(self, monkeypatch) -> None:
+        capture = USAGE_CAPTURES["killed-mid"]
+        artifacts = adapter.ClaudeCodeArtifacts(_capture_stream(capture))
+        state = adapter.ClaudeCodeSandboxSession(
+            request=AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id={"rollout_id": "rollout"},
+                task_id={"taskset": "fixture", "task_id": "task"},
+            ),
+            runtime="/runtime",
+            session=SimpleNamespace(
+                session_dir="/tmp/session",
+                workdir="/app",
+                artifacts=artifacts,
+                cleanup={"timed_out": True, "return_code": 137, "cleanup_confirmed": True},
+            ),
+        )
+        monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
+        response = asyncio.run(
+            _make_agent()._sandbox_response(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="fix it"), prompt="fix it", system=None
+            )
+        )
+        streamed = {event["message"]["id"] for event in capture["stream"] if event["type"] == "assistant"}
+        started = sum(_started_input(call) for call in capture["proxy_calls"] if call["message_id"] in streamed)
+        assert _response_counts(response) == (started, None, 0)
+        assert [gap.code for gap in state.observations.gaps][:1] == ["agent_transcript_unavailable"]
+
+    def test_cache_counts_served_through_a_gym_model_server_reach_the_usage(self) -> None:
+        # Gym's model server answers Claude Code with Responses usage turned into Anthropic Messages SSE. The served
+        # response is built from an Anthropic usage with a cache split, so both directions of the converter run.
+        converter = AnthropicConverter()
+        served = converter.anthropic_to_responses(
+            {
+                "content": [{"type": "text", "text": "done"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 200, "cache_read_input_tokens": 800, "output_tokens": 50},
+            },
+            NeMoGymResponseCreateParamsNonStreaming(input="fix it"),
+            "model",
+        )
+        assert (served.usage.input_tokens, served.usage.input_tokens_details.cached_tokens) == (1000, 800)
+        events = [
+            json.loads(line.split("data: ", 1)[1])
+            for line in "".join(
+                converter.anthropic_response_to_sse(converter.responses_to_anthropic_response(served, "model"))
+            ).splitlines()
+            if line.startswith("data: ")
+        ]
+        started = next(event["message"]["usage"] for event in events if event["type"] == "message_start")
+        delta = next(event["usage"] for event in events if event["type"] == "message_delta")
+        # Claude Code keeps message_start's usage and updates it with message_delta's.
+        final = {**started, **delta}
+        result = _event("result", subtype="success", is_error=False, usage=final)
+        _, usage = parse_stream_json(result)
+        assert _counts(usage) == (1000, 800, 50)
+        entry = {"type": "assistant", "message": {"id": "m1", "stop_reason": "end_turn", "usage": final}}
+        _, killed = parse_stream_json("", transcript_records=[entry])
+        assert _counts(killed) == (1000, 800, 50)
+
+
+class TestUsageRecordValidation:
+    @pytest.mark.parametrize(
+        "model_usage",
+        [
+            {"model": {}},
+            {"model": {"cacheReadInputTokens": 5}},
+            {"model": {"inputTokens": True, "outputTokens": 1}},
+            {"model": {"inputTokens": 1.5, "outputTokens": 1}},
+            {"model": {"inputTokens": -1, "outputTokens": 1}},
+            {"model": {"inputTokens": "3", "outputTokens": 1}},
+            {"good": {"inputTokens": 3, "outputTokens": 1}, "bad": {"inputTokens": 3, "outputTokens": -1}},
+        ],
+    )
+    def test_an_invalid_model_usage_record_falls_back_to_usage(self, model_usage: dict) -> None:
+        result = _event("result", modelUsage=model_usage, usage={"input_tokens": 10, "output_tokens": 2})
+        _, usage = parse_stream_json(result)
+        assert _counts(usage) == (10, None, 2)
+
+    @pytest.mark.parametrize(
+        "record",
+        [{}, {"cache_read_input_tokens": 5}, {"input_tokens": False}, {"input_tokens": 2.0}, {"output_tokens": -3}],
+    )
+    def test_an_invalid_usage_record_is_not_counted(self, record: dict) -> None:
+        _, usage = parse_stream_json(_event("result", usage=record))
+        assert _counts(usage) == (0, None, 0)
+
+    def test_missing_and_null_optional_counts_are_unreported(self) -> None:
+        result = _event("result", usage={"input_tokens": 7, "output_tokens": None, "cache_read_input_tokens": None})
+        _, usage = parse_stream_json(result)
+        assert _counts(usage) == (7, None, 0)
+
+    def test_a_reported_zero_cache_count_is_kept(self) -> None:
+        result = _event(
+            "result",
+            usage={
+                "input_tokens": 7,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        )
+        _, usage = parse_stream_json(result)
+        assert _counts(usage) == (7, 0, 1)
 
 
 class TestConfigYaml:
@@ -1365,7 +1533,7 @@ class TestCaptureFriendlyTranscript:
             response = asyncio.run(
                 agent._create_response(
                     NeMoGymResponseCreateParamsNonStreaming(input="fix it"),
-                    observation_collector=lambda path, run_metadata: metadata.update(run_metadata),
+                    observation_collector=lambda transcripts, run_metadata: metadata.update(run_metadata),
                 )
             )
         assert proc.kill.call_count == int(timeout)

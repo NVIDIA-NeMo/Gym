@@ -22,7 +22,11 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox.utils import read_text, upload_text
 from nemo_gym.skills import stage_skills
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.observability import (
+    ClaudeCodeTranscripts,
+    extract_claude_code_observations,
+    read_transcripts,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -53,8 +57,24 @@ class ClaudeCodeArtifacts:
     transcripts: bytes | None = None
 
 
+def read_artifact_transcripts(artifacts: ClaudeCodeArtifacts) -> ClaudeCodeTranscripts | None:
+    """The run's transcripts from the captured archive, read once for token usage and observations; None without
+    an archive or when it cannot be read."""
+    if artifacts.transcripts is None:
+        return None
+    try:
+        with tempfile.TemporaryDirectory(prefix="gym-claude-transcripts-") as temporary:
+            path = Path(temporary)
+            with tarfile.open(fileobj=io.BytesIO(artifacts.transcripts)) as archive:
+                archive.extractall(path, filter="data")
+            return read_transcripts(path)
+    except Exception:
+        LOG.warning("Could not read Claude native transcripts", exc_info=True)
+        return None
+
+
 def parse_artifact_observations(
-    artifacts: ClaudeCodeArtifacts,
+    transcripts: ClaudeCodeTranscripts | None,
     *,
     model_ref: ModelServerRef | None,
     status: str,
@@ -63,20 +83,16 @@ def parse_artifact_observations(
 ) -> AgentObservationBundle:
     """Extract native observations off the event loop after capture completes."""
     try:
-        if artifacts.transcripts is None:
+        if transcripts is None:
             raise ValueError("Claude native transcripts are unavailable")
-        with tempfile.TemporaryDirectory(prefix="gym-claude-observations-") as temporary:
-            path = Path(temporary)
-            with tarfile.open(fileobj=io.BytesIO(artifacts.transcripts)) as archive:
-                archive.extractall(path, filter="data")
-            observations = extract_claude_code_observations(
-                path,
-                model_ref=model_ref,
-                root_status=status,
-                root_duration_ms=run_metadata.get("duration_ms"),
-                root_error_type=error_type,
-                compaction_attempts=run_metadata.get("compaction_attempts"),
-            )
+        observations = extract_claude_code_observations(
+            transcripts=transcripts,
+            model_ref=model_ref,
+            root_status=status,
+            root_duration_ms=run_metadata.get("duration_ms"),
+            root_error_type=error_type,
+            compaction_attempts=run_metadata.get("compaction_attempts"),
+        )
     except Exception:
         LOG.warning("Could not parse Claude native observations", exc_info=True)
         observations = AgentObservationBundle(

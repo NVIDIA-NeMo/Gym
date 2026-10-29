@@ -13,13 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import io
 import json
 import logging
-import tarfile
-from collections.abc import Callable, Iterable, Mapping
-from pathlib import Path
-from typing import Any, Optional
+from collections.abc import Iterable, Mapping
+from typing import Any, NamedTuple, Optional
 from uuid import uuid4
 
 from nemo_gym.openai_utils import (
@@ -40,99 +37,86 @@ def _extract_text(content: list[Any]) -> str:
 
 
 # (input, cached input, output) tokens. Input includes the prompt cache's writes and reads, which an Anthropic
-# usage object reports apart from ``input_tokens``.
-UsageCounts = tuple[int, int, int]
+# usage object reports apart from ``input_tokens``. Cached input is None when no cache count was reported.
+UsageCounts = tuple[int, Optional[int], int]
 
 
 def _add(a: UsageCounts, b: UsageCounts) -> UsageCounts:
-    return a[0] + b[0], a[1] + b[1], a[2] + b[2]
+    cached = None if a[1] is None and b[1] is None else (a[1] or 0) + (b[1] or 0)
+    return a[0] + b[0], cached, a[2] + b[2]
+
+
+def _reported_counts(
+    usage: Any, *, input_key: str, output_key: str, read_key: str, write_key: str
+) -> Optional[UsageCounts]:
+    """The counts in one usage record, or None unless it reports input or output tokens and every count it reports
+    is a non-negative integer. A count that is absent or null was not reported."""
+    if not isinstance(usage, Mapping):
+        return None
+    reported = {key: usage[key] for key in (input_key, output_key, read_key, write_key) if usage.get(key) is not None}
+    if input_key not in reported and output_key not in reported:
+        return None
+    if any(type(value) is not int or value < 0 for value in reported.values()):
+        return None
+    read, written = reported.get(read_key), reported.get(write_key)
+    cached = None if read is None and written is None else read or 0
+    return reported.get(input_key, 0) + (written or 0) + (read or 0), cached, reported.get(output_key, 0)
 
 
 def _usage_counts(usage: Any) -> Optional[UsageCounts]:
-    if not isinstance(usage, dict) or not ("input_tokens" in usage or "output_tokens" in usage):
-        return None
-    cached = int(usage.get("cache_read_input_tokens") or 0)
-    written = int(usage.get("cache_creation_input_tokens") or 0)
-    return int(usage.get("input_tokens") or 0) + written + cached, cached, int(usage.get("output_tokens") or 0)
+    """An Anthropic Messages usage object's counts."""
+    return _reported_counts(
+        usage,
+        input_key="input_tokens",
+        output_key="output_tokens",
+        read_key="cache_read_input_tokens",
+        write_key="cache_creation_input_tokens",
+    )
 
 
 def _model_usage_counts(model_usage: Any) -> Optional[UsageCounts]:
-    """The result event's ``modelUsage`` summed over models: every call the CLI made, its subagents' included."""
-    if not isinstance(model_usage, dict) or not model_usage:
+    """The result event's ``modelUsage`` summed over models: every call the CLI made, its subagents' included.
+
+    None unless every model's record is valid, so the result event's ``usage`` is used instead.
+    """
+    if not isinstance(model_usage, Mapping) or not model_usage:
         return None
-    totals: UsageCounts = (0, 0, 0)
+    totals: UsageCounts = (0, None, 0)
     for usage in model_usage.values():
-        if not isinstance(usage, dict):
+        counts = _reported_counts(
+            usage,
+            input_key="inputTokens",
+            output_key="outputTokens",
+            read_key="cacheReadInputTokens",
+            write_key="cacheCreationInputTokens",
+        )
+        if counts is None:
             return None
-        cached = int(usage.get("cacheReadInputTokens") or 0)
-        written = int(usage.get("cacheCreationInputTokens") or 0)
-        input_tokens = int(usage.get("inputTokens") or 0) + written + cached
-        totals = _add(totals, (input_tokens, cached, int(usage.get("outputTokens") or 0)))
+        totals = _add(totals, counts)
     return totals
 
 
-def transcript_usage(lines: Iterable[str]) -> dict[str, UsageCounts]:
-    """The usage of each model call that finished, by message id, from Claude Code's session transcripts.
+class TranscriptCall(NamedTuple):
+    usage: Optional[UsageCounts]
+    finished: bool
+
+
+def transcript_calls(records: Iterable[Any]) -> dict[str, TranscriptCall]:
+    """Each model call in Claude Code's session transcripts, by message id: its last usage and whether it finished.
 
     Claude Code writes an entry per content block. Once the message has finished, the entries carry its stop
     reason and its final usage, output included. An entry written before then carries neither: the usage known
-    when the message started, with no output. A message whose last entry has no stop reason was cut off in
-    flight and is left out.
+    when the message started, with no output. A message whose last entry has no stop reason was cut off in flight.
     """
-    last: dict[str, tuple[Optional[UsageCounts], Any]] = {}
-    for line in lines:
-        try:
-            entry = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
+    calls: dict[str, TranscriptCall] = {}
+    for record in records:
+        if not isinstance(record, Mapping) or record.get("type") != "assistant":
             continue
-        if (
-            not isinstance(entry, dict)
-            or entry.get("type") != "assistant"
-            or not isinstance(entry.get("message"), dict)
-        ):
+        message = record.get("message")
+        if not isinstance(message, Mapping) or not isinstance(message.get("id"), str) or not message["id"]:
             continue
-        message = entry["message"]
-        if isinstance(message.get("id"), str) and message["id"]:
-            last[message["id"]] = (_usage_counts(message.get("usage")), message.get("stop_reason"))
-    return {message_id: counts for message_id, (counts, stop) in last.items() if stop and counts is not None}
-
-
-def transcript_usage_from_dir(config_dir: Path) -> Optional[dict[str, UsageCounts]]:
-    """``transcript_usage`` over the session and subagent transcripts below ``config_dir/projects``.
-
-    None when none could be read, so the caller falls back to the stream's usage; a transcript that was read is
-    authoritative even when it holds no finished call.
-    """
-    usage: dict[str, UsageCounts] = {}
-    readable = False
-    for path in sorted((config_dir / "projects").rglob("*.jsonl")):
-        try:
-            text = path.read_text(errors="replace")
-        except OSError:
-            LOG.warning("Could not read Claude Code transcript %s for token usage", path, exc_info=True)
-            continue
-        usage.update(transcript_usage(text.splitlines()))
-        readable = True
-    return usage if readable else None
-
-
-def transcript_usage_from_tar(archive_bytes: bytes) -> Optional[dict[str, UsageCounts]]:
-    """``transcript_usage`` over the ``*.jsonl`` members of a tar of ``projects``; None when there are none."""
-    usage: dict[str, UsageCounts] = {}
-    found = False
-    try:
-        with tarfile.open(fileobj=io.BytesIO(archive_bytes)) as archive:
-            for member in sorted(archive.getmembers(), key=lambda member: member.name):
-                if not member.isfile() or not member.name.endswith(".jsonl"):
-                    continue
-                handle = archive.extractfile(member)
-                if handle is not None:
-                    found = True
-                    usage.update(transcript_usage(handle.read().decode(errors="replace").splitlines()))
-    except (tarfile.TarError, OSError, EOFError):
-        LOG.warning("Could not read Claude Code transcripts for token usage", exc_info=True)
-        return None
-    return usage if found else None
+        calls[message["id"]] = TranscriptCall(_usage_counts(message.get("usage")), bool(message.get("stop_reason")))
+    return calls
 
 
 def _extract_thinking(content: list[Any]) -> str:
@@ -149,17 +133,18 @@ def parse_stream_json(
     stdout: str,
     *,
     fold_thinking: bool = True,
-    transcript: Optional[Callable[[], Optional[Mapping[str, UsageCounts]]]] = None,
+    transcript_records: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> tuple[list[Any], dict]:
     """Convert claude -p --output-format=stream-json stdout into (output_items, usage).
 
     Usage counts every model call the CLI made, subagents' included, with the prompt cache's reads and writes in
-    the input. It comes from the result event when there is one. Without it (the CLI was killed), it is the sum
-    of the calls that finished, from the session transcripts that ``transcript`` returns (called only then; see
-    ``transcript_usage``). Not counted there: a call cut off in flight (its output is reported only when it
-    ends) and context compaction, which Claude Code leaves out of its transcripts.
-    When there are no transcripts, the stream's per-message usage is all there is, which on servers that send
-    output only at the end of a message (vLLM) holds input alone.
+    the input. It comes from the result event when there is one. Without it (the CLI was killed), each call is
+    counted once by message id, from the run's transcript records (``transcript_records``, None when none could
+    be read): a call that finished counts its final usage, and a call cut off in flight counts the input it was
+    sent with, from its transcript entry or the stream, but no output, which is reported only when a call ends.
+    Context compaction, which Claude Code leaves out of its transcripts and stream, is not counted. Without
+    transcripts, the stream's per-message usage is all there is, which on servers that send output only at the end
+    of a message (vLLM) holds input alone. ``cached_tokens`` is None when no cache count was reported.
 
     ``fold_thinking=True`` (eval default) prefixes each assistant message with the model's thinking as
     ``<think>...</think>`` text. Under training-token capture that must be off: Gym attributes the finished
@@ -188,7 +173,7 @@ def parse_stream_json(
     # once each: stream-json emits one event per content block, each repeating the usage its message started with.
     result_usage: Optional[UsageCounts] = None
     message_usage: dict[str, UsageCounts] = {}
-    unidentified: UsageCounts = (0, 0, 0)
+    unidentified: UsageCounts = (0, None, 0)
     num_turns: Optional[int] = None
     result_metadata: dict[str, Any] = {}
     compacting_sessions: set[str] = set()
@@ -200,9 +185,11 @@ def parse_stream_json(
 
         if etype == "result":
             # ``usage`` covers the main conversation only; ``modelUsage`` adds its subagents' calls.
-            counts = _model_usage_counts(event.get("modelUsage")) or _usage_counts(event.get("usage"))
+            counts = _model_usage_counts(event.get("modelUsage"))
+            if counts is None:
+                counts = _usage_counts(event.get("usage"))
             if counts is not None:
-                result_usage = _add(result_usage or (0, 0, 0), counts)
+                result_usage = _add(result_usage or (0, None, 0), counts)
             # Claude Code's authoritative turn counter (what --max-turns bounds).
             if event.get("num_turns") is not None:
                 num_turns = int(event["num_turns"])
@@ -217,11 +204,11 @@ def parse_stream_json(
         elif etype == "assistant":
             message = event.get("message", {})
             content = message.get("content") or []
-            counts = _usage_counts(message.get("usage")) or (0, 0, 0)
+            counts = _usage_counts(message.get("usage"))
             message_id = message.get("id")
-            if isinstance(message_id, str) and message_id:
+            if counts is not None and isinstance(message_id, str) and message_id:
                 message_usage[message_id] = counts
-            else:
+            elif counts is not None:
                 unidentified = _add(unidentified, counts)
 
             # Subagent frames belong to a different captured chain. Keep their usage accounting,
@@ -331,11 +318,20 @@ def parse_stream_json(
     )
     if result_usage is not None:
         totals = result_usage
+    elif transcript_records is not None:
+        calls = transcript_calls(transcript_records)
+        totals = (0, None, 0)
+        for message_id in sorted(calls.keys() | message_usage.keys()):
+            call = calls.get(message_id)
+            if call is not None and call.finished and call.usage is not None:
+                totals = _add(totals, call.usage)
+                continue
+            started = call.usage if call is not None and call.usage is not None else message_usage.get(message_id)
+            if started is not None:
+                totals = _add(totals, (started[0], started[1], 0))
     else:
-        finished = transcript() if transcript is not None else None
-        calls = finished.values() if finished is not None else [unidentified, *message_usage.values()]
-        totals = (0, 0, 0)
-        for counts in calls:
+        totals = unidentified
+        for counts in message_usage.values():
             totals = _add(totals, counts)
     metadata: dict = {"input_tokens": totals[0], "cached_tokens": totals[1], "output_tokens": totals[2]}
     if terminal_response_id:

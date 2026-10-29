@@ -211,13 +211,17 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
 - Token usage covers every model call the CLI made, its subagents' included. Input counts the
-  prompt cache's reads and writes, and `cached_tokens` is the cache reads. A run that ends on its
-  own takes it from the result event's `modelUsage` (its `usage` covers the main conversation
-  only). A run cut off at the timeout has no result event; it counts the calls that finished, from
-  Claude Code's session transcripts. Two kinds of call are missing there: one cut off in flight,
-  whose output is reported only when it ends, and context compaction, which Claude Code leaves out
+  prompt cache's reads and writes, and `cached_tokens` is the cache reads, or null when no cache
+  count was reported; `reasoning_tokens` is null, since Anthropic reports none. A run that ends on
+  its own takes it from the result event's `modelUsage` (its `usage` covers the main conversation
+  only). A run cut off at the timeout has no result event; it counts each call once by message id,
+  from Claude Code's session transcripts and its stream: a call that finished counts its final
+  usage, and a call cut off in flight counts the input it was sent with but no output, which is
+  reported only when a call ends. Context compaction is missing, since Claude Code leaves it out
   of its transcripts (each compaction is one call over the whole context, about 0.5% of a long
   run's input).
+- Through a Gym model server, the Anthropic Messages responses carry the cache reads in
+  `cache_read_input_tokens`, so Claude Code counts them as against an Anthropic endpoint.
 - Usage is Claude Code's own count. Against vLLM it counts a call's prompt twice when the call's
   final usage reports no uncached input: Claude Code then keeps the prompt total it was sent when
   the call started and adds the cache reads and writes to it. With DeepSeek V4.1 Flash that is
