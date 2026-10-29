@@ -674,6 +674,8 @@ def _interrupt_on_sigterm() -> None:
     def _on_sigterm(signum: int, frame: Any) -> None:
         global _terminated
         _terminated = True
+        # The run exits 143 (`_exit_if_terminated`) whatever `require_complete` says; its tracking run closes FAILED.
+        mark_run_failed()
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_sigterm)
@@ -772,8 +774,7 @@ def collect_rollouts():  # pragma: no cover
     try:
         asyncio.run(rch.run_from_config(config))
     except KeyboardInterrupt:
-        if config.require_complete or not _terminated:
-            mark_run_failed()
+        mark_run_failed()
         if not _terminated:
             raise
     except BaseException:
