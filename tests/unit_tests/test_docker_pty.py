@@ -34,9 +34,8 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox import AsyncSandbox, SandboxHandle
 from nemo_gym.sandbox.providers.base import (
-    SandboxHandle,
     SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
@@ -1302,7 +1301,7 @@ async def test_the_pid_read_exec_has_a_timeout_of_its_own(monkeypatch: pytest.Mo
 
     async def hook(command: str, **kwargs: Any):
         calls.append((command.split(";")[0], kwargs))
-        from nemo_gym.sandbox.providers.base import SandboxExecResult
+        from nemo_gym.sandbox import SandboxExecResult
 
         stdout = PID_RECORD if command.startswith("f=") else ""
         return SandboxExecResult(stdout=stdout, stderr="", return_code=0, error_type=None)

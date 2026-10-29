@@ -35,9 +35,8 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.episode_types import TaskId
-from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymEasyInputMessage,
@@ -58,9 +57,7 @@ from nemo_gym.rollout_observability import (
     ContextCompactionObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,

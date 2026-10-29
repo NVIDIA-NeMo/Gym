@@ -15,11 +15,8 @@
 from pydantic import ValidationError
 from pytest import raises, warns
 
-from nemo_gym.config_types import (
-    DatasetConfig,
-    GitlabDatasetSource,
-    HuggingFaceDatasetSource,
-)
+from nemo_gym.config import DatasetConfig
+from nemo_gym.config.config_types import GitlabDatasetSource, HuggingFaceDatasetSource
 
 
 def _dataset(**extra) -> dict:

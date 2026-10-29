@@ -21,7 +21,7 @@ from typing import Dict, Optional, TypedDict
 import pytest
 from pydantic import Field
 
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
 
 class ParsedHelpOutput(TypedDict):
@@ -202,7 +202,7 @@ class TestHelpOutput:
 def test_domain_enum_documents_every_value() -> None:
     # Each Domain value must be documented in the enum docstring, so newly-added domains can't
     # ship without guidance (the docstring is the source of truth surfaced in IDEs / on hover).
-    from nemo_gym.config_types import Domain
+    from nemo_gym.config import Domain
 
     doc = Domain.__doc__ or ""
     for member in Domain:

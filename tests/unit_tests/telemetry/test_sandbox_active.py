@@ -22,8 +22,8 @@ OTel SDK is importable, with or without nemo-lens.
 
 import pytest
 
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox import api as sandbox_api
-from nemo_gym.sandbox.api import AsyncSandbox, SandboxSpec
 from nemo_gym.telemetry import gym_metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from tests.unit_tests.test_sandbox import FakeSandboxProvider
@@ -191,7 +191,7 @@ async def test_sandbox_group_off_records_nothing(collected_metrics, monkeypatch)
 @pytest.mark.asyncio
 async def test_connected_sandbox_is_not_subtracted_on_stop(collected_metrics, sandbox_group_on):
     """A sandbox rebuilt via connect() was counted by the process that started it."""
-    from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxHandle
+    from nemo_gym.sandbox import ConnectableProvider, SandboxHandle
 
     class _Connectable(FakeSandboxProvider):
         async def connect(self, descriptor):

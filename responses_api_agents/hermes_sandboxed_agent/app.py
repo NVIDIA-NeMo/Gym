@@ -23,11 +23,9 @@ from nemo_gym.agent_utils.supervisor_client import (
 )
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop, split_input
 

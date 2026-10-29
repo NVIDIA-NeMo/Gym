@@ -52,7 +52,7 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from nemo_gym.global_config import TASK_SOURCE_KEY_NAME
+from nemo_gym.config.global_config import TASK_SOURCE_KEY_NAME
 from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, QUALITY_SUMMARY_SOURCES_KEY, ROLLOUT_VERDICTS_FILENAME
 from nemo_gym.path_utils import (
     aggregate_metrics_path_for,

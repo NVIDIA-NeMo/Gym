@@ -22,12 +22,10 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
 )
-from nemo_gym.config_types import AgentServerRef
+from nemo_gym.config import AgentServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, read_text, upload_text
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 

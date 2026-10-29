@@ -22,7 +22,7 @@ import orjson
 import pandas as pd
 import pytest
 
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.reward_profile import (
     RewardProfiler,
     compute_aggregate_metrics,

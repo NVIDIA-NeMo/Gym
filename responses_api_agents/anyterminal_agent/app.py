@@ -34,13 +34,17 @@ from pydantic import BaseModel, ConfigDict, Field
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
-from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
+from nemo_gym.sandbox import (
+    ApptainerProvider,
+    AsyncSandbox,
+    DockerCreateConfig,
+    DockerProvider,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.server_utils import apply_rollout_prefix
 
 
@@ -220,9 +224,18 @@ openclaw_defaults = AGENT_KWARGS.get("openclaw_config", {{}}).get("agents", {{}}
 if openclaw_defaults.get("workspace") == ".":
     openclaw_defaults["workspace"] = str(Path.cwd())
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
+try:
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
+    from nemo_gym.config import ModelServerRef, ResourcesServerRef
+    from nemo_gym.server_utils import ServerClient
+except ModuleNotFoundError as exc:
+    # This runs against the nemo-gym the sandbox image installed, which can predate the package
+    # reorganization (#5166). A missing dependency other than nemo_gym still fails here.
+    if not (exc.name or "").startswith("nemo_gym."):
+        raise
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage  # path before nemo_gym 0.8.0
+    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef  # path before nemo_gym 0.8.0
+    from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
 from {agent_module} import {agent_class}, {agent_cfg_class}
 
 _mock_client = ServerClient.model_construct(global_config_dict={{}})

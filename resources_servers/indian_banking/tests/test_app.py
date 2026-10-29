@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 from pytest import fixture
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.indian_banking.app import (

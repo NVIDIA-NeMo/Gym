@@ -7,13 +7,13 @@ from collections.abc import Mapping
 
 from pydantic import JsonValue
 
-from nemo_gym.episode_types import TaskId
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.episode_types import TaskId
 
 
 # Row fields that hold a task's own id, in precedence order.

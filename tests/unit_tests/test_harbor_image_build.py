@@ -653,7 +653,7 @@ class TestBuildOptions:
         the node read as absent and prepare ran with default build settings until the full configuration parse
         reported the mistake. A configured node that does not resolve is the error it was in M28; a sibling
         block that does not resolve is still left alone, since only the builds node's own interpolations run."""
-        from nemo_gym.global_config import ConfigInterpolationError
+        from nemo_gym.config.global_config import ConfigInterpolationError
         from nemo_gym.tasks.harbor.build_options import BuildOptions, build_options_from_overrides
 
         dotenv, _ = sources
@@ -1529,7 +1529,7 @@ class TestSandboxProviderAtPrepare:
         """Review: an OpenSandbox volume with `host.path: ${results_dir}/task-data` is a supported option whose
         default the server's configuration parser supplies at dispatch; run and validate read the platform before
         prepare_target, so only `sandbox_provider_options.platform` is resolved and the sibling volume is left."""
-        from nemo_gym.global_config import ConfigInterpolationError
+        from nemo_gym.config.global_config import ConfigInterpolationError
         from nemo_gym.tasks.harbor.build_options import _block_from_overrides
         from nemo_gym.tasks.harbor.cli import SANDBOX_PROVIDER_OPTIONS_KEY, compose_platform_from_overrides
 

@@ -8,8 +8,8 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
+from nemo_gym.config import GlobalConfigDictParser
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.global_config import GlobalConfigDictParser
 from nemo_gym.rollout_collection import (
     RolloutCollectionConfig,
     RolloutCollectionHelper,

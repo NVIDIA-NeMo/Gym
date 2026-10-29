@@ -28,7 +28,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import Domain, ModelServerRef
+from nemo_gym.config import Domain, ModelServerRef
 from nemo_gym.judge import reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,

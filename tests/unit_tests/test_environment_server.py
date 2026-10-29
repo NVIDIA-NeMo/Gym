@@ -21,7 +21,7 @@ from nemo_gym.base_environment_server import (
     is_retryable_dependency_error,
     is_retryable_dependency_status,
 )
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,

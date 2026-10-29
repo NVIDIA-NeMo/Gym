@@ -1339,7 +1339,7 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
     from nemo_gym._checkpoint import coordination
     from nemo_gym._checkpoint.control import install_participant
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
-    from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
+    from nemo_gym.config import AgentServerRef, ResourcesServerRef
     from nemo_gym.episode_types import MaterializedTask, TaskId
     from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
     from tests.unit_tests.test_checkpoint_coordination import InProcessClient, Recorder

@@ -595,7 +595,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from pydantic import ValidationError
     from rich.markup import escape
 
-    from nemo_gym.config_types import ConfigError
+    from nemo_gym.config.config_types import ConfigError
     from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
@@ -1813,7 +1813,7 @@ def _handle_pydantic_validation_error(exc, parser: argparse.ArgumentParser) -> N
     # ckeck if the error is coming from a BaseNeMoGymCLIConfig subclass
     # pydantic sets ValidationError.title to the validated
     # model's name, so we match it against the CLI config classes.
-    from nemo_gym.config_types import BaseNeMoGymCLIConfig
+    from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
     config_names = {BaseNeMoGymCLIConfig.__name__}
     stack = [BaseNeMoGymCLIConfig]

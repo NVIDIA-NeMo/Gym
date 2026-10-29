@@ -19,8 +19,8 @@ from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
 
+from nemo_gym.config.secret_utils import hide_secrets_in_container
 from nemo_gym.path_utils import resolved_config_path_for
-from nemo_gym.secret_utils import hide_secrets_in_container
 
 
 def write_resolved_config(global_config_dict: Mapping[str, Any], output_fpath: Path) -> Path:

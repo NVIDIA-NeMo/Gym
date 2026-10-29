@@ -24,7 +24,7 @@ from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

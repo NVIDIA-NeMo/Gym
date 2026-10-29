@@ -24,7 +24,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox import SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.daytona import provider as daytona_provider
 
 
@@ -822,7 +822,7 @@ def test_per_command_user_switching_is_not_supported_except_for_the_sandbox_own_
 async def test_spec_user_becomes_the_os_user_and_task_commands_run_without_a_switch(fake_daytona_sdk: None) -> None:
     """M20's default user reaches Daytona as the creation setting it supports; a conflicting default is refused at
     create, before any task command."""
-    from nemo_gym.sandbox.api import AsyncSandbox
+    from nemo_gym.sandbox import AsyncSandbox
 
     commands: list[str] = []
 

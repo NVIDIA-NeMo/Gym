@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
 from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
+from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,

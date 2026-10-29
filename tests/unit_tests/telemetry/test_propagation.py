@@ -37,9 +37,10 @@ from aiohttp import ClientSession
 from fastapi import FastAPI
 from omegaconf import OmegaConf
 
-from nemo_gym import global_config, server_utils
+from nemo_gym import server_utils
+from nemo_gym.config import global_config
+from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry import setup as telemetry_setup
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.telemetry.conftest import requires_lens
 
 

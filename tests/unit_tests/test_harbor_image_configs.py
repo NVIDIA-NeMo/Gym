@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 
 import nemo_gym.tasks.harbor.compose_variables as compose_variables_module
+from nemo_gym.sandbox import service_gpus
 from nemo_gym.sandbox.compose_config import _compose_literals
-from nemo_gym.sandbox.compose_fields import service_gpus
 from nemo_gym.tasks.harbor import image_configs
 from nemo_gym.tasks.harbor import registry as registry_module
 from nemo_gym.tasks.harbor.build_options import BuildOptions
@@ -1018,8 +1018,7 @@ class TestComposeVariablesAndEnvFile:
         must reach the adapter as an integer: the loader restores the types after interpolation."""
         from types import SimpleNamespace
 
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-        from nemo_gym.sandbox.compose_config import resolve_compose
+        from nemo_gym.sandbox import AsyncSandboxCompose, resolve_compose
 
         write_task(
             tmp_path,
@@ -1697,7 +1696,7 @@ class TestRecordBaseImages:
         """Prepare's order: base images are recorded, the tasks load pinned to them, then the Compose images
         (``main`` is the task image) are recorded. The record stays keyed by the reference the Dockerfile
         wrote, and ``main`` resolves by the pinned reference the task now carries."""
-        from nemo_gym.sandbox.compose_config import resolve_compose
+        from nemo_gym.sandbox import resolve_compose
 
         compose = "services:\n  main:\n  cache:\n    image: redis:7-alpine\n"
         write_task(tmp_path, "t", image=None, dockerfile="FROM redis:7-alpine\nRUN true\n", compose=compose)

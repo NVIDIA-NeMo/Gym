@@ -14,9 +14,9 @@ from datasets import Dataset
 from omegaconf import OmegaConf
 
 from nemo_gym.cli.eval import PrepareBenchmarkConfig, _datasets_to_prepare, _prepare_datasets
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.environment.manifest import dump_manifest, load_manifest
 from nemo_gym.environment.validation import _manifest_dataset
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 PREPARE = importlib.import_module("benchmarks.speed-bench.prepare")

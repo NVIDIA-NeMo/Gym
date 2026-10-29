@@ -26,8 +26,7 @@ import shutil
 
 import pytest
 
-from nemo_gym.sandbox.api import AsyncSandbox, Sandbox
-from nemo_gym.sandbox.providers import SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, Sandbox, SandboxSpec
 
 
 pytestmark = [

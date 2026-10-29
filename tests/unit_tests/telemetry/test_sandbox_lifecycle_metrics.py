@@ -21,8 +21,8 @@ the stop span) live in test_call_sites.py because they need nemo-lens.
 
 import pytest
 
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox import api as sandbox_api
-from nemo_gym.sandbox.api import AsyncSandbox, SandboxSpec
 from nemo_gym.telemetry import gym_metrics
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics, sandbox_group_on  # noqa: F401 - fixtures
 from tests.unit_tests.test_sandbox import FakeSandboxProvider

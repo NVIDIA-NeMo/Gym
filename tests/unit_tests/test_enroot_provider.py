@@ -21,12 +21,7 @@ from typing import Any, Callable
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import (
-    SandboxExecResult,
-    SandboxHandle,
-    SandboxSpec,
-    SandboxStatus,
-)
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.enroot import provider as enroot_provider
 
 
@@ -219,7 +214,7 @@ def test_resolve_image(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 
 def test_resource_gpu_env() -> None:
-    from nemo_gym.sandbox.providers.base import SandboxResources
+    from nemo_gym.sandbox import SandboxResources
 
     assert enroot_provider._resource_gpu_env(SandboxResources()) == {}
     assert enroot_provider._resource_gpu_env(SandboxResources(gpu=0)) == {}

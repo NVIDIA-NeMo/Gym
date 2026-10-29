@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 
 

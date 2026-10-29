@@ -15,12 +15,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.sandbox.compose_config import (
-    adapt_non_root_sidecars,
-    document_volume_sources,
-    plan_compose_volumes,
-    resolve_compose,
-)
+from nemo_gym.sandbox import adapt_non_root_sidecars, document_volume_sources, resolve_compose
+from nemo_gym.sandbox.compose_config import plan_compose_volumes
 from nemo_gym.sandbox.compose_volumes import ComposeVolumeError, parse_volume
 from tests.unit_tests.compose_testing import IMAGE_CONFIGS, MAIN, OVERLAY, SIDECAR
 

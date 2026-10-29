@@ -47,9 +47,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -64,9 +63,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    SandboxStatus,
+    create_provider,
+    resolve_provider_config,
+)
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.skills import stage_skills
 from nemo_gym.tool_access import MCPToolAccess

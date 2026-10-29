@@ -24,7 +24,7 @@ from app import (
     _parse_wildguard_verdict,
 )
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,

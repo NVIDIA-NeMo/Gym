@@ -13,6 +13,8 @@ import yaml
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, load_manifest
 from nemo_gym.environment.scaffold import (
     ScaffoldConflictError,
@@ -21,11 +23,6 @@ from nemo_gym.environment.scaffold import (
     scaffold_resources_server,
 )
 from nemo_gym.environment.validation import validate_environment
-from nemo_gym.global_config import (
-    ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-)
 from nemo_gym.rollout_collection import _environment_servers_by_agent
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 

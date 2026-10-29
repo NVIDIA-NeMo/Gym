@@ -69,7 +69,7 @@ export MOUNTS="$repo_root:$repo_root,$repo_root:/opt/Gym,$MODEL:$MODEL:ro${MOUNT
 import json
 import sys
 from omegaconf import OmegaConf
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollout_collection import RolloutCollectionConfig
 
 paths, overrides = [], []

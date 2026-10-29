@@ -206,7 +206,7 @@ def test_cli(monkeypatch) -> None:
 def test_native_config_reuses_english_components_and_preserves_generation_defaults() -> None:
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     manifest = load_manifest(module.BENCHMARK_DIR / "manifest.yaml")
     assert manifest.resources_server == "math_with_judge"
@@ -265,7 +265,7 @@ def _resolve_cli_config(flags: list[str]) -> dict:
     from omegaconf import OmegaConf
 
     from nemo_gym.cli.main import _merge_config_paths, build_parser
-    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     args = build_parser().parse_args(
         [
@@ -297,7 +297,7 @@ def _resolve_cli_config(flags: list[str]) -> dict:
 
 
 def _materialize_dataset(config: dict, agent_name: str, source_rows: list[dict], tmp_path: Path) -> list[dict]:
-    from nemo_gym.config_types import BenchmarkDatasetConfig
+    from nemo_gym.config import BenchmarkDatasetConfig
     from nemo_gym.train_data_utils import TrainDataProcessor
 
     dataset = dict(config[agent_name]["responses_api_agents"]["simple_agent"]["datasets"][0])

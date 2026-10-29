@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.indic.in22 import prepare as prepare_module
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.prompt import fill_prompt, load_prompt_config
 
 

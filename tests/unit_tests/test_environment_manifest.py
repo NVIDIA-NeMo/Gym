@@ -8,7 +8,8 @@ import yaml
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
-from nemo_gym.config_types import ConfigError, Domain
+from nemo_gym.config import Domain
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     IntegrationProfile,

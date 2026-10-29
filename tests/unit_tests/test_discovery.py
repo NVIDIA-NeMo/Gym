@@ -345,8 +345,8 @@ class TestTolerantInterpolationParse:
         assert after == before == {"foo": "???", "bar": "${baz}"}
 
     def test_included_required_values_are_listing_only(self, tmp_path: Path) -> None:
-        from nemo_gym.config_types import ConfigMissingValuesError
-        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.config import GlobalConfigDictParser
+        from nemo_gym.config.config_types import ConfigMissingValuesError
 
         included = tmp_path / "base.yaml"
         included.write_text("runtime:\n  harness: ???\n  model: fixed-model\n")
@@ -360,7 +360,7 @@ class TestTolerantInterpolationParse:
         assert OmegaConf.to_container(config) == {"config_paths": [str(included)]}
 
     def test_included_environment_values_are_listing_only(self, tmp_path: Path, monkeypatch) -> None:
-        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.config import GlobalConfigDictParser
 
         monkeypatch.delenv("GYM_TEST_LISTING_IMAGE", raising=False)
         monkeypatch.setenv("GYM_TEST_LISTING_MODEL", "configured-model")

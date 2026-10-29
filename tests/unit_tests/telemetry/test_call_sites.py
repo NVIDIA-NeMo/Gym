@@ -16,7 +16,7 @@
 
 import pytest
 
-from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.telemetry import GymSpanGroup
 from tests.unit_tests.telemetry.conftest import requires_lens
 
 
@@ -74,12 +74,12 @@ class _StubProvider:
         self.closed = False
 
     async def create(self, spec):
-        from nemo_gym.sandbox.providers.base import SandboxHandle
+        from nemo_gym.sandbox import SandboxHandle
 
         return SandboxHandle(sandbox_id="handle-1", provider_name=self.name, raw=None)
 
     async def exec(self, handle, command, **kwargs):
-        from nemo_gym.sandbox.providers.base import SandboxExecResult
+        from nemo_gym.sandbox import SandboxExecResult
 
         return SandboxExecResult(stdout="out", stderr="", return_code=self._return_code)
 
@@ -92,8 +92,7 @@ class _StubProvider:
 
 @pytest.fixture
 def started_sandbox():
-    from nemo_gym.sandbox.api import AsyncSandbox
-    from nemo_gym.sandbox.providers.base import SandboxSpec
+    from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 
     def build(return_code: int = 0):
         return AsyncSandbox(_StubProvider(return_code), SandboxSpec(image="ubuntu"))
@@ -190,8 +189,7 @@ async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(
     from opentelemetry.trace import StatusCode
 
     from nemo_gym.rollout_correlation import rollout_context
-    from nemo_gym.sandbox.api import AsyncSandbox
-    from nemo_gym.sandbox.providers.base import SandboxSpec
+    from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 
     sandbox = AsyncSandbox(_FailingProvider(fail), SandboxSpec(image="ubuntu"))
     with rollout_context("7-0"), pytest.raises(RuntimeError, match="boom"):
@@ -611,7 +609,7 @@ def test_dispatch_span_omits_a_repeat_that_is_not_an_index(recorded_spans):
 def _write_rollout_input(tmp_path, n: int):
     import json as _json
 
-    from nemo_gym.global_config import AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+    from nemo_gym.config import AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
 
     path = tmp_path / "input.jsonl"
     path.write_text(

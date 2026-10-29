@@ -23,12 +23,7 @@ import pytest
 import nemo_gym.exporters
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.cli.eval import _health_check_collected_rollouts
-from nemo_gym.global_config import (
-    AGENT_REF_KEY_NAME,
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.config import AGENT_REF_KEY_NAME, ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.health.timeouts import (
     ELAPSED_S_KEY,
     LEGACY_TIMEOUT_SIGNALS,

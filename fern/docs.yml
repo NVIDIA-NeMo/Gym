@@ -136,6 +136,15 @@ redirects:
   # does not publish a standalone page for private modules.
   - source: "/nemo/gym/nemo-gym/nemo_gym/cli/_compat"
     destination: "/nemo/gym/nemo-gym/nemo_gym/cli"
+  # Library reference pages of modules moved into nemo_gym/config (#5166).
+  - source: "/nemo/gym/nemo-gym/nemo_gym/config_types"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/config/config_types"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/global_config"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/config/global_config"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/secret_utils"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/config/secret_utils"
+  - source: "/nemo/gym/nemo-gym/nemo_gym/server_metadata"
+    destination: "/nemo/gym/nemo-gym/nemo_gym/config/server_metadata"
   # `detailed-setup` → `installation` (closest equivalent on main);
   # `rollout-collection` → `quickstart` (folded into the quickstart flow).
   # Both still exist on `latest` (sourced from v0.2.1, the current GA).

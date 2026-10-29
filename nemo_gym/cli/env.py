@@ -47,17 +47,8 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
-from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
-from nemo_gym.environment.onboarding import (
-    EnvironmentOnboardingError,
-    VerifierReport,
-    prepare_verifier_run,
-)
-from nemo_gym.environment.publication import finalize_publication
-from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
-from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
@@ -72,6 +63,15 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
+from nemo_gym.environment.onboarding import (
+    EnvironmentOnboardingError,
+    VerifierReport,
+    prepare_verifier_run,
+)
+from nemo_gym.environment.publication import finalize_publication
+from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
+from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
 from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
@@ -374,7 +374,7 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
     """Yield each server instance in the config that has an entrypoint to launch."""
     top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
-    # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
+    # TODO there is a better way to resolve this that uses nemo_gym/config/global_config.py::ServerInstanceConfig
     for top_level_path in top_level_paths:
         server_config_dict = global_config_dict[top_level_path]
         if not isinstance(server_config_dict, DictConfig):

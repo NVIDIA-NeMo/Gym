@@ -34,8 +34,8 @@ from scipy import stats
 if TYPE_CHECKING:
     from wandb import Histogram
 
-from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,

@@ -26,11 +26,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from nemo_gym.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from responses_api_agents.conversational_tool_use_policy_tool_generation.compat import format_domain_name
 from responses_api_agents.conversational_tool_use_policy_tool_generation.models import (
     PolicyToolGenerationResult,

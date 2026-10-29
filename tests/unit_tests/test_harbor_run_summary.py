@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 import nemo_gym.cli.main as main_module
-from nemo_gym import global_config
+from nemo_gym.config import global_config
 from nemo_gym.path_utils import failures_path_for, materialized_path_for, run_summary_path_for
 from nemo_gym.rollout_health import write_provisional_summary
 from nemo_gym.tasks.harbor.cli import prepare_target, resolve_agent
@@ -564,7 +564,7 @@ def test_validate_writes_the_summary_beside_the_rollouts_even_when_collection_fa
     attempts = []
 
     def collect(target, tokens):
-        from nemo_gym.global_config import get_global_config_dict
+        from nemo_gym.config import get_global_config_dict
 
         rollouts = Path(get_global_config_dict().output_jsonl_fpath)
         attempts.append(rollouts)
@@ -743,7 +743,7 @@ def test_validate_names_the_collator_files_after_the_resolved_split(tmp_path, mo
     write_task(tmp_path / "ds" / "a")
 
     def collect(target, tokens):
-        from nemo_gym.global_config import get_global_config_dict
+        from nemo_gym.config import get_global_config_dict
 
         config = get_global_config_dict()
         assert config.split == "train"
@@ -834,7 +834,7 @@ def test_validate_lists_the_tasks_it_left_out_for_want_of_a_solution_beside_the_
     (tmp_path / "ds/b/solution/solve.sh").unlink()
 
     def collect(target, tokens):
-        from nemo_gym.global_config import get_global_config_dict
+        from nemo_gym.config import get_global_config_dict
 
         write_jsonl(Path(get_global_config_dict().output_jsonl_fpath), [result("a", task_source="ds")])
 
@@ -939,7 +939,7 @@ def test_eval_run_fresh_start_that_dies_before_the_collector_clears_its_outputs_
     that reaches the collector rewrites the files and owns them."""
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import TASK_SOURCE_KEY_NAME, get_global_config_dict
+    from nemo_gym.config import TASK_SOURCE_KEY_NAME, get_global_config_dict
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     write_task(tmp_path / "ds" / "a")
@@ -1047,7 +1047,7 @@ def test_a_resumed_run_summarizes_the_saved_schedule_it_resumed_not_the_current_
     inputs the collector actually resumed."""
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import TASK_SOURCE_KEY_NAME, get_global_config_dict
+    from nemo_gym.config import TASK_SOURCE_KEY_NAME, get_global_config_dict
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     write_task(tmp_path / "ds" / "a")
@@ -1111,7 +1111,7 @@ def test_summary_writer_failure_never_hides_the_run(tmp_path, monkeypatch, capfd
     write_task(tmp_path / "ds" / "a")
 
     def collect(target, tokens):
-        from nemo_gym.global_config import get_global_config_dict
+        from nemo_gym.config import get_global_config_dict
 
         write_jsonl(Path(get_global_config_dict().output_jsonl_fpath), [result()])
 

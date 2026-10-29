@@ -36,7 +36,8 @@ from nemo_gym.base_responses_api_model import (
     install_model_call_capture,
     make_capture_store,
 )
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 from nemo_gym.observability.model_calls import read_model_call_records
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -737,7 +738,7 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
     from pydantic import BaseModel, ConfigDict
 
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
     from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})

@@ -13,8 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox import AsyncSandboxCompose, SandboxExecResult, SandboxHandle
 
 
 pytestmark = pytest.mark.sandbox
@@ -24,7 +23,7 @@ def make_compose(provider, document, *, default_command=None, **kwargs):
     """Supply normalized YAML and optional commands for focused lifecycle tests."""
     from unittest.mock import Mock
 
-    from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+    from nemo_gym.sandbox import AsyncSandboxCompose
 
     group = AsyncSandboxCompose(provider, "compose.yaml", **kwargs)
     if default_command is not None:
@@ -443,7 +442,7 @@ async def test_yaml_input_runs_services_without_local_tools(tmp_path, monkeypatc
 
     import yaml
 
-    from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+    from nemo_gym.sandbox import AsyncSandboxCompose
 
     output = tmp_path / "result"
     path = tmp_path / "compose.yaml"
@@ -516,7 +515,7 @@ def test_yaml_preserves_literal_dollars_and_does_not_load_dotenv(tmp_path, monke
 async def test_cancel_during_initial_file_upload_deletes_created_service():
     import asyncio
 
-    from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec
+    from nemo_gym.sandbox import SandboxHandle, SandboxSpec
 
     uploading = asyncio.Event()
 
@@ -550,7 +549,7 @@ async def test_cancel_during_initial_file_upload_deletes_created_service():
 
 @pytest.mark.asyncio
 async def test_failed_volume_seed_delete_is_retried_by_collection_cleanup():
-    from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
+    from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 
     live = set()
     failed_seed_delete = False
@@ -808,7 +807,7 @@ async def test_invalid_project_and_volumes_never_provision(document, message):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("user", ["1000", "0", 0])
 async def test_service_resources_environment_and_workdir(tmp_path, user):
-    from nemo_gym.sandbox.providers.base import SandboxSpec
+    from nemo_gym.sandbox import SandboxSpec
 
     output = tmp_path / "output"
 
@@ -1158,7 +1157,7 @@ async def test_process_finishing_during_marker_probe_is_not_startup_failure(monk
 
 class ConnectableShellProvider(ShellProvider):
     async def endpoint(self, handle, port):
-        from nemo_gym.sandbox.providers.base import SandboxEndpoint
+        from nemo_gym.sandbox import SandboxEndpoint
 
         return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}")
 
@@ -1413,7 +1412,7 @@ async def test_spec_env_wins_over_compose_environment_only_where_the_caller_give
     ``${HF_TOKEN:-}`` that interpolated to empty upstream must not hide the host value, as in Harbor, where the
     task's env override file is merged after the task's Compose file). A key only the Compose file sets is kept,
     and a sidecar given an empty spec env keeps its Compose ``environment``."""
-    from nemo_gym.sandbox.providers.base import SandboxSpec
+    from nemo_gym.sandbox import SandboxSpec
 
     main_out, side_out = tmp_path / "main", tmp_path / "side"
     provider = ShellProvider()
@@ -1644,7 +1643,7 @@ async def test_extra_hosts_need_host_injection():
 
 @pytest.mark.asyncio
 async def test_deploy_resources_size_the_service_sandbox_and_gpu_sidecars_run_on_their_own_provider():
-    from nemo_gym.sandbox.providers.base import SandboxSpec
+    from nemo_gym.sandbox import SandboxSpec
 
     cpu_provider, gpu_provider = HostsProvider(), HostsProvider()
     gpu_provider.name = "gpu"
@@ -2049,7 +2048,7 @@ async def test_service_options_need_the_provider_capability_and_the_error_names_
 
 @pytest.mark.asyncio
 async def test_service_options_and_pull_policy_merge_into_the_spec_provider_options():
-    from nemo_gym.sandbox.providers.base import SandboxSpec
+    from nemo_gym.sandbox import SandboxSpec
 
     class FullProvider(ShellProvider):
         SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
@@ -2245,7 +2244,7 @@ async def test_the_volume_copy_up_seed_keeps_the_services_pull_policy(policy, ma
     entry OpenSandbox reads per spec). Under a deployment default of Never an uncached ``always`` image failed at the
     seed, before the service could pull it; under Always a ``never`` image was pulled by the seed. The seed keeps every
     option of the service but its mounts, the service keeps them all, and the init helper keeps the deployment's."""
-    from nemo_gym.sandbox.providers.base import SandboxSpec
+    from nemo_gym.sandbox import SandboxSpec
 
     class PullPolicyProvider(RecordingProvider):
         def pull_policy_options(self, policy):
@@ -2522,7 +2521,7 @@ async def test_two_groups_with_a_narrowed_mapping_keep_an_ordinary_volume_apart(
     """The reviewer's reproduction (round 13): with the deployment-wide mapping forwarded whole, two groups
     declaring an ordinary ``pgdata`` got one shared path with no initialization. Narrowed by the planner's
     ``document_volume_sources``, each group gets its own project directory, made and copied up."""
-    from nemo_gym.sandbox.compose_config import document_volume_sources
+    from nemo_gym.sandbox import document_volume_sources
 
     document = {
         "services": {"db": {"image": "img", "volumes": [{"type": "volume", "source": "pgdata", "target": "/pg"}]}},

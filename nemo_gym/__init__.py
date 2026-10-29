@@ -207,12 +207,12 @@ _LAZY_EXPORTS: dict[str, str] = {
     "get_response_json": "server_utils",
     "SESSION_ID_KEY": "server_utils",
     # Author-facing config and metrics types
-    "BaseServerConfig": "config_types",
-    "BaseRunServerInstanceConfig": "config_types",
-    "Domain": "config_types",
-    "AggregateMetrics": "config_types",
-    "AggregateMetricsRequest": "config_types",
-    "ModelServerRef": "config_types",
+    "BaseServerConfig": "config.config_types",
+    "BaseRunServerInstanceConfig": "config.config_types",
+    "Domain": "config.config_types",
+    "AggregateMetrics": "config.config_types",
+    "AggregateMetricsRequest": "config.config_types",
+    "ModelServerRef": "config.config_types",
     # High-level OpenAI-compatible client and API boundary types
     "NeMoGymAsyncOpenAI": "openai_utils",
     "NeMoGymResponse": "openai_utils",

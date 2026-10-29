@@ -29,7 +29,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli.dataset
 import nemo_gym.cli.env
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.cli.env import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
@@ -56,14 +56,14 @@ from nemo_gym.cli.env import (
     test_environment_manifest as run_manifest_test,
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     ConfigError,
     ConfigPathNotFoundError,
     NoServerInstancesError,
     ResourcesServerInstanceConfig,
 )
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.environment.scaffold import ScaffoldError
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.registry import EnvironmentCatalogEntry
 
 
@@ -262,7 +262,7 @@ class TestCLI:
         server_name = "test_cli_server"
         server_path = tmp_path / "resources_servers" / server_name
         monkeypatch.setattr(
-            nemo_gym.global_config,
+            nemo_gym.config.global_config,
             "_GLOBAL_CONFIG_DICT",
             OmegaConf.create({"entrypoint": str(server_path)}),
         )
@@ -304,7 +304,7 @@ class TestCLI:
         sentinel = server_path / "sentinel.txt"
         sentinel.write_text("keep\n", encoding="utf-8")
         monkeypatch.setattr(
-            nemo_gym.global_config,
+            nemo_gym.config.global_config,
             "_GLOBAL_CONFIG_DICT",
             OmegaConf.create({"entrypoint": str(server_path)}),
         )
@@ -320,7 +320,7 @@ class TestCLI:
     ) -> None:
         server_path = tmp_path / "resources_servers" / "invalid-name"
         monkeypatch.setattr(
-            nemo_gym.global_config,
+            nemo_gym.config.global_config,
             "_GLOBAL_CONFIG_DICT",
             OmegaConf.create({"entrypoint": str(server_path)}),
         )
@@ -480,7 +480,7 @@ class TestRunHelperLaunchEnvironment:
     """RunHelper.start must pass config dict and path via process environment rather than command line."""
 
     def test_secrets_passed_in_env_not_command_line(self, monkeypatch: MonkeyPatch) -> None:
-        from nemo_gym.global_config import (
+        from nemo_gym.config.global_config import (
             NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
             NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
         )
@@ -584,7 +584,7 @@ class TestRunHelperH2PingSidecar:
         )
 
     def test_starts_before_servers_and_stops_after(self, monkeypatch: MonkeyPatch) -> None:
-        from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+        from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
         cfg = self._config(dry_run=False)
         events: list = []
@@ -765,7 +765,7 @@ class TestRunHelperServerReadiness:
     def test_readiness_failure_leaves_head_health_unready(self, failing_method: str) -> None:
         from fastapi.testclient import TestClient
 
-        from nemo_gym.config_types import BaseServerConfig
+        from nemo_gym.config import BaseServerConfig
         from nemo_gym.server_utils import HeadServer
 
         runner = RunHelper()
@@ -802,7 +802,7 @@ class TestRunHelperServerReadiness:
         """Each probe used to wait its full 5s, so the deadline was checked only after every server had been tried."""
         import socket
 
-        from nemo_gym.config_types import BaseServerConfig
+        from nemo_gym.config import BaseServerConfig
         from nemo_gym.server_utils import ServerClient
 
         # A listening socket that never accepts completes the TCP handshake and then never answers.
@@ -867,7 +867,7 @@ class TestServerSpinupTimeoutFromConfig:
         ids=["int", "float", "numeric_string", "zero", "null"],
     )
     def test_normalizes_numeric_values(self, value: object, expected: float) -> None:
-        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
+        config = OmegaConf.create({nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
 
         assert nemo_gym.cli.env._server_spinup_timeout_seconds(config) == expected
 
@@ -877,14 +877,14 @@ class TestServerSpinupTimeoutFromConfig:
     def test_environment_interpolation_yields_a_number(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setenv("GYM_STARTUP_TIMEOUT", "900")
         config = OmegaConf.create(
-            {nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "${oc.env:GYM_STARTUP_TIMEOUT}"}
+            {nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "${oc.env:GYM_STARTUP_TIMEOUT}"}
         )
 
         assert nemo_gym.cli.env._server_spinup_timeout_seconds(config) == 900.0
 
     @pytest.mark.parametrize("value", ["ten minutes", [600]])
     def test_malformed_value_is_a_config_error(self, value: object) -> None:
-        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
+        config = OmegaConf.create({nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
 
         with raises(ConfigError, match="server_spinup_timeout_seconds` must be a number of seconds"):
             nemo_gym.cli.env._server_spinup_timeout_seconds(config)
@@ -924,7 +924,9 @@ class TestRunHelperStartUnwind:
 
     def test_invalid_timeout_fails_before_anything_starts(self, monkeypatch: MonkeyPatch) -> None:
         """Runs the real start() and shutdown(), so cleanup state must already exist at the earliest failure."""
-        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "ten minutes"})
+        config = OmegaConf.create(
+            {nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "ten minutes"}
+        )
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=config))
         monkeypatch.setattr(nemo_gym.cli.env.GlobalConfigDictParser, "raise_on_no_server_instances", MagicMock())
         initialize_ray = MagicMock()
@@ -1177,7 +1179,7 @@ class TestValidate:
         # chdir to a clean dir so a repo-local env.yaml isn't picked up; clear the parse cache.
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(sys, "argv", ["gym", f"+config_paths=[{config_file}]"])
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         validate()
 
     def test_valid_config_passes(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:

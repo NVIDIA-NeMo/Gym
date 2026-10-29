@@ -30,7 +30,7 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import get_response_json, raise_for_status

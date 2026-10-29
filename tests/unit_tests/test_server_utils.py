@@ -38,10 +38,10 @@ from requests.exceptions import ProxyError
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 import nemo_gym.server_utils
-from nemo_gym.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
+from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
@@ -378,7 +378,7 @@ class TestServerUtils:
         get_global_config_dict_mock.return_value = global_config_dict
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
         httpx_client_mock = MagicMock()
@@ -431,7 +431,7 @@ class TestServerUtils:
 
         # `gym eval run --no-serve` initializes a partial local config.
         # It must still fetch the full config from the running head server.
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
         response = MagicMock(content=b'"remote_server: {host: remote, port: 1234}"')
@@ -448,7 +448,7 @@ class TestServerUtils:
         get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "head_server: {host: '', port: 0}")
 
         def boom(*args, **kwargs):
@@ -472,7 +472,7 @@ class TestServerUtils:
         get_global_config_dict_mock.return_value = global_config_dict
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
         httpx_client_mock = MagicMock()
@@ -685,7 +685,7 @@ class TestServerUtils:
 
         The client must come up with the default limits instead of parsing that argv and exiting.
         """
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.delenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, raising=False)
         monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
@@ -713,18 +713,18 @@ class TestServerUtils:
             defaults = GlobalAIOHTTPAsyncClientConfig()
             assert client.connector.limit == defaults.global_aiohttp_connector_limit
             assert client.connector.limit_per_host == defaults.global_aiohttp_connector_limit_per_host
-            assert nemo_gym.global_config._GLOBAL_CONFIG_DICT is None
+            assert nemo_gym.config.global_config._GLOBAL_CONFIG_DICT is None
         finally:
             await client.close()
 
     async def test_get_global_aiohttp_client_parses_an_explicit_parser_config(self, monkeypatch: MonkeyPatch) -> None:
         """A caller that passes a parser config gets the limits it describes, not the defaults."""
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
-        parser_config = nemo_gym.global_config.GlobalConfigDictParserConfig(
+        parser_config = nemo_gym.config.global_config.GlobalConfigDictParserConfig(
             initial_global_config_dict=DictConfig(
                 {"global_aiohttp_connector_limit": 7, "global_aiohttp_connector_limit_per_host": 3}
             ),

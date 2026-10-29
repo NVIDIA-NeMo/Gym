@@ -28,7 +28,7 @@ from nemo_gym.base_responses_api_agent import (
     assert_model_url_reachable_from_sandbox,
     is_loopback_host,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.server_utils import ServerClient
 
 

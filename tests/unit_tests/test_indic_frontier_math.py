@@ -73,7 +73,7 @@ def test_manifest_and_committed_requests() -> None:
 def test_native_config_routes_to_frontiermath_without_global_sampling_defaults() -> None:
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     parser = GlobalConfigDictParser()
     config = parser.parse(

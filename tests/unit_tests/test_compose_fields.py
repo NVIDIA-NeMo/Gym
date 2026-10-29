@@ -13,13 +13,8 @@ from copy import deepcopy
 import pytest
 import yaml
 
-from nemo_gym.sandbox.compose_fields import (
-    ComposeFieldError,
-    check_compose_fields,
-    normalize_platform,
-    service_gpus,
-    service_resources,
-)
+from nemo_gym.sandbox import service_gpus, service_resources
+from nemo_gym.sandbox.compose_fields import ComposeFieldError, check_compose_fields, normalize_platform
 from tests.unit_tests.compose_testing import (
     IMAGE_CONFIGS,  # noqa: F401
     MAIN,

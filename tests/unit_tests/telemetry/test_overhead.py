@@ -30,8 +30,8 @@ from contextlib import nullcontext
 
 import pytest
 
+from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 #: Wide enough that ordinary scheduler noise on a loaded machine does not flake the test,

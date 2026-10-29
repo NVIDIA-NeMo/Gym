@@ -4,7 +4,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 
 
 def test_sandbox_access_round_trips_an_owner_managed_connection() -> None:

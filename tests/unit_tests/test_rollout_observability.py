@@ -4,7 +4,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.observability.model_calls import ModelCallRecord
 from nemo_gym.rollout_observability import (
     AgentInvocation,

@@ -30,7 +30,7 @@ from fastapi import Request
 from pydantic import ValidationError
 from pytest import MonkeyPatch, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

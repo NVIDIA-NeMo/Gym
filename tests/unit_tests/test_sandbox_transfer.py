@@ -10,22 +10,20 @@ import tarfile
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.transfer import (
+from nemo_gym.sandbox import (
+    SandboxExecResult,
     SandboxProbeError,
     SandboxTransferError,
     SandboxUnavailableError,
-    _pack,
-    _unpack,
     download_dir,
     download_path,
     exec_as_root,
     remote_kind,
-    tar_extract_command,
     upload_archive,
     upload_dir,
     upload_path,
 )
+from nemo_gym.sandbox.transfer import _pack, _unpack, tar_extract_command
 
 
 class LocalSandbox:

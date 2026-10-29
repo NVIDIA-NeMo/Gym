@@ -25,7 +25,7 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _DUMMY_EXCLUDE_DOMAINS_FILE = os.path.join(os.path.dirname(_TEST_DIR), "tests", "dummy_exclude_domains_file.json")
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

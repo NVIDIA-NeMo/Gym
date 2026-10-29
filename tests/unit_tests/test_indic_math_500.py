@@ -11,8 +11,8 @@ from omegaconf import OmegaConf
 
 from benchmarks.indic.math_500 import prepare as module
 from nemo_gym.benchmarks import BenchmarkConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.environment.manifest import load_manifest
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
 
 

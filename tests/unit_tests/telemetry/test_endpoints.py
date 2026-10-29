@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry import metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.endpoints import (
@@ -35,7 +36,6 @@ from nemo_gym.telemetry.endpoints import (
     traced_rollout_endpoint,
     traced_verify_endpoint,
 )
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.telemetry.conftest import requires_lens
 
 

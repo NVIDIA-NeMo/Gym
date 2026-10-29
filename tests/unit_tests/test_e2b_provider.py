@@ -26,15 +26,20 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.package_info import __version__ as nemo_gym_version
-from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    ConnectableProvider,
+    SandboxHandle,
+    SandboxSpec,
+    SandboxStatus,
+    get_provider_class,
+)
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.e2b import provider as e2b_provider
 from nemo_gym.sandbox.providers.e2b.provider import _API_PARAM_KEYS, E2BCreateError, E2BProvider
-from nemo_gym.sandbox.providers.registry import get_provider_class
 
 
 pytestmark = pytest.mark.sandbox

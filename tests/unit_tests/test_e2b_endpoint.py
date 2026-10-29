@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxHandle
+from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.providers.e2b import E2BProvider
 
 

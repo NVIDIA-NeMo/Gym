@@ -23,7 +23,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     stop_and_confirm_cleanup,
     supervised_launch_command,
 )
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 
 
 class LocalSandbox:

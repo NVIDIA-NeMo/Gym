@@ -39,13 +39,19 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, BenchmarkDatasetConfig, DatasetConfig
-from nemo_gym.global_config import get_global_config_dict  # same import as resources_servers/swebench_pro/app.py
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, BenchmarkDatasetConfig, DatasetConfig
+from nemo_gym.config.global_config import (
+    get_global_config_dict,  # same import as resources_servers/swebench_pro/app.py
+)
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
+from nemo_gym.sandbox import (
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader.execution import (
     CLEANUP_STATUSES,

@@ -29,8 +29,7 @@ from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreate
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, join_agent_model_calls
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult
 from responses_api_agents.kilocode_agent.app import KiloCodeAgent, KiloCodeAgentRunRequest, _runtime_failure
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession, _sandbox_prepare_command
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent

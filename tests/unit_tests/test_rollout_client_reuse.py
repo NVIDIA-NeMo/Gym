@@ -8,7 +8,7 @@ from unittest.mock import Mock
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import BaseServerConfig
+from nemo_gym.config import BaseServerConfig
 from nemo_gym.rollout_collection import RolloutCollectionHelper
 from nemo_gym.server_utils import ServerClient
 

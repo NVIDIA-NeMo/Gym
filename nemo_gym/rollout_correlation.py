@@ -20,14 +20,14 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.episode_types import EpisodeId
 
 
 VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"

@@ -28,11 +28,11 @@ from omegaconf import OmegaConf
 import benchmarks.hle_diamond.prepare as prepare_module
 import benchmarks.hle_diamond.prepare_text as prepare_text_module
 from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
-from nemo_gym.config_types import ModelServerRef, is_almost_server, maybe_get_server_instance_config
+from nemo_gym.config import GlobalConfigDictParserConfig, ModelServerRef, get_first_server_config_dict
+from nemo_gym.config.config_types import is_almost_server, maybe_get_server_instance_config
 from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
 from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
-from nemo_gym.global_config import GlobalConfigDictParserConfig, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -41,7 +41,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.prompt import fill_prompt, load_prompt_config
 from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox import resolve_provider_config
 from nemo_gym.server_utils import ServerClient
 from resources_servers.equivalence_llm_judge.app import (
     JudgeEvaluation,
@@ -145,7 +145,9 @@ def prepared_env(monkeypatch, tmp_path):
         return Dataset.from_dict({column: [row[column] for row in rows] for column in rows[0]})
 
     monkeypatch.setattr("datasets.load_dataset", fake_load_dataset)
-    monkeypatch.setattr("nemo_gym.global_config.maybe_get_global_config_dict", lambda: {"hf_token": "hf-fixture"})
+    monkeypatch.setattr(
+        "nemo_gym.config.global_config.maybe_get_global_config_dict", lambda: {"hf_token": "hf-fixture"}
+    )
     monkeypatch.setattr(prepare_module, "EXPECTED_CORPUS", FIXTURE_EXPECTATION)
     monkeypatch.setattr(prepare_module, "OUTPUT_FPATH", tmp_path / "hle_diamond_benchmark.jsonl")
     monkeypatch.setattr(prepare_module, "OUTPUT_TEXT_FPATH", tmp_path / "hle_diamond_benchmark_text.jsonl")

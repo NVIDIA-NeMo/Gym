@@ -36,15 +36,13 @@ from nemo_gym.atif_reverification import (
     project_atif_manifest_entries,
 )
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     BaseNeMoGymCLIConfig,
     ConfigError,
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -55,6 +53,8 @@ from nemo_gym.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.path_utils import aggregate_metrics_path_for, aggregation_sources_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,

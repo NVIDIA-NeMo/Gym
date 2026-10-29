@@ -40,8 +40,8 @@ from nemo_gym.cli.setup_command import (
     run_command,
     setup_env_command,
 )
-from nemo_gym.global_config import UV_VENV_DIR_KEY_NAME
-from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalConfig
+from nemo_gym.config.global_config import UV_VENV_DIR_KEY_NAME
+from tests.unit_tests.config.test_global_config import TestGlobalConfig as _TestGlobalConfig
 
 
 class TestCLISetupCommandSetupEnvCommand:

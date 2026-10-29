@@ -24,10 +24,17 @@ from omegaconf.errors import ConfigKeyError
 from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
-from nemo_gym.config_types import (
+from nemo_gym.config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    find_open_port,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
+from nemo_gym.config.config_types import (
     AgentCompositionError,
     AgentWithoutEnvironmentServerError,
     AlmostServerError,
@@ -45,23 +52,18 @@ from nemo_gym.config_types import (
     WANDBConfig,
     is_almost_server,
 )
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
     UV_LOCK_TIMEOUT_KEY_NAME,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
     _openai_version_matches_nemo_gym_constraint,
-    find_open_port,
-    get_first_server_config_dict,
-    get_global_config_dict,
     resolve_dataset_agent,
 )
+from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.rollout_collection import _environment_servers_by_agent
-from nemo_gym.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.server_utils import (
     DictConfig,
 )
@@ -71,11 +73,11 @@ class TestGlobalConfig:
     def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
         # An exported UV_LOCK_TIMEOUT becomes the resolved default; keep snapshots hermetic.
         monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")
-        monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
+        monkeypatch.setattr(nemo_gym.config.global_config, "openai_version", "test openai version")
+        monkeypatch.setattr(nemo_gym.config.global_config, "ray_version", "test ray version")
 
         python_version_mock = MagicMock(return_value="test python version")
-        monkeypatch.setattr(nemo_gym.global_config, "python_version", python_version_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "python_version", python_version_mock)
 
     @property
     def _default_global_config_dict_values(self) -> dict:
@@ -107,12 +109,12 @@ class TestGlobalConfig:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.delenv("UV_LOCK_TIMEOUT", raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -123,7 +125,7 @@ class TestGlobalConfig:
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
         assert self._default_global_config_dict_values == global_config_dict
@@ -135,9 +137,9 @@ class TestGlobalConfig:
         probe = MagicMock(side_effect=AssertionError("offline resolution must not probe sockets"))
         hostname = MagicMock(side_effect=AssertionError("offline resolution must not resolve hostnames"))
         setup_exporters = MagicMock(side_effect=AssertionError("offline resolution must not start exporters"))
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", probe)
-        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", hostname)
-        monkeypatch.setattr(nemo_gym.global_config, "setup_exporters", setup_exporters)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", probe)
+        monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", hostname)
+        monkeypatch.setattr(nemo_gym.config.global_config, "setup_exporters", setup_exporters)
         monkeypatch.setattr(WANDBConfig, "is_available", PropertyMock(return_value=True))
 
         config = GlobalConfigDictParser().parse(
@@ -159,27 +161,27 @@ class TestGlobalConfig:
         probe.assert_not_called()
         hostname.assert_not_called()
         setup_exporters.assert_not_called()
-        assert "UV_CACHE_DIR" not in nemo_gym.global_config.environ
-        assert "UV_LOCK_TIMEOUT" not in nemo_gym.global_config.environ
+        assert "UV_CACHE_DIR" not in nemo_gym.config.global_config.environ
+        assert "UV_LOCK_TIMEOUT" not in nemo_gym.config.global_config.environ
         assert config[UV_LOCK_TIMEOUT_KEY_NAME] == 1800
 
     def test_uv_lock_timeout_is_exported_and_overridable(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
-        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        monkeypatch.setattr(nemo_gym.config.global_config, "environ", dict())
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         default_config = get_global_config_dict()
 
         assert default_config[UV_LOCK_TIMEOUT_KEY_NAME] == 1800
-        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == "1800"
+        assert nemo_gym.config.global_config.environ["UV_LOCK_TIMEOUT"] == "1800"
 
-        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        monkeypatch.setattr(nemo_gym.config.global_config, "environ", dict())
         self._mock_parse_environment(monkeypatch, DictConfig({UV_LOCK_TIMEOUT_KEY_NAME: 60}))
 
         overridden_config = get_global_config_dict()
 
         assert overridden_config[UV_LOCK_TIMEOUT_KEY_NAME] == 60
-        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == "60"
+        assert nemo_gym.config.global_config.environ["UV_LOCK_TIMEOUT"] == "60"
 
     @mark.parametrize(
         ("exported", "configured", "expected"),
@@ -193,42 +195,44 @@ class TestGlobalConfig:
         self, monkeypatch: MonkeyPatch, exported: str, configured: dict, expected: int
     ) -> None:
         self._mock_versions_for_testing(monkeypatch)
-        monkeypatch.setattr(nemo_gym.global_config, "environ", {"UV_LOCK_TIMEOUT": exported})
+        monkeypatch.setattr(nemo_gym.config.global_config, "environ", {"UV_LOCK_TIMEOUT": exported})
         self._mock_parse_environment(monkeypatch, DictConfig(configured))
 
         config = get_global_config_dict()
 
         assert config[UV_LOCK_TIMEOUT_KEY_NAME] == expected
-        assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == str(expected)
+        assert nemo_gym.config.global_config.environ["UV_LOCK_TIMEOUT"] == str(expected)
 
     def test_null_uv_lock_timeout_leaves_the_environment_alone(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
-        monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
+        monkeypatch.setattr(nemo_gym.config.global_config, "environ", dict())
         self._mock_parse_environment(monkeypatch, DictConfig({UV_LOCK_TIMEOUT_KEY_NAME: None}))
 
         config = get_global_config_dict()
 
         assert config[UV_LOCK_TIMEOUT_KEY_NAME] is None
-        assert "UV_LOCK_TIMEOUT" not in nemo_gym.global_config.environ
+        assert "UV_LOCK_TIMEOUT" not in nemo_gym.config.global_config.environ
 
     def _mock_parse_environment(self, monkeypatch: MonkeyPatch, config_dict: "DictConfig") -> None:
         """Standard parser mocks (no env var, no .env.yaml, fixed hydra config)."""
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         hydra_main_mock = MagicMock()
         hydra_main_mock.return_value = lambda fn: (lambda: fn(config_dict))
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
     def _mock_openai_topology(self, monkeypatch: MonkeyPatch, parent_version: str) -> None:
         """Parent process on `parent_version`; nemo-gym's own constraint is openai<=2.7.2."""
-        monkeypatch.setattr(nemo_gym.global_config, "openai_version", parent_version)
-        monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
-        monkeypatch.setattr(nemo_gym.global_config, "python_version", MagicMock(return_value="test python version"))
+        monkeypatch.setattr(nemo_gym.config.global_config, "openai_version", parent_version)
+        monkeypatch.setattr(nemo_gym.config.global_config, "ray_version", "test ray version")
+        monkeypatch.setattr(
+            nemo_gym.config.global_config, "python_version", MagicMock(return_value="test python version")
+        )
         monkeypatch.setattr(importlib.metadata, "requires", lambda name: ["openai<=2.7.2"])
 
     def test_ray_version_is_a_constraint_not_a_requirement(self, monkeypatch: MonkeyPatch) -> None:
@@ -241,7 +245,7 @@ class TestGlobalConfig:
 
     def test_config_parses_without_ray_installed(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
-        monkeypatch.setattr(nemo_gym.global_config, "ray_version", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "ray_version", None)
         self._mock_parse_environment(monkeypatch, DictConfig({}))
 
         global_config_dict = get_global_config_dict()
@@ -257,8 +261,8 @@ class TestGlobalConfig:
     def test_head_server_deps_carry_provider_plugins(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_openai_topology(monkeypatch, parent_version="2.6.0")
         self._mock_parse_environment(monkeypatch, DictConfig({}))
-        monkeypatch.setattr(nemo_gym.global_config, "plugin_distributions", lambda: ["gym-substrate"])
-        monkeypatch.setattr(nemo_gym.global_config, "installed_requirement", lambda dist, req: f"{req}==0.1.0")
+        monkeypatch.setattr(nemo_gym.config.global_config, "plugin_distributions", lambda: ["gym-substrate"])
+        monkeypatch.setattr(nemo_gym.config.global_config, "installed_requirement", lambda dist, req: f"{req}==0.1.0")
 
         global_config_dict = get_global_config_dict()
         assert "gym-substrate==0.1.0" in global_config_dict["head_server_deps"]
@@ -330,7 +334,7 @@ class TestGlobalConfig:
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", "my_dict")
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", "my_dict")
 
         global_config_dict = get_global_config_dict()
         assert "my_dict" == global_config_dict
@@ -347,12 +351,12 @@ class TestGlobalConfig:
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = True
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -363,7 +367,7 @@ class TestGlobalConfig:
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
@@ -387,7 +391,7 @@ class TestGlobalConfig:
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         (tmp_path / "config1.yaml").write_text(f"""\
 config_paths:
@@ -402,7 +406,7 @@ b: 2
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = True
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -413,7 +417,7 @@ b: 2
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
@@ -440,7 +444,7 @@ b: 2
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Two roots pulling in the same child is what triggers the duplicate-path warning.
         (tmp_path / "shared.yaml").write_text("a: 1\n")
@@ -452,7 +456,7 @@ config_paths:
 
         exists_mock = MagicMock()
         exists_mock.return_value = True
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -461,7 +465,7 @@ config_paths:
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
@@ -480,12 +484,12 @@ config_paths:
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = True
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -496,7 +500,7 @@ config_paths:
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
@@ -535,12 +539,12 @@ config_paths:
         the loader so only the config_paths merge order is under test."""
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = True
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         hydra_main_mock = MagicMock()
@@ -550,7 +554,7 @@ config_paths:
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
@@ -725,17 +729,17 @@ contested: second_inner
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -752,7 +756,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
         assert (
@@ -771,7 +775,7 @@ contested: second_inner
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.side_effect = [12345, 12346, 12347]
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         parser = GlobalConfigDictParser()
         global_config_dict = parser.parse_no_environment(
@@ -830,17 +834,17 @@ contested: second_inner
 
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.side_effect = [12345, 123456]
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -877,7 +881,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
         assert (
@@ -918,17 +922,17 @@ contested: second_inner
     def test_get_global_config_dict_server_refs_errors_on_missing(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "find_open_port", find_open_port_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -957,7 +961,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         with raises(ServerRefNotFoundError) as exc_info:
             get_global_config_dict()
@@ -971,17 +975,17 @@ contested: second_inner
     def test_get_global_config_dict_server_refs_errors_on_wrong_type(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         # Explicitly handle any local .env.yaml files. Either read or don't read.
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "find_open_port", find_open_port_mock)
 
         # Override the hydra main wrapper call. At runtime, this will use sys.argv.
         # Here we assume that the user sets sys.argv correctly (we are not trying to test Hydra) and just return some DictConfig for our test.
@@ -1017,7 +1021,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         with raises(ServerRefNotFoundError):
             get_global_config_dict()
@@ -1025,15 +1029,15 @@ contested: second_inner
     def test_get_global_config_dict_server_refs_suggests_close_match(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "find_open_port", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "find_open_port", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1068,7 +1072,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         with raises(ServerRefNotFoundError) as exc_info:
             get_global_config_dict()
@@ -1223,11 +1227,11 @@ contested: second_inner
     def test_get_global_config_dict_raises_on_missing_values(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1248,7 +1252,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         with raises(ConfigMissingValuesError) as exc_info:
             get_global_config_dict()
@@ -1266,15 +1270,15 @@ contested: second_inner
         self._mock_versions_for_testing(monkeypatch)
 
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1294,7 +1298,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         # Must not raise — the only '???' lived in the deleted branch.
         config = get_global_config_dict()
@@ -1306,11 +1310,11 @@ contested: second_inner
         # End-to-end through get_global_config_dict() -> parse(): more than one unset '???' is
         # collected into a single ConfigMissingValuesError listing every missing path.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1331,7 +1335,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         with raises(ConfigMissingValuesError) as exc_info:
             get_global_config_dict()
@@ -1347,15 +1351,15 @@ contested: second_inner
         self._mock_versions_for_testing(monkeypatch)
 
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1364,7 +1368,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         config = get_global_config_dict()
         assert config["x"] == 3
@@ -1391,17 +1395,17 @@ contested: second_inner
             DEFAULT_HEAD_SERVER_PORT,  # first attempt: 11000 (conflict)
             12345,  # second attempt (safe)
         ]
-        monkeypatch.setattr(nemo_gym.global_config, "randint", randint_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "randint", randint_mock)
 
         socket_mock = MagicMock()
         socket_instance = MagicMock()
         socket_mock.return_value.__enter__ = MagicMock(return_value=socket_instance)
         socket_mock.return_value.__exit__ = MagicMock(return_value=False)
-        monkeypatch.setattr(nemo_gym.global_config, "socket", socket_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "socket", socket_mock)
 
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = {"port_range_low": 10_001, "port_range_high": 20_000}
-        monkeypatch.setattr(nemo_gym.global_config, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "get_global_config_dict", get_global_config_dict_mock)
 
         port = find_open_port(disallowed_ports=[DEFAULT_HEAD_SERVER_PORT])
 
@@ -1415,11 +1419,11 @@ contested: second_inner
         socket_mock.return_value.__enter__ = MagicMock(return_value=socket_instance)
         socket_mock.return_value.__exit__ = MagicMock(return_value=False)
         socket_instance.bind.side_effect = OSError("")
-        monkeypatch.setattr(nemo_gym.global_config, "socket", socket_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "socket", socket_mock)
 
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = {"port_range_low": 10_001, "port_range_high": 20_000}
-        monkeypatch.setattr(nemo_gym.global_config, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "get_global_config_dict", get_global_config_dict_mock)
 
         with raises(RuntimeError) as exc_info:
             find_open_port(disallowed_ports=[], max_retries=5)
@@ -1432,14 +1436,14 @@ contested: second_inner
         """Integration test: verify that child servers never get the head server port."""
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         mock_find_open_port_mock = MagicMock(return_value=12345)
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", mock_find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", mock_find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1451,7 +1455,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         global_config_dict = get_global_config_dict()
 
@@ -1469,14 +1473,14 @@ contested: second_inner
         """Test the default flag error_on_almost_servers=true raises ValueError."""
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         rich_print_mock = MagicMock()
-        monkeypatch.setattr(nemo_gym.global_config.rich, "print", rich_print_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.rich, "print", rich_print_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1514,7 +1518,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         # AlmostServerError is a ConfigError, so the CLI reports it cleanly (no traceback).
         with raises(AlmostServerError, match="almost-server.*validation errors") as exc_info:
@@ -1542,14 +1546,14 @@ contested: second_inner
         """
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         rich_print_mock = MagicMock()
-        monkeypatch.setattr(nemo_gym.global_config.rich, "print", rich_print_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.rich, "print", rich_print_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1588,7 +1592,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         with does_not_raise():
             global_config_dict = get_global_config_dict()
@@ -1608,15 +1612,15 @@ contested: second_inner
     def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
         """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1630,11 +1634,11 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         expected_ip = "192.0.2.20"
         gethostbyname_mock = MagicMock(return_value=expected_ip)
-        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", gethostbyname_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", gethostbyname_mock)
 
         global_config_dict = get_global_config_dict()
 
@@ -1735,15 +1739,15 @@ contested: second_inner
         self._mock_versions_for_testing(monkeypatch)
 
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1775,7 +1779,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         actual_global_config_dict = OmegaConf.to_container(get_global_config_dict())
         expected_global_config_dict = self._default_global_config_dict_values | {
@@ -1808,15 +1812,15 @@ contested: second_inner
         self._mock_versions_for_testing(monkeypatch)
 
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1836,7 +1840,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         actual_global_config_dict = OmegaConf.to_container(get_global_config_dict())
         expected_global_config_dict = self._default_global_config_dict_values | {
@@ -1857,15 +1861,15 @@ contested: second_inner
         self._mock_versions_for_testing(monkeypatch)
 
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1874,7 +1878,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         actual_global_config_dict = OmegaConf.to_container(
             get_global_config_dict(
@@ -1905,15 +1909,15 @@ contested: second_inner
         self._mock_versions_for_testing(monkeypatch)
 
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         exists_mock = MagicMock()
         exists_mock.return_value = False
-        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.Path, "exists", exists_mock)
 
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         hydra_main_mock = MagicMock()
 
@@ -1926,7 +1930,7 @@ contested: second_inner
             return lambda: fn(config_dict)
 
         hydra_main_mock.return_value = hydra_main_wrapper
-        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config.hydra, "main", hydra_main_mock)
 
         actual_global_config_dict = OmegaConf.to_container(
             get_global_config_dict(
@@ -1982,7 +1986,7 @@ contested: second_inner
     def test_env_yaml_loaded_from_cwd(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         self._mock_versions_for_testing(monkeypatch)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         (tmp_path / "env.yaml").write_text("custom_env_key: from_cwd\n")
         monkeypatch.chdir(tmp_path)
@@ -1999,7 +2003,7 @@ contested: second_inner
     def test_env_yaml_falls_back_to_parent_dir(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         self._mock_versions_for_testing(monkeypatch)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
 
         parent_dir = tmp_path / "parent"
         parent_dir.mkdir()
@@ -2592,7 +2596,7 @@ class TestConfigLoadErrors:
     def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
         agent_name = f"{resources_server}_langchain_deepagents_agent_model_server"
         config_path = (
-            Path(__file__).resolve().parents[2]
+            Path(__file__).resolve().parents[3]
             / "resources_servers"
             / resources_server
             / "configs"
@@ -2719,7 +2723,7 @@ class TestConfigLoadErrors:
         # but a plain PyYAML parse silently allows them (last-writer-wins). A repeated key like a
         # second `datasets:` block can land unnoticed and only surface at runtime. Sweep every real
         # config in the repo so this fails fast in CI instead.
-        repo_root = Path(__file__).resolve().parents[2]
+        repo_root = Path(__file__).resolve().parents[3]
         config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
         config_paths = _discover_repo_configs(repo_root, config_dirs)
         assert config_paths, "no config files discovered -- sweep dirs may have moved"
@@ -3563,15 +3567,11 @@ def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
     """
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import (
-        HEAD_SERVER_KEY_NAME,
-        USE_ABSOLUTE_IP,
-        GlobalConfigDictParser,
-        GlobalConfigDictParserConfig,
-    )
+    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME, USE_ABSOLUTE_IP
 
-    monkeypatch.setattr("nemo_gym.global_config.gethostname", lambda: "node-17")
-    monkeypatch.setattr("nemo_gym.global_config.gethostbyname", lambda _h: "10.1.2.3")
+    monkeypatch.setattr("nemo_gym.config.global_config.gethostname", lambda: "node-17")
+    monkeypatch.setattr("nemo_gym.config.global_config.gethostbyname", lambda _h: "10.1.2.3")
 
     initial = OmegaConf.create(
         {
@@ -3588,7 +3588,7 @@ def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
 
 class TestRolloutRunLabels:
     def test_rows_group_by_environment_server_and_keep_agent_labels(self) -> None:
-        from nemo_gym.global_config import rollout_run_key, rollout_run_labels
+        from nemo_gym.config.global_config import rollout_run_key, rollout_run_labels
 
         rows = [
             {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"},
@@ -3609,7 +3609,7 @@ class TestRolloutRunLabels:
         assert rollout_run_labels(reversed(rows)) == expected
 
     def test_a_stamped_record_and_an_older_record_of_one_agent_get_distinct_labels(self) -> None:
-        from nemo_gym.global_config import rollout_run_labels
+        from nemo_gym.config.global_config import rollout_run_labels
 
         stamped = {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"}
         older = {"agent_ref": {"name": "hermes"}}
@@ -3619,7 +3619,7 @@ class TestRolloutRunLabels:
         assert labels == {"hermes_relay": "hermes_relay", "hermes": "hermes"}
 
     def test_labels_stay_unique_when_a_server_name_matches_another_agent(self) -> None:
-        from nemo_gym.global_config import label_runs
+        from nemo_gym.config.global_config import label_runs
 
         # Servers "judge" and "judge_twin" share agent "policy", so both use their own names.
         # Server "grader" fronts an agent that happens to be named "judge", which would repeat that label.
@@ -3644,7 +3644,7 @@ def test_explicit_default_host_skips_hostname_resolution(monkeypatch):
 
     # An explicit address wins even on a machine whose short hostname has no DNS entry.
     resolver = MagicMock(side_effect=gaierror("hostname does not resolve"))
-    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", resolver)
     config = GlobalConfigDictParser().parse(_absolute_ip_parse_config({"default_host": "192.0.2.20"}))
     assert config.head_server.host == "192.0.2.20"
     resolver.assert_not_called()
@@ -3654,14 +3654,14 @@ def test_explicit_default_host_skips_hostname_resolution(monkeypatch):
 def test_absolute_ip_reports_unusable_hostname(monkeypatch, resolved):
     from socket import gaierror
 
-    from nemo_gym.config_types import ConfigError
+    from nemo_gym.config.config_types import ConfigError
 
     resolver = (
         MagicMock(side_effect=gaierror("hostname does not resolve"))
         if resolved is None
         else MagicMock(return_value=resolved)
     )
-    monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", resolver)
+    monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", resolver)
     with raises(ConfigError, match="default_host=.*reachable from the sandbox"):
         GlobalConfigDictParser().parse(_absolute_ip_parse_config({}))
 
@@ -3676,8 +3676,10 @@ class TestAbsoluteIpServerTypes:
 
     @fixture(autouse=True)
     def _network(self, monkeypatch):
-        monkeypatch.setattr(nemo_gym.global_config, "gethostbyname", MagicMock(return_value="192.0.2.20"))
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", MagicMock(return_value=12345))
+        monkeypatch.setattr(nemo_gym.config.global_config, "gethostbyname", MagicMock(return_value="192.0.2.20"))
+        monkeypatch.setattr(
+            nemo_gym.config.global_config, "_find_open_port_using_range", MagicMock(return_value=12345)
+        )
 
     @staticmethod
     def _hosts(config) -> dict[str, str]:
@@ -3735,7 +3737,7 @@ class TestAbsoluteIpServerTypes:
         [("responses_api_models", "must be a list"), (["models"], "unknown server types"), (True, "must be a list")],
     )
     def test_malformed_list_is_a_config_error(self, value, match):
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
 
         with raises(ConfigError, match=match):
             GlobalConfigDictParser().parse(_absolute_ip_parse_config({"absolute_ip_server_types": value}))

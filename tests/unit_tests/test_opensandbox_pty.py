@@ -24,7 +24,8 @@ import aiohttp
 import pytest
 
 import nemo_gym.sandbox.providers.opensandbox.pty as pty_module
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtyError, SandboxPtySpec
+from nemo_gym.sandbox import SandboxHandle
+from nemo_gym.sandbox.providers.base import SandboxPtyError, SandboxPtySpec
 from nemo_gym.sandbox.providers.opensandbox.pty import (
     OpenSandboxPtySession,
     _effective_command,
@@ -502,7 +503,7 @@ async def test_pipe_mode_splits_streams() -> None:
 
 async def test_facade_passes_pipe_mode() -> None:
     from nemo_gym.sandbox import AsyncSandbox as _AS
-    from nemo_gym.sandbox.providers.base import SandboxSpec as _Spec
+    from nemo_gym.sandbox import SandboxSpec as _Spec
 
     class Recorder:
         name = "rec"

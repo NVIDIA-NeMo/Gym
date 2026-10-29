@@ -26,8 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
-from nemo_gym.config_types import ModelServerRef, OmegaConf
-from nemo_gym.global_config import CACHE_DIR_KEY_NAME
+from nemo_gym.config import CACHE_DIR_KEY_NAME, ModelServerRef, OmegaConf
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

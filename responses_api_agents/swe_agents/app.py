@@ -56,10 +56,10 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
+    ModelServerRef,
     OmegaConf,
     get_global_config_dict,
     maybe_get_global_config_dict,

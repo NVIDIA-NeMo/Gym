@@ -28,6 +28,7 @@ OUTSIDE_THE_LAYERS = {
     "__init__": "the package root",
     "package_info": "version metadata",
     "_moved_paths": "the old-path compatibility table, which nemo_gym/__init__.py installs first",
+    "_public_api": "builds each package's lazy public API from the standard library alone",
     "verifiers": "standard-library-only helpers that verifiers running inside sandboxes import by name",
 }
 

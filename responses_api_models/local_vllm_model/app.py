@@ -42,12 +42,7 @@ except ImportError:  # Older vLLM, such as the macOS pin in setup.py.
         validate_parsed_serve_args,
     )
 
-from nemo_gym.global_config import (
-    DISALLOWED_PORTS_KEY_NAME,
-    find_open_port,
-    get_global_config_dict,
-    get_hf_token,
-)
+from nemo_gym.config import DISALLOWED_PORTS_KEY_NAME, find_open_port, get_global_config_dict, get_hf_token
 from responses_api_models.local_vllm_model.local_vllm_model_actor import LocalVLLMModelActor
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 

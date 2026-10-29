@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterable
 from time import monotonic, time
 from typing import Any
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

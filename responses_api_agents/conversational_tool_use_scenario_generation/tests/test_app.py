@@ -25,12 +25,7 @@ import pytest
 from fastapi import Request
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.conversational_tool_use_scenario_generation import app
 from responses_api_agents.conversational_tool_use_scenario_generation.app import (

@@ -1029,7 +1029,7 @@ class TestTrainingMetadataKeys:
         return folder
 
     def test_keys_parse_and_leave_tasks_alone(self, tmp_path):
-        from nemo_gym.config_types import Domain
+        from nemo_gym.config import Domain
 
         folder = self.write(
             tmp_path,

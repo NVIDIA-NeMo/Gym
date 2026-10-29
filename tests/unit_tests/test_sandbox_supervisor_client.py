@@ -30,8 +30,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     supervised_launch_command,
     supervision_timeouts,
 )
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox import SandboxExecResult, read_text, upload_text
 
 
 class LocalSandbox:

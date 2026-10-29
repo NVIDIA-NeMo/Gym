@@ -985,7 +985,7 @@ class TestMaterialize:
         # Without a dataset.toml the rows are a benchmark: no license, not verified, one rollout per task, and
         # no prepare script (the rows were just written). The entry is what Gym's config types accept.
         assert entry == {"name": "ds", "type": "benchmark", "verified": False, "jsonl_fpath": str(rows_path.resolve())}
-        from nemo_gym.config_types import BenchmarkDatasetConfig
+        from nemo_gym.config import BenchmarkDatasetConfig
 
         assert BenchmarkDatasetConfig.model_validate(entry).prepare_script is None
         assert "resources_server" not in agent["responses_api_agents"]["hermes_agent"]
@@ -2989,7 +2989,7 @@ def test_config_overlays_win_after_real_loading_and_inheritance(tmp_path):
     from omegaconf import OmegaConf
 
     from nemo_gym.cli.main import _merge_config_paths
-    from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.config import GlobalConfigDictParser
 
     task = write_task(tmp_path / "ds" / "a")
     prepared = prepare_target(str(task.parent), output_root=tmp_path / "out")
@@ -3023,7 +3023,7 @@ def test_partial_eval_requires_explicit_opt_in_and_records_reasons(tmp_path, mon
     write_task(tmp_path / "ds" / "bad", toml="bad toml")
     # The run resolves this host for the servers' addresses; a host that resolves to 127.0.1.1 (Ubuntu /etc/hosts)
     # would be refused as unreachable from a sandbox, so pin a routable address as the other CLI tests do.
-    import nemo_gym.global_config as global_config
+    import nemo_gym.config.global_config as global_config
 
     monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     monkeypatch.chdir(tmp_path)
@@ -3081,7 +3081,7 @@ def test_partial_eval_names_every_task_whose_compose_file_does_not_resolve(tmp_p
         )
     # The run resolves this host for the servers' addresses; a host that resolves to 127.0.1.1 (Ubuntu /etc/hosts)
     # would be refused as unreachable from a sandbox, so pin a routable address as the other CLI tests do.
-    import nemo_gym.global_config as global_config
+    import nemo_gym.config.global_config as global_config
 
     monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
     monkeypatch.chdir(tmp_path)
@@ -3115,7 +3115,7 @@ def test_eval_run_resolves_its_own_tokens_over_a_config_this_process_resolved_be
     from omegaconf import DictConfig
 
     import nemo_gym.cli.main as main_module
-    import nemo_gym.global_config as global_config
+    import nemo_gym.config.global_config as global_config
 
     write_task(tmp_path / "ds" / "good")
     monkeypatch.chdir(tmp_path)
@@ -3368,10 +3368,10 @@ def test_harbor_task_data_schema_names_the_digest_key(tmp_path):
 def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, taskset, agent_name):
     import sys
 
-    import nemo_gym.global_config as global_config
+    import nemo_gym.config.global_config as global_config
     from nemo_gym import PARENT_DIR
     from nemo_gym.cli.main import _merge_config_paths
-    from nemo_gym.global_config import GlobalConfigDictParser, get_global_config_dict
+    from nemo_gym.config import GlobalConfigDictParser, get_global_config_dict
     from nemo_gym.rollout_collection import E2ERolloutCollectionConfig
     from nemo_gym.tasks.harbor.materialize import agent_instance, environment_server_instance
 
@@ -3489,10 +3489,10 @@ def test_generated_instance_names_are_override_safe_and_collision_free():
 def test_generated_agent_can_be_overridden_for_versioned_taskset(tmp_path, monkeypatch):
     import sys
 
-    import nemo_gym.global_config as global_config
+    import nemo_gym.config.global_config as global_config
     from nemo_gym import PARENT_DIR
     from nemo_gym.cli.main import _merge_config_paths
-    from nemo_gym.global_config import get_global_config_dict
+    from nemo_gym.config import get_global_config_dict
     from nemo_gym.tasks.harbor.materialize import agent_instance
 
     monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
@@ -3731,7 +3731,7 @@ def test_eval_run_resume_refuses_a_changed_selection_or_digest(tmp_path, monkeyp
     import sys
 
     import nemo_gym.cli.main as main_module
-    from nemo_gym import global_config
+    from nemo_gym.config import global_config
     from nemo_gym.path_utils import materialized_path_for
 
     monkeypatch.chdir(tmp_path)
@@ -3807,7 +3807,7 @@ def test_eval_run_resume_reports_a_config_error_cleanly(tmp_path, monkeypatch, c
     import sys
 
     import nemo_gym.cli.main as main_module
-    from nemo_gym import global_config
+    from nemo_gym.config import global_config
     from nemo_gym.path_utils import materialized_path_for
 
     monkeypatch.chdir(tmp_path)
@@ -4363,12 +4363,12 @@ class TestTrainingMetadata:
     """The `[gym]` keys of M37 flow from dataset.toml into the generated `datasets:` entry, the rows and the run."""
 
     def test_task_source_key_is_the_collectors(self):
-        from nemo_gym.global_config import TASK_SOURCE_KEY_NAME
+        from nemo_gym.config import TASK_SOURCE_KEY_NAME
 
         assert TASK_SOURCE_KEY == TASK_SOURCE_KEY_NAME
 
     def test_entry_carries_the_gym_table(self, tmp_path):
-        from nemo_gym.config_types import DatasetConfig
+        from nemo_gym.config import DatasetConfig
         from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
 
         folder = tmp_path / "ds"
@@ -4588,7 +4588,7 @@ class TestTrainingMetadata:
         import sys
 
         import nemo_gym.cli.main as main_module
-        import nemo_gym.global_config as global_config
+        import nemo_gym.config.global_config as global_config
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -4619,7 +4619,7 @@ class TestTrainingMetadata:
         import sys
 
         import nemo_gym.cli.main as main_module
-        import nemo_gym.global_config as global_config
+        import nemo_gym.config.global_config as global_config
 
         folder = tmp_path / "ds"
         write_task(folder / "good")
@@ -4655,8 +4655,8 @@ class TestTrainingMetadata:
         import sys
 
         import nemo_gym.cli.main as main_module
-        import nemo_gym.global_config as global_config
-        from nemo_gym.config_types import BenchmarkDatasetConfig
+        import nemo_gym.config.global_config as global_config
+        from nemo_gym.config import BenchmarkDatasetConfig
 
         folder = tmp_path / "ds"
         write_task(folder / "good")
@@ -4695,7 +4695,7 @@ class TestTrainingMetadata:
         import sys
 
         import nemo_gym.cli.main as main_module
-        import nemo_gym.global_config as global_config
+        import nemo_gym.config.global_config as global_config
         from nemo_gym.tasks.harbor.cli import pairing_override_from_overrides
 
         folder = tmp_path / "ds"
@@ -4787,7 +4787,7 @@ class TestTrainingMetadata:
         import sys
 
         import nemo_gym.cli.main as main_module
-        import nemo_gym.global_config as global_config
+        import nemo_gym.config.global_config as global_config
 
         folder = tmp_path / "ds"
         write_task(folder / "good")

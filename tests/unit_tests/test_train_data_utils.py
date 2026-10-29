@@ -21,11 +21,12 @@ from unittest.mock import MagicMock, mock_open
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 import nemo_gym.train_data_utils
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
+from nemo_gym.config import DatasetConfig, GlobalConfigDictParser
+from nemo_gym.config.config_types import ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.config.global_config import DictConfig
 from nemo_gym.train_data_utils import (
     AvgMinMax,
     CategoricalMetrics,
@@ -101,7 +102,7 @@ class TestLoadAndValidateServerInstanceConfigs:
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         config = TrainDataProcessorConfig(
             output_dirpath="",
@@ -1497,7 +1498,7 @@ class TestCollateSamples:
 def _instance(name: str, server_type: str, impl: dict):
     from omegaconf import OmegaConf
 
-    from nemo_gym.config_types import maybe_get_server_instance_config
+    from nemo_gym.config.config_types import maybe_get_server_instance_config
 
     cfg, err = maybe_get_server_instance_config(name, OmegaConf.create({server_type: {"impl": impl}}))
     assert err is None, err

@@ -31,7 +31,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,

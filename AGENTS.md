@@ -189,6 +189,17 @@ gym dev test
 gym env resolve --config ...
 ```
 
+## Imports from nemo_gym
+
+- Code outside `nemo_gym/` (servers, benchmarks, scripts, tests, and code samples in docs and skills) imports public
+  names from the package's public API: `from nemo_gym.<package> import Name`. If such code needs a name the package
+  does not export, add it to the package's `_PUBLIC_API` in its `__init__.py` rather than importing the submodule.
+- Tests may import private names from submodules, and a `mock.patch` target names the submodule that looks the name
+  up.
+- Code inside `nemo_gym/` imports submodules directly (`from nemo_gym.<package>.<module> import Name`), never a
+  package's public API, so the import-linter contract in `pyproject.toml` sees every dependency. A package imports
+  only packages below it.
+
 ## Code Style
 
 - `pyproject.toml` is authoritative for Python, Ruff, formatter, and coverage settings;

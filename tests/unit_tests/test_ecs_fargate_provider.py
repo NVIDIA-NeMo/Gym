@@ -21,14 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.providers import (
-    SandboxSpec,
-    SandboxStatus,
-    create_provider,
-    get_provider_class,
-    list_providers,
-)
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider, get_provider_class
+from nemo_gym.sandbox.providers import list_providers
 from nemo_gym.sandbox.providers.ecs_fargate import EcsFargateProvider, engine
 from nemo_gym.sandbox.providers.ecs_fargate.provider import _apply_spec_overrides, engine_config_from_mapping
 
@@ -209,7 +203,7 @@ async def test_outside_endpoints_build_reverse_tunnel():
 
 async def test_create_missing_image_raises():
     provider = create_provider(_provider_config())
-    from nemo_gym.sandbox.providers import SandboxCreateError
+    from nemo_gym.sandbox import SandboxCreateError
 
     with pytest.raises(SandboxCreateError, match="requires SandboxSpec.image"):
         await provider.create(SandboxSpec(image=None))
@@ -420,7 +414,7 @@ def test_apply_spec_overrides_maps_resources_and_ttl():
 
 
 def test_apply_spec_overrides_rejects_gpu():
-    from nemo_gym.sandbox.providers import SandboxCreateError
+    from nemo_gym.sandbox import SandboxCreateError
 
     cfg = engine.EcsFargateConfig(region="us-east-1")
     with pytest.raises(SandboxCreateError, match="GPU"):

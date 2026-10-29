@@ -16,7 +16,7 @@
 
 import pytest
 
-from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.telemetry import GymSpanGroup
 from tests.unit_tests.telemetry.conftest import import_without_lens, no_lens, requires_lens
 
 

@@ -23,8 +23,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
-from nemo_gym.sandbox.providers.registry import get_provider_class
+from nemo_gym.sandbox import SandboxHandle, SandboxSpec, SandboxStatus, get_provider_class
 
 
 pytestmark = pytest.mark.sandbox

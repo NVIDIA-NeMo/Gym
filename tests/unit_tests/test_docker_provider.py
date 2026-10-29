@@ -19,13 +19,7 @@ from typing import Any, Callable
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import (
-    SandboxExecResult,
-    SandboxHandle,
-    SandboxResources,
-    SandboxSpec,
-    SandboxStatus,
-)
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxResources, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.docker import provider as docker_provider
 
 

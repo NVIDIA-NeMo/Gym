@@ -316,7 +316,7 @@ def _resolve_hf_token() -> Optional[str]:
     HuggingFace auth is fine.
     """
     try:
-        from nemo_gym.global_config import get_hf_token
+        from nemo_gym.config import get_hf_token
 
         return get_hf_token()
     except (Exception, SystemExit):

@@ -10,9 +10,8 @@ import pytest
 
 from nemo_gym._checkpoint import coordination
 from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
-from nemo_gym.telemetry import gym_metrics
+from nemo_gym.telemetry import GymSpanGroup, gym_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.test_checkpoint_control import FakeParticipant, body, make_client
 from tests.unit_tests.test_checkpoint_resources import AUTH, SEED, control, make_server
 

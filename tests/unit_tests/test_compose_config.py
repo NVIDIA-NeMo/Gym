@@ -7,22 +7,18 @@ from copy import deepcopy
 import pytest
 import yaml
 
-from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-from nemo_gym.sandbox.compose_config import (
+from nemo_gym.sandbox import (
+    AsyncSandboxCompose,
     adapt_non_root_sidecars,
-    check_sidecar_extra_hosts,
     deployment_platform,
-    non_root_sidecar_users,
     opensandbox_shm_labels,
     resolve_compose,
     sandbox_platform,
-)
-from nemo_gym.sandbox.compose_fields import (
-    ComposeFieldError,
-    check_compose_fields,
     service_gpus,
     service_resources,
 )
+from nemo_gym.sandbox.compose_config import check_sidecar_extra_hosts, non_root_sidecar_users
+from nemo_gym.sandbox.compose_fields import ComposeFieldError, check_compose_fields
 from tests.unit_tests.compose_testing import IMAGE_CONFIGS, MAIN, OVERLAY, SIDECAR, _fixture
 
 

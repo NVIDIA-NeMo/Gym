@@ -21,11 +21,7 @@ from collections import defaultdict
 
 import pytest
 
-from nemo_gym.global_config import (
-    ATTEMPT_INDEX_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymChatCompletion
 from responses_api_agents.conversational_tool_use_policy_tool_generation.assets import load_assets
 from responses_api_agents.conversational_tool_use_policy_tool_generation.compat import (

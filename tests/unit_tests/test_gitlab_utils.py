@@ -19,7 +19,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from pytest import MonkeyPatch
 
-from nemo_gym.config_types import ConfigError, DownloadJsonlDatasetGitlabConfig, MLFlowConfig
+from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
+from nemo_gym.config.config_types import ConfigError, MLFlowConfig
 from nemo_gym.gitlab_utils import create_mlflow_client, download_jsonl_dataset
 
 

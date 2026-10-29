@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox import SandboxResources, SandboxSpec, SandboxStatus
 
 
 pytestmark = pytest.mark.sandbox

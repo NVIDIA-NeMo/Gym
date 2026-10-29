@@ -30,6 +30,7 @@ import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.sandbox import (
     AsyncSandbox,
     Sandbox,
+    SandboxConfig,
     SandboxCreateError,
     SandboxEndpoint,
     SandboxExecResult,
@@ -46,10 +47,9 @@ from nemo_gym.sandbox import (
     register_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+    rewrite_image,
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
-from nemo_gym.sandbox.config import SandboxConfig
-from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 

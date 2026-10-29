@@ -28,7 +28,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.failure_kinds import JUDGE_UNPARSEABLE
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import compute_aggregate_metrics

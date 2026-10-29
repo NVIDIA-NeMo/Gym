@@ -48,22 +48,18 @@ import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
-from nemo_gym.config_types import (
-    AmbiguousEnvironmentServerError,
-    BaseServerConfig,
-    ConfigError,
-    ConfigPathNotFoundError,
-)
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
+    BaseServerConfig,
 )
+from nemo_gym.config.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
+from nemo_gym.episode_types import EpisodeId
+from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
 from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.path_utils import aggregation_sources_path_for, materialized_path_for
@@ -122,8 +118,8 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
+from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
     LineageResolution,
     ParentResolutionStatus,
@@ -5743,7 +5739,7 @@ class TestRolloutCollection:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from nemo_gym.base_responses_api_model import CaptureStore
-        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+        from nemo_gym.config import ROLLOUT_ID_KEY_NAME
 
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(

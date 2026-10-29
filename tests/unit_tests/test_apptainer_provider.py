@@ -23,14 +23,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxResources, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
-from nemo_gym.sandbox.providers.base import (
-    SandboxExecResult,
-    SandboxHandle,
-    SandboxResources,
-    SandboxSpec,
-    SandboxStatus,
-)
 
 
 pytestmark = pytest.mark.sandbox

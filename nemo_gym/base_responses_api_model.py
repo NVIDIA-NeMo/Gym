@@ -69,7 +69,7 @@ from nemo_gym._checkpoint.model_workers import (
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,

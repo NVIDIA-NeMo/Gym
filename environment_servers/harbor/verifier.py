@@ -51,8 +51,9 @@ from nemo_gym import __version__, failure_kinds
 from nemo_gym.atif_export import encode_atif_trajectory, transcript_to_atif
 from nemo_gym.episode_types import BaseEpisodeRequest
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.sandbox.transfer import (
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxExecResult,
     SandboxProbeError,
     SandboxTransferError,
     download_dir,

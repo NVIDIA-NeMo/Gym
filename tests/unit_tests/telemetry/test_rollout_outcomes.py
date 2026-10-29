@@ -5,8 +5,7 @@
 import pytest
 
 from nemo_gym import rollout_collection
-from nemo_gym.telemetry import gym_metrics
-from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.telemetry import GymSpanGroup, gym_metrics
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 
 

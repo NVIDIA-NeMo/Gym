@@ -24,10 +24,9 @@ import sys
 
 import pytest
 
+from nemo_gym.telemetry import get_telemetry, init_telemetry
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.setup import (
-    get_telemetry,
-    init_telemetry,
     is_metrics_exporter_active,
     is_telemetry_env_enabled,
     is_telemetry_metrics_enabled,
@@ -550,7 +549,8 @@ def test_the_fastapi_instrumentor_is_installed_only_while_traces_export(monkeypa
 
 def test_init_registers_the_rollout_id_provider_for_sandbox_spans(enabled_console_env):
     import nemo_gym.sandbox.observability as sandbox_observability
-    from nemo_gym.telemetry.setup import init_telemetry, rollout_span_attributes
+    from nemo_gym.telemetry import init_telemetry
+    from nemo_gym.telemetry.setup import rollout_span_attributes
 
     init_telemetry()
     assert sandbox_observability._span_attribute_provider is rollout_span_attributes
