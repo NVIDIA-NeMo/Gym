@@ -10,31 +10,35 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ValidationError
 
 from nemo_gym.config.config_types import EnvironmentServerInstanceConfig, ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.tasks.harbor import DIGEST_KEY, content_hash, load_task
-from nemo_gym.tasks.harbor.cli import prepare_target
-from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.materialize import (
+from nemo_gym.data import (
+    DIGEST_KEY,
+    HarborTaskError,
+    TaskDataError,
+    TaskDataSchema,
+    check_row_matches_folder,
+    load_task,
+)
+from nemo_gym.data.dataset_preparation import TrainDataProcessor
+from nemo_gym.data.tasks.harbor import content_hash
+from nemo_gym.data.tasks.harbor.cli import prepare_target
+from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY
+from nemo_gym.data.tasks.harbor.materialize import (
     agent_instance,
     environment_server_instance,
     materialize_task,
     run_config,
     write_rows,
 )
-from nemo_gym.tasks.harbor.task_data import (
+from nemo_gym.data.tasks.harbor.task_data import (
     TASK_DATA_FILE,
     TASK_DATA_MODULE,
     DatasetRowValidator,
-    TaskDataError,
-    TaskDataSchema,
-    check_row_matches_folder,
     check_task_folders,
     check_tasks,
     load_task_data_schema,
     read_task_fields,
     task_fields,
 )
-from nemo_gym.train_data_utils import TrainDataProcessor
 from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
 
 
@@ -525,7 +529,7 @@ class TestMaterializeRefusesTheDataset:
     def test_a_violating_task_refuses_the_dataset_before_images_are_recorded_or_built(self, tmp_path, monkeypatch):
         # The fields need no loaded task, so a dataset refused as a whole does not first resolve every base image
         # against the registry and build and push every Dockerfile; nested task folders are walked like the loader's.
-        from nemo_gym.tasks.harbor import cli as cli_module
+        from nemo_gym.data.tasks.harbor import cli as cli_module
         from tests.unit_tests.test_harbor_tasks import FakeRegistryClient
 
         monkeypatch.setattr(FakeRegistryClient, "resolved", [])

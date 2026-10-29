@@ -8,8 +8,8 @@ import pytest
 import yaml
 
 from benchmarks.indic.aime_2026 import prepare as module
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
 from nemo_gym.environment.manifest import load_manifest
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
 
 
 def problem(*, index: int = 1) -> dict:
@@ -298,7 +298,7 @@ def _resolve_cli_config(flags: list[str]) -> dict:
 
 def _materialize_dataset(config: dict, agent_name: str, source_rows: list[dict], tmp_path: Path) -> list[dict]:
     from nemo_gym.config import BenchmarkDatasetConfig
-    from nemo_gym.train_data_utils import TrainDataProcessor
+    from nemo_gym.data.dataset_preparation import TrainDataProcessor
 
     dataset = dict(config[agent_name]["responses_api_agents"]["simple_agent"]["datasets"][0])
     source_path = tmp_path / f"{agent_name}.jsonl"

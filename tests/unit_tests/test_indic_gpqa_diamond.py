@@ -12,7 +12,8 @@ from omegaconf import OmegaConf
 from benchmarks.gpqa import prepare as english_module
 from benchmarks.indic.gpqa_diamond import prepare as module
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
+from nemo_gym.data.prompt import validate_prompt_compatibility
 
 
 def record(index=0, language="en", **extra):

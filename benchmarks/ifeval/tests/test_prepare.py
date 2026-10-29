@@ -8,7 +8,7 @@ from unittest.mock import patch
 from pydantic import TypeAdapter
 
 from benchmarks.ifeval import prepare
-from nemo_gym.task_data import validate_jsonl_rows
+from nemo_gym.data.task_data import validate_jsonl_rows
 from resources_servers.instruction_following.task_data import TaskData
 
 

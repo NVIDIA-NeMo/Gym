@@ -9,7 +9,8 @@ suite measures.
 
 from environment_servers.harbor.app import HarborTasksetConfig
 from environment_servers.harbor.task_data import TaskData
-from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
+from nemo_gym.data import DIGEST_KEY
+from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY
 
 
 def test_the_environment_server_accepts_the_recorded_identity(tmp_path):

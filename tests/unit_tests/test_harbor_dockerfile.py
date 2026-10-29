@@ -9,12 +9,11 @@ Terminal Bench shapes seen in the hub.
 
 import pytest
 
-from nemo_gym.tasks.harbor.dockerfile import (
-    RECORD_VERSION,
+from nemo_gym.data import RECORD_VERSION, OverlayRun
+from nemo_gym.data.tasks.harbor.dockerfile import (
     BaseImageConfig,
     DockerfileNeedsBuild,
     OverlayImage,
-    OverlayRun,
     base_image_only,
     overlay_image,
     parse_dockerfile,

@@ -58,8 +58,8 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.data import PromptConfig, load_prompt_config
 from nemo_gym.metrics import Stat
-from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.server_runtime import BaseRunRequest
 from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
 

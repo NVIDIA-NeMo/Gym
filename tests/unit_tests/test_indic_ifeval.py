@@ -10,8 +10,8 @@ from omegaconf import OmegaConf
 
 from benchmarks.indic.ifeval import prepare as module
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.data.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
 from nemo_gym.server_runtime import BaseRunRequest
-from nemo_gym.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
 
 
 def source_row(key=1, *, tags=None):
@@ -197,7 +197,7 @@ def _resolve_cli_config(flags):
 @pytest.mark.parametrize("override", [False, True])
 def test_cli_defaults_and_overrides_preserve_other_benchmark_metadata(tmp_path, override):
     from benchmarks.numb3rs.prepare import _format_row
-    from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+    from nemo_gym.data import apply_prompt_to_row, load_prompt_config
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
     flags = ["--benchmark", "numb3rs"]

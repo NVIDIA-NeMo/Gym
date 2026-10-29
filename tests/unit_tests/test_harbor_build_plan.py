@@ -13,12 +13,12 @@ import shutil
 
 import pytest
 
-from nemo_gym.tasks.harbor.build_plan import BuildConflict, BuildError, detect_tool, needs_build, plan_builds
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
-from nemo_gym.tasks.harbor.image_build import build_images
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.data import BUILT_IMAGES_FILE, load_task
+from nemo_gym.data.tasks.harbor.build_plan import BuildConflict, BuildError, detect_tool, needs_build, plan_builds
+from nemo_gym.data.tasks.harbor.digest import context_digest
+from nemo_gym.data.tasks.harbor.harbor_compat import environment_content_hash
+from nemo_gym.data.tasks.harbor.image_build import build_images
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
 from tests.unit_tests.harbor_build_helpers import (
     BUILD_DOCKERFILE,
     OVERLAY_DOCKERFILE,

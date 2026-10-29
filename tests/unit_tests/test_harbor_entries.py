@@ -15,13 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.tasks.harbor import cli as harbor_cli
-from nemo_gym.tasks.harbor import entries as entries_module
-from nemo_gym.tasks.harbor import hub as hub_module
-from nemo_gym.tasks.harbor.cli import PulledDataset, entry_folder, prepare_target, pull_dataset
-from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig, read_dataset_config
-from nemo_gym.tasks.harbor.digest import content_hash
-from nemo_gym.tasks.harbor.entries import (
+from nemo_gym.data import HarborTaskError
+from nemo_gym.data.tasks.harbor import cli as harbor_cli
+from nemo_gym.data.tasks.harbor import entries as entries_module
+from nemo_gym.data.tasks.harbor import hub as hub_module
+from nemo_gym.data.tasks.harbor.cli import PulledDataset, entry_folder, prepare_target, pull_dataset
+from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig, read_dataset_config
+from nemo_gym.data.tasks.harbor.digest import content_hash
+from nemo_gym.data.tasks.harbor.entries import (
     LAYER_RECORD_FILE,
     DatasetEntry,
     PullPlan,
@@ -33,10 +34,9 @@ from nemo_gym.tasks.harbor.entries import (
     plan_pull,
     prepare_destination,
 )
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.hub import HubError, RegistryDataset, RegistryTask, declares_recorded_fetch
-from nemo_gym.tasks.harbor.manifest import Manifest, dataset_files_digest, dataset_toml_digest
-from nemo_gym.tasks.harbor.task_data import load_task_data_schema
+from nemo_gym.data.tasks.harbor.hub import HubError, RegistryDataset, RegistryTask, declares_recorded_fetch
+from nemo_gym.data.tasks.harbor.manifest import Manifest, dataset_files_digest, dataset_toml_digest
+from nemo_gym.data.tasks.harbor.task_data import load_task_data_schema
 from tests.unit_tests.test_harbor_tasks import (
     commit_repo,
     fake_registry,  # noqa: F401
@@ -118,7 +118,7 @@ class TestSourceKey:
             read_dataset_config(tmp_path)
 
     def test_default_is_unset_and_the_scaffold_documents_it_without_setting_it(self, tmp_path):
-        from nemo_gym.tasks.harbor.scaffold import init_dataset
+        from nemo_gym.data.tasks.harbor.scaffold import init_dataset
 
         assert GymDatasetConfig().source is None and GymDatasetConfig().is_empty
         folder = init_dataset(tmp_path, "my-dataset")
@@ -679,7 +679,7 @@ class TestPullDataset:
         assert prepare_target("tb4", output_root=root / "out").dataset_source == "harbor-package-store"
 
     def test_expected_folder_follows_from_the_reference_alone(self, root):
-        from nemo_gym.tasks.harbor.hub import expected_folder
+        from nemo_gym.data.tasks.harbor.hub import expected_folder
 
         harbor = (root / "environments" / "harbor").resolve()
         assert expected_folder(TB4_REF) == harbor / "terminal-bench-4.0.0"
@@ -692,7 +692,7 @@ class TestPullDataset:
     def test_resolved_folder_asks_the_registry_only_when_the_reference_leaves_it_the_version(
         self, root, monkeypatch, tmp_path
     ):
-        from nemo_gym.tasks.harbor.hub import RegistryDataset, resolved_folder
+        from nemo_gym.data.tasks.harbor.hub import RegistryDataset, resolved_folder
 
         harbor = (root / "environments" / "harbor").resolve()
         datasets = [RegistryDataset("ds", version, "", ()) for version in ("1.0", "2.0")]

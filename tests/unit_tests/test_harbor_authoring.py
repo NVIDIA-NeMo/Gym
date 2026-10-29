@@ -18,10 +18,10 @@ from pathlib import Path
 import pytest
 
 import nemo_gym.verifiers as verifiers_package
-from nemo_gym.tasks.harbor import DIGEST_KEY, content_hash, load_task, parameterized
-from nemo_gym.tasks.harbor.cli import prepare_target
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.parameterized import (
+from nemo_gym.data import DIGEST_KEY, HarborTaskError, VerifierShim, load_task, write_shim
+from nemo_gym.data.tasks.harbor import content_hash, parameterized
+from nemo_gym.data.tasks.harbor.cli import prepare_target
+from nemo_gym.data.tasks.harbor.parameterized import (
     ParameterizedError,
     is_template_folder,
     read_rows,
@@ -30,20 +30,18 @@ from nemo_gym.tasks.harbor.parameterized import (
     rendered_name,
     rendered_task_toml,
 )
-from nemo_gym.tasks.harbor.publish import PublishError, answer_write_command, publish_harbor, strip_gym_table
-from nemo_gym.tasks.harbor.python_verifier import (
+from nemo_gym.data.tasks.harbor.publish import PublishError, answer_write_command, publish_harbor, strip_gym_table
+from nemo_gym.data.tasks.harbor.python_verifier import (
     PYTHON_FLOOR,
     PythonVerifierError,
-    VerifierShim,
     declared_arguments,
     python_verifier_for,
     reads_response,
-    write_shim,
 )
-from nemo_gym.tasks.harbor.python_verifier import test_script as shim_test_script
-from nemo_gym.tasks.harbor.records import read_built_images, read_image_configs
-from nemo_gym.tasks.harbor.scaffold import init_dataset
-from nemo_gym.tasks.harbor.task_data import TASK_DATA_FILE
+from nemo_gym.data.tasks.harbor.python_verifier import test_script as shim_test_script
+from nemo_gym.data.tasks.harbor.records import read_built_images, read_image_configs
+from nemo_gym.data.tasks.harbor.scaffold import init_dataset
+from nemo_gym.data.tasks.harbor.task_data import TASK_DATA_FILE
 from nemo_gym.verifiers import exact_match, final_text, numeric_match
 from nemo_gym.verifiers.files import file_exists, read_text, text_file_equals
 from nemo_gym.verifiers.runner import main as run_verifier

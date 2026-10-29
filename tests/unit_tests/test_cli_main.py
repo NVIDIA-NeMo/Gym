@@ -780,7 +780,7 @@ class TestFriendlyValidationError:
     def test_dataset_config_mistake_is_a_clean_error_not_a_traceback(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, request, argv: list[str], expected: str
     ) -> None:
-        from nemo_gym.prompt import load_prompt_config
+        from nemo_gym.data import load_prompt_config
 
         # The loader caches by the path string, and these relative names would otherwise outlive this tmp_path.
         load_prompt_config.cache_clear()
@@ -909,7 +909,7 @@ class TestDatasetValidateFlags:
         # The file name is not a Hydra expression: unquoted, `(` is a parse error and `,` is ambiguous. It is
         # also not JSON: Hydra keeps `\uXXXX` and a doubled backslash literally, so the override must parse
         # back to the exact name the user typed, Unicode and backslashes included.
-        from nemo_gym.tasks.harbor import cli as harbor_cli
+        from nemo_gym.data.tasks.harbor import cli as harbor_cli
 
         captured: list = []
         monkeypatch.setattr(harbor_cli, "validate_target", lambda args, overrides: captured.append(overrides))
@@ -2024,7 +2024,7 @@ def test_eval_run_restores_equals_free_hydra_deletions(monkeypatch, serve, delet
 
 
 def test_eval_run_keeps_home_relative_target(monkeypatch):
-    import nemo_gym.tasks.harbor.cli as harbor_cli
+    import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
     captured = []
     monkeypatch.setattr(harbor_cli, "run_target", lambda args, overrides: captured.append(args.target))
@@ -2040,7 +2040,7 @@ def test_eval_run_ambiguous_folder_targets_take_precedence(tmp_path, monkeypatch
     import pwd
     from types import SimpleNamespace
 
-    import nemo_gym.tasks.harbor.cli as harbor_cli
+    import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
     home = tmp_path / "home"
     (home / "tasks").mkdir(parents=True)

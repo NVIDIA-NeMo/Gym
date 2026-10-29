@@ -43,11 +43,10 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.verifier import COLLECT_HOOK_GRACE_S
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.data import BUILT_IMAGES_FILE, STEP_METADATA_KEY, load_task
+from nemo_gym.data.tasks.harbor.digest import context_digest
+from nemo_gym.data.tasks.harbor.materialize import materialize_task
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.tasks.harbor import load_task
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, materialize_task
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
 
 
 # The top-level instruction.md `write_task` writes: in a multi-step task it may hold what the agent must not see.
@@ -229,7 +228,7 @@ async def test_a_task_with_step_level_tests_alone_grades_each_turn_with_its_step
     server, task, sandbox, _ = multi_turn_server(
         tmp_path, monkeypatch, THREE_STEPS, {"plan": "P", "build": "B", "check": "C"}
     )
-    from nemo_gym.tasks.harbor import load_task
+    from nemo_gym.data import load_task
 
     (task.path / "tests" / "test.sh").unlink()
     (task.path / "tests").rmdir()

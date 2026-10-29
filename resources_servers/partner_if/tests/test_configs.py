@@ -61,7 +61,7 @@ SWE_FIELDS = HARBOR_FIELDS | {
     ids=["text", "mock_tools", "swe", "harbor"],
 )
 def test_gym_task_data_tooling_validates_the_same_contract(dataset, native_fields):
-    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+    from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
 
     root = PARENT_DIR / "resources_servers/partner_if"
     adapter = load_task_data_schema(root)

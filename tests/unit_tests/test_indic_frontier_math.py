@@ -12,10 +12,11 @@ import yaml
 from benchmarks.indic.frontier_math import prepare as prep
 from benchmarks.indic.frontier_math.summarize import summarize
 from nemo_gym.cli.main import _asset_config_path
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
+from nemo_gym.data.prompt import validate_prompt_compatibility
+from nemo_gym.data.task_data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.environment.manifest import load_manifest
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.registry import _manifest_entry
-from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
 
 
 @pytest.mark.parametrize("rendered", [False, True], ids=["raw", "rendered"])

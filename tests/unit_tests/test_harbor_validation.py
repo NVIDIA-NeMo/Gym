@@ -12,8 +12,8 @@ import yaml
 
 import nemo_gym.cli.main as main_module
 import nemo_gym.config.global_config as global_config
-from nemo_gym.tasks.harbor.cli import build_run, prepare_target, resolve_agent
-from nemo_gym.tasks.harbor.validation_report import summarize_validation
+from nemo_gym.data.tasks.harbor.cli import build_run, prepare_target, resolve_agent
+from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 from nemo_gym.utils import failures_path_for, materialized_path_for
 from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
 
@@ -503,7 +503,7 @@ def test_validate_resume_repairs_an_interrupted_final_record(tmp_path, monkeypat
     the cache with the collector's tolerance, so the collector's own repair runs and only the lost task reruns.
     A complete unterminated final record still counts (and is still rejected when another agent wrote it), and
     a damaged interior record is refused by file and line with the cache left as it was."""
-    from nemo_gym.tasks.harbor.validation_report import _validation_key
+    from nemo_gym.data.tasks.harbor.validation_report import _validation_key
 
     write_task(tmp_path / "ds" / "a")
     write_task(tmp_path / "ds" / "b")
@@ -593,7 +593,7 @@ def test_validate_renders_a_template_where_eval_run_does(tmp_path, monkeypatch, 
     """A template is rendered into results/harbor/<taskset>/rendered/ by `gym dataset validate` as by `gym eval run`:
     the rendered folder is the dataset root prepare records into, so one copy means one manifest and a template's
     image built and pushed once, while the oracle's rows and results still live under results/harbor/validation/."""
-    from nemo_gym.tasks.harbor.records import read_built_images
+    from nemo_gym.data.tasks.harbor.records import read_built_images
     from tests.unit_tests.test_harbor_authoring import write_template
 
     write_template(tmp_path / "ds")

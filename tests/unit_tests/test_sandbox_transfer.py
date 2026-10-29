@@ -161,7 +161,7 @@ def test_pack_leaves_out_the_names_the_task_digest_skips_when_asked(tmp_path):
     ``__pycache__/`` included, which ``content_hash`` skips: importable bytes outside the digest. With ``ignore``
     (the digest's own rule) the archive holds exactly what the digest covers, a folder left out taking its
     subtree with it; without it (artifacts restored into the verifier) everything travels as before."""
-    from nemo_gym.tasks.harbor.digest import is_ignored
+    from nemo_gym.data import is_ignored
 
     source = tmp_path / "tests"
     (source / "__pycache__").mkdir(parents=True)
@@ -190,7 +190,7 @@ def test_pack_leaves_out_the_names_the_task_digest_skips_when_asked(tmp_path):
 
 @pytest.mark.asyncio
 async def test_upload_dir_with_the_digest_rule_ships_what_the_digest_covers(tmp_path):
-    from nemo_gym.tasks.harbor.digest import is_ignored
+    from nemo_gym.data import is_ignored
 
     source, target = tmp_path / "tests", tmp_path / "target"
     (source / "__pycache__").mkdir(parents=True)

@@ -36,6 +36,23 @@ from environment_servers.harbor.verifier import _verifier_image, _verifier_key, 
 from nemo_gym.agents import sandbox_server_url
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.data import (
+    MAIN_SERVICE,
+    RECORD_VERSION,
+    HarborEnvironment,
+    HarborTask,
+    HarborTaskError,
+    ImageConfigError,
+    check_task_compose_fields,
+    check_task_compose_services,
+    check_task_sidecar_extra_hosts,
+    load_compose_document,
+    overlay_files,
+    plan_task_compose_volumes,
+    reusable_record,
+    task_declares_gpus,
+    without_restated_main_build,
+)
 from nemo_gym.sandbox import (
     ORPHAN_REAP_TIMEOUT_S,
     AsyncSandbox,
@@ -56,23 +73,6 @@ from nemo_gym.sandbox import (
     service_gpus,
     service_resources,
 )
-from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.compose_overlay import overlay_files
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.image_configs import (
-    check_task_compose_fields,
-    check_task_compose_services,
-    check_task_sidecar_extra_hosts,
-    load_compose_document,
-    plan_task_compose_volumes,
-    reusable_record,
-    task_declares_gpus,
-    without_restated_main_build,
-)
-from nemo_gym.tasks.harbor.models import HarborEnvironment
-from nemo_gym.tasks.harbor.records import MAIN_SERVICE
-from nemo_gym.tasks.harbor.registry import ImageConfigError
 
 
 LOGGER = logging.getLogger(__name__)
@@ -401,7 +401,7 @@ class HarborSandboxMixin:
         """Refuse, before anything is provisioned, a Compose group whose images prepare did not record for this
         deployment: the record file missing next to the task folders, or a service of the merged document (an overlay's,
         or ``main`` with the task's image) without an entry this deployment can use, by prepare's own rule
-        (:func:`~nemo_gym.tasks.harbor.image_configs.reusable_record`: the current record version and the platform the
+        (:func:`~nemo_gym.data.tasks.harbor.image_configs.reusable_record`: the current record version and the platform the
         sandboxes run; ``resolve_compose`` refuses a record of another platform at the group's start). A dataset
         prepared without the ``compose_overlay`` the server now runs with, or for another platform (prepared on x86,
         served on arm64), is the usual cause; it is a configuration error, so the seed is refused terminally (422)

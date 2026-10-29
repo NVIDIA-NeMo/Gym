@@ -14,12 +14,28 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.tasks.harbor import image_configs
-from nemo_gym.tasks.harbor.cli import COMPOSE_OVERLAY_KEY, compose_overlay_from_overrides, prepare_target, run_images
-from nemo_gym.tasks.harbor.compose_overlay import (
-    RESET,
+from nemo_gym.data import (
+    BUILT_IMAGES_FILE,
+    RECORD_VERSION,
     ComposeOverlayError,
     HarborComposeOverlay,
+    HarborMCPServer,
+    ImageConfigError,
+    OverlayRun,
+    load_compose_document,
+    load_task,
+    merged_mcp_servers,
+    wrap_first_instruction,
+)
+from nemo_gym.data.tasks.harbor import image_configs
+from nemo_gym.data.tasks.harbor.cli import (
+    COMPOSE_OVERLAY_KEY,
+    compose_overlay_from_overrides,
+    prepare_target,
+    run_images,
+)
+from nemo_gym.data.tasks.harbor.compose_overlay import (
+    RESET,
     OverrideMapping,
     OverrideScalar,
     OverrideSequence,
@@ -28,18 +44,12 @@ from nemo_gym.tasks.harbor.compose_overlay import (
     load_overlay_file,
     load_overlay_text,
     merge_compose,
-    merged_mcp_servers,
     render_prompt_template,
     synthesized_group,
-    wrap_first_instruction,
 )
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION, OverlayRun
-from nemo_gym.tasks.harbor.image_configs import load_compose_document, record_compose_images
-from nemo_gym.tasks.harbor.models import HarborMCPServer
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from nemo_gym.tasks.harbor.registry import ImageConfigError
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.data.tasks.harbor.digest import context_digest
+from nemo_gym.data.tasks.harbor.image_configs import record_compose_images
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
 
 
 # The memory team's shape: a standalone stack with fixed host ports and a global network name, then a ``.harbor.yaml``
@@ -129,7 +139,7 @@ def write_overlay(folder: Path, name: str, text: str) -> Path:
 
 def merge_files(base: dict, *texts: str, variables: dict[str, str] | None = None) -> dict:
     """``texts`` as overlay files merged in order onto ``base``, interpolated like the task's file."""
-    from nemo_gym.tasks.harbor.compose_variables import substitute_with_empty
+    from nemo_gym.data.tasks.harbor.compose_variables import substitute_with_empty
 
     unset: set[str] = set()
     document = base
@@ -673,7 +683,7 @@ class TestLoadComposeDocument:
             "services:\n  memory:\n    image: org/memory:1\n    environment:\n      PROJECT: ${COMPOSE_PROJECT_NAME}\n",
         )
         monkeypatch.setattr(
-            "nemo_gym.tasks.harbor.compose_variables.context_digest",
+            "nemo_gym.data.tasks.harbor.compose_variables.context_digest",
             lambda path: pytest.fail(f"the loader hashed {path} although load_task recorded the context id"),
         )
         for _ in range(2):
@@ -799,7 +809,7 @@ class TestLoadComposeDocument:
             "    environment:\n      KEY: ${KEY}\n",
         )
         overlay = HarborComposeOverlay(files=[merged])
-        logger = "nemo_gym.tasks.harbor.image_configs"
+        logger = "nemo_gym.data.tasks.harbor.image_configs"
         with caplog.at_level(logging.WARNING, logger=logger):
             document = load_compose_document(task, overlay=overlay, operator_variables={"KEY": "sk"})
             load_compose_document(task, overlay=overlay, operator_variables={"KEY": "sk"})  # the server's second load
@@ -863,8 +873,8 @@ class TestLoadComposeDocument:
     def test_remaining_own_services_follows_what_each_overlay_file_replaced(self):
         """The set the next file's warning is checked against: a service tagged ``!override`` or ``!reset`` leaves it,
         a merged one or one written with no value stays, and a ``services`` mapping tagged either empties it."""
-        from nemo_gym.tasks.harbor.compose_overlay import load_overlay_text
-        from nemo_gym.tasks.harbor.image_configs import remaining_own_services
+        from nemo_gym.data.tasks.harbor.compose_overlay import load_overlay_text
+        from nemo_gym.data.tasks.harbor.image_configs import remaining_own_services
 
         own = {"memory", "redis", "db", "main"}
         extra = load_overlay_text(
@@ -1059,7 +1069,7 @@ class TestLoadComposeDocument:
         interpolated = interpolate_overlay(load_overlay_file(scalar), str.upper)
         assert isinstance(interpolated["services"]["api"]["env_file"], OverrideScalar)
         assert interpolated["services"]["api"]["env_file"] == f"${{OVERLAY_DIR:-{folder}}}/o.env".upper()
-        from nemo_gym.tasks.harbor.compose_variables import substitute_with_empty
+        from nemo_gym.data.tasks.harbor.compose_variables import substitute_with_empty
 
         interpolated = interpolate_overlay(
             load_overlay_file(scalar), lambda value: substitute_with_empty(value, {}, set())
@@ -1394,7 +1404,7 @@ class TestPrepare:
         assert set(json.loads((root / IMAGE_CONFIGS_FILE).read_text())) == set(prepared.images)
 
     def test_the_block_is_read_from_the_configuration_the_command_names(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor import build_options
+        from nemo_gym.data.tasks.harbor import build_options
 
         overlay_dir = tmp_path / "overlay"
         files = [write_overlay(overlay_dir, "a.yaml", STANDALONE), write_overlay(overlay_dir, "b.yaml", HARBOR_GLUE)]

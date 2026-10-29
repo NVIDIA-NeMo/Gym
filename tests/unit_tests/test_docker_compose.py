@@ -1905,7 +1905,7 @@ async def test_names_the_task_digest_skips_are_not_uploaded(tmp_path):
     program loads could change with no change to the task digest, the manifest check or the server's check. The
     upload leaves out exactly the names the digest skips (Harbor's packager publishes none of them), so what the
     service sees is what the digest covers."""
-    from nemo_gym.tasks.harbor.digest import content_hash
+    from nemo_gym.data.tasks.harbor.digest import content_hash
 
     task = tmp_path / "task"
     data = task / "environment" / "data"

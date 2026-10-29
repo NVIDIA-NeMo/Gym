@@ -11,24 +11,25 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
-from nemo_gym.tasks.harbor import image_configs
-from nemo_gym.tasks.harbor.build_options import BuildOptions
-from nemo_gym.tasks.harbor.build_plan import DEFAULT_PLATFORM, BuildError, plan_builds
-from nemo_gym.tasks.harbor.build_records import build_inputs_digest, settle_entry
-from nemo_gym.tasks.harbor.cli import prepare_target
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.image_configs import (
+import nemo_gym.data.tasks.harbor.prepare_builds as prepare_builds
+from nemo_gym.data import (
+    BUILT_IMAGES_FILE,
+    RECORD_VERSION,
+    ImageConfigError,
     check_task_compose_fields,
     load_compose_document,
-    record_compose_images,
-    without_pull_policy,
+    load_task,
     without_restated_main_build,
 )
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from nemo_gym.tasks.harbor.registry import ImageConfigError
-from nemo_gym.tasks.harbor.task import discover_tasks, load_task
+from nemo_gym.data.tasks.harbor import image_configs
+from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+from nemo_gym.data.tasks.harbor.build_plan import DEFAULT_PLATFORM, BuildError, plan_builds
+from nemo_gym.data.tasks.harbor.build_records import build_inputs_digest, settle_entry
+from nemo_gym.data.tasks.harbor.cli import prepare_target
+from nemo_gym.data.tasks.harbor.digest import context_digest
+from nemo_gym.data.tasks.harbor.image_configs import record_compose_images, without_pull_policy
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
+from nemo_gym.data.tasks.harbor.task import discover_tasks
 
 
 PULL_DOCKERFILE = "FROM ubuntu:24.04\nWORKDIR /app\n"
@@ -434,7 +435,7 @@ class TestPrepareChecksTheFieldsBeforeBuilding:
     @staticmethod
     def docker_tool(monkeypatch):
         """prepare_target's builder as a docker FakeTool, whatever ``builds.tool`` says."""
-        from nemo_gym.tasks.harbor.build_tools import ImageBuilder
+        from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
         from tests.unit_tests.harbor_build_helpers import FakeTool
 
         tool = FakeTool("docker")
@@ -487,7 +488,7 @@ class TestPrepareChecksTheFieldsBeforeBuilding:
         assert loaded.built_image is None and bool(loaded.overlay) == (dockerfile is OVERLAY_DOCKERFILE)
         digest = context_digest(task / "environment")
         assert any("build" in call and str(task / "environment") in " ".join(call) for call in tool.calls)
-        from nemo_gym.tasks.harbor.task import built_service_images
+        from nemo_gym.data.tasks.harbor.task import built_service_images
 
         assert built_service_images(loaded.path) == {"api": f"registry.example/r/hb__{digest}-api@sha256:pushed02"}
         # The loader's own rule agrees with the preflight: the restatement is dropped, no reason, and the sidecar runs
@@ -540,7 +541,7 @@ class TestPrepareChecksTheFieldsBeforeBuilding:
     def test_a_refused_task_is_neither_built_nor_pushed_and_its_failing_build_stops_nothing(
         self, tmp_path, monkeypatch
     ):
-        from nemo_gym.tasks.harbor.build_tools import ImageBuilder
+        from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
         from tests.unit_tests.harbor_build_helpers import FakeTool
 
         folder = tmp_path / "ds"
@@ -659,7 +660,7 @@ class TestPreparedImages:
         assert json.loads((tmp_path / "out" / "ds" / "images.json").read_text()) == list(prepared.images)
 
     def test_a_sidecar_image_is_listed_as_its_record_pins_it(self, tmp_path):
-        from nemo_gym.tasks.harbor.cli import run_images
+        from nemo_gym.data.tasks.harbor.cli import run_images
 
         folder = tmp_path / "ds"
         folder.mkdir()

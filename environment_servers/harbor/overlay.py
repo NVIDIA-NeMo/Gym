@@ -23,9 +23,8 @@ from environment_servers.harbor.users import (
     _is_root,
     _user_group,
 )
+from nemo_gym.data import HarborTask, OverlayRun
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.dockerfile import OverlayRun
 
 
 # How much of a failed overlay RUN line's output the seed error carries.

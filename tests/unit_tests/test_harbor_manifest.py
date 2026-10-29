@@ -20,13 +20,13 @@ import yaml
 import nemo_gym.rollout_collection
 import tests.unit_tests.test_harbor_package_store as test_harbor_package_store
 import tests.unit_tests.test_rollout_collection as collection_tests
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
-from nemo_gym.tasks.harbor.build_options import BuildOptions
-from nemo_gym.tasks.harbor.cli import build_run, prepare_target, resolve_agent
-from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig, apply_dataset_config, read_dataset_config
-from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY, content_hash
-from nemo_gym.tasks.harbor.hub import HubError, RegistryDataset, RegistryTask, fetch_dataset
-from nemo_gym.tasks.harbor.manifest import (
+from nemo_gym.data import DIGEST_KEY, load_task
+from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+from nemo_gym.data.tasks.harbor.cli import build_run, prepare_target, resolve_agent
+from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig, apply_dataset_config, read_dataset_config
+from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY, content_hash
+from nemo_gym.data.tasks.harbor.hub import HubError, RegistryDataset, RegistryTask, fetch_dataset
+from nemo_gym.data.tasks.harbor.manifest import (
     MANIFEST_FILE,
     Manifest,
     ManifestError,
@@ -39,8 +39,9 @@ from nemo_gym.tasks.harbor.manifest import (
     refresh_gym_layer,
     task_differences,
 )
-from nemo_gym.tasks.harbor.materialize import run_config, write_rows
-from nemo_gym.tasks.harbor.task import MAX_DISCOVERY_DEPTH, iter_task_folders, load_task
+from nemo_gym.data.tasks.harbor.materialize import run_config, write_rows
+from nemo_gym.data.tasks.harbor.task import MAX_DISCOVERY_DEPTH, iter_task_folders
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from tests.unit_tests.test_harbor_tasks import (  # noqa: F401  (fixtures)
     commit_repo,
     fake_registry,
@@ -94,7 +95,7 @@ class TestManifestFormat:
             # A replace that fails leaves the previous file, its mode and no temporary behind.
             before = path.read_bytes()
             monkeypatch.setattr(
-                "nemo_gym.tasks.harbor.manifest.os.replace", lambda *_: (_ for _ in ()).throw(OSError("disk"))
+                "nemo_gym.data.tasks.harbor.manifest.os.replace", lambda *_: (_ for _ in ()).throw(OSError("disk"))
             )
             with pytest.raises(OSError, match="disk"):
                 Manifest.build(folder, source="harbor-registry").write(folder)
@@ -130,7 +131,7 @@ class TestManifestFormat:
         """A datasets directory on a filesystem without hard links (vfat, some FUSE or SMB mounts) refuses os.link:
         the claim is then created with an exclusive open of the target itself, still one winner and no temporary
         left, while any other failure of the link propagates and leaves the folder as it was."""
-        import nemo_gym.tasks.harbor.manifest as manifest_module
+        import nemo_gym.data.tasks.harbor.manifest as manifest_module
 
         folder = tmp_path / "ds"
         folder.mkdir()
@@ -162,7 +163,7 @@ class TestManifestFormat:
     def test_temporary_names_are_unique_per_writer(self, tmp_path, monkeypatch):
         """Two writers in one process (or one pid reused across hosts of a shared mount) never share a temporary: the
         name carries the pid, the thread and random bytes, and is opened exclusively."""
-        import nemo_gym.tasks.harbor.manifest as manifest_module
+        import nemo_gym.data.tasks.harbor.manifest as manifest_module
 
         folder = tmp_path / "ds"
         folder.mkdir()
@@ -313,7 +314,7 @@ class TestManifestFormat:
             Manifest.build(tmp_path, source="somewhere")
 
     def test_build_reuses_known_digests_and_extends_the_cache(self, tmp_path, monkeypatch):
-        import nemo_gym.tasks.harbor.manifest as module
+        import nemo_gym.data.tasks.harbor.manifest as module
 
         folder = tmp_path / "ds"
         for name in ("a", "b"):
@@ -817,13 +818,13 @@ class TestPrepareRecordsIdentity:
 
         # An edit that lands after the check and before the load: the loader's digest differs from the checked one,
         # so the folder is held to the manifest once more, as a dataset folder is, and refused.
-        discover = nemo_gym.tasks.harbor.cli.discover_tasks
+        discover = nemo_gym.data.tasks.harbor.cli.discover_tasks
 
         def edit_then_discover(target, **kwargs):
             (folder / "other" / "instruction.md").write_text("Create a file called cheat.txt.\n")
             return discover(target, **kwargs)
 
-        monkeypatch.setattr(nemo_gym.tasks.harbor.cli, "discover_tasks", edit_then_discover)
+        monkeypatch.setattr(nemo_gym.data.tasks.harbor.cli, "discover_tasks", edit_then_discover)
         with pytest.raises(ManifestError, match=r"\(changed: other\)"):
             prepare_target(str(folder / "other"), output_root=tmp_path / "out2")
         assert not (tmp_path / "out2" / "other" / "tasks.jsonl").exists()
@@ -1009,7 +1010,7 @@ class TestGymIdentityKeys:
         assert GymDatasetConfig().is_empty
 
     def test_scaffold_documents_the_keys_without_setting_them(self, tmp_path):
-        from nemo_gym.tasks.harbor.scaffold import init_dataset
+        from nemo_gym.data.tasks.harbor.scaffold import init_dataset
 
         folder = init_dataset(tmp_path, "my-dataset")
         text = (folder / "dataset.toml").read_text()
@@ -1094,7 +1095,7 @@ class TestFetchersRecordOnlyWhatTheyFetched:
     """A folder nobody fetched is never blessed: the fetch refuses it and `Manifest.build` records named tasks only."""
 
     def test_build_with_names_records_those_tasks_and_hashes_nothing_it_knows(self, tmp_path, monkeypatch):
-        import nemo_gym.tasks.harbor.manifest as module
+        import nemo_gym.data.tasks.harbor.manifest as module
 
         folder = tmp_path / "ds"
         for name in ("a", "b", "stray"):
@@ -1132,8 +1133,8 @@ class TestFetchersRecordOnlyWhatTheyFetched:
         assert check_manifest(folder) == Manifest.read(folder)
 
     def test_registry_fetch_scans_once_and_hashes_each_task_once(self, tmp_path, registry_repo, monkeypatch):
-        import nemo_gym.tasks.harbor.hub as hub
-        import nemo_gym.tasks.harbor.manifest as module
+        import nemo_gym.data.tasks.harbor.hub as hub
+        import nemo_gym.data.tasks.harbor.manifest as module
 
         scans: list[str] = []
         hashed: list[str] = []
@@ -1269,7 +1270,7 @@ class TestManifestQuoting:
 @pytest.mark.usefixtures("fake_registry")
 class TestPrepareOrderAndTrackedFolders:
     def test_prepare_refuses_a_hand_edited_fetched_dataset_before_any_build_or_push(self, tmp_path, monkeypatch):
-        import nemo_gym.tasks.harbor.cli as harbor_cli
+        import nemo_gym.data.tasks.harbor.cli as harbor_cli
 
         calls: list[str] = []
         monkeypatch.setattr(harbor_cli, "record_base_images", lambda *a, **k: calls.append("images"))

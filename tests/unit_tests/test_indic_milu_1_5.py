@@ -9,7 +9,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from benchmarks.indic.milu_1_5 import prepare as module
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
+from nemo_gym.data.prompt import validate_prompt_compatibility
 
 
 def source(question="कौन?", **extra):

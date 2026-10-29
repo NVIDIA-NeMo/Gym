@@ -18,17 +18,17 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.tasks.harbor.build_compose import COMPOSE_BUILD_FILE, compose_build_env, validate_task_compose
-from nemo_gym.tasks.harbor.build_plan import BuildError, BuildPlanEntry, BuildResult, plan_builds
-from nemo_gym.tasks.harbor.build_records import record_built_image
-from nemo_gym.tasks.harbor.build_tools import HTTP_403, ImageBuilder, normalize_inspect
-from nemo_gym.tasks.harbor.compose_variables import compose_variables
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION, dockerfile_has_heredoc
-from nemo_gym.tasks.harbor.image_build import build_images
-from nemo_gym.tasks.harbor.image_configs import load_compose_document
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from nemo_gym.tasks.harbor.task import built_service_images, load_task
+from nemo_gym.data import BUILT_IMAGES_FILE, RECORD_VERSION, load_compose_document, load_task
+from nemo_gym.data.tasks.harbor.build_compose import COMPOSE_BUILD_FILE, compose_build_env, validate_task_compose
+from nemo_gym.data.tasks.harbor.build_plan import BuildError, BuildPlanEntry, BuildResult, plan_builds
+from nemo_gym.data.tasks.harbor.build_records import record_built_image
+from nemo_gym.data.tasks.harbor.build_tools import HTTP_403, ImageBuilder, normalize_inspect
+from nemo_gym.data.tasks.harbor.compose_variables import compose_variables
+from nemo_gym.data.tasks.harbor.digest import context_digest
+from nemo_gym.data.tasks.harbor.dockerfile import dockerfile_has_heredoc
+from nemo_gym.data.tasks.harbor.image_build import build_images
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
+from nemo_gym.data.tasks.harbor.task import built_service_images
 from tests.unit_tests.harbor_build_helpers import (
     ARM_BUILDAH_INSPECT,
     BUILD_DOCKERFILE,
@@ -258,7 +258,7 @@ class TestImageBuilder:
         assert again.record["config_digest"] == "sha256:rebuilt"
 
     def test_platform_variants_compare_on_os_and_arch(self, tmp_path):
-        from nemo_gym.tasks.harbor.build_records import platform_key, recorded_image_mismatch
+        from nemo_gym.data.tasks.harbor.build_records import platform_key, recorded_image_mismatch
 
         assert platform_key("linux/arm64/v8") == "linux/arm64" and platform_key(None) == ""
         folder = tmp_path / "ds"
@@ -832,7 +832,7 @@ class TestDirectBuildPath:
         (entry,) = plan_builds(folder)
         env = compose_build_env(entry, "hb__x", None)
         assert env["TEST_DIR"] == "/tests" and env["COMPOSE_PROJECT_NAME"] == f"hb__{entry.digest}"
-        with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.build_compose"):
+        with caplog.at_level("WARNING", logger="nemo_gym.data.tasks.harbor.build_compose"):
             document = validate_task_compose(entry.context, env, tasks=entry.tasks)
             built = settled(entry)
         main = document["services"]["main"]

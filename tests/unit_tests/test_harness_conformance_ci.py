@@ -65,7 +65,7 @@ def test_shared_or_unknown_dependencies_run_all(path):
         [
             ".gitignore",
             "nemo_gym/cli/main.py",
-            "nemo_gym/tasks/harbor/hub.py",
+            "nemo_gym/data/tasks/harbor/hub.py",
             "tests/unit_tests/test_harbor_tasks.py",
         ],
         ["responses_api_agents/opencode_sandboxed_agent/app.py"],

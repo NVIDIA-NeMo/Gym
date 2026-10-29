@@ -14,29 +14,33 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.tasks.harbor.compose_variables as compose_variables_module
-from nemo_gym.sandbox import service_gpus
-from nemo_gym.sandbox.compose_config import _compose_literals
-from nemo_gym.tasks.harbor import image_configs
-from nemo_gym.tasks.harbor import registry as registry_module
-from nemo_gym.tasks.harbor.build_options import BuildOptions
-from nemo_gym.tasks.harbor.cli import prepare_target
-from nemo_gym.tasks.harbor.compose_variables import compose_variables
-from nemo_gym.tasks.harbor.digest import content_hash, context_digest, is_covered
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.image_configs import (
+import nemo_gym.data.tasks.harbor.compose_variables as compose_variables_module
+from nemo_gym.data import (
+    BUILT_IMAGES_FILE,
+    HarborTaskError,
+    ImageConfigError,
     check_task_compose_fields,
-    compose_image_references,
-    dockerfile_base_images,
     load_compose_document,
     plan_task_compose_volumes,
+)
+from nemo_gym.data.tasks.harbor import image_configs
+from nemo_gym.data.tasks.harbor import registry as registry_module
+from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+from nemo_gym.data.tasks.harbor.cli import prepare_target
+from nemo_gym.data.tasks.harbor.compose_variables import compose_variables
+from nemo_gym.data.tasks.harbor.digest import content_hash, context_digest, is_covered
+from nemo_gym.data.tasks.harbor.image_configs import (
+    compose_image_references,
+    dockerfile_base_images,
     record_base_images,
     record_compose_images,
     with_built_images,
 )
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, write_json_record
-from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient, parse_image_ref
-from nemo_gym.tasks.harbor.task import discover_tasks
+from nemo_gym.data.tasks.harbor.records import write_json_record
+from nemo_gym.data.tasks.harbor.registry import RegistryClient, parse_image_ref
+from nemo_gym.data.tasks.harbor.task import discover_tasks
+from nemo_gym.sandbox import service_gpus
+from nemo_gym.sandbox.compose_config import _compose_literals
 
 
 MAIN_IMAGE = "harborframework/terminal-bench:ctr-environment-abc@sha256:" + "a" * 64
@@ -378,7 +382,7 @@ class TestRegistryClient:
         (host, Docker Hub's registry for `docker.io/`), and a reference takes the credentials of its longest matching
         prefix, as the provider selects an `images.auth` entry at pull (CI bot, round 34: the map was folded to one
         pair per host, so a second repository's credentials on the same registry were never sent)."""
-        from nemo_gym.tasks.harbor.registry import credentials_for_image_prefixes
+        from nemo_gym.data.tasks.harbor.registry import credentials_for_image_prefixes
 
         assert credentials_for_image_prefixes(None) == {}
         assert credentials_for_image_prefixes({}) == {}
@@ -415,7 +419,7 @@ class TestRegistryClient:
         pair per host (the shorter prefix's), so preparing an image under `reg.example/bb/` sent A and the registry
         refused it. A broad host rule and a specific repository override coexist the way the provider applies them:
         the longest matching prefix, and no Basic authorization for a reference no prefix covers."""
-        from nemo_gym.tasks.harbor.registry import credentials_for_image_prefixes
+        from nemo_gym.data.tasks.harbor.registry import credentials_for_image_prefixes
 
         creds = credentials_for_image_prefixes(
             {
@@ -836,7 +840,7 @@ class TestComposeVariablesAndEnvFile:
             "LITERAL='${SHELL_WINS}'\n"
         )
         (task,) = discover_tasks(tmp_path)
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.compose_variables"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.compose_variables"):
             environment = load_compose_document(task)["services"]["main"]["environment"]
         assert environment == {
             "INFRA": "/tests",
@@ -962,7 +966,7 @@ class TestComposeVariablesAndEnvFile:
         monkeypatch.delenv("SIDECAR_IMAGE", raising=False)
         write_task(tmp_path, "ctr", compose="services:\n  api:\n    image: ${SIDECAR_IMAGE}\n")
         (task,) = discover_tasks(tmp_path)
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.compose_variables"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.data.tasks.harbor.compose_variables"):
             with pytest.raises(ImageConfigError, match="ctr: Compose service 'api' names no image"):
                 compose_image_references(task)
         (warning,) = [r.getMessage() for r in caplog.records]
@@ -1538,7 +1542,7 @@ class TestPrepareRecordsPrivateImagesWithTheSandboxCredentials:
         prefixes of one host with different credentials, the second repository's token request carried the first
         prefix's credentials and the registry refused it, stopping the preparation. Each scope is authenticated with
         its own prefix's pair and both images are recorded."""
-        from nemo_gym.tasks.harbor.registry import credentials_for_image_prefixes
+        from nemo_gym.data.tasks.harbor.registry import credentials_for_image_prefixes
 
         fake = FakeRegistry(basic_auth={"a/mcp": ("user-a", "secret-a"), "bb/mcp": ("user-b", "secret-b")})
         patch_opener(monkeypatch, fake)

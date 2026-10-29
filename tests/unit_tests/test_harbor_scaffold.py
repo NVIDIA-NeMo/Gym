@@ -11,8 +11,8 @@ import tomllib
 
 import pytest
 
-from nemo_gym.tasks.harbor import discover_tasks
-from nemo_gym.tasks.harbor.materialize import write_rows
+from nemo_gym.data.tasks.harbor import discover_tasks
+from nemo_gym.data.tasks.harbor.materialize import write_rows
 from tests.unit_tests.test_harbor_tasks import fake_registry  # noqa: F401 (fixture)
 
 
@@ -21,8 +21,8 @@ class TestDatasetInit:
     """The scaffold is read back by the loader, so `gym dataset init` cannot drift from what runs."""
 
     def test_scaffold_loads_validates_and_materializes(self, tmp_path):
-        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
-        from nemo_gym.tasks.harbor.scaffold import init_dataset
+        from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
+        from nemo_gym.data.tasks.harbor.scaffold import init_dataset
 
         folder = init_dataset(tmp_path, "my-dataset", image="ubuntu:24.04")
         assert folder == tmp_path / "my-dataset"
@@ -43,8 +43,8 @@ class TestDatasetInit:
 
     def test_org_name_is_kept_and_the_folder_is_the_short_name(self, tmp_path):
         """`gym dataset init acme/my-dataset`: the manifest keeps the org, the folder is the name without it."""
-        from nemo_gym.tasks.harbor.dataset_config import read_dataset_config
-        from nemo_gym.tasks.harbor.scaffold import init_dataset
+        from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
+        from nemo_gym.data.tasks.harbor.scaffold import init_dataset
 
         folder = init_dataset(tmp_path, "acme/my-dataset")
         assert folder == tmp_path / "my-dataset" and not (tmp_path / "acme").exists()
@@ -57,7 +57,7 @@ class TestDatasetInit:
 
     @pytest.mark.parametrize("name", ["a/b/c", ".hidden", "org/.hidden", "bad..name", "with space", "org/", "/name"])
     def test_names_harbor_rejects_are_refused_before_anything_is_written(self, tmp_path, name):
-        from nemo_gym.tasks.harbor.scaffold import init_dataset
+        from nemo_gym.data.tasks.harbor.scaffold import init_dataset
 
         with pytest.raises(ValueError, match="org/name"):
             init_dataset(tmp_path, name)
@@ -118,7 +118,7 @@ class TestDatasetInit:
         from harbor.models.task.config import TaskConfig
         from pydantic import ValidationError
 
-        from nemo_gym.tasks.harbor.scaffold import init_dataset
+        from nemo_gym.data.tasks.harbor.scaffold import init_dataset
 
         folder = init_dataset(tmp_path, "my-dataset")
         manifest = DatasetManifest.from_toml((folder / "dataset.toml").read_text())

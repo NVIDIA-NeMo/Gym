@@ -25,10 +25,9 @@ from environment_servers.harbor.tests.conftest import (
     make_server,
     run_episode,
 )
+from nemo_gym.data import DIGEST_KEY, HarborTaskError, load_task
+from nemo_gym.data.tasks.harbor.materialize import materialize_task
 from nemo_gym.sandbox import SandboxTransferError, cpu_cap_env
-from nemo_gym.tasks.harbor import DIGEST_KEY, load_task
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.materialize import materialize_task
 
 
 def refresh_task(server, task):

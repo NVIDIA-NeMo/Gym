@@ -73,15 +73,11 @@ from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import failure_kinds
+from nemo_gym.data import BUILT_IMAGES_FILE, DIGEST_KEY, RECORD_VERSION, HarborEnvironment, HarborTaskError, load_task
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, cpu_cap_env
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_runtime import BaseEnvironmentServerConfig
-from nemo_gym.tasks.harbor import load_task
-from nemo_gym.tasks.harbor.digest import DIGEST_KEY
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborEnvironment
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 
 
 def harness_trajectory(step_count: int) -> dict:
@@ -909,8 +905,8 @@ class TestSeedWorkdirAndResources:
         assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
 
     async def test_build_mode_task_seeds_from_its_recorded_image(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        from nemo_gym.data import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor.digest import context_digest
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         # A Dockerfile that needs a build resolves to the image prepare recorded beside the task folders.
@@ -2468,10 +2464,10 @@ class TestComposeAndRouting:
         recorded images stand in, so the ``build:`` and ``pull_policy: build`` keys that only describe those builds are
         dropped before the Compose adapter, which starts images only, and the sidecar's entrypoint, command and
         ports come from its recorded configuration like any pulled image's."""
+        from nemo_gym.data import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor.digest import context_digest
+        from nemo_gym.data.tasks.harbor.task import built_service_images
         from nemo_gym.sandbox import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
-        from nemo_gym.tasks.harbor.task import built_service_images
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
@@ -2538,9 +2534,9 @@ class TestComposeAndRouting:
         """``load_task`` (once per task, in a thread) hashes ``environment/`` once and carries Harbor's context id
         and the build record on the task; ``_compose_document``, which runs per episode, hashes nothing, whatever
         the folder's size, and still substitutes the recorded images and defines ``COMPOSE_PROJECT_NAME``."""
-        import nemo_gym.tasks.harbor.digest as digest_module
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        import nemo_gym.data.tasks.harbor.digest as digest_module
+        from nemo_gym.data import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor.digest import context_digest
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
@@ -2605,8 +2601,8 @@ class TestComposeAndRouting:
         """Harbor's own template already builds ``main`` from ``environment/Dockerfile`` with ``context: ${CONTEXT_DIR}``,
         so a task file that only restates that (orca-bench, terminal_bench_aai) changes nothing there. Gym runs the
         Dockerfile without a build in pull and overlay mode, so the section is dropped and the document starts."""
+        from nemo_gym.data import check_task_compose_fields, load_compose_document
         from nemo_gym.sandbox import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile=dockerfile)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -2629,9 +2625,7 @@ class TestComposeAndRouting:
         """A ``target`` (or ``args``, ``dockerfile_inline``, another ``dockerfile`` or ``context``) would change the image
         Harbor builds; without a build Gym cannot honour it, so the task is an error naming the key, as prepare already
         reported it into ``skipped.json``, instead of starting on the wrong image."""
-        from nemo_gym.tasks.harbor.errors import HarborTaskError
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data import HarborTaskError, ImageConfigError, check_task_compose_fields, load_compose_document
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -2657,9 +2651,8 @@ class TestComposeAndRouting:
         invalid value is the task's error, as prepare reports it (review: the key was dropped from every service
         before the field check, by prepare and again here, so the advertised support never saw a task's setting).
         Only ``pull_policy: build`` leaves, with the build it names (``test_built_images_stand_in...``)."""
+        from nemo_gym.data import ImageConfigError, check_task_compose_fields, load_compose_document
         from nemo_gym.sandbox import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
 
         class PullPolicyStubProvider(NetworkedStubProvider):
             def pull_policy_options(self, policy):
@@ -2712,9 +2705,9 @@ class TestComposeAndRouting:
         adapter and prepare's check normalizes it the same way; only ``pull_policy: build``, the policy naming that
         build, leaves with it (review: ``with_built_images`` dropped every policy of a built service, so with a
         recorded build preparation succeeded and the server and the adapter received no policy)."""
+        from nemo_gym.data import check_task_compose_fields, load_compose_document
+        from nemo_gym.data.tasks.harbor.digest import context_digest
         from nemo_gym.sandbox import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
 
         class PullPolicyStubProvider(NetworkedStubProvider):
             def pull_policy_options(self, policy):
@@ -2878,8 +2871,8 @@ class TestComposeAndRouting:
     def test_a_built_images_recorded_env_sits_under_the_compose_file_too(self, tmp_path, monkeypatch):
         """Build mode: the recorded built image's whole ``Env`` is the image layer, under the file and under the
         host-resolved ``[environment].env``; a key only the image names survives."""
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        from nemo_gym.data import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor.digest import context_digest
 
         server, task, _, _ = make_server(
             tmp_path, monkeypatch, toml=TASK_TOML + '\n[environment.env]\nTOK = "${TOK:-fromtoml}"\n'
@@ -2920,7 +2913,7 @@ class TestComposeAndRouting:
         ``[environment].env``; prepare could only use the dataset-time default. At seed the sidecars' ``environment``
         is read again with the host values (tau3 / hil-bench shape); a literal entry and the structure are untouched,
         and without the variable the default still applies."""
-        from nemo_gym.tasks.harbor.image_configs import load_compose_document
+        from nemo_gym.data import load_compose_document
 
         server, task, _, _ = make_server(
             tmp_path,
@@ -3551,7 +3544,7 @@ class TestComposeAndRouting:
         assert gpu.closed == ["1"] and sorted(cpu.closed) == ["1", "2"]
 
     def test_platform_at_seed_is_read_from_the_provider_options_as_at_prepare(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data import ImageConfigError
 
         server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
 
@@ -3583,8 +3576,8 @@ class TestComposeAndRouting:
     async def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_and_seed_for_the_same_reason(
         self, tmp_path, monkeypatch
     ):
-        from nemo_gym.tasks.harbor.image_configs import record_compose_images
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data import ImageConfigError
+        from nemo_gym.data.tasks.harbor.image_configs import record_compose_images
 
         server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -3618,7 +3611,7 @@ class TestComposeAndRouting:
         assert kafka["extra_hosts"] == {"licence.example": "198.51.100.7"} and "x-sandbox" not in kafka
 
     def test_a_gpu_sidecars_options_are_checked_against_the_gpu_block_at_seed(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data import ImageConfigError
 
         server, task = self.gpu_sidecar_server(tmp_path, monkeypatch, extra="    tmpfs: [/run]\n")
         # Docker task block, OpenSandbox GPU block: kafka runs on the GPU block, which applies no tmpfs.
@@ -3639,7 +3632,7 @@ class TestComposeAndRouting:
     def test_compose_document_normalizes_the_example_fields_and_names_what_the_provider_cannot_apply(
         self, tmp_path, monkeypatch
     ):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data import ImageConfigError
 
         server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
         # alibaba-ctf style: restart always and a custom network, which need nothing else.

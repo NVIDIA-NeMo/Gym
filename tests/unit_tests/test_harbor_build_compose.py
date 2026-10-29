@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.tasks.harbor.build_compose import (
+from nemo_gym.data import BUILT_IMAGES_FILE, load_compose_document, load_task
+from nemo_gym.data.tasks.harbor.build_compose import (
     COMPOSE_BUILD_FILE,
     COMPOSE_IMAGES_FILE,
     compose_build_env,
@@ -23,12 +24,11 @@ from nemo_gym.tasks.harbor.build_compose import (
     resolve_task_env,
     validate_task_compose,
 )
-from nemo_gym.tasks.harbor.build_plan import BuildError, BuildPlanEntry, plan_builds
-from nemo_gym.tasks.harbor.build_tools import ImageBuilder
-from nemo_gym.tasks.harbor.image_build import build_images
-from nemo_gym.tasks.harbor.image_configs import load_compose_document
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from nemo_gym.tasks.harbor.task import built_image, built_service_images, load_task
+from nemo_gym.data.tasks.harbor.build_plan import BuildError, BuildPlanEntry, plan_builds
+from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
+from nemo_gym.data.tasks.harbor.image_build import build_images
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
+from nemo_gym.data.tasks.harbor.task import built_image, built_service_images
 from tests.unit_tests.harbor_build_helpers import (
     DOCKER_INSPECT,
     OVERLAY_DOCKERFILE,
@@ -531,7 +531,7 @@ class TestDockerComposeBackend:
         # A bare reference nobody sets is an empty string in .env as in the document, with one warning naming the
         # task(s): Compose's own rule, and the loader's for the same file (image_configs.substitute_with_empty).
         (context / ".env").write_text("NET=${NOT_SET_ANYWHERE}\nARG=x\n")
-        with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.build_compose"):
+        with caplog.at_level("WARNING", logger="nemo_gym.data.tasks.harbor.build_compose"):
             document = validate_task_compose(context, variables, tasks=("a",))
         assert document["services"]["main"]["build"]["network"] == ""
         assert [r.getMessage() for r in caplog.records] == [
@@ -653,7 +653,7 @@ class TestDockerComposeBackend:
             cpus=2,
             memory_mb=4096,
         )
-        with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.build_compose"):
+        with caplog.at_level("WARNING", logger="nemo_gym.data.tasks.harbor.build_compose"):
             env = compose_build_env(entry, "hb__x", None)
         # os.environ < task env < infra, Harbor's order.
         assert env["MAIN_IMAGE_NAME"] == "hb__x" and env["KEEP_ME"] == "1" and "DOCKER_DEFAULT_PLATFORM" not in env
@@ -712,7 +712,7 @@ class TestDockerComposeBackend:
         write_task(folder / "a", toml=TOML + '\n[environment.env]\nV = "1"\n', extra={"docker-compose.yaml": compose})
         write_task(folder / "b", toml=TOML + '\n[environment.env]\nV = "2"\n', extra={"docker-compose.yaml": compose})
         write_task(folder / "c", toml=TOML + '\n[environment.env]\nV = "1"\n', extra={"docker-compose.yaml": compose})
-        with caplog.at_level("WARNING", logger="nemo_gym.tasks.harbor.build_plan"):
+        with caplog.at_level("WARNING", logger="nemo_gym.data.tasks.harbor.build_plan"):
             (entry,) = plan_builds(folder)
         assert entry.tasks == ("a", "b", "c") and entry.env == {"V": "1"}
         assert "Tasks a and b share build context" in caplog.text and "(V)" in caplog.text

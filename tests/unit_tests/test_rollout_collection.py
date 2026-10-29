@@ -11123,7 +11123,8 @@ class TestEnvironmentServerRouting:
         reward=1.0 result to the failures file (``_ng_failure_class``), write it nowhere
         (``_ng_no_persist``) or relabel its type (``_ng_result_type``).
         """
-        from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
+        from nemo_gym.data import DIGEST_KEY
+        from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY
 
         assert PROVENANCE_KEYS == (DIGEST_KEY, DATASET_DIGEST_KEY)
         monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})

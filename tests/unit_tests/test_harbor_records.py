@@ -8,8 +8,8 @@ The sidecar lock, the atomic replace and the read that retries once against a to
 
 import pytest
 
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.records import read_json_record, record_lock, write_json_record
+from nemo_gym.data import HarborTaskError
+from nemo_gym.data.tasks.harbor.records import read_json_record, record_lock, write_json_record
 
 
 class TestRecordFiles:
@@ -29,7 +29,7 @@ class TestRecordFiles:
         def failing_replace(*_):
             raise OSError("disk full")
 
-        monkeypatch.setattr("nemo_gym.tasks.harbor.records.os.replace", failing_replace)
+        monkeypatch.setattr("nemo_gym.data.tasks.harbor.records.os.replace", failing_replace)
         with pytest.raises(OSError, match="disk full"):
             write_json_record(path, {"lost": True})
         assert read_json_record(path) == {"kept": True}
@@ -42,7 +42,7 @@ class TestRecordFiles:
         assert read_json_record(path) == {}
 
     def test_read_retries_once_and_then_names_the_file(self, tmp_path, monkeypatch):
-        import nemo_gym.tasks.harbor.records as records_module
+        import nemo_gym.data.tasks.harbor.records as records_module
 
         path = tmp_path / "compose-images.json"
         path.write_text('{"torn": ')

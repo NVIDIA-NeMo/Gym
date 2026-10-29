@@ -14,12 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.tasks.harbor.build_plan import BuildResult
-from nemo_gym.tasks.harbor.build_records import record_built_image
-from nemo_gym.tasks.harbor.digest import context_digest
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, read_built_images, read_image_configs
-from nemo_gym.tasks.harbor.task import built_image, built_service_images, load_task
+from nemo_gym.data import BUILT_IMAGES_FILE, HarborTaskError, load_task
+from nemo_gym.data.tasks.harbor.build_plan import BuildResult
+from nemo_gym.data.tasks.harbor.build_records import record_built_image
+from nemo_gym.data.tasks.harbor.digest import context_digest
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE, read_built_images, read_image_configs
+from nemo_gym.data.tasks.harbor.task import built_image, built_service_images
 from tests.unit_tests.harbor_build_helpers import REPO, UBUNTU_RECORD, write_task
 
 
@@ -27,7 +27,7 @@ class TestBuildRecords:
     """``built-images.json``: one entry per context, one image per built service, readable by older readers."""
 
     def test_a_legacy_record_is_main_alone_and_a_services_record_without_main_has_no_built_image(self, tmp_path):
-        from nemo_gym.tasks.harbor.build_records import recorded_image_mismatch
+        from nemo_gym.data.tasks.harbor.build_records import recorded_image_mismatch
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -102,7 +102,7 @@ class TestBuildRecords:
         )
 
     def test_each_service_is_judged_by_its_own_pushed_flag(self, tmp_path):
-        from nemo_gym.tasks.harbor.build_records import recorded_image_mismatch
+        from nemo_gym.data.tasks.harbor.build_records import recorded_image_mismatch
 
         folder = tmp_path / "ds"
         folder.mkdir()
@@ -250,7 +250,7 @@ class TestConcurrentRecording:
             before = (folder / BUILT_IMAGES_FILE).read_text()
             later = BuildResult(digest="f" * 32, tasks=("b",), tag="t:2", image="t:2", tool="docker", pushed=False)
             monkeypatch.setattr(
-                "nemo_gym.tasks.harbor.records.os.replace", lambda *_: (_ for _ in ()).throw(OSError("disk"))
+                "nemo_gym.data.tasks.harbor.records.os.replace", lambda *_: (_ for _ in ()).throw(OSError("disk"))
             )
             with pytest.raises(OSError, match="disk"):
                 record_built_image(folder, later)

@@ -12,8 +12,8 @@ from pytest import MonkeyPatch
 import resources_servers.deepswe_external1.prepare_examples as module
 from nemo_gym.config import DatasetConfig
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
-from nemo_gym.train_data_utils import TrainDataProcessor
+from nemo_gym.data.dataset_preparation import TrainDataProcessor
+from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
 from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.task_data import TaskData
 

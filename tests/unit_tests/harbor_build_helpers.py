@@ -12,12 +12,12 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
-from nemo_gym.tasks.harbor.build_compose import compose_build_env, service_build_settings, validate_task_compose
-from nemo_gym.tasks.harbor.build_plan import BuildPlanEntry, plan_builds
-from nemo_gym.tasks.harbor.build_tools import ImageBuilder
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.harbor_compat import environment_content_hash
-from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE
+from nemo_gym.data import RECORD_VERSION
+from nemo_gym.data.tasks.harbor.build_compose import compose_build_env, service_build_settings, validate_task_compose
+from nemo_gym.data.tasks.harbor.build_plan import BuildPlanEntry, plan_builds
+from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
+from nemo_gym.data.tasks.harbor.harbor_compat import environment_content_hash
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE
 
 
 TOML = """
@@ -159,8 +159,8 @@ def task_inputs_digest(
 ) -> str:
     """The inputs digest prepare records for ``service`` of ``task``'s build context: the plan entry settled as a
     builder for ``repository`` and ``platform`` settles it."""
-    from nemo_gym.tasks.harbor.build_plan import DEFAULT_PLATFORM
-    from nemo_gym.tasks.harbor.build_records import build_inputs_digest, settle_entry
+    from nemo_gym.data.tasks.harbor.build_plan import DEFAULT_PLATFORM
+    from nemo_gym.data.tasks.harbor.build_records import build_inputs_digest, settle_entry
 
     entry = next(entry for entry in plan_builds(task) if entry.service == service)
     return build_inputs_digest(settle_entry(entry, repository=repository, platform=platform or DEFAULT_PLATFORM))
