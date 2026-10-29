@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, shell_assignments
 from nemo_gym.agent_utils.supervisor_client import (
     CLEANUP_PHASE_COUNT,
     CLEANUP_RECEIPT_FILE,
@@ -210,6 +209,14 @@ async def test_stop_reaches_running_supervisor_through_the_stop_file(session, tm
 
 
 # Starts a non-Python tool, like an agent CLI, and waits for it.
+_RUNNER = """
+import pathlib, subprocess, sys
+tool = subprocess.Popen(["sleep", "60"])
+pathlib.Path(sys.argv[1]).write_text(str(tool.pid))
+tool.wait()
+"""
+
+
 def _parent(pid: int) -> int:
     return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
 
@@ -222,27 +229,19 @@ def _alive(pid: int) -> bool:
 
 
 @pytest.mark.skipif(sys.platform != "linux" or shutil.which("pgrep") is None, reason="Linux /proc and pgrep")
-async def test_kills_by_interpreter_name_miss_the_supervisor_and_runner(session, tmp_path):
+async def test_kills_by_interpreter_name_miss_the_supervisor_and_stdlib_runner(session, tmp_path):
     """pgrep matches exactly as pkill and killall would, without signalling anything on this host."""
     sandbox, session_dir = session
     shutil.copyfile(SUPERVISOR_SCRIPT, session_dir / SUPERVISOR_FILE)
-    shutil.copyfile(HARNESS_RUNNER_SCRIPT, session_dir / HARNESS_RUNNER_FILE)
+    runner = session_dir / "sandbox_runner"
+    runner.write_text(_RUNNER)
     tool_pid_file = session_dir / "tool.pid"
-    params = {
-        "cwd": str(session_dir),
-        "command": ["bash", "-c", f"echo $$ > {quote(str(tool_pid_file))}; exec sleep 60"],
-        "stdin": "/dev/null",
-        "stdout": str(session_dir / "stdout.log"),
-        "stderr": str(session_dir / "stderr.log"),
-        # In events mode the runner stays and starts the tool as its child.
-        "events": str(session_dir / "events.jsonl"),
-    }
-    (session_dir / "params.sh").write_text(shell_assignments(params))
     command = supervised_launch_command(
         session_dir=str(session_dir),
-        command=["bash", str(session_dir / HARNESS_RUNNER_FILE), str(session_dir / "params.sh")],
+        command=[sys.executable, "-I", str(runner), str(tool_pid_file)],
         timeout=60,
         cleanup_timeout=1,
+        stdlib_runner=True,
     )
     launch = asyncio.create_task(sandbox.exec(command, timeout_s=90))
     try:
@@ -259,11 +258,12 @@ async def test_kills_by_interpreter_name_miss_the_supervisor_and_runner(session,
         assert harness_supervisor == supervisor_pid or str(harness_supervisor) in (
             Path(f"/proc/{supervisor_pid}/task/{supervisor_pid}/children").read_text().split()
         )
-        # The supervisor and the runner are bash scripts.
-        for pid in (supervisor_pid, harness_supervisor, runner_pid):
-            assert Path(f"/proc/{pid}/comm").read_text().strip() == "bash"
+        # The supervisor is bash; the runner runs through a link to the base interpreter.
+        for pid, name in ((supervisor_pid, "bash"), (harness_supervisor, "bash"), (runner_pid, "gym-runner")):
+            assert Path(f"/proc/{pid}/comm").read_text().strip() == name
             cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
             assert "python" not in cmdline and ".py" not in cmdline, cmdline
+        assert Path(f"/proc/{runner_pid}/exe").resolve() == Path(sys.executable).resolve()
         # pkill -f python3 / python / "python3 -" / "\.py"; pkill python; killall python3 (an exact name).
         for args in (
             ["-f", "python3"],

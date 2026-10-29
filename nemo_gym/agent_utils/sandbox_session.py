@@ -19,6 +19,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     SUPERVISOR_SCRIPT,
     CleanupReceipt,
     HarnessTerminationError,
+    check_stdlib_runner,
     remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
@@ -37,6 +38,9 @@ HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
 # could not be started. Any other status is the CLI's own.
 HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
+# Where adapters upload a standard-library Python runner, relative to session_dir. Without a
+# .py suffix, a `pkill -f '\.py'` in the task cannot match the runner's command line.
+RUNNER_FILE = "sandbox_runner"
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -50,9 +54,19 @@ def _reuse_or_start[T](
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxCommand:
-    """Harness argv, run under the bash process supervisor."""
+    """Harness argv, run under the bash process supervisor.
+
+    ``stdlib_runner`` declares a Python runner that needs nothing beyond the standard library.
+    Its argv, which must start with the interpreter, then runs under a neutral process name so
+    that ``pkill python3`` in the task cannot stop it. The renamed interpreter is the base
+    interpreter, outside any virtual environment.
+    """
 
     argv: list[str]
+    stdlib_runner: bool = False
+
+    def __post_init__(self) -> None:
+        check_stdlib_runner(self.argv, stdlib_runner=self.stdlib_runner)
 
 
 def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, str]]) -> str:
@@ -208,6 +222,7 @@ class SandboxSession[Artifacts]:
                 command=command.argv,
                 timeout=timeout,
                 cleanup_timeout=cleanup_timeout,
+                stdlib_runner=command.stdlib_runner,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(

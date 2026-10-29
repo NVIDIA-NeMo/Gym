@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Agent sessions in a borrowed sandbox, run on the local sandbox provider in a temporary directory."""
 
+import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.agent_utils import sandbox_python
 from nemo_gym.agent_utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime
+from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
@@ -89,6 +92,64 @@ def _seed(client: TestClient, **grants):
 def _close(client: TestClient):
     body = AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=_EPISODE)
     return client.post("/v1/agent_sessions/close", json=body.model_dump(mode="json"))
+
+
+async def test_runner_ignores_task_python_settings_but_preserves_them_for_tools(tmp_path, monkeypatch):
+    harness, task = tmp_path / "harness", tmp_path / "task"
+    harness.mkdir()
+    task.mkdir()
+    (harness / "sibling.py").write_text("VALUE = 'trusted'\n")
+    (task / "json.py").write_text("raise RuntimeError('task json imported')\n")
+    (task / "task_only.py").write_text("VALUE = 'task'\n")
+    (harness / "sandbox_runner.py").write_text(
+        "import importlib.util, json, subprocess, sibling\n"
+        "assert sibling.VALUE == 'trusted'\n"
+        "assert importlib.util.find_spec('task_only') is None\n"
+        "print(json.dumps(subprocess.check_output(['python'], text=True).splitlines()))\n"
+    )
+    task_python = task / "python"
+    task_python.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "task-python" "$HOME" "$PATH" "$VIRTUAL_ENV" '
+        '"$PYTHONPATH" "$PYTHONHOME" "$PYTHONUSERBASE"\npwd\n'
+    )
+    task_python.chmod(0o755)
+    task_env = {
+        "HOME": str(task / "home"),
+        "PATH": f"{task}:{os.environ['PATH']}",
+        "VIRTUAL_ENV": str(task / "venv"),
+        "PYTHONPATH": str(task),
+        "PYTHONHOME": str(task / "not-a-python-install"),
+        "PYTHONUSERBASE": str(task / "user-site"),
+    }
+
+    async def execute(_session, *, stage_activation, **_kwargs):
+        command = await stage_activation()
+        process = await asyncio.create_subprocess_exec(
+            *command.argv,
+            cwd=task,
+            env={**os.environ, **task_env},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+        assert process.returncode == 0, stderr.decode(errors="replace")
+        assert json.loads(stdout) == ["task-python", *task_env.values(), str(task)]
+        return {"resources_cookies": {}}
+
+    monkeypatch.setattr(sandbox, "SANDBOX_PYTHON", sys.executable)
+    monkeypatch.setattr(sandbox, "_PACKAGE_DIR", str(harness))
+    monkeypatch.setattr(SandboxSession, "execute", execute)
+    state = sandbox.StirrupSessionState(
+        request=AgentSeedSessionRequest(
+            agent_session_id="session", episode_id=_EPISODE, task_id=TaskId(taskset="test", task_id="task")
+        ),
+        session=SandboxSession(
+            sandbox=AsyncMock(), session_dir=str(tmp_path / "session"), workdir=str(task), harness="stirrup"
+        ),
+        tool_access=None,
+        resources_cookies={},
+    )
+    await state.execute({}, timeout=10, close_timeout=10)
 
 
 def test_an_episode_runs_stirrup_in_the_borrowed_sandbox(agent, client, root, monkeypatch):
@@ -467,8 +528,8 @@ def test_a_runner_that_leaves_no_valid_output_fails_the_activation(agent, client
     fake_python.write_text(
         "#!/bin/sh\n"
         '[ "$1" = -c ] && exit 0\n'
-        # The runner runs without the task's user site-packages.
-        f"case \"$1 $2\" in '-s '*sandbox_runner.py) printf '%s' '{output}' > \"$4\"; exit 0;; esac\n"
+        # The runner ignores task Python settings and user site-packages.
+        f"case \"$1 $2 $3\" in '-E -s '*sandbox_runner.py) printf '%s' '{output}' > \"$5\"; exit 0;; esac\n"
         f'exec {sys.executable} "$@"\n'
     )
     fake_python.chmod(0o755)
@@ -482,6 +543,8 @@ def test_a_runner_that_leaves_no_valid_output_fails_the_activation(agent, client
 
 class _FakeSandbox:
     """A borrowed sandbox that records its commands and answers each with ``answer(command)``."""
+
+    provider_name = "local"
 
     def __init__(self, answer):
         self.answer = answer

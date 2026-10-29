@@ -707,8 +707,7 @@ def test_failed_or_partial_codex_output_is_preserved(setup, reason, expected):
     "case",
     [
         # Graded, as Harbor grades after any agent exit:
-        "codex-killed",  # e.g. the kernel's OOM kill picked Codex: the runner exits 128+9
-        "runner-killed",  # e.g. the agent's `pkill python3` hit the runner: a negative status
+        "process-killed",  # Codex or its runner was killed: the receipt reports the shell status 128+9
         "failed-turn",
         "timed-out",  # an error event in a run that hit its time limit: graded as a timeout
         # Retried as before:
@@ -728,14 +727,14 @@ def test_failed_codex_run_is_graded_only_while_its_sandbox_still_runs(setup, cas
     if case == "failed-turn":
         records = [json.loads(line) for line in events(stop_reason="error").splitlines()]
     elif case == "timed-out":
-        sandbox.result.update(timed_out=True, return_code=-15)
+        sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
         records[-1] = [9.0, {"type": "item.completed", "item": {"type": "error", "message": "tool call failed"}}]
     elif case == "not-started":
         sandbox.result["return_code"] = 1
         records = []
     else:
         # Codex died mid-turn: no turn.completed.
-        sandbox.result["return_code"] = -9 if case == "runner-killed" else 247
+        sandbox.result["return_code"] = 128 + signal.SIGKILL
         records = records[:-1]
     if case != "not-started":
         records.insert(0, [-1.0, {"type": "turn.started"}])
@@ -759,7 +758,7 @@ def test_failed_codex_run_is_graded_only_while_its_sandbox_still_runs(setup, cas
         return await execute(command, **kwargs)
 
     sandbox.exec.side_effect = probe_or_execute
-    graded = case in ("codex-killed", "runner-killed", "failed-turn", "timed-out")
+    graded = case in ("process-killed", "failed-turn", "timed-out")
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
@@ -904,7 +903,7 @@ def test_codex_0154_endpoint_outage_is_retried_not_graded(setup, case, ending) -
     if ending == "retries-spent":
         sandbox.result["return_code"] = 1
     else:
-        sandbox.result["return_code"] = -9
+        sandbox.result["return_code"] = 128 + signal.SIGKILL
         transcript.pop()  # killed after the error event, before turn.failed
     result, closed, probed = run_codex_transcript(agent, sandbox, transcript)
     # The sandbox was never probed for grading, and the episode is rerun.
@@ -940,7 +939,7 @@ def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) ->
     message = CODEX_NATIVE_ENDPOINT_FAILURES[case]
     assert _model_endpoint_error([(9.0, event) for event in codex_error(message)]) is not None
     # Codex exits 1 on the reported failure, or its runner is killed right after it reports it.
-    sandbox.result["return_code"] = 1 if ending == "reported" else -9
+    sandbox.result["return_code"] = 1 if ending == "reported" else 128 + signal.SIGKILL
     result, closed, probed = run_codex_transcript(agent, sandbox, [{"type": "turn.started"}, *codex_error(message)])
     assert not probed
     assert closed["agent_observations"]["records"][0]["status"] == "failed"
@@ -990,7 +989,7 @@ def test_recovered_codex_0154_retries_keep_the_run_gradable(setup, ending) -> No
         *(json.loads(line)[1] for line in events().splitlines()),
     ]
     if ending == "timed-out":
-        sandbox.result.update(timed_out=True, return_code=-15)
+        sandbox.result.update(timed_out=True, return_code=128 + signal.SIGTERM)
         transcript.pop()  # stopped in its turn: no turn.completed
     result, closed, probed = run_codex_transcript(agent, sandbox, transcript)
     assert result.status_code == 200, result.text
@@ -1003,8 +1002,7 @@ def test_recovered_codex_0154_retries_keep_the_run_gradable(setup, ending) -> No
     assert "Fixed" in json.dumps(body["output"])
 
 
-@pytest.mark.parametrize("ending", ["oom-kill", "runner-killed"])
-def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup, ending) -> None:
+def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup) -> None:
     # Endpoint retries early in the run, recovered; the run then ends on an unrelated agent error.
     agent, sandbox = setup
     transcript = [
@@ -1014,8 +1012,8 @@ def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup, endin
         WAITING,
         *[json.loads(line)[1] for line in events().splitlines()][:-1],  # model output, no turn.completed
     ]
-    # The kernel's OOM kill picked Codex, or the agent's `pkill python3` hit the runner.
-    sandbox.result["return_code"] = 247 if ending == "oom-kill" else -9
+    # Codex or its runner was killed after the model requests recovered.
+    sandbox.result["return_code"] = 128 + signal.SIGKILL
     result, closed, probed = run_codex_transcript(agent, sandbox, transcript)
     # Graded as a nonzero agent exit, as the reference runs grade it.
     assert result.status_code == 200, result.text
@@ -1028,7 +1026,7 @@ def test_recovered_codex_0154_retries_then_an_agent_error_is_graded(setup, endin
 
 def test_codex_0154_killed_while_waiting_for_the_network_is_rerun(setup) -> None:
     agent, sandbox = setup
-    sandbox.result["return_code"] = 247
+    sandbox.result["return_code"] = 128 + signal.SIGKILL
     transcript = [
         {"type": "turn.started"},
         *[json.loads(line)[1] for line in events().splitlines()][:-1],
@@ -1337,7 +1335,7 @@ async def test_close_during_the_startup_stderr_read_keeps_the_observations(setup
 async def test_close_during_the_grading_probe_keeps_the_observations(setup):
     agent, sandbox = setup
     agent.config.verify_after_agent_error = True
-    sandbox.result["return_code"] = -9  # killed mid-turn, after a tool call and a message
+    sandbox.result["return_code"] = 128 + signal.SIGKILL  # killed mid-turn, after a tool call and a message
     records = [json.loads(line) for line in events().splitlines()][:-1]
     records.insert(0, [-1.0, {"type": "turn.started"}])
     sandbox.events = "\n".join(json.dumps(record) for record in records)
@@ -1662,7 +1660,7 @@ async def test_lost_execution_is_never_graded(setup):
     agent, sandbox = setup
     agent.config.verify_after_agent_error = True
     sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
-    sandbox.result["return_code"] = 247
+    sandbox.result["return_code"] = 128 + signal.SIGKILL
     create = sandbox.launch.side_effect
 
     async def lost(**kwargs):
@@ -1745,7 +1743,7 @@ async def test_provider_error_type_blocks_success_even_with_zero_exit(setup, sta
 
 async def test_timeout_preserves_partial_tools_and_close_observations(setup):
     agent, sandbox = setup
-    sandbox.result.update(timed_out=True, return_code=-9)
+    sandbox.result.update(timed_out=True, return_code=128 + signal.SIGKILL)
     sandbox.events = "\n".join(sandbox.events.splitlines()[:-1])
     request, session_id, task = await activate(agent, sandbox)
     response = await task
@@ -2601,7 +2599,7 @@ async def test_execution_outcomes_preserve_evidence_and_only_limits_are_gradable
         )
         sandbox.events = "\n".join(json.dumps(row) for row in rows)
     elif outcome == "wall-time":
-        sandbox.result.update(timed_out=True, return_code=-9)
+        sandbox.result.update(timed_out=True, return_code=128 + signal.SIGKILL)
         sandbox.events = "\n".join(events().splitlines()[:-1])
     request, session_id, task = await activate(agent, sandbox)
     if outcome in ("provider", "runtime"):
@@ -3236,7 +3234,7 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
     agent, sandbox = setup
     agent.config.verify_after_agent_error = True
     sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
-    sandbox.result["return_code"] = -9  # killed after a completed tool call, before turn.completed
+    sandbox.result["return_code"] = 128 + signal.SIGKILL  # killed after a completed tool call, before turn.completed
     tool = {"id": "item_1", "type": "command_execution", "command": "printf retained", "status": "in_progress"}
     records = [
         {"type": "turn.started"},
@@ -3280,7 +3278,7 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
     assert response.status_code == 200, response.text
     body = response.json()
     assert (body["status"], body["error"]) == ("failed", None)
-    assert body["metadata"]["graded_agent_error"].startswith("exit -9: ")
+    assert body["metadata"]["graded_agent_error"].startswith("exit 137: ")
     assert "ng_agent_outcome" not in body["metadata"]
     if usage_source == "native":
         assert body["usage"] == {
