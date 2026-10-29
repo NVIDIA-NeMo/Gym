@@ -18,11 +18,11 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym import rollout_collection
-from nemo_gym.rollout_health import evaluate_record, run_health_checks
+from nemo_gym.rollouts import rollout_collection, run_health_checks
+from nemo_gym.rollouts.rollout_health import evaluate_record
 from nemo_gym.telemetry import gym_metrics
+from tests.unit_tests.rollouts.test_rollout_health import _call, _record, _trajectory_call, _write_fixture
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
-from tests.unit_tests.test_rollout_health import _call, _record, _trajectory_call, _write_fixture
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")

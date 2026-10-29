@@ -40,7 +40,7 @@ from nemo_gym.client import get_server_url
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
 from nemo_gym.models import NeMoGymAsyncOpenAI, chat_completion_usage_to_response_usage
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint

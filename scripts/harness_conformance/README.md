@@ -200,7 +200,7 @@ compaction, parallelism and transport disconnects remain outside its qualificati
 Run regression checks with:
 
 ```bash
-python -m pytest scripts/harness_conformance/tests tests/unit_tests/harness_capabilities -q
+python -m pytest scripts/harness_conformance/tests tests/unit_tests/rollouts/harness_capabilities -q
 ```
 
 To add another local harness, add its adapter class to `registry.HARNESSES`, supply

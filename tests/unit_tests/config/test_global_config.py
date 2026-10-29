@@ -63,7 +63,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
-from nemo_gym.rollout_collection import _environment_servers_by_agent
+from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 from nemo_gym.server_runtime.ray_support import (
     DictConfig,
 )

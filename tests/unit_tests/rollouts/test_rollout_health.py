@@ -13,12 +13,13 @@ import pytest
 
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
-import nemo_gym.health.checks as health_checks
-import nemo_gym.rollout_collection as rollout_collection
-import nemo_gym.rollout_health as health
-from nemo_gym.observability.model_calls import build_model_call_record
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
-from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
+import nemo_gym.rollouts.health.checks as health_checks
+import nemo_gym.rollouts.rollout_collection as rollout_collection
+import nemo_gym.rollouts.rollout_health as health
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, run_health_checks
+from nemo_gym.rollouts.model_calls import build_model_call_record
+from nemo_gym.rollouts.rollout_collection import _CompletedRollout
+from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY
 from nemo_gym.trajectory import TrajectoryRecord
 
 
@@ -2417,7 +2418,7 @@ def _run_with_outcomes(
             for task, terminal in failures
         )
     )
-    from nemo_gym.health.types import RunHealthLimits
+    from nemo_gym.rollouts.health.types import RunHealthLimits
 
     result = run_health_checks(rollout_path, workers=1, limits=RunHealthLimits(**limits))
     return json.loads(result.summary_path.read_text())["run"]["artifacts"]
@@ -2538,7 +2539,7 @@ def test_sigterm_during_collection_writes_a_provisional_summary_without_reading_
 import asyncio
 from pathlib import Path
 import nemo_gym.cli.eval as cli_eval
-from nemo_gym.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts import RolloutCollectionHelper
 
 root = Path({str(tmp_path)!r})
 
@@ -2560,7 +2561,7 @@ cli_eval.collect_rollouts()
 """
     (tmp_path / "landed.jsonl").write_bytes(_write_fixture(tmp_path, [(_record(0, 0), [_call()])]).read_bytes())
     (tmp_path / "rollouts.jsonl").unlink()
-    process = subprocess.Popen([sys.executable, "-c", child], cwd=Path(__file__).parents[2])
+    process = subprocess.Popen([sys.executable, "-c", child], cwd=Path(__file__).parents[3])
     try:
         deadline = time.monotonic() + 60
         while not (tmp_path / "collecting").exists():
@@ -2701,7 +2702,7 @@ class TestOneSourceOfLimits:
         return rollout_path
 
     def test_the_effective_limits_are_written_to_the_summary(self, tmp_path: Path) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         result = run_health_checks(
             self._failed_run(tmp_path), workers=1, limits=RunHealthLimits(max_final_failure_fraction=0.01)
@@ -2716,7 +2717,7 @@ class TestOneSourceOfLimits:
         assert artifacts["healthy"] is False
 
     def test_a_recheck_uses_the_runs_persisted_limits(self, tmp_path: Path) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         rollout_path = self._failed_run(tmp_path)
         run_health_checks(rollout_path, workers=1, limits=RunHealthLimits(max_final_failure_fraction=0.01))
@@ -2732,7 +2733,7 @@ class TestOneSourceOfLimits:
         }
 
     def test_an_explicit_override_wins_and_is_recorded(self, tmp_path: Path) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         rollout_path = self._failed_run(tmp_path)
         run_health_checks(rollout_path, workers=1, limits=RunHealthLimits(max_final_failure_fraction=0.01))
@@ -2750,7 +2751,7 @@ class TestOneSourceOfLimits:
         }
 
     def test_the_provisional_summary_records_its_limits(self, tmp_path: Path) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         rollout_path = tmp_path / "rollouts.jsonl"
         rollout_path.write_bytes(b"")
@@ -2769,7 +2770,7 @@ class TestOneSourceOfLimits:
 
     @pytest.mark.parametrize("config_name", ["RolloutCollectionConfig", "RolloutAggregationConfig"])
     def test_every_command_reads_the_limits_from_the_shared_config(self, config_name: str) -> None:
-        from nemo_gym.health.types import RunHealthConfig, RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthConfig, RunHealthLimits
 
         config_cls = getattr(rollout_collection, config_name)
         assert issubclass(config_cls, RunHealthConfig)
@@ -2786,7 +2787,7 @@ class TestOneSourceOfLimits:
     def test_health_check_cli_passes_the_limit_overrides(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         received = {}
         monkeypatch.setattr(cli_eval, "health_check_rollouts", lambda run_dir, **kwargs: received.update(kwargs))
@@ -2823,7 +2824,7 @@ class TestPerFlagLimitOverride:
                 for task in (96, 97, 98, 99)
             )
         )
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         run_health_checks(
             root / "rollouts.jsonl",
@@ -2987,7 +2988,7 @@ class TestNoLimitValue:
 
     @pytest.mark.parametrize("value", ["none", "None", "NONE", "nOnE"])
     def test_none_is_accepted_in_any_case(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         received = {}
         monkeypatch.setattr(cli_eval, "health_check_rollouts", lambda run_dir, **kwargs: received.update(kwargs))
@@ -3037,7 +3038,7 @@ class TestNoLimitValue:
         assert "--health-max-final-failure-fraction" in capsys.readouterr().err
 
     def test_python_api_explicit_none_removes_and_unset_keeps(self, tmp_path: Path) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         TestPerFlagLimitOverride._judged_run(tmp_path)
 
@@ -3066,15 +3067,15 @@ class TestRunExcessiveFailuresCheck:
 
     @staticmethod
     def _summary(root: Path, *, ignored: tuple[str, ...] = (), **limits: float) -> dict:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         rollout_path = TestOneSourceOfLimits._failed_run(root)
         result = run_health_checks(rollout_path, workers=1, ignored_checks=ignored, limits=RunHealthLimits(**limits))
         return json.loads(result.summary_path.read_text())["run"]
 
     def test_the_check_is_registered_at_run_scope(self) -> None:
-        from nemo_gym.health.checks import normalize_ignored_checks
-        from nemo_gym.health.types import CheckScope
+        from nemo_gym.rollouts.health.checks import normalize_ignored_checks
+        from nemo_gym.rollouts.health.types import CheckScope
 
         [spec] = [spec for spec in CHECK_REGISTRY if spec.id == "run_excessive_failures"]
         assert spec.evaluation_scope == CheckScope.RUN
@@ -3121,7 +3122,7 @@ class TestRunExcessiveFailuresCheck:
 
     @pytest.mark.parametrize("ignored", [(), ("run_excessive_failures",)], ids=["evaluated", "ignored"])
     def test_the_provisional_summary_evaluates_only_this_check(self, tmp_path: Path, ignored: tuple) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         rollout_path = TestOneSourceOfLimits._failed_run(tmp_path)
 
@@ -3150,7 +3151,7 @@ class TestFailureGroupsAreNamedByRetry:
     """The two failure groups are split by whether a failure is final; the cause is not known, so not claimed."""
 
     def test_the_limits_name_final_and_not_final_failures(self) -> None:
-        from nemo_gym.health.types import RunHealthConfig, RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthConfig, RunHealthLimits
 
         assert set(RunHealthLimits.model_fields) == {"max_final_failure_fraction", "max_not_final_failure_fraction"}
         assert {name for name in RunHealthConfig.model_fields if "failure_fraction" in name} == {
@@ -3161,7 +3162,7 @@ class TestFailureGroupsAreNamedByRetry:
         assert "infra" not in descriptions and "model" not in descriptions
 
     def test_a_not_final_finding_and_reason_claim_no_cause(self, tmp_path: Path) -> None:
-        from nemo_gym.health.types import RunHealthLimits
+        from nemo_gym.rollouts.health.types import RunHealthLimits
 
         rollout_path = _write_fixture(tmp_path, [(_record(task, 0), [_call()]) for task in range(98)])
         _inventory(tmp_path, 100)

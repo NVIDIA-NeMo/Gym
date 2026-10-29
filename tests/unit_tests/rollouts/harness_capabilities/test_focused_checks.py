@@ -7,8 +7,9 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.harness_capabilities.checker import TOKEN_FIELDS, EvidenceScope, inspect_record
-from tests.unit_tests.harness_capabilities.synthetic import evidence_record
+from nemo_gym.rollouts import EvidenceScope, inspect_record
+from nemo_gym.rollouts.harness_capabilities.checker import TOKEN_FIELDS
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_record
 
 
 def checks(record, **kwargs):

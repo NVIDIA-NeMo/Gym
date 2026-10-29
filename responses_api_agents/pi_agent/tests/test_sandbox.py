@@ -1205,7 +1205,7 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
         SingleAgentTurnEnvironmentServerConfig,
     )
     from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.server_runtime import SingleAgentTurnRequest
 
     agent, sandbox = setup
@@ -2026,7 +2026,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     gaps = [gap.code for gap in close.agent_observations.gaps]
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
-        from nemo_gym.observability.model_calls import ModelCallRecord
+        from nemo_gym.rollouts import ModelCallRecord
         from nemo_gym.trajectory.trajectory_record import join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps

@@ -40,7 +40,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",
                 "scripts/harness_conformance/",
-                "tests/unit_tests/harness_capabilities/",
+                "tests/unit_tests/rollouts/harness_capabilities/",
                 "tests/unit_tests/test_harness_conformance",
             )
         ):

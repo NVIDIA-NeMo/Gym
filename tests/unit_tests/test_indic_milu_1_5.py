@@ -259,7 +259,7 @@ def test_examples_and_config(monkeypatch):
 
 
 def test_run_overrides_preserve_row_scoped_vllm_metadata(tmp_path):
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     row = module.build_rows([source()], language="hi")[0]
     row["agent_ref"] = {"name": "milu_1_5_simple_agent"}

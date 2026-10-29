@@ -7,9 +7,8 @@ import json
 
 import pytest
 
-from nemo_gym.harness_capabilities.checker import inspect_record
-from nemo_gym.harness_capabilities.cli import main
-from tests.unit_tests.harness_capabilities.synthetic import evidence_record
+from nemo_gym.rollouts import inspect_record, main
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_record
 
 
 @pytest.fixture

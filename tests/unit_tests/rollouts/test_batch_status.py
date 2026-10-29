@@ -20,7 +20,6 @@ import orjson
 import pytest
 
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
-from nemo_gym.batch_status import BatchManifest, BatchStatusTracker, observe_materialized_rows, validate_batch_manifest
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -30,6 +29,12 @@ from nemo_gym.config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.rollouts.batch_status import (
+    BatchManifest,
+    BatchStatusTracker,
+    observe_materialized_rows,
+    validate_batch_manifest,
+)
 
 
 def materialized_row(

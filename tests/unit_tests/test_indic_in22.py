@@ -258,7 +258,7 @@ def test_gen_and_conv_compose_with_separate_preparation(config_names, monkeypatc
 @pytest.mark.parametrize("cli_override", [False, True])
 def test_cli_defaults_overrides_and_duplicate_conv_tasks(monkeypatch, tmp_path, cli_override) -> None:
     from nemo_gym.data import apply_prompt_to_row
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     flags = ["--temperature", "0.4", "--top-p", "0.8", "--max-output-tokens", "1024"] if cli_override else []
     config = _resolve_cli_config(["config_conv.yaml"], flags)
@@ -301,7 +301,7 @@ def test_cli_defaults_overrides_and_duplicate_conv_tasks(monkeypatch, tmp_path, 
 @pytest.mark.parametrize("add_seed", [False, True])
 def test_repeat_seeds_are_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, add_seed: bool) -> None:
     from nemo_gym.data import apply_prompt_to_row
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     flags = ["--num-repeats", "3"] + (["+num_repeats_add_seed=true"] if add_seed else [])
     config = _resolve_cli_config(["config.yaml"], flags)

@@ -198,7 +198,7 @@ def _resolve_cli_config(flags):
 def test_cli_defaults_and_overrides_preserve_other_benchmark_metadata(tmp_path, override):
     from benchmarks.numb3rs.prepare import _format_row
     from nemo_gym.data import apply_prompt_to_row, load_prompt_config
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     flags = ["--benchmark", "numb3rs"]
     if override:
@@ -235,7 +235,7 @@ def test_cli_defaults_and_overrides_preserve_other_benchmark_metadata(tmp_path, 
 
 
 def test_repeat_seeds_preserve_indic_sampling_and_source_metadata(tmp_path):
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     source = module.build_rows([source_row()], language="hi")[0]
     source["agent_ref"] = {"name": "indic_ifeval_instruction_following_simple_agent"}

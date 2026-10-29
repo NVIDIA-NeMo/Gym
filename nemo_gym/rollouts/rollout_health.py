@@ -29,7 +29,7 @@ from nemo_gym.artifacts.run_files import (
     QUALITY_SUMMARY_SOURCES_KEY,
     ROLLOUT_VERDICTS_FILENAME,
 )
-from nemo_gym.health.checks import (
+from nemo_gym.rollouts.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
     _ROLLOUT_CHECKS,
@@ -53,8 +53,8 @@ from nemo_gym.health.checks import (
     _transcript_tokens,
     normalize_ignored_checks,
 )
-from nemo_gym.health.timeouts import read_rollout_timing, summarize_timeouts
-from nemo_gym.health.types import (
+from nemo_gym.rollouts.health.timeouts import read_rollout_timing, summarize_timeouts
+from nemo_gym.rollouts.health.types import (
     CALL_BINDING_INPUTS,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
@@ -510,7 +510,7 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
     owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
     """
     # Lazy: rollout_collection imports this module.
-    from nemo_gym.rollout_collection import is_omitted_rollout_row, is_unstarted_rollout_row
+    from nemo_gym.rollouts.rollout_collection import is_omitted_rollout_row, is_unstarted_rollout_row
 
     failed: dict[tuple[Any, ...], dict[str, Any]] = {}
     any_sidecar = False
@@ -562,7 +562,7 @@ def _rollout_accounting(
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
     from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
-    from nemo_gym.rollout_collection import is_terminal_failure
+    from nemo_gym.rollouts.rollout_collection import is_terminal_failure
 
     failed, owed, any_sidecar = failures.rows, failures.owed, failures.any_sidecar
     expected = None if owed is None else len(owed)
@@ -690,7 +690,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
 def capture_dirs_for_health(global_config_dict: Any) -> list[Path]:
     """The run's model-call capture directories for ``run_health_checks``; none when capture is off or misconfigured,
     so a capture setting never stops the health check."""
-    from nemo_gym.observability.model_calls import model_call_capture_dirs_from_config
+    from nemo_gym.rollouts.model_calls import model_call_capture_dirs_from_config
 
     try:
         return model_call_capture_dirs_from_config(global_config_dict)
@@ -714,7 +714,7 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
     # Lazy: the capture store pulls in the model-server stack, which health workers do not need.
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
     from nemo_gym.models.model_call_capture import _PENDING_SUFFIX, CaptureStore
-    from nemo_gym.observability.model_calls import read_available_model_call_records
+    from nemo_gym.rollouts.model_calls import read_available_model_call_records
 
     listings = []
     for directory in capture_dirs:

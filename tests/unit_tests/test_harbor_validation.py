@@ -425,7 +425,8 @@ def oracle_collection(monkeypatch, validation_cli):
     from types import SimpleNamespace
 
     from nemo_gym.cli.eval import RunHelper
-    from nemo_gym.rollout_collection import RolloutCollectionHelper, _CompletedRollout
+    from nemo_gym.rollouts import RolloutCollectionHelper
+    from nemo_gym.rollouts.rollout_collection import _CompletedRollout
 
     collection = SimpleNamespace(dispatched=[], payload=lambda row: result())
 

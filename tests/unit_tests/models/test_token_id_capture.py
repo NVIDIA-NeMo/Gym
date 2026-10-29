@@ -95,7 +95,7 @@ from nemo_gym.models.token_capture.records import (
     response_finish_reason,
 )
 from nemo_gym.models.token_capture.store import make_token_store
-from nemo_gym.observability.model_calls import read_model_call_records
+from nemo_gym.rollouts.model_calls import read_model_call_records
 
 
 _ASSISTANT_TURN = {

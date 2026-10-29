@@ -26,9 +26,8 @@ from nemo_gym.agents import (
     SandboxSession,
 )
 from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.models.base_responses_api_model import ModelCallRecord
-from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
+from nemo_gym.rollouts import ModelCallRecord, run_health_checks
+from nemo_gym.rollouts.rollout_collection import _build_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
 from nemo_gym.trajectory.trajectory_record import join_agent_model_calls

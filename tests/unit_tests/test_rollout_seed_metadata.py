@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 @pytest.mark.parametrize("metadata_source", ["row", "run"])

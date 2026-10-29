@@ -9,7 +9,7 @@ from environment_servers.swe_together.schemas import SWETRequest
 from nemo_gym.agents import AgentCloseSessionResponse
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_ID_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.rollout_collection import _build_trajectory_record, _episode_record, _episode_request_body
+from nemo_gym.rollouts.rollout_collection import _build_trajectory_record, _episode_record, _episode_request_body
 from nemo_gym.trajectory import TrajectoryRecord
 
 

@@ -30,11 +30,12 @@ from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
 import nemo_gym.artifacts.exporters.wandb as wandb_module
-import nemo_gym.rollout_collection as collection_module
 import nemo_gym.rollout_reverification as reverification_module
+import nemo_gym.rollouts.rollout_collection as collection_module
 from nemo_gym.artifacts.exporters import export_rollouts, get_exporters, setup_exporters, teardown_exporters
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_reverification import OutputPaths
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import _CompletedRollout
 
 
 @pytest.fixture(autouse=True)

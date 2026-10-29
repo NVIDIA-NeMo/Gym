@@ -54,7 +54,7 @@ from nemo_gym.config.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
-from nemo_gym.rollout_collection import (
+from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,

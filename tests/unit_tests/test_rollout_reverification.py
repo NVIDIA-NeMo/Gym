@@ -32,7 +32,6 @@ from nemo_gym.config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,
@@ -71,6 +70,8 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_collection import NG_OMITTED_ROLLOUT_KEY
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils import aggregation_sources_path_for

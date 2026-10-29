@@ -1548,7 +1548,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
 
     import orjson
 
-    import nemo_gym.rollout_collection as collection
+    import nemo_gym.rollouts.rollout_collection as collection
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
     from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
     from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig

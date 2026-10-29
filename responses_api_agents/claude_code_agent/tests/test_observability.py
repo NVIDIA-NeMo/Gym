@@ -11,7 +11,7 @@ import pytest
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymFunctionCallOutput
 from nemo_gym.models import CaptureStore
-from nemo_gym.observability.model_calls import ModelCallRecord, merge_model_call_capture_into_record
+from nemo_gym.rollouts import ModelCallRecord, merge_model_call_capture_into_record
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,

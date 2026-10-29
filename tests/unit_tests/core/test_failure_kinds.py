@@ -140,7 +140,10 @@ class TestNamesTheRepoAlreadyProduces:
     """Labels main emits today must be in the vocabulary, or it describes nothing."""
 
     def test_rollout_collection_row_routing_classes(self) -> None:
-        from nemo_gym.rollout_collection import AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS
+        from nemo_gym.rollouts.rollout_collection import (
+            AGENT_REQUEST_FAILED_FAILURE_CLASS,
+            AGENT_RUN_ERROR_FAILURE_CLASS,
+        )
 
         assert is_registered(AGENT_RUN_ERROR_FAILURE_CLASS)
         assert is_registered(AGENT_REQUEST_FAILED_FAILURE_CLASS)

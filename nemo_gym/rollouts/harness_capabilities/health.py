@@ -6,8 +6,8 @@
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from nemo_gym.health.types import CheckInput, CheckScope, Verdict
-from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
+from nemo_gym.rollouts.health.types import CheckInput, CheckScope, Verdict
+from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY, run_health_checks
 
 from .checks import HealthCheck
 from .results import Results

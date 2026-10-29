@@ -13,12 +13,8 @@ from nemo_gym.core import EpisodeId
 from nemo_gym.data.dataset_preparation import TrainDataProcessor
 from nemo_gym.data.task_data import TaskDataValidator
 from nemo_gym.data.task_materialization import materialize_task
-from nemo_gym.rollout_collection import (
-    RolloutCollectionConfig,
-    RolloutCollectionHelper,
-    _environment_server_for_config_row,
-    _episode_request_body,
-)
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import _environment_server_for_config_row, _episode_request_body
 from nemo_gym.server_runtime import SingleAgentTurnRequest
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 

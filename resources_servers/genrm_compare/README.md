@@ -583,7 +583,7 @@ client for callers that already hold all answers for a batch comparison.
 - **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
 - **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
 - **Type Definitions**: `nemo_gym/models/openai_utils.py` - Custom role type support
-- **Rollout Collection**: `nemo_gym/rollout_collection.py` - Collects per-rollout agent results
+- **Rollout Collection**: `nemo_gym/rollouts/rollout_collection.py` - Collects per-rollout agent results
 
 ## License
 

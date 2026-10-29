@@ -42,13 +42,12 @@ from anyio import CancelScope
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
-import nemo_gym.batch_status
 import nemo_gym.models.token_capture.delivery
-import nemo_gym.rollout_collection
+import nemo_gym.rollouts.batch_status
+import nemo_gym.rollouts.rollout_collection
 import nemo_gym.server_runtime.server_utils
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.artifacts.rollout_rows import _rollout_for_export
-from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
@@ -64,7 +63,6 @@ from nemo_gym.config import (
 from nemo_gym.config.config_types import AmbiguousEnvironmentServerError, ConfigError, ConfigPathNotFoundError
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
-from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.metrics import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.models.token_capture import (
     LineageResolution,
@@ -84,30 +82,37 @@ from nemo_gym.models.token_capture.delivery import (
     retire_rollout_token_capture,
     rollout_carries_token_ids,
 )
-from nemo_gym.rollout_collection import (
+from nemo_gym.rollout_reverification import RolloutReverificationConfig
+from nemo_gym.rollouts import (
+    ENVIRONMENT_SERVER_FAILURE_CLASS,
+    NG_ENVIRONMENT_SERVER_KEY,
+    NG_RESULT_TYPE_KEY,
+    NG_TERMINAL_KEY,
+    NG_TRAJECTORY_KEY,
+    DispatchLatencyTracker,
+    RolloutCollectionConfig,
+    RolloutCollectionHelper,
+    get_max_rollout_attempts,
+    is_terminal_failure,
+)
+from nemo_gym.rollouts.batch_status import observe_materialized_rows
+from nemo_gym.rollouts.health.types import RunHealthLimits
+from nemo_gym.rollouts.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
     AGENT_RUN_ERROR_FAILURE_CLASS,
     AGGREGATION_ERROR_KEY,
-    ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_AGENT_OBSERVATIONS_KEY,
     NG_DATASET_DIGEST_KEY,
     NG_DIGEST_KEY,
-    NG_ENVIRONMENT_SERVER_KEY,
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
     NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
-    NG_RESULT_TYPE_KEY,
-    NG_TERMINAL_KEY,
-    NG_TRAJECTORY_KEY,
     PROVENANCE_KEYS,
-    DispatchLatencyTracker,
     E2ERolloutCollectionConfig,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
-    RolloutCollectionConfig,
-    RolloutCollectionHelper,
     _attach_ng_perf,
     _attach_trajectory_record,
     _build_ng_perf,
@@ -126,12 +131,9 @@ from nemo_gym.rollout_collection import (
     _rollout_request_debug_summary,
     _round_robin_by_agent,
     _trajectory_identity,
-    get_max_rollout_attempts,
-    is_terminal_failure,
     loads_jsonl_line,
 )
-from nemo_gym.rollout_health import health_check_run_dir
-from nemo_gym.rollout_reverification import RolloutReverificationConfig
+from nemo_gym.rollouts.rollout_health import health_check_run_dir
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
@@ -184,7 +186,7 @@ class _StubLineageStore:
 @pytest.fixture
 def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     get_global_config_dict = MagicMock(return_value={})
-    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", get_global_config_dict)
+    monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", get_global_config_dict)
     return get_global_config_dict
 
 
@@ -236,7 +238,7 @@ def install_fake_server_client(
             }
         )
     monkeypatch.setattr(
-        nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: server_client
+        nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: server_client
     )
 
     async def raise_for_status(response: FakeResponse) -> None:
@@ -246,8 +248,8 @@ def install_fake_server_client(
     async def get_response_json(response: FakeResponse) -> dict | None:
         return response.payload
 
-    monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", raise_for_status)
-    monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+    monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", raise_for_status)
+    monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_response_json", get_response_json)
     return server_client
 
 
@@ -572,15 +574,15 @@ class TestRolloutCollection:
             return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
-        monkeypatch.setattr(nemo_gym.batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(nemo_gym.rollouts.batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 0)
         status_snapshots = []
-        atomic_write = nemo_gym.batch_status._atomic_write_json
+        atomic_write = nemo_gym.rollouts.batch_status._atomic_write_json
 
         def capture_status_write(path: Path, payload: dict) -> None:
             status_snapshots.append(deepcopy(payload))
             atomic_write(path, payload)
 
-        monkeypatch.setattr(nemo_gym.batch_status, "_atomic_write_json", capture_status_write)
+        monkeypatch.setattr(nemo_gym.rollouts.batch_status, "_atomic_write_json", capture_status_write)
 
         with pytest.raises(RuntimeError, match="Aggregation failed for agents: beta"):
             await RolloutCollectionHelper().run_from_config(config)
@@ -1111,7 +1113,9 @@ class TestRolloutCollection:
     def test_trajectory_projection_failure_without_attachment_keeps_gap(self, monkeypatch) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
         result = {"ng_trajectory": {}}
-        monkeypatch.setattr(nemo_gym.rollout_collection, "_build_trajectory_record", MagicMock(side_effect=ValueError))
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "_build_trajectory_record", MagicMock(side_effect=ValueError)
+        )
 
         _attach_trajectory_record(row, result)
 
@@ -1466,7 +1470,7 @@ class TestRolloutCollection:
     def test_attach_ng_perf_swallows_build_errors(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # An unexpected assembly failure must never take down rollout collection over an observability side-channel.
         result = {NG_TRAJECTORY_KEY: {}}
-        monkeypatch.setattr(nemo_gym.rollout_collection, "_build_ng_perf", MagicMock(side_effect=ValueError))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "_build_ng_perf", MagicMock(side_effect=ValueError))
 
         _attach_ng_perf(result, observability_enabled=True, rollout_latency_ms=42.0)
 
@@ -1499,13 +1503,15 @@ class TestRolloutCollection:
         )
 
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
 
         async def fail_raise_for_status(_response):
             raise RuntimeError("boom")
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", fail_raise_for_status)
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
@@ -1538,7 +1544,7 @@ class TestRolloutCollection:
         }
         install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0})))
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "is_global_aiohttp_client_request_debug_enabled",
             lambda: debug_enabled,
         )
@@ -1618,7 +1624,7 @@ class TestRolloutCollection:
         async def raise_for_status(_response):
             raise http_error(500, body=b'{"detail": "unhandled tool-call json"}')
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", raise_for_status)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", raise_for_status)
 
         returned_row, result = await next(
             RolloutCollectionHelper().run_examples([row], route_failures_to_sidecar=True)
@@ -1677,7 +1683,7 @@ class TestRolloutCollection:
             async def get_response_json(_response):
                 raise error
 
-            monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+            monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_response_json", get_response_json)
 
         _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
 
@@ -1704,7 +1710,9 @@ class TestRolloutCollection:
         config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
         config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
         client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
+        )
         transport = MagicMock()
         failure = (
             ClientConnectorError(MagicMock(), ConnectionRefusedError("not sent"))
@@ -1782,7 +1790,7 @@ class TestRolloutCollection:
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_response_json",
             AsyncMock(return_value={"reward": 1}),
         )
@@ -1833,7 +1841,7 @@ class TestRolloutCollection:
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_response_json",
             AsyncMock(return_value={"reward": 1}),
         )
@@ -1886,7 +1894,7 @@ class TestRolloutCollection:
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_response_json",
             AsyncMock(return_value={"reward": 1}),
         )
@@ -1969,7 +1977,7 @@ class TestRolloutCollection:
             return Result(reward=1)
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_response_json", get_response_json)
 
         futures = getattr(RolloutCollectionHelper(), entry_point)(rows, max_resident_tasks=max_resident_tasks)
         completed = await next(futures)
@@ -1997,7 +2005,7 @@ class TestRolloutCollection:
         async def blocked_rollout():
             await block.wait()
 
-        completions = nemo_gym.rollout_collection._BoundedCompletionIterator(
+        completions = nemo_gym.rollouts.rollout_collection._BoundedCompletionIterator(
             iter([failing_rollout(), blocked_rollout()]),
             max_resident_tasks=2,
             total=2,
@@ -2027,7 +2035,7 @@ class TestRolloutCollection:
         async def blocked_rollout():
             await asyncio.Event().wait()
 
-        completions = nemo_gym.rollout_collection._BoundedCompletionIterator(
+        completions = nemo_gym.rollouts.rollout_collection._BoundedCompletionIterator(
             iter([failing_rollout(), blocked_rollout()]),
             max_resident_tasks=2,
             total=2,
@@ -2117,7 +2125,7 @@ class TestRolloutCollection:
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_response_json",
             AsyncMock(return_value={"reward": 1}),
         )
@@ -2183,9 +2191,9 @@ class TestRolloutCollection:
             require_complete=require_complete,
         )
         outcomes: list[dict] = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda group: True)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "record_rollout_completed",
             lambda outcome, **kw: outcomes.append({"outcome": outcome, **kw}),
         )
@@ -2644,7 +2652,7 @@ class TestRolloutCollection:
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT
+            nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT
         )
 
         await RolloutCollectionHelper().run_from_config(
@@ -2815,9 +2823,9 @@ class TestRolloutCollection:
             return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-        monkeypatch.setattr("nemo_gym.rollout_collection.get_exporters", lambda: ["any"])
+        monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.get_exporters", lambda: ["any"])
         monkeypatch.setattr(
-            "nemo_gym.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
+            "nemo_gym.rollouts.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
         )
 
         config = RolloutCollectionConfig(
@@ -2878,9 +2886,9 @@ class TestRolloutCollection:
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         exported: dict[str, float] = {}
-        monkeypatch.setattr("nemo_gym.rollout_collection.get_exporters", lambda: ["any"])
+        monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.get_exporters", lambda: ["any"])
         monkeypatch.setattr(
-            "nemo_gym.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
+            "nemo_gym.rollouts.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
         )
 
         config = RolloutCollectionConfig(
@@ -2920,9 +2928,9 @@ class TestRolloutCollection:
             return FakeResponse(200, {"reward": 1.0})
 
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
-        monkeypatch.setattr("nemo_gym.rollout_collection.get_exporters", lambda: ["any"])
+        monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.get_exporters", lambda: ["any"])
         monkeypatch.setattr(
-            "nemo_gym.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
+            "nemo_gym.rollouts.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
         )
 
         config = RolloutCollectionConfig(
@@ -3286,9 +3294,9 @@ class TestRolloutCollection:
         )
         output_jsonl_fpath = tmp_path / "output.jsonl"
         install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_exporters", lambda: [object()])
         export_rollouts = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", export_rollouts)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "export_rollouts", export_rollouts)
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
@@ -3372,10 +3380,14 @@ class TestRolloutCollection:
             }
         )
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}})
+        )
 
         returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
 
@@ -3400,7 +3412,9 @@ class TestRolloutCollection:
             }
         )
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
 
         with pytest.raises(AmbiguousEnvironmentServerError, match="my_legacy_server.*my_session_server"):
@@ -3432,10 +3446,14 @@ class TestRolloutCollection:
             }
         )
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}})
+        )
 
         await next(RolloutCollectionHelper().run_examples([row]))
 
@@ -3461,16 +3479,20 @@ class TestRolloutCollection:
             }
         )
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}})
+        )
 
         span_context = object()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda _: tracing)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_trace_exporter_active", lambda: tracing)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda _: tracing)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_trace_exporter_active", lambda: tracing)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "_dispatch_span", lambda *args, **kwargs: nullcontext(span_context)
+            nemo_gym.rollouts.rollout_collection, "_dispatch_span", lambda *args, **kwargs: nullcontext(span_context)
         )
         completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([row], retry_requests=False))
 
@@ -4271,7 +4293,7 @@ class TestRolloutCollection:
             return file
 
         monkeypatch.setattr(Path, "open", tracked_open)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_exporters", lambda: [object()])
 
         class Helper(RolloutCollectionHelper):
             def _run_examples_with_metadata(self, *args, **kwargs):
@@ -4367,8 +4389,10 @@ class TestRolloutCollection:
                     examples,
                 )
                 if max_resident_tasks is None:
-                    return nemo_gym.rollout_collection._EagerCompletionIterator(awaitables, total=len(examples))
-                return nemo_gym.rollout_collection._BoundedCompletionIterator(
+                    return nemo_gym.rollouts.rollout_collection._EagerCompletionIterator(
+                        awaitables, total=len(examples)
+                    )
+                return nemo_gym.rollouts.rollout_collection._BoundedCompletionIterator(
                     awaitables,
                     max_resident_tasks=max_resident_tasks,
                     total=len(examples),
@@ -4384,9 +4408,9 @@ class TestRolloutCollection:
             upload_rollouts=True,
         )
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_exporters", lambda: [object()])
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "export_rollouts",
             lambda rows: pytest.fail("collection failure must prevent upload"),
         )
@@ -4505,14 +4529,14 @@ class TestRolloutCollection:
                 "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}},
             }
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: client)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *a, **k: client)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_response_json",
             AsyncMock(side_effect=lambda response: {"reward": 1.0}),
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: {})
 
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
@@ -4589,13 +4613,13 @@ class TestRolloutCollection:
             }
         )
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "setup_server_client_utils",
             lambda *a, **k: client,
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_json)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_response_json", get_json)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: {})
 
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
@@ -4716,13 +4740,13 @@ class TestRolloutCollection:
 
         exported: list[list[dict]] = []
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_exporters", lambda: [object()])
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "export_rollouts",
             lambda rows: exported.append(rows),
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", lambda *args, **kwargs: None)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "export_metrics", lambda *args, **kwargs: None)
 
         async def run(*, retain: bool, output_fpath: Path, resume: bool = False) -> list[dict]:
             config = RolloutCollectionConfig(
@@ -4869,7 +4893,7 @@ class TestRolloutCollection:
         def fail_if_reloaded(path: Path):
             raise AssertionError(f"artifact-only non-retaining run reloaded {path}")
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "_read_jsonl", fail_if_reloaded)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "_read_jsonl", fail_if_reloaded)
 
         non_retaining_output = tmp_path / "non-retaining.jsonl"
         non_retaining_results = await run(retain=False, output_fpath=non_retaining_output)
@@ -4896,7 +4920,7 @@ class TestRolloutCollection:
         monkeypatch: pytest.MonkeyPatch,
         empty_global_config: MagicMock,
     ) -> None:
-        import nemo_gym.rollout_health
+        import nemo_gym.rollouts.rollout_health
 
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
@@ -4925,8 +4949,8 @@ class TestRolloutCollection:
         health_result = object()
         run_health_checks = MagicMock(return_value=health_result)
         format_health_report = MagicMock(return_value="health checks passed")
-        monkeypatch.setattr(nemo_gym.rollout_health, "run_health_checks", run_health_checks)
-        monkeypatch.setattr(nemo_gym.rollout_health, "format_health_report", format_health_report)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_health, "run_health_checks", run_health_checks)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_health, "format_health_report", format_health_report)
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_fpath),
@@ -4989,9 +5013,9 @@ class TestRolloutCollection:
             "_fill_task_fields",
         )
         for name in reads:
-            read = getattr(nemo_gym.rollout_collection, name, None)
+            read = getattr(nemo_gym.rollouts.rollout_collection, name, None)
             if read is not None:
-                monkeypatch.setattr(nemo_gym.rollout_collection, name, require_loop_progress(name, read))
+                monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, name, require_loop_progress(name, read))
 
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_text(
@@ -5021,9 +5045,9 @@ class TestRolloutCollection:
                 aggregated["results"] = results
                 return None
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_exporters", lambda: [object()])
         export_rollouts = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", export_rollouts)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "export_rollouts", export_rollouts)
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_fpath),
@@ -5066,7 +5090,7 @@ class TestRolloutCollection:
         rows = [{"i": i, "text": "x" * i} for i in range(20)]
         path = tmp_path / "rows.jsonl"
         path.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows) + b"\n")
-        monkeypatch.setattr(nemo_gym.rollout_collection, "_READ_JSONL_YIELD_INTERVAL_S", 0)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "_READ_JSONL_YIELD_INTERVAL_S", 0)
         parsed_when_ticked: list[int] = []
         parsed: list[dict] = []
         loads = orjson.loads
@@ -5075,7 +5099,7 @@ class TestRolloutCollection:
             parsed.append(loads(line))
             return parsed[-1]
 
-        monkeypatch.setattr(nemo_gym.rollout_collection.orjson, "loads", recording_loads)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection.orjson, "loads", recording_loads)
 
         async def tick() -> None:
             while True:
@@ -5085,7 +5109,7 @@ class TestRolloutCollection:
         ticker = asyncio.create_task(tick())
         await asyncio.sleep(0)
         try:
-            result = await nemo_gym.rollout_collection._read_jsonl(path)
+            result = await nemo_gym.rollouts.rollout_collection._read_jsonl(path)
         finally:
             ticker.cancel()
 
@@ -5097,14 +5121,18 @@ class TestRolloutCollection:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         merged: list[int] = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", MagicMock())
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection, "clear_model_call_captures_for_rollouts", MagicMock()
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection,
             "merge_model_call_capture_into_record",
             lambda record, *args, **kwargs: merged.append(record[TASK_INDEX_KEY_NAME]),
         )
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "model_call_capture_dirs_from_config", lambda _: [tmp_path / "capture"]
+            nemo_gym.rollouts.rollout_collection,
+            "model_call_capture_dirs_from_config",
+            lambda _: [tmp_path / "capture"],
         )
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
@@ -5146,8 +5174,12 @@ class TestRolloutCollection:
     ) -> None:
         clear_captures = MagicMock()
         merge_capture = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "merge_model_call_capture_into_record", merge_capture
+        )
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
@@ -5292,8 +5324,12 @@ class TestRolloutCollection:
         """
         clear_captures = MagicMock()
         merge_capture = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "merge_model_call_capture_into_record", merge_capture
+        )
 
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
@@ -5384,8 +5420,12 @@ class TestRolloutCollection:
         """
         clear_captures = MagicMock()
         merge_capture = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "merge_model_call_capture_into_record", merge_capture)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "merge_model_call_capture_into_record", merge_capture
+        )
 
         input_jsonl_fpath = tmp_path / "input.jsonl"
         samples = [
@@ -5602,9 +5642,9 @@ class TestRolloutCollection:
         base = dict(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True)
         await Helper().run_from_config(RolloutCollectionConfig(**base, resume_from_cache=False))
         exporter = MagicMock()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [exporter])
-        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", MagicMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", MagicMock())
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_exporters", lambda: [exporter])
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "export_rollouts", MagicMock())
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "export_metrics", MagicMock())
 
         config = RolloutCollectionConfig(**base, resume_from_cache=True)
         await Helper().run_from_config(config)
@@ -5672,7 +5712,7 @@ class TestRolloutCollection:
 
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
         )
@@ -5741,7 +5781,7 @@ class TestRolloutCollection:
 
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
         )
@@ -5791,7 +5831,7 @@ class TestRolloutCollection:
     ) -> None:
         capture_dir = tmp_path / "tokens"
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
                 "token_id_capture": {"enabled": True, "dir": str(capture_dir)},
@@ -5843,7 +5883,7 @@ class TestRolloutCollection:
         """
         capture_dir = tmp_path / "tokens"
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
                 "token_id_capture": {"enabled": True, "dir": str(capture_dir)},
@@ -5866,7 +5906,7 @@ class TestRolloutCollection:
             finalized_agents.append(result["agent"])
             return None
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "finalize_rollout_token_capture", finalize)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "finalize_rollout_token_capture", finalize)
 
         class Helper(RolloutCollectionHelper):
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
@@ -5915,7 +5955,7 @@ class TestRolloutCollection:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
                 "token_id_capture": {
@@ -5965,9 +6005,9 @@ class TestRolloutCollection:
             await original_close(store)
 
         monkeypatch.setattr(TokenCaptureStore, "close", tracked_close)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: None)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "installed_token_source", lambda: None)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
                 "token_id_capture": {
@@ -6038,9 +6078,9 @@ class TestRolloutCollection:
                 self.closed = True
 
         source = Source()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: source)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "installed_token_source", lambda: source)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
                 "token_id_capture": {
@@ -6101,9 +6141,9 @@ class TestRolloutCollection:
         configured value arrived.
         """
         # The owned file store stands in for a source another test may have installed process-wide.
-        monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: None)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "installed_token_source", lambda: None)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
                 "token_id_capture": {
@@ -6117,7 +6157,7 @@ class TestRolloutCollection:
         )
         # Wrapping the real finalizer records its call arguments while the rollout still takes the real path.
         finalize = AsyncMock(wraps=finalize_rollout_token_capture)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "finalize_rollout_token_capture", finalize)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "finalize_rollout_token_capture", finalize)
         input_fpath = tmp_path / "input.jsonl"
         input_fpath.write_bytes(
             orjson.dumps(
@@ -6435,7 +6475,7 @@ class TestRolloutCollection:
         client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         client.global_config_dict = _environment_server_config()
         loader = MagicMock(return_value=client)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", loader)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", loader)
 
         helper = RolloutCollectionHelper(reuse_server_client=True)
         scored = []
@@ -6491,7 +6531,9 @@ class TestRolloutCollection:
         )
 
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
         helper = RolloutCollectionHelper()
 
@@ -6588,7 +6630,9 @@ class TestRolloutCollection:
         )
         mock_server_client.post = AsyncMock(return_value=mock_response)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
         helper = RolloutCollectionHelper()
 
@@ -6626,7 +6670,9 @@ class TestRolloutCollection:
         )
         mock_server_client.post = AsyncMock(return_value=mock_response)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
         helper = RolloutCollectionHelper()
 
@@ -6680,7 +6726,9 @@ class TestRolloutCollection:
         mock_server_client.post = AsyncMock(side_effect=mock_post)
 
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
         helper = RolloutCollectionHelper()
 
@@ -6851,12 +6899,14 @@ class TestRolloutCollection:
             }
         )
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
         )
         build_calls: list[int] = []
-        build_map = nemo_gym.rollout_collection._environment_servers_by_agent
+        build_map = nemo_gym.rollouts.rollout_collection._environment_servers_by_agent
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "_environment_servers_by_agent",
             lambda config: build_calls.append(1) or build_map(config),
         )
@@ -7036,8 +7086,10 @@ class TestRunExamplesAclose:
 
     @pytest.mark.parametrize("max_resident_tasks", [None, 4])
     async def test_drain_preserves_backlog_and_stops_admission(self, monkeypatch, max_resident_tasks) -> None:
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1})
+        )
         started, cancelled = [], []
         completions = self._helper({3, 4, 5, 6}, started, cancelled).run_examples(
             [self._row(i) for i in range(7)], max_resident_tasks=max_resident_tasks
@@ -7075,11 +7127,11 @@ class TestRunExamplesAclose:
 
         awaitables = (rollout(i) for i in range(4))
         internal = (
-            nemo_gym.rollout_collection._BoundedCompletionIterator(awaitables, total=4, max_resident_tasks=4)
+            nemo_gym.rollouts.rollout_collection._BoundedCompletionIterator(awaitables, total=4, max_resident_tasks=4)
             if bounded
-            else nemo_gym.rollout_collection._EagerCompletionIterator(awaitables, total=4)
+            else nemo_gym.rollouts.rollout_collection._EagerCompletionIterator(awaitables, total=4)
         )
-        completions = nemo_gym.rollout_collection._RowResultIterator(internal)
+        completions = nemo_gym.rollouts.rollout_collection._RowResultIterator(internal)
         waiter = asyncio.ensure_future(next(completions))
         try:
             while len(started) < 4:
@@ -7106,8 +7158,10 @@ class TestRunExamplesAclose:
 
     @pytest.mark.parametrize("max_resident_tasks", [None, 2])
     async def test_drain_before_start_and_after_exhaustion(self, monkeypatch, max_resident_tasks) -> None:
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1})
+        )
         started = []
         helper = self._helper(set(), started, [])
         completions = helper.run_examples([self._row(0)], max_resident_tasks=max_resident_tasks)
@@ -7128,13 +7182,13 @@ class TestRunExamplesAclose:
             raise asyncio.CancelledError
 
         internal = (
-            nemo_gym.rollout_collection._BoundedCompletionIterator(
+            nemo_gym.rollouts.rollout_collection._BoundedCompletionIterator(
                 iter([cancelled_rollout()]), total=1, max_resident_tasks=1
             )
             if bounded
-            else nemo_gym.rollout_collection._EagerCompletionIterator(iter([cancelled_rollout()]), total=1)
+            else nemo_gym.rollouts.rollout_collection._EagerCompletionIterator(iter([cancelled_rollout()]), total=1)
         )
-        completions = nemo_gym.rollout_collection._RowResultIterator(internal)
+        completions = nemo_gym.rollouts.rollout_collection._RowResultIterator(internal)
         waiter = asyncio.ensure_future(next(completions))
         await finished.wait()
         drained = await completions.aclose_and_drain()
@@ -7165,11 +7219,13 @@ class TestRunExamplesAclose:
         try:
             awaitables = (rollout(i) for i in range(3))
             internal = (
-                nemo_gym.rollout_collection._BoundedCompletionIterator(awaitables, total=3, max_resident_tasks=3)
+                nemo_gym.rollouts.rollout_collection._BoundedCompletionIterator(
+                    awaitables, total=3, max_resident_tasks=3
+                )
                 if bounded
-                else nemo_gym.rollout_collection._EagerCompletionIterator(awaitables, total=3)
+                else nemo_gym.rollouts.rollout_collection._EagerCompletionIterator(awaitables, total=3)
             )
-            completions = nemo_gym.rollout_collection._RowResultIterator(internal)
+            completions = nemo_gym.rollouts.rollout_collection._RowResultIterator(internal)
             waiter = asyncio.ensure_future(next(completions))
             # Pause after the underlying tasks finish, before the waiter claims one.
             await asyncio.sleep(0)
@@ -7218,8 +7274,10 @@ class TestRunExamplesAclose:
     async def test_aclose_cancels_rollouts_still_running(
         self, monkeypatch: pytest.MonkeyPatch, max_resident_tasks: int | None
     ) -> None:
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
         started: list = []
         cancelled: list = []
         rows = [self._row(i) for i in range(4)]
@@ -7256,8 +7314,10 @@ class TestRunExamplesAclose:
             next(completions)
 
     async def test_full_iteration_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
         started: list = []
         cancelled: list = []
         rows = [self._row(i) for i in range(3)]
@@ -7283,7 +7343,9 @@ class TestRunExamplesAclose:
             return index
 
         try:
-            completions = nemo_gym.rollout_collection._EagerCompletionIterator((rollout(i) for i in range(3)), total=3)
+            completions = nemo_gym.rollouts.rollout_collection._EagerCompletionIterator(
+                (rollout(i) for i in range(3)), total=3
+            )
             assert await next(completions) == 0
             await asyncio.wait_for(completions.aclose(), timeout=1)
             del completions
@@ -7304,8 +7366,8 @@ class TestRunExamplesAclose:
             payload_refs.append(weakref.ref(result))
             return result
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", response_json)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_response_json", response_json)
         completions = self._helper(set(), [], []).run_examples([self._row(i) for i in range(3)])
         if close_early:
             await next(completions)
@@ -7338,8 +7400,8 @@ class TestRunExamplesAclose:
                 raise ValueError("already failed")
             return _CompletedRollout(row={"id": 1}, result={"reward": 1}, rollout_latency_ms=None)
 
-        completions = nemo_gym.rollout_collection._RowResultIterator(
-            nemo_gym.rollout_collection._EagerCompletionIterator(iter([rollout()]), total=1)
+        completions = nemo_gym.rollouts.rollout_collection._RowResultIterator(
+            nemo_gym.rollouts.rollout_collection._EagerCompletionIterator(iter([rollout()]), total=1)
         )
         future = next(completions)
         await asyncio.wait_for(finished.wait(), timeout=1)
@@ -7468,8 +7530,10 @@ class TestDispatchBudget:
 
     async def test_no_budget_dispatches_everything(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
 
         rows = [self._row(i) for i in range(3)]
         results = [await future for future in self._helper(posted).run_examples(rows)]
@@ -7479,8 +7543,10 @@ class TestDispatchBudget:
 
     async def test_exhausted_budget_drains_without_dispatching(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
 
         tracker = DispatchLatencyTracker()
         rows = [self._row(i) for i in range(3)]
@@ -7505,8 +7571,10 @@ class TestDispatchBudget:
     ) -> None:
         """`max_resident_tasks` admits rows in order, and a spent budget still drains every one."""
         posted: list = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
 
         rows = [self._row(i) for i in (4, 2, 7, 1)]
         semaphore = asyncio.Semaphore(1)
@@ -7531,8 +7599,10 @@ class TestDispatchBudget:
 
     async def test_drain_margin_blocks_a_task_that_cannot_finish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
 
         tracker = DispatchLatencyTracker()
         results = [
@@ -7626,8 +7696,10 @@ class TestDispatchBudget:
     async def test_zero_budget_drains_rather_than_disabling_the_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """0.0 is a spent budget, not an absent one -- truthiness gets this wrong."""
         posted: list = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
 
         tracker = DispatchLatencyTracker()
         results = [
@@ -7643,8 +7715,10 @@ class TestDispatchBudget:
 
     async def test_generous_budget_still_dispatches(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
 
         tracker = DispatchLatencyTracker()
         results = [
@@ -7666,7 +7740,9 @@ class TestDispatchBudget:
         self, monkeypatch: pytest.MonkeyPatch, preloaded_s: float, recorded: bool
     ) -> None:
         """A failure counts toward the adaptive margin only when it is at least as long as the median."""
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock(side_effect=http_error(502)))
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock(side_effect=http_error(502))
+        )
         tracker = DispatchLatencyTracker()
         for _ in range(5):
             tracker.record(preloaded_s)
@@ -7719,7 +7795,7 @@ class TestDispatchBudget:
         max_mask_fraction, aborting the in-flight rollouts the budget exists to protect.
         """
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "get_global_config_dict",
             lambda: {
                 "token_id_capture": {
@@ -7733,7 +7809,7 @@ class TestDispatchBudget:
                 }
             },
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "installed_token_source", lambda: object())
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "installed_token_source", lambda: object())
         finalized: list[dict] = []
 
         async def finalize(result: dict, source: object, **kwargs: object) -> dict:
@@ -7741,18 +7817,22 @@ class TestDispatchBudget:
             # The real finalizer masks a rollout that recorded nothing, as a drained row would.
             return {MASK_SAMPLE_KEY: NG_DISPATCH_DRAINED_KEY in result, "metrics": {}}
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "finalize_rollout_token_capture", finalize)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "finalize_rollout_token_capture", finalize)
         outcomes: list[str] = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda group: True)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "record_rollout_completed", lambda outcome, **kw: outcomes.append(outcome)
+            nemo_gym.rollouts.rollout_collection,
+            "record_rollout_completed",
+            lambda outcome, **kw: outcomes.append(outcome),
         )
 
         # Each /run takes 25 s of a 60 s budget: three rows start and the other four drain.
         clock = SimpleNamespace(now=0.0)
-        real_time = nemo_gym.rollout_collection.time
+        real_time = nemo_gym.rollouts.rollout_collection.time
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "time", SimpleNamespace(monotonic=lambda: clock.now, time=real_time.time)
+            nemo_gym.rollouts.rollout_collection,
+            "time",
+            SimpleNamespace(monotonic=lambda: clock.now, time=real_time.time),
         )
 
         async def post(server_name: str, url_path: str, json: dict, **kwargs):
@@ -7860,8 +7940,10 @@ class TestDispatchOrderReachesTheServer:
     """
 
     async def test_rows_hit_the_server_in_list_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
 
         posted: list = []
 
@@ -7902,8 +7984,10 @@ class TestDispatchOrderReachesTheServer:
 
     def test_rows_are_scheduled_when_iteration_starts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Calling run_examples schedules nothing, so it may be built outside the loop that consumes it."""
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
         posted: list = []
         rows = [TestDispatchBudget._row(i) for i in range(3)]
 
@@ -8351,9 +8435,9 @@ class TestRolloutAggregationHelper:
         monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", _noop)
         monkeypatch.delenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", raising=False)
         exported: dict[str, float] = {}
-        monkeypatch.setattr("nemo_gym.rollout_collection.get_exporters", lambda: ["any"])
+        monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.get_exporters", lambda: ["any"])
         monkeypatch.setattr(
-            "nemo_gym.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
+            "nemo_gym.rollouts.rollout_collection.export_metrics", lambda metrics, **kw: exported.update(metrics)
         )
         cfg = RolloutAggregationConfig(
             input_glob=f"{shards[0]},{shards[1]}",
@@ -8496,7 +8580,7 @@ class TestRolloutAggregationHelper:
             raise RuntimeError("health failed")
 
         monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", fake_call)
-        monkeypatch.setattr("nemo_gym.rollout_health.run_health_checks", broken_health_check)
+        monkeypatch.setattr("nemo_gym.rollouts.rollout_health.run_health_checks", broken_health_check)
         config = RolloutAggregationConfig(
             input_glob=str(shard),
             output_jsonl_fpath=str(output_fpath),
@@ -8905,13 +8989,13 @@ class TestRolloutAggregationHelper:
         listed = aggregation_sources_path_for(output).read_bytes()
 
         resolved_on = []
-        resolve = nemo_gym.rollout_health._aggregated_shards
+        resolve = nemo_gym.rollouts.rollout_health._aggregated_shards
 
         def recording_resolve(*args, **kwargs):
             resolved_on.append(threading.current_thread() is threading.main_thread())
             return resolve(*args, **kwargs)
 
-        monkeypatch.setattr(nemo_gym.rollout_health, "_aggregated_shards", recording_resolve)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_health, "_aggregated_shards", recording_resolve)
         await Helper().run_from_config(RolloutCollectionConfig(**config, resume_from_cache=True))
 
         # Resolving the list hashes every listed file, so it runs off the event loop.
@@ -9040,7 +9124,7 @@ class TestRolloutAggregationHelper:
         from types import SimpleNamespace
 
         from nemo_gym.cli.eval import _health_check_collected_rollouts
-        from nemo_gym.rollout_health import RunHealthLimits
+        from nemo_gym.rollouts.rollout_health import RunHealthLimits
 
         run_a, run_b = self._landed_and_failed_runs(tmp_path, same_indices=False)
         merged_dir = tmp_path / "merged"
@@ -9062,7 +9146,7 @@ class TestRolloutAggregationHelper:
         from types import SimpleNamespace
 
         import nemo_gym.cli.eval as cli_eval
-        from nemo_gym.rollout_health import RunHealthLimits
+        from nemo_gym.rollouts.rollout_health import RunHealthLimits
 
         run_a, run_b = self._landed_and_failed_runs(tmp_path, same_indices=False)
         merged_dir = tmp_path / "merged"
@@ -9279,7 +9363,7 @@ class TestRolloutAggregationHelper:
         def no_head_server(*args, **kwargs):
             raise RuntimeError("Could not connect to the head server")
 
-        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", no_head_server)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", no_head_server)
         config = RolloutAggregationConfig(
             input_glob=str(shard), output_jsonl_fpath=str(tmp_path / "merged.jsonl"), disable_health_check=True
         )
@@ -9944,7 +10028,9 @@ class TestFanOut:
                 )
             }
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *a, **k: mock_client)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *a, **k: mock_client
+        )
         for fut in RolloutCollectionHelper().run_examples(rows):
             await fut
         assert sorted(posted) == ["shared_agent_a_environment_server", "shared_agent_b_environment_server"]
@@ -10048,7 +10134,7 @@ class TestTaskSourcePreprocess:
     ) -> None:
         """task_source-only rows must be resolved to an agent BEFORE the materialized-inputs
         file is written: custom drivers (e.g. gdpval's orchestrator) read agent_ref from it."""
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: {})
 
         source_row = {"responses_create_params": {"input": []}, "task_source": "math_rs"}
         input_fpath = tmp_path / "input.jsonl"
@@ -10242,7 +10328,7 @@ class TestTurnsFromModelCalls:
             self._call("second", {"output": [message]}, started_at=2.0),
         ]
 
-        turns = nemo_gym.rollout_collection._turns_from_model_calls(
+        turns = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
             "task", "rollout", [self._invocation("root", ["first", "second"])], calls, resolved=True
         )
 
@@ -10259,7 +10345,7 @@ class TestTurnsFromModelCalls:
         message = {"role": "assistant", "content": "", "reasoning_content": "think", "tool_calls": [{"id": "t1"}]}
         calls = [self._call("only", {"choices": [{"message": message}]}, started_at=1.0)]
 
-        [turn] = nemo_gym.rollout_collection._turns_from_model_calls(
+        [turn] = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
             "task", "rollout", [self._invocation("root", ["only"])], calls, resolved=None
         )
 
@@ -10273,7 +10359,7 @@ class TestTurnsFromModelCalls:
         failed = TrajectoryModelCall.model_validate({"model_call_id": "failed", "started_at": 1.0})
         answered = self._call("answered", {"output": []}, started_at=2.0)
 
-        turns = nemo_gym.rollout_collection._turns_from_model_calls(
+        turns = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
             "task", "rollout", [self._invocation("root", ["failed", "answered"])], [failed, answered], None
         )
 
@@ -10285,7 +10371,7 @@ class TestTurnsFromModelCalls:
         failed.response_metadata.status_code = status
         answered = self._call("answered", {"output": []}, started_at=2.0)
         invocation = self._invocation("root", ["failed", "answered"])
-        turns = nemo_gym.rollout_collection._turns_from_model_calls(
+        turns = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
             "task", "rollout", [invocation], [failed, answered], None
         )
         assert [(turn.model_calls[0].model_call_id, turn.turn_no) for turn in turns] == [("answered", 1)]
@@ -10300,7 +10386,9 @@ class TestTurnsFromModelCalls:
         ]
         invocations = [self._invocation("assistant", ["owned"]), self._invocation("user", [])][:invocation_count]
 
-        turns = nemo_gym.rollout_collection._turns_from_model_calls("task", "rollout", invocations, calls, None)
+        turns = nemo_gym.rollouts.rollout_collection._turns_from_model_calls(
+            "task", "rollout", invocations, calls, None
+        )
 
         assert [turn.model_calls[0].model_call_id for turn in turns] == ["owned"]
 
@@ -10327,7 +10415,7 @@ class TestTurnsFromModelCalls:
     @pytest.mark.parametrize("reference_key", ["model_call_id", "response_id"])
     @pytest.mark.parametrize("declared_verifier", [False, True])
     def test_judge_capture_does_not_become_a_policy_turn(self, reference_key: str, declared_verifier: bool) -> None:
-        from nemo_gym.health.checks import (
+        from nemo_gym.rollouts.health.checks import (
             _bind_policy_call_views,
             _normalized_trajectory_calls,
             _rollout_token_count_mismatch,
@@ -10622,7 +10710,7 @@ class TestEnvironmentServerRouting:
     async def test_the_timing_table_reads_an_episode_reply_as_saved_health_does(
         self, monkeypatch: pytest.MonkeyPatch, reply: dict, timed_out: bool
     ) -> None:
-        from nemo_gym.rollout_collection import RunTimingReport, _episode_record
+        from nemo_gym.rollouts.rollout_collection import RunTimingReport, _episode_record
 
         envelope = {
             "episode_id": {"rollout_id": "0-0", "attempt": 0},
@@ -10669,7 +10757,7 @@ class TestEnvironmentServerRouting:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A row that went out without a materialized task is not projected, even if its reply looks like one."""
-        from nemo_gym.rollout_collection import RunTimingReport
+        from nemo_gym.rollouts.rollout_collection import RunTimingReport
 
         reply = {"episode_id": {"rollout_id": "0-0"}, "task_id": {"task_id": "x"}, "agent_timed_out": True}
         install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, reply)))
@@ -10720,7 +10808,7 @@ class TestEnvironmentServerRouting:
             num_repeats=1,
         )
 
-        assert nemo_gym.rollout_collection._environment_server_for_config_row(row, config) == "environment"
+        assert nemo_gym.rollouts.rollout_collection._environment_server_for_config_row(row, config) == "environment"
 
     async def test_routes_legacy_row_to_selected_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         payload = {
@@ -11054,9 +11142,9 @@ class TestEnvironmentServerRouting:
                 "trajectory": {"task_id": "a", "rollout_id": "0-a", "turns": []},
             },
         }
-        assert nemo_gym.rollout_collection._is_episode_response(reply)
+        assert nemo_gym.rollouts.rollout_collection._is_episode_response(reply)
 
-        record = nemo_gym.rollout_collection._episode_record(reply)
+        record = nemo_gym.rollouts.rollout_collection._episode_record(reply)
 
         assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
         assert record[NG_TERMINAL_KEY] is False
@@ -11066,10 +11154,10 @@ class TestEnvironmentServerRouting:
         assert record["ng_agent_observations"] == {"source": "stirrup", "records": []}
         # The harness's own turns before the failure land in the producer's slot, as they do on a result.
         assert record["ng_trajectory"] == {"task_id": "a", "rollout_id": "0-a", "turns": []}
-        assert record[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
+        assert record[nemo_gym.rollouts.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
         assert "reward" not in record
 
-        terminal = nemo_gym.rollout_collection._episode_record(
+        terminal = nemo_gym.rollouts.rollout_collection._episode_record(
             self._episode_identity("a") | {"failure": {"failure_reason": "bad task", "terminal": True}}
         )
         assert terminal[NG_TERMINAL_KEY] is True
@@ -11087,18 +11175,20 @@ class TestEnvironmentServerRouting:
         }
         reply = self._episode_identity("a") | {"failure": None, "result": result}
 
-        record = nemo_gym.rollout_collection._episode_record(reply)
+        record = nemo_gym.rollouts.rollout_collection._episode_record(reply)
 
-        assert record == result | {nemo_gym.rollout_collection.NG_TASK_ID_KEY: {"taskset": "swe_pro", "task_id": "a"}}
+        assert record == result | {
+            nemo_gym.rollouts.rollout_collection.NG_TASK_ID_KEY: {"taskset": "swe_pro", "task_id": "a"}
+        }
         # The envelope is not stored twice: no nested result, no episode_id, no second reward.
         assert "result" not in record and "episode_id" not in record and "failure" not in record
 
     def test_episode_result_is_scored_only_through_its_top_level_reward(self) -> None:
         """Any Environment Server type is scored through top-level reward and reward_components."""
-        scored = nemo_gym.rollout_collection._episode_record(
+        scored = nemo_gym.rollouts.rollout_collection._episode_record(
             self._episode_identity("a") | {"result": {"reward": 0.5, "reward_components": {"quality": 0.5}}}
         )
-        nested = nemo_gym.rollout_collection._episode_record(
+        nested = nemo_gym.rollouts.rollout_collection._episode_record(
             self._episode_identity("b") | {"result": {"verification": {"reward": 1.0}}}
         )
 
@@ -11111,7 +11201,7 @@ class TestEnvironmentServerRouting:
         reply = self._episode_identity("a") | {"result": {"reward": 1.0, "ng_perf": {}}}
 
         with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_perf'\]"):
-            nemo_gym.rollout_collection._episode_record(reply)
+            nemo_gym.rollouts.rollout_collection._episode_record(reply)
 
     async def test_task_data_provenance_copies_only_the_digest_keys(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -11127,7 +11217,7 @@ class TestEnvironmentServerRouting:
         from nemo_gym.data.tasks.harbor.digest import DATASET_DIGEST_KEY
 
         assert PROVENANCE_KEYS == (DIGEST_KEY, DATASET_DIGEST_KEY)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: {})
         task_data = {
             NG_DIGEST_KEY: "a" * 64,
             NG_DATASET_DIGEST_KEY: "b" * 64,
@@ -11200,7 +11290,7 @@ class TestEnvironmentServerRouting:
             NG_FAILURE_JUDGE_ERROR_KEY: "judge timed out",
         }
 
-        record = nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
+        record = nemo_gym.rollouts.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
 
         assert record[NG_FAILURE_CLASS_KEY] == "judge_failed"
         assert record[NG_FAILURE_JUDGE_ERROR_KEY] == "judge timed out"
@@ -11209,31 +11299,31 @@ class TestEnvironmentServerRouting:
     def test_episode_result_may_not_pair_a_failure_class_with_another_value(self) -> None:
         reply = self._episode_identity("a") | {"result": {"reward": 0.0, NG_FAILURE_CLASS_KEY: "agent_run_error"}}
         with pytest.raises(ValueError, match=rf"reserved for rollout collection: \['{NG_FAILURE_CLASS_KEY}'\]"):
-            nemo_gym.rollout_collection._episode_record(reply)
+            nemo_gym.rollouts.rollout_collection._episode_record(reply)
 
     def test_failed_judge_result_may_not_use_other_collector_keys(self) -> None:
         result = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed", "ng_perf": {}}
         with pytest.raises(ValueError, match=r"reserved for rollout collection: \['ng_perf'\]"):
-            nemo_gym.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
+            nemo_gym.rollouts.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
 
     def test_episode_result_keeps_the_harness_trajectory_for_the_collector(self) -> None:
         """``ng_trajectory`` is the producer slot: an Environment Server forwards the harness's own turns there."""
         trajectory = {"task_id": "a", "rollout_id": "0-a", "turns": []}
         reply = self._episode_identity("a") | {"result": {"reward": 1.0, NG_TRAJECTORY_KEY: trajectory}}
 
-        record = nemo_gym.rollout_collection._episode_record(reply)
+        record = nemo_gym.rollouts.rollout_collection._episode_record(reply)
 
         assert record[NG_TRAJECTORY_KEY] == trajectory and record["reward"] == 1.0
 
     def test_episode_detection_needs_object_identities_and_an_object_failure(self) -> None:
         """An agent reply echoing identity fields as strings is not an episode reply; a bad failure is an error."""
-        is_episode = nemo_gym.rollout_collection._is_episode_response
+        is_episode = nemo_gym.rollouts.rollout_collection._is_episode_response
         assert is_episode(self._episode_identity("a") | {"failure": {"failure_reason": "x", "terminal": True}})
         assert not is_episode({"episode_id": "0-a", "task_id": "a", "reward": 1.0, "failure": {"reason": "echoed"}})
         assert not is_episode(self._episode_identity("a") | {"reward": 1.0})
 
         with pytest.raises(ValueError, match="non-object failure: 'timeout'"):
-            nemo_gym.rollout_collection._episode_record(
+            nemo_gym.rollouts.rollout_collection._episode_record(
                 self._episode_identity("a") | {"result": None, "failure": "timeout"}
             )
 
@@ -11254,7 +11344,7 @@ class TestEnvironmentServerRouting:
 
         assert result["reward"] == 1.0
         assert NG_FAILURE_CLASS_KEY not in result
-        assert nemo_gym.rollout_collection._materialized_taskset(flat) is None
+        assert nemo_gym.rollouts.rollout_collection._materialized_taskset(flat) is None
 
     async def test_call_aggregate_metrics_groups_by_environment_server(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -11275,7 +11365,7 @@ class TestEnvironmentServerRouting:
             TASK_INDEX_KEY_NAME: 0,
             ROLLOUT_INDEX_KEY_NAME: 0,
             NG_ENVIRONMENT_SERVER_KEY: "environment",
-            nemo_gym.rollout_collection.NG_TASK_ID_KEY: {"taskset": "swe_pro", "task_id": "a"},
+            nemo_gym.rollouts.rollout_collection.NG_TASK_ID_KEY: {"taskset": "swe_pro", "task_id": "a"},
             "reward": 1.0,
             "response": {"usage": {"tokens": 3}},
         }
@@ -11370,7 +11460,9 @@ class TestEnvironmentServerRouting:
 
         client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         client.global_config_dict = self._mixed_batch_config()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict
+        )
 
         await RolloutCollectionHelper().run_from_config(
             RolloutCollectionConfig(
@@ -11382,7 +11474,7 @@ class TestEnvironmentServerRouting:
 
         [record] = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
         assert record[NG_ENVIRONMENT_SERVER_KEY] == "legacy_environment"
-        assert record[nemo_gym.rollout_collection.NG_RESULT_TYPE_KEY] == "legacy_agent"
+        assert record[nemo_gym.rollouts.rollout_collection.NG_RESULT_TYPE_KEY] == "legacy_agent"
         assert record[AGENT_REF_KEY_NAME] == {"name": "hermes_legacy"}
 
     async def test_progress_reward_averages_only_results_that_report_a_reward(
@@ -11411,11 +11503,13 @@ class TestEnvironmentServerRouting:
 
         client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         client.global_config_dict = self._mixed_batch_config()
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict)
-        exported: list[dict] = []
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [object()])
         monkeypatch.setattr(
-            nemo_gym.rollout_collection, "export_metrics", lambda metrics, **_: exported.append(metrics)
+            nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: client.global_config_dict
+        )
+        exported: list[dict] = []
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_exporters", lambda: [object()])
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "export_metrics", lambda metrics, **_: exported.append(metrics)
         )
 
         await RolloutCollectionHelper().run_from_config(
@@ -11489,17 +11583,17 @@ class TestEnvironmentServerRouting:
 
         assert [server for server, _ in dispatched] == ["environment", "environment"]
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
-        assert [r[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted] == ["b"]
+        assert [r[nemo_gym.rollouts.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted] == ["b"]
         assert persisted[0]["reward"] == 1.0
         assert persisted[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
-        assert persisted[0][nemo_gym.rollout_collection.NG_RESULT_TYPE_KEY] == "single_agent"
+        assert persisted[0][nemo_gym.rollouts.rollout_collection.NG_RESULT_TYPE_KEY] == "single_agent"
         assert "result" not in persisted[0] and "episode_id" not in persisted[0]
         failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
         assert len(failures) == 1
         assert failures[0][NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
         assert failures[0][NG_TERMINAL_KEY] is False
         assert failures[0][NG_ENVIRONMENT_SERVER_KEY] == "environment"
-        assert failures[0][nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
+        assert failures[0][nemo_gym.rollouts.rollout_collection.NG_TASK_ID_KEY]["task_id"] == "a"
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
             ".json"
         )
@@ -11517,7 +11611,10 @@ class TestEnvironmentServerRouting:
         assert body["task"]["task_id"]["task_id"] == "a"
         assert body["episode_id"]["attempt"] == 1
         persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
-        assert sorted(r[nemo_gym.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted) == ["a", "b"]
+        assert sorted(r[nemo_gym.rollouts.rollout_collection.NG_TASK_ID_KEY]["task_id"] for r in persisted) == [
+            "a",
+            "b",
+        ]
         assert all(r[NG_ENVIRONMENT_SERVER_KEY] == "environment" for r in persisted)
 
 
@@ -11554,18 +11651,21 @@ class TestMultiAgentEnvironmentServers:
     def test_results_are_attributed_to_one_agent_only_when_the_server_has_one(
         self, server: str, agent: str | None
     ) -> None:
-        row = {nemo_gym.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: server}
+        row = {nemo_gym.rollouts.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: server}
 
         assert RolloutCollectionHelper._agent_name_for_row(row, self._config()) == agent
 
     def test_a_row_may_name_any_agent_of_its_environment_server(self) -> None:
-        row = {nemo_gym.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: "conversation", "agent_ref": {"name": "user"}}
+        row = {
+            nemo_gym.rollouts.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: "conversation",
+            "agent_ref": {"name": "user"},
+        }
 
         RolloutCollectionHelper._validate_environment_servers([row], self._config())
 
     def test_a_row_naming_another_agent_is_rejected(self) -> None:
         row = {
-            nemo_gym.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: "conversation",
+            nemo_gym.rollouts.rollout_collection.NG_ENVIRONMENT_SERVER_KEY: "conversation",
             "agent_ref": {"name": "outsider"},
         }
 
@@ -11727,7 +11827,7 @@ class TestLiveHealthEvaluation:
         install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
         if stub_health:
             monkeypatch.setattr(
-                nemo_gym.rollout_collection,
+                nemo_gym.rollouts.rollout_collection,
                 "_record_rollout_health",
                 lambda result, outcome, ignored, span_context=None: evaluated.append((outcome, result)),
             )
@@ -11744,7 +11844,7 @@ class TestLiveHealthEvaluation:
                 1: {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_invalid"},
             },
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_metrics_exporter_active", lambda: True)
 
         await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
 
@@ -11765,8 +11865,8 @@ class TestLiveHealthEvaluation:
         expected: int,
     ) -> None:
         evaluated = self._install(monkeypatch, bodies={0: {"reward": 1.0}, 1: {"reward": 1.0}})
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: span_group)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: exporter)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda group: span_group)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_metrics_exporter_active", lambda: exporter)
 
         await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
 
@@ -11812,7 +11912,7 @@ class TestLiveHealthEvaluation:
         expected: list[str],
     ) -> None:
         evaluated = self._install(monkeypatch, bodies={0: {"reward": 1.0}, 1: failed_body})
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_metrics_exporter_active", lambda: True)
 
         await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
 
@@ -11840,9 +11940,9 @@ class TestLiveHealthEvaluation:
                 },
             },
         )
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_metrics_exporter_active", lambda: True)
         monkeypatch.setattr(
-            nemo_gym.rollout_collection,
+            nemo_gym.rollouts.rollout_collection,
             "record_rollout_health",
             lambda verdict, *, outcome, flagged_checks: recorded.append((outcome, verdict)),
         )
@@ -11859,15 +11959,15 @@ class TestLiveHealthEvaluation:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         self._install(monkeypatch, bodies={0: {"reward": 1.0}, 1: {"reward": 1.0}})
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_span_group_enabled", lambda group: True)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "is_metrics_exporter_active", lambda: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_span_group_enabled", lambda group: True)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "is_metrics_exporter_active", lambda: True)
         seen_at_await: list[str] = []
 
         async def cancelled_thread(*args, **kwargs):
             seen_at_await.append(capsys.readouterr().out)
             raise asyncio.CancelledError
 
-        monkeypatch.setattr(nemo_gym.rollout_collection.asyncio, "to_thread", cancelled_thread)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection.asyncio, "to_thread", cancelled_thread)
 
         with pytest.raises(asyncio.CancelledError):
             await RolloutCollectionHelper().run_from_config(self._config(tmp_path))
@@ -11963,7 +12063,7 @@ class TestRecordPolicyModelServer:
         return OmegaConf.create({"my_agent": {"responses_api_agents": {"simple_agent": agent}}})
 
     def test_names_the_agents_policy_server_in_the_capture(self) -> None:
-        from nemo_gym.rollout_collection import _record_policy_model_server
+        from nemo_gym.rollouts.rollout_collection import _record_policy_model_server
 
         result = {"ng_model_call_capture": {"calls": []}}
         config = self._config({"type": "responses_api_models", "name": "policy_model_reasoning_off"})
@@ -11971,7 +12071,7 @@ class TestRecordPolicyModelServer:
         assert result["ng_policy_model_server"] == "policy_model_reasoning_off"
 
     def test_leaves_the_capture_unchanged_without_a_policy_server(self) -> None:
-        from nemo_gym.rollout_collection import _record_policy_model_server
+        from nemo_gym.rollouts.rollout_collection import _record_policy_model_server
 
         for config, agent in ((self._config(None), "my_agent"), (self._config(None), "unknown_agent")):
             result = {"ng_model_call_capture": {"calls": []}}
@@ -11985,9 +12085,9 @@ class TestRecordPolicyModelServer:
 async def test_collection_persists_policy_alias_for_offline_failed_rollout_timing(tmp_path, monkeypatch):
     import time
 
-    from nemo_gym.observability.model_calls import CaptureStore
-    from nemo_gym.rollout_health import health_check_run_dir
-    from tests.unit_tests.test_health_timeouts import exchange
+    from nemo_gym.models import CaptureStore
+    from nemo_gym.rollouts.rollout_health import health_check_run_dir
+    from tests.unit_tests.rollouts.test_health_timeouts import exchange
 
     elapsed = [0.0]
 
@@ -11998,7 +12098,7 @@ async def test_collection_persists_policy_alias_for_offline_failed_rollout_timin
         def __getattr__(self, name):
             return getattr(time, name)
 
-    monkeypatch.setattr(nemo_gym.rollout_collection, "time", Clock())
+    monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "time", Clock())
     config_dict = {
         "my_agent": {
             "responses_api_agents": {
@@ -12006,7 +12106,7 @@ async def test_collection_persists_policy_alias_for_offline_failed_rollout_timin
             }
         }
     }
-    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda *a, **k: config_dict)
+    monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda *a, **k: config_dict)
     (tmp_path / "input.jsonl").write_text(
         json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
     )
@@ -12210,7 +12310,7 @@ class TestSidecarReadersSkipOmittedRows:
         }
 
     def test_run_health_counts_them_missing(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_health import _read_failures, _rollout_accounting
+        from nemo_gym.rollouts.rollout_health import _read_failures, _rollout_accounting
 
         accounting = _rollout_accounting(
             set(),
@@ -12293,7 +12393,7 @@ class TestOmittedRowsAndTheLatestAttempt:
         }
 
     def test_run_health(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_health import _read_failures, _rollout_accounting
+        from nemo_gym.rollouts.rollout_health import _read_failures, _rollout_accounting
 
         accounting = _rollout_accounting(
             set(),
@@ -12315,7 +12415,7 @@ class TestOmittedRowsAndTheLatestAttempt:
 def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     """An Environment Server's failure kind (Harbor's ``harbor:task_deadline``) reaches the sidecar row as it left
     the wire, under the key the metrics label reads; a failure that names no kind adds no key."""
-    import nemo_gym.rollout_collection as rollout_collection
+    import nemo_gym.rollouts.rollout_collection as rollout_collection
     from nemo_gym.server_runtime import EpisodeFailure
 
     failure = EpisodeFailure(

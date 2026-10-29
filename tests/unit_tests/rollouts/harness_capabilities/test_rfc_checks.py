@@ -9,11 +9,11 @@ import json
 import pytest
 from jsonschema import Draft202012Validator
 
-from nemo_gym.harness_capabilities.checker import EvidenceScope, Inspector, inspect_record
-from nemo_gym.harness_capabilities.checks import Check, SchemaCheck
-from nemo_gym.harness_capabilities.cli import inspect_bundle, main
-from nemo_gym.harness_capabilities.results import Results
-from tests.unit_tests.harness_capabilities.synthetic import evidence_record
+from nemo_gym.rollouts import EvidenceScope, inspect_bundle, inspect_record, main
+from nemo_gym.rollouts.harness_capabilities.checker import Inspector
+from nemo_gym.rollouts.harness_capabilities.checks import Check, SchemaCheck
+from nemo_gym.rollouts.harness_capabilities.results import Results
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_record
 
 
 def item_schema(check_id):

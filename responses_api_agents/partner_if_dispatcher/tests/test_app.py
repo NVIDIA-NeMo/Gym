@@ -110,8 +110,8 @@ def test_routes_the_complete_episode_without_rewriting_native_fields(harness):
 
 
 def test_tool_executions_in_the_agent_reply_reach_the_agent_observations():
-    from nemo_gym.harness_capabilities.checker import inspect_record
-    from nemo_gym.rollout_collection import _attach_trajectory_record
+    from nemo_gym.rollouts import inspect_record
+    from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record
 
     module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
     invocation = {

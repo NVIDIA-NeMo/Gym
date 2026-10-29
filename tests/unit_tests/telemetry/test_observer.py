@@ -655,7 +655,7 @@ class TestDriverMetrics:
     def test_output_writes_record_their_duration_and_size(self, collected):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollouts.rollout_collection import _record_output_write
 
         async def run():
             async with observer.observe_event_loop("driver"):
@@ -670,7 +670,7 @@ class TestDriverMetrics:
     def test_nothing_is_recorded_without_an_observer(self):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollouts.rollout_collection import _record_output_write
 
         assert observer.driver_metrics() is None
         _record_output_write(time.perf_counter(), b"row")
@@ -678,7 +678,7 @@ class TestDriverMetrics:
 
 class TestRolloutShape:
     def _record(self, collected, row, result):
-        from nemo_gym.rollout_collection import _record_rollout_shape
+        from nemo_gym.rollouts.rollout_collection import _record_rollout_shape
 
         async def run():
             async with observer.observe_event_loop("driver"):

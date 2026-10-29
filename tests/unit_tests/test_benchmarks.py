@@ -1077,7 +1077,7 @@ class TestMaterializedTasksetBenchmark:
 
         from nemo_gym.benchmarks import BenchmarkConfig
         from nemo_gym.data.dataset_preparation import TrainDataProcessor
-        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
         benchmark = BenchmarkConfig.from_initial_config_dict(
             path=tmp_path / "config.yaml",
@@ -1263,7 +1263,7 @@ class TestMaterializedTasksetBenchmark:
         import json
 
         from nemo_gym.data.dataset_preparation import TrainDataProcessor
-        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
         source = tmp_path / "source.jsonl"
         rows = [{"instance_id": f"task-{index}", "answer": "expected"} for index in range(5)]
@@ -1312,7 +1312,7 @@ class TestAgentPinDiscoveryCollateRollout:
         from nemo_gym.benchmarks import BenchmarkConfig
         from nemo_gym.config.config_types import maybe_get_server_instance_config
         from nemo_gym.data.dataset_preparation import TrainDataProcessor
-        from nemo_gym.rollout_collection import RolloutCollectionHelper
+        from nemo_gym.rollouts import RolloutCollectionHelper
 
         data_fpath = tmp_path / "bench.jsonl"
         data_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")

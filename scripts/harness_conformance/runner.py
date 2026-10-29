@@ -15,12 +15,19 @@ from pathlib import Path
 
 import psutil
 
-from nemo_gym import harness_capabilities
-from nemo_gym.harness_capabilities.behavior import inspect_behavior
-from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
-from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
-from nemo_gym.harness_capabilities.health import inspect_health
-from nemo_gym.harness_capabilities.results import gate_passes, render_matrices
+from nemo_gym.rollouts import (
+    NAMES,
+    EvidenceScope,
+    digest_file,
+    gate_passes,
+    harness_capabilities,
+    inspect_behavior,
+    inspect_bundle,
+    inspect_health,
+    inspect_record,
+    json_rows,
+    render_matrices,
+)
 
 from .episode import HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
@@ -197,7 +204,10 @@ def run_suite(
         },
         health_sources={
             str(p.relative_to(ROOT)): digest_file(p)
-            for p in [ROOT / "nemo_gym/rollout_health.py", *sorted((ROOT / "nemo_gym/health").glob("*.py"))]
+            for p in [
+                ROOT / "nemo_gym/rollouts/rollout_health.py",
+                *sorted((ROOT / "nemo_gym/rollouts/health").glob("*.py")),
+            ]
         },
     )
     (output / "suite.json").write_text(_json(manifest))

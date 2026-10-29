@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import BaseServerConfig
-from nemo_gym.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts import RolloutCollectionHelper
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def load_client(monkeypatch):
         )
 
     loader = Mock(side_effect=load)
-    monkeypatch.setattr("nemo_gym.rollout_collection.setup_server_client_utils", loader)
+    monkeypatch.setattr("nemo_gym.rollouts.rollout_collection.setup_server_client_utils", loader)
     return loader
 
 

@@ -8,7 +8,7 @@ from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
+from nemo_gym.rollouts.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
 
 
 def test_benchmark_agent_has_environment_server(monkeypatch: MonkeyPatch) -> None:

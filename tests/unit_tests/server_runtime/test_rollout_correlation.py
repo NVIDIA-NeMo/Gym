@@ -34,7 +34,7 @@ from nemo_gym.models import (
     install_model_call_capture,
 )
 from nemo_gym.models.model_call_capture import _CaptureMiddleware
-from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+from nemo_gym.rollouts import merge_model_call_capture_into_record
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,

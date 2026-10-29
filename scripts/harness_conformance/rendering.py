@@ -6,7 +6,7 @@
 import re
 from datetime import UTC, datetime
 
-from nemo_gym.harness_capabilities.results import render_matrices
+from nemo_gym.rollouts import render_matrices
 
 from .documentation import BEGIN, END
 from .registry import HARNESSES

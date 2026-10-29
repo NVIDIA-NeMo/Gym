@@ -25,33 +25,32 @@ from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
 from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME
 from nemo_gym.cli.eval import _health_check_collected_rollouts
 from nemo_gym.config import AGENT_REF_KEY_NAME, ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.health.timeouts import (
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts.health.timeouts import (
     ELAPSED_S_KEY,
     LEGACY_TIMEOUT_SIGNALS,
     export_keys,
     read_rollout_timing,
     summarize_timeouts,
 )
-from nemo_gym.health.types import RunHealthLimits
-from nemo_gym.metrics import compute_aggregate_metrics
-from nemo_gym.models import CaptureStore
-from nemo_gym.rollout_collection import (
+from nemo_gym.rollouts.health.types import RunHealthLimits
+from nemo_gym.rollouts.rollout_collection import (
     RolloutAggregationConfig,
     RolloutAggregationHelper,
-    RolloutCollectionConfig,
-    RolloutCollectionHelper,
     _attach_trajectory_record,
 )
-from nemo_gym.rollout_health import health_check_run_dir
+from nemo_gym.rollouts.rollout_health import health_check_run_dir
 from nemo_gym.utils import failures_path_for
-from tests.unit_tests.test_rollout_collection import (  # noqa: F401 - fixture
+from tests.unit_tests.rollouts.test_rollout_collection import (  # noqa: F401 - fixture
     FakeResponse,
     empty_global_config,
     install_fake_server_client,
 )
 
 
-REPO_ROOT = Path(__file__).parents[2]
+REPO_ROOT = Path(__file__).parents[3]
 T0 = 1_000_000.0  # Unix time at which a rollout's first call starts.
 
 

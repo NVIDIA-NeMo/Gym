@@ -2145,7 +2145,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
     from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
     from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     agent, sandbox = setup
     provider_failure = outcome == "provider-failure"

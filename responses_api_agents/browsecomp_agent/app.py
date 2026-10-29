@@ -935,7 +935,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 flush=True,
             )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
-            # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
+            # the collector treats as fatal (raise_for_status in nemo_gym/rollouts/rollout_collection.py)
             # and every remaining sample dies with it — that cost two full multi-node
             # allocations, each dying part-way through a run on one bad sample.
             #
@@ -957,7 +957,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # EXCEPT when the HARNESS is what broke. Then nothing about this sample failed, so
             # scoring it 0 is wrong, and persisting a row is worse: _load_from_cache keys on
             # (task_index, rollout_index) and would treat it as permanently done. NG_NO_PERSIST_KEY
-            # writes no row at all (nemo_gym/rollout_collection.py), so resume's set-difference
+            # writes no row at all (nemo_gym/rollouts/rollout_collection.py), so resume's set-difference
             # re-dispatches it on the next chain-hop. The 4h cluster cap makes chain-hops
             # unavoidable on a 1266-sample run, so this path is load-bearing, not a corner case.
             # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.

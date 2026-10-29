@@ -35,7 +35,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import CaptureStore, PermanentEndpointError
 from nemo_gym.models.model_call_capture import _CaptureMiddleware
-from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.rollouts.model_calls import aggregate_model_call_metrics, read_model_call_records
 from nemo_gym.server_runtime import server_utils
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (

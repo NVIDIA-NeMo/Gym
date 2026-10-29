@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
+from nemo_gym.rollouts.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
 from responses_api_agents.hermes_agent.app import HermesAgentConfig
 
 

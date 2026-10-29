@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.rollout_outcomes import RolloutFailure
+from nemo_gym.rollouts.rollout_outcomes import RolloutFailure
 from nemo_gym.server_runtime import BaseEpisodeResponse, EpisodeFailure
 
 

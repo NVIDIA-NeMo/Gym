@@ -27,7 +27,7 @@ from aiohttp import ClientResponseError, ClientSession, web
 from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 
-import nemo_gym.rollout_collection as rollout_collection_module
+import nemo_gym.rollouts.rollout_collection as rollout_collection_module
 import resources_servers.gdpval.multistage_orchestrator as multistage_module
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.config import (
@@ -39,14 +39,14 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import maybe_rollout_id_from_run_body
 from nemo_gym.models import CaptureStore
-from nemo_gym.rollout_collection import (
+from nemo_gym.rollouts import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
     NG_ENVIRONMENT_SERVER_KEY,
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
-    SharedRolloutCollectionConfig,
     is_terminal_failure,
 )
+from nemo_gym.rollouts.rollout_collection import SharedRolloutCollectionConfig
 from nemo_gym.server_runtime import lost_session_verification
 from nemo_gym.utils import aggregation_sources_path_for, failures_path_for
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy

@@ -312,7 +312,7 @@ def _materialize_dataset(config: dict, agent_name: str, source_rows: list[dict],
 
 
 def _collect_rows(config: dict, source_rows: list[dict], tmp_path: Path) -> list[dict]:
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
     prepared = tmp_path / "prepared.jsonl"
     prepared.write_text("".join(json.dumps(row) + "\n" for row in source_rows))

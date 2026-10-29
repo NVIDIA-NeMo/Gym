@@ -3385,7 +3385,7 @@ def test_generated_run_passes_full_config_validation(tmp_path, monkeypatch, task
     from nemo_gym.cli.main import _merge_config_paths
     from nemo_gym.config import GlobalConfigDictParser, get_global_config_dict
     from nemo_gym.data.tasks.harbor.materialize import agent_instance, environment_server_instance
-    from nemo_gym.rollout_collection import E2ERolloutCollectionConfig
+    from nemo_gym.rollouts.rollout_collection import E2ERolloutCollectionConfig
 
     write_task(tmp_path / taskset / "a")
     prepared = prepare_target(str(tmp_path / taskset), output_root=tmp_path / "out")
@@ -4752,7 +4752,7 @@ class TestTrainingMetadata:
         dispatch too, naming the harness and the dataset."""
         from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
         from nemo_gym.data.tasks.harbor.materialize import environment_server_instance
-        from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
+        from nemo_gym.rollouts import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -4786,7 +4786,7 @@ class TestTrainingMetadata:
         while an admitted harness's run config keeps the list and passes the same guard."""
         from nemo_gym.data import ORACLE_AGENT
         from nemo_gym.data.tasks.harbor.materialize import environment_server_instance
-        from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
+        from nemo_gym.rollouts import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
