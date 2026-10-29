@@ -91,15 +91,9 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
     )
 
-    @field_validator("nooa")
-    @classmethod
-    def require_embedded_execution(cls, value: NOOAInvocationConfig) -> NOOAInvocationConfig:
-        if value.execution_mode != "embedded":
-            raise ValueError(
-                "nooa.execution_mode='sandboxed' is unavailable in this agent server; "
-                "use 'embedded' until sandbox sessions are supported"
-            )
-        return value
+    max_output_tokens: int | None = Field(default=None, gt=0, description="Per-model-call output ceiling.")
+    sandbox_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
+    session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
 
 
 def load_agent_class(path: str) -> type[Agent]:

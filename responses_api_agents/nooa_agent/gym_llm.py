@@ -311,7 +311,11 @@ class GymResponsesLLM(UnifiedLLM):
                 request[destination] = value
 
         # Explicit Gym rollout controls take precedence over NOOA's per-call settings.
-        request.update(self._sampling_overrides)
+        for name, value in self._sampling_overrides.items():
+            if name == "max_output_tokens" and request.get(name) is not None:
+                request[name] = min(request[name], value)
+            else:
+                request[name] = value
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         call = GymModelCall(
             model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),

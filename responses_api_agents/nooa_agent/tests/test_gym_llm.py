@@ -245,6 +245,7 @@ async def test_replays_nooa_history_without_injecting_prior_response_metadata() 
     ("overrides", "expected"),
     [
         ({}, {"temperature": 0.7, "top_p": 0.9, "max_output_tokens": 128}),
+        ({"max_output_tokens": 256}, {"temperature": 0.7, "top_p": 0.9, "max_output_tokens": 128}),
         ({"temperature": 0}, {"temperature": 0, "top_p": 0.9, "max_output_tokens": 128}),
         (
             {"temperature": 0, "top_p": 0.8, "max_output_tokens": 64},

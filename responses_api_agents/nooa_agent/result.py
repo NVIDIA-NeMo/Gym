@@ -7,7 +7,7 @@ import aiohttp
 from openai.types.responses.response_error import ResponseError
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
 from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
 from responses_api_agents.nooa_agent.runner import NOOARunResult
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
@@ -43,7 +43,19 @@ def set_response_lifecycle(
 
 def finalize_run_result(run_result: NOOARunResult) -> tuple[NeMoGymResponse, AgentObservationBundle]:
     """Preserve the final answer and capture gaps for a completed or partial run."""
-    verify_response, verify_gaps = ensure_verifier_final_message(run_result.episode.response, run_result.return_value)
+    roots = [
+        record
+        for record in run_result.episode.observations.records
+        if isinstance(record, AgentInvocation) and record.parent_invocation_id is None
+    ]
+    terminal_response_id = None
+    if len(roots) == 1:
+        terminal_response_id = next(
+            (call.response_id for call in reversed(roots[0].model_calls) if call.response_id), None
+        )
+    verify_response, verify_gaps = ensure_verifier_final_message(
+        run_result.episode.response, run_result.return_value, terminal_response_id=terminal_response_id
+    )
     observations = finalize_observation_gaps(
         run_result.episode.observations,
         extra_gaps=verify_gaps,

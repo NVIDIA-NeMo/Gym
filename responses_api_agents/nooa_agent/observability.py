@@ -372,6 +372,8 @@ def _ends_with_completed_assistant_message(response: NeMoGymResponse) -> bool:
 def ensure_verifier_final_message(
     response: NeMoGymResponse,
     return_value: Any,
+    *,
+    terminal_response_id: str | None = None,
 ) -> tuple[NeMoGymResponse, list[ObservationGap]]:
     """Add a verifier-facing fallback message without mutating the captured episode."""
 
@@ -399,7 +401,12 @@ def ensure_verifier_final_message(
             detail="NOOA returned a value without a final model-authored message.",
         )
     )
-    return response.model_copy(update={"output": output}), gaps
+    updates = {"output": output}
+    if terminal_response_id is not None:
+        # Only the synthetic return lacks its own served item identity. An
+        # unchanged child-authored answer must keep its existing attribution.
+        updates["metadata"] = {**(response.metadata or {}), "terminal_response_id": terminal_response_id}
+    return response.model_copy(update=updates), gaps
 
 
 def finalize_observation_gaps(
