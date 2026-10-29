@@ -307,24 +307,25 @@ async def test_a_restored_attempt_record_evicted_before_its_cohort_takes_its_res
     await restored.aclose()
 
 
+async def finished_states(config, attempt: int) -> dict:
+    """Export a finished group attempt whose members verified in separate sessions."""
+    server, participant = participant_server(config)
+    sessions = [f"attempt-{attempt}-{index}" for index in range(2)]
+    for index, session_id in enumerate(sessions):
+        participant.seeded(session_id, EpisodeId(rollout_id=f"{session_id}_g{index}"))
+    await asyncio.gather(
+        *(verify_as(server, session_id, member(i, attempt=attempt)) for i, session_id in enumerate(sessions))
+    )
+    states = await server.export_session_states(sessions)
+    await server.aclose()
+    return states
+
+
 async def test_retiring_a_restored_attempt_lets_it_re_form_while_an_older_attempt_is_still_restored(config):
     """A result whose attempt record was evicted stays replayable, so a checkpoint can hold two attempts of a group.
     Retiring the newer one must drop the record that names it, or its restarted rollouts are refused."""
-
-    async def finished_states(attempt: int) -> dict:
-        server, participant = participant_server(config)
-        sessions = [f"attempt-{attempt}-{index}" for index in range(2)]
-        for index, session_id in enumerate(sessions):
-            participant.seeded(session_id, EpisodeId(rollout_id=f"{session_id}_g{index}"))
-        await asyncio.gather(
-            *(verify_as(server, session_id, member(i, attempt=attempt)) for i, session_id in enumerate(sessions))
-        )
-        states = await server.export_session_states(sessions)
-        await server.aclose()
-        return states
-
     restored, _ = participant_server(config)
-    await restored.restore_session_states(await finished_states(0) | await finished_states(1))
+    await restored.restore_session_states(await finished_states(config, 0) | await finished_states(config, 1))
     for index in range(2):
         await restored.retire_session_state(f"attempt-1-{index}")
     assert restored._latest_group_attempts == {} and restored._restored_watermarks == set()
@@ -339,6 +340,28 @@ async def test_retiring_a_restored_attempt_lets_it_re_form_while_an_older_attemp
         timeout=0.5,
     )
     assert all(reward.reward == 3.0 for reward in rewards)
+    await restored.aclose()
+
+
+@pytest.mark.parametrize("restore_order", [(0, 1), (1, 0)])
+async def test_retiring_an_older_restored_attempt_keeps_the_newer_attempts_record(config, restore_order):
+    """Retiring an older attempt must keep the newer record, so an old rollout is immediately refused."""
+    restored, _ = participant_server(config)
+    states = {}
+    for attempt in restore_order:
+        states.update(await finished_states(config, attempt))
+    await restored.restore_session_states(states)
+    for index in range(2):
+        await restored.retire_session_state(f"attempt-0-{index}")
+    assert restored._latest_group_attempts["group"].latest_attempt == 1
+    assert restored._restored_watermarks == {"group"}
+    assert_cohort_indices_match(restored)
+    with pytest.raises(genrm.HTTPException) as refused:
+        await asyncio.wait_for(verify_as(restored, "restart", member(0, attempt=0, answer="new")), timeout=0.5)
+    assert refused.value.status_code == 409 and "superseded" in refused.value.detail
+    replay = await asyncio.wait_for(verify_as(restored, "attempt-1-0", member(0, attempt=1)), timeout=0.5)
+    assert replay.reward == states["attempt-1-0"]["result"]["reward"]
+    restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 
 

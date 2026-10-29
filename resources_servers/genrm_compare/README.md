@@ -506,10 +506,13 @@ a replay must return. Its attempt record is kept too, so the group still refuses
 pruning keeps either record, that record's retention restarts. A kept record does not count toward
 `max_terminal_cohorts`, so it cannot evict another group's record. Each prune checks the longest-kept record
 again, and a record becomes an ordinary tombstone once its members have closed their sessions or been retired.
-A newer attempt of the group still removes it, because the caller has replaced the whole group. Restored groups
-join the same retention order as other finished groups. After a restore, a member of a superseded group therefore
-has no saved outcome. If the newer attempt's result was restored too, its replay is refused as superseded (409);
-otherwise it re-forms the old attempt and fails after `cohort_collection_timeout_s` (503).
+A newer attempt of the group still removes it, because the caller has replaced the whole group.
+Restored groups join the same retention order as other finished groups. After a restore, a member of a superseded
+group therefore has no saved outcome. If the newer attempt's result was restored too, its replay is refused as
+superseded (409). Otherwise its replay re-forms the old attempt. If every member of the old attempt replays before
+a member of the newer attempt arrives, the old attempt is judged again and its members get new outcomes, which
+the caller discards because it replaced the group. If only some members replay, the old attempt fails after
+`cohort_collection_timeout_s` (503), or when the newer attempt supersedes it.
 
 Only groups with an explicit `_ng_group_id` are exported. A member that is started over from its input while
 its restored group still holds continued members gets a conflicting response for its slot; the controller

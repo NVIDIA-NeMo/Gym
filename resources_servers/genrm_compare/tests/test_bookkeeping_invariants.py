@@ -121,6 +121,9 @@ async def test_outcomes_held_for_a_checkpoint_do_not_yield_while_holding_locks(s
     assert not any(task.done() for task in members)
     await participant.open_admission()
     outcomes = await asyncio.gather(*members, return_exceptions=True)
-    assert all(isinstance(outcome, JudgeError) for outcome in outcomes) == judge_fails
+    if judge_fails:
+        assert all(isinstance(outcome, JudgeError) for outcome in outcomes)
+    else:
+        assert [outcome.reward for outcome in outcomes] == [3.0, 3.0]
     await asyncio.sleep(0)
     assert not violations

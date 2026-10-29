@@ -1147,8 +1147,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cohort goes: a restore can install two attempts of one group, and an older one must not keep the newer one's.
         """
         group_id = cohort.group_id
-        watermark = self._latest_group_attempts.get(group_id)
-        if group_id in self._restored_watermarks and watermark is not None and watermark.cohort_key == cohort.key:
+        if group_id in self._restored_watermarks and self._latest_group_attempts[group_id].cohort_key == cohort.key:
             self._drop_watermark(group_id)
 
     def _drop_cohort(self, key: str) -> None:

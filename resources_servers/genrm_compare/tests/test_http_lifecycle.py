@@ -89,6 +89,8 @@ async def services(config, monkeypatch):
     config.num_rollouts_per_prompt = 4
     config.cohort_collection_timeout_s = 3
     config.cohort_evaluation_timeout_s = 3
+    # Real HTTP judge calls must not race the per-request deadline on a loaded runner.
+    config.judge_request_timeout_s = 2.0
     resource = GenRMCompareResourcesServer(config=config, server_client=client)
     state = SimpleNamespace(
         policy_calls=0,
@@ -331,6 +333,7 @@ async def test_closed_judge_port_is_bounded_despite_transport_retries(services):
     sock.bind(("127.0.0.1", 0))
     # Keep the unlistening port reserved so another service cannot reuse it.
     services.client._server_base_urls["judge"] = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    services.resource.config.judge_request_timeout_s = 0.2
     try:
         started = time.monotonic()
         results = await asyncio.gather(*(run(services, i) for i in range(4)))
@@ -490,8 +493,6 @@ async def test_failed_legacy_collector_requires_fresh_explicit_group(services, t
         num_samples_in_parallel=4,
         disable_health_check=True,
     )
-    # The 500 must reach the judge client before the per-request deadline, even on a loaded runner.
-    services.resource.config.judge_request_timeout_s = 2.0
     services.judge_status = 500
     with pytest.raises(RuntimeError, match="produced a result"):
         await collection.RolloutCollectionHelper().run_from_config(config)
@@ -554,9 +555,6 @@ async def test_transient_http_failure_recovers_without_regenerating_answers(serv
 
 @pytest.mark.parametrize("recovers", [True, False])
 async def test_interrupted_judge_body_retries_without_regenerating_answers(services, recovers):
-    # Allow Uvicorn to close the truncated response before the independent request
-    # deadline can win on a loaded runner. Keep both failure paths bounded.
-    services.resource.config.judge_request_timeout_s = 2.0
     services.resource.config.cohort_evaluation_timeout_s = 10.0
     services.truncated_judge_responses = 1 if recovers else 100
     results = await asyncio.gather(*(run(services, i) for i in range(4)))
@@ -575,8 +573,6 @@ async def test_interrupted_judge_body_retries_without_regenerating_answers(servi
 @pytest.mark.parametrize("value", ["NaN", "Infinity"])
 @pytest.mark.parametrize("recovers", [False, True])
 async def test_nonfinite_judge_output_uses_parse_retries_over_http(services, value, recovers):
-    # Exercise parse retries, independently of HTTP scheduling on a loaded runner.
-    services.resource.config.judge_request_timeout_s = 2.0
     services.resource.config.cohort_evaluation_timeout_s = 10.0
     invalid = json.dumps({"score_1": value, "score_2": 2, "ranking": 1})
     services.judge_texts = [invalid] * (1 if recovers else 16)
