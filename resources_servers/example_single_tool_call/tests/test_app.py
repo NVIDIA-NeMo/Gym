@@ -26,7 +26,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
 )
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.example_single_tool_call.app import (
     VERIFIER_FIXTURE,

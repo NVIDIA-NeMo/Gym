@@ -39,6 +39,7 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
 )
 from nemo_gym.agents.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY
+from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
@@ -80,7 +81,6 @@ from nemo_gym.server_runtime._checkpoint.control import (
 )
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,

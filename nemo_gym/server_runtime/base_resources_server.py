@@ -736,7 +736,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         session. An app built without session routing, such as one under ``TestClient``, gives a new session a random
         ID instead, so release by ``body.resources_session_id`` to be correct either way.
 
-        ``nemo_gym.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
+        ``nemo_gym.server_runtime.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
         """
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
