@@ -200,7 +200,7 @@ class SandboxAccess(BaseModel):
 ```python
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox import resolve_provider_config
-from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.config import get_global_config_dict
 
 connection = body.sandbox_access.connection
 provider = create_provider(resolve_provider_config(connection.provider_config_ref, get_global_config_dict()))

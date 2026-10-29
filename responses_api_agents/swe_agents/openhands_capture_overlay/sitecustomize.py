@@ -41,18 +41,22 @@ _MODEL_SERVER_BASE_URL_ENV = "NEMO_GYM_MODEL_SERVER_BASE_URL"
 
 def _install_capture_route_patch() -> None:
     try:
-        from nemo_gym import server_utils
+        from nemo_gym.client import ServerClient, http_client
     except ModuleNotFoundError as error:
         # The base Miniforge interpreter also loads this module without ``nemo-gym`` installed.
         # Model requests run in the OpenHands virtual environment.
         # That environment has ``nemo-gym`` installed and applies the patch.
         if error.name == "nemo_gym":
             return
-        raise
+        if error.name != "nemo_gym.client":
+            raise
+        # The nemo-gym that nv-OpenHands locks can predate the nemo_gym.client package.
+        from nemo_gym import server_utils as http_client  # path before nemo_gym 0.8.0
+        from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
 
     from pydantic import BaseModel
 
-    server_client_cls = server_utils.ServerClient
+    server_client_cls = ServerClient
     if getattr(server_client_cls.request, "_nemo_gym_capture_route_patch", False):
         return
 
@@ -75,7 +79,7 @@ def _install_capture_route_patch() -> None:
         if "json" in kwargs and isinstance(kwargs["json"], BaseModel):
             kwargs["json"] = kwargs["json"].model_dump(exclude_unset=True)
 
-        return await server_utils.request(
+        return await http_client.request(
             method=method,
             url=f"{model_server_base_url.rstrip('/')}{url_path}",
             _internal=True,

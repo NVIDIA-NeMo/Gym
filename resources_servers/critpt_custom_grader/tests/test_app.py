@@ -16,11 +16,11 @@ from fastapi.exceptions import RequestValidationError
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym import server_utils
 from nemo_gym.client import ServerClient
 from nemo_gym.config import DatasetConfig, visit_resources_server
 from nemo_gym.config.config_types import ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
 from nemo_gym.core import failure_kinds
+from nemo_gym.server_runtime import base_server
 from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader import task_data as task_schema
@@ -1526,16 +1526,16 @@ def test_contributed_yaml_loads_actual_server_schemas(operator_yaml, monkeypatch
     ResourcesServerTypeConfig.model_validate(operator_yaml[GRADER_NAME])
     ResponsesAPIAgentServerTypeConfig.model_validate(operator_yaml[AGENT_NAME])
     reader = MagicMock(return_value=OmegaConf.create(operator_yaml))
-    monkeypatch.setattr(server_utils, "get_global_config_dict", reader)
+    monkeypatch.setattr(base_server, "get_global_config_dict", reader)
     loaded = {}
     for name, server_class, config_class in (
         (GRADER_NAME, adapter.CritPtCustomGraderServer, adapter.CritPtCustomGraderConfig),
         (AGENT_NAME, SimpleAgent, SimpleAgentConfig),
     ):
         selector = MagicMock(return_value=name)
-        monkeypatch.setattr(server_utils, "getenv", selector)
+        monkeypatch.setattr(base_server, "getenv", selector)
         loaded[name] = server_class.load_config_from_global_config()
-        selector.assert_called_once_with(server_utils.NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
+        selector.assert_called_once_with(base_server.NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
         assert isinstance(loaded[name], config_class)
         assert loaded[name].name == name and loaded[name].entrypoint == "app.py"
     assert reader.call_count == 2
