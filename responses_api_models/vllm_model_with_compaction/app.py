@@ -16,7 +16,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_streaming import sanitize_streaming_responses_body
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
@@ -51,6 +50,12 @@ class VLLMModelWithCompaction(VLLMModel):
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/tokenize")})
     _TOKENIZE_CHAT_FIELDS = (*VLLMModel._TOKENIZE_CHAT_FIELDS, "required_prefix_token_ids")
 
+    def model_post_init(self, context):
+        # This server's own dispatch never sets the unlisted effort aside, so the option would do nothing.
+        if self.config.forward_unvalidated_reasoning_effort:
+            raise ValueError("vllm_model_with_compaction does not support forward_unvalidated_reasoning_effort")
+        super().model_post_init(context)
+
     def setup_webserver(self):
         app = super().setup_webserver()
         app.post("/tokenize")(self.tokenize)
@@ -83,7 +88,7 @@ class VLLMModelWithCompaction(VLLMModel):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, namespace_map = sanitize_streaming_responses_body(body)
+        cleaned, namespace_map = self._sanitize_streaming_responses_body(body)
         params = _validate_context_compaction_params(cleaned)
         return await self._stream_responses(request, params, namespace_map)
 

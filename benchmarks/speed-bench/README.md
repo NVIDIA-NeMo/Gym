@@ -11,15 +11,46 @@ This benchmark is governed by the
 
 ## Configs
 
-Skills' upstream prepare supports six configs:
+Gym supports preparing and running all six configs:
 
 - `qualitative` — single fixed mixture of qualitative prompts.
 - `throughput_{1k,2k,8k,16k,32k}` — token-budgeted mixtures used to
   measure SD throughput at varying prompt lengths.
 
-This Gym port defaults to preparing **`qualitative` and `throughput_2k`**
-to keep iteration cheap; `prepare.py` accepts `--config all` to prepare
-the full set.
+Select `--benchmark speed-bench/config_<name>` for any of these configs.
+Each has its own dataset, agent, resources server, and environment server.
+Each selects a small preparation wrapper that delegates to shared Speed Bench
+logic. All splits can share one policy model.
+
+The default Hugging Face source is `nvidia/SPEED-Bench`. Override it for preparation:
+
+```bash
+gym eval prepare \
+    --benchmark speed-bench/config_qualitative \
+    --benchmark speed-bench/config_throughput_32k \
+    +prepare_script_args.dataset_repo=<org>/<private-SPEED-Bench-repo>
+```
+
+Optionally add `+prepare_script_args.dataset_revision=<commit-sha>` for a pinned
+source. Private repositories use your existing Hugging Face login or `HF_TOKEN`.
+The replacement repository must provide the
+selected configs' `test` split with compatible `turns` and metadata fields.
+
+Each dataset's `prepare_script` selects its split. Gym's existing global
+`prepare_script_args` pass repository and revision overrides to every selected
+wrapper without changing its split selection. Run `gym eval prepare` explicitly
+before evaluation; `gym eval run` does not invoke these preparation scripts when
+the input files are missing.
+The standalone equivalent also supports preparing all six:
+
+```bash
+# Install preparation dependencies into the active Gym Python environment.
+uv pip install numpy pandas tiktoken
+python benchmarks/speed-bench/prepare.py --config all \
+    --dataset-repo <org>/<private-SPEED-Bench-repo> \
+    --dataset-revision <commit-sha>
+```
+
 
 ## Multi-turn shape
 
@@ -73,7 +104,9 @@ gym env start \
     --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
     --benchmark speed-bench/config_qualitative \
     --config benchmarks/speed-bench/configs/local_vllm_metrics.yaml \
-    +policy_model._inherit_from=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
+    +policy_model._inherit_from=Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
+    ++policy_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4 \
+    ++policy_model.responses_api_models.local_vllm_model.sampling_overrides.max_tokens=8192
 
 # Collecting rollouts
 gym eval run --no-serve \
@@ -83,7 +116,14 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
-The same overlay works with `speed-bench/config_throughput_2k` or multiple
+For another split, replace `qualitative` in the benchmark selector, agent name,
+input filename, and output filename. The generation cap applies to each model
+call, not the whole multi-turn task. Set the model's context window large enough
+for the prompt, accumulated conversation, and output; a split name does not set
+the context window. The example allocates four GPUs; adjust tensor parallelism
+to your hardware.
+
+The same overlay works with every split or multiple
 `--benchmark` selections; load it once. It targets the standard `policy_model`
 binding and is only for Gym-managed `local_vllm_model` servers. To request
 `detailed` metrics, add
@@ -98,9 +138,6 @@ produce `spec_decode_unavailable: true` and null acceptance metrics.
 
 ## Deferred items
 
-- **`throughput_{1k,8k,16k,32k}`**: `prepare.py` knows how to prepare
-  these but they're not in the default config; pass
-  `--config throughput_8k` etc. to prepare them explicitly.
 - **Per-position acceptance rates**: recorded per-row but not surfaced in
   `get_key_metrics()` — they're only useful for deeper SD analysis.
 - **SGLang per-request metrics file**: the Prometheus-delta SGLang path is
