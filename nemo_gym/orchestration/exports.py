@@ -84,7 +84,9 @@ def export_run_settings(
         full.setdefault("output_dirpath", str(bench_dir / "exports" / "atif"))
     elif name == "evalrdl":
         meta = full.setdefault("meta", {})
-        meta.setdefault("benchmark", benchmark_name)
+        # Anything but a mapping is left for the settings model to reject with its own message.
+        if isinstance(meta, dict):
+            meta.setdefault("benchmark", benchmark_name)
     return full
 
 
