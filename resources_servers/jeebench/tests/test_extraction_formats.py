@@ -192,6 +192,11 @@ def test_explanatory_option_conclusions(text, kind, expected):
         (
             "So the rate is given by\n\nY = 6.75\n\ni.e. r = 6.75e-5, with concentration irrelevant.",
             "$Y$ का मान क्या है?",
+            "None",
+        ),
+        (
+            "So the rate is given by\n\nY = 6.75\n\ni.e. r = 6.75e-5.",
+            "$Y$ का मान क्या है?",
             "6.75",
         ),
         ("Y = 8.25\n\nThe corresponding rate is 8.25e-5.", "What is the value of $Y$?", "8.25"),
@@ -274,8 +279,8 @@ def test_multiple_requested_symbols_do_not_select_the_last_one():
 @pytest.mark.parametrize(
     "text,question,expected",
     [
-        (r"T=\mu v^{2}" + "\n\n" + r"T=5\;{\rm N}", "What is the value of $T$?", "5.0"),
-        ("n = x/y\n\nThe range is reduced.\n\nn = 0.95", "What is the value of $n$?", "0.95"),
+        (r"T=\mu v^{2}" + "\n\nFinal answer: " + r"T=5\;{\rm N}", "What is the value of $T$?", "5.0"),
+        ("n = x/y\n\nThe range is reduced.\n\nFinal answer: n = 0.95", "What is the value of $n$?", "0.95"),
         (r"\det A = 5", "$A$ के सारणिक का मान क्या है?", "5"),
         ("The product of the four solutions is 1.", "$x$ के सभी मानों का गुणनफल क्या है?", "1"),
         ("x = 2\n\n0.50 kg", "What is the value of $x$?", "0.5"),
@@ -291,6 +296,19 @@ def test_requested_symbol_is_not_a_transformed_or_counted_quantity(question):
     from resources_servers.jeebench.extraction import requested_symbol
 
     assert requested_symbol(question) is None
+
+
+@pytest.mark.parametrize(
+    "text,target",
+    [
+        (r"T=\mu v^{2}" + "\n\n" + r"T=5\;{\rm N}", "T"),
+        ("n = x/y\n\nThe range is reduced.\n\nn = 0.95", "n"),
+    ],
+)
+def test_unmarked_assignment_does_not_discard_unsupported_derivation(text, target):
+    # These previously accepted forms now require an explicit final-answer
+    # boundary; symbolic derivations and unknown prose are not silently ignored.
+    assert extract_answer(text, "Numeric", question=f"What is the value of ${target}$?") == ("None", "unparsed")
 
 
 @pytest.mark.parametrize(

@@ -15,7 +15,7 @@ import unicodedata
 from collections.abc import Callable
 
 
-PARSER_VERSION = "indic-formats-v2.9"
+PARSER_VERSION = "indic-formats-v2.10"
 MAX_PAYLOAD_CHARS = 4096
 # Answer/option vocabulary covers the fourteen languages in the Indic campaign.
 ANSWER_WORDS = (
@@ -380,10 +380,50 @@ def harmless_annotation(text: str) -> bool:
     """Accept complete supported annotations, never arbitrary non-negative prose."""
     return bool(
         re.fullmatch(
-            r"(?:as required|(?:this|it) is the required (?:answer|value|coefficient|result)"
+            r"(?:as required|(?:this|it) is the required (?:answer|value|coefficient|result|coplanar point)"
             r"|this follows from symmetry|(?:as|because) it yields a valid (?:configuration|solution|result)"
+            r"|the calculation is consistent|thus the answer is consistent"
             r"|किया गया|کیا گیا)[.।۔]*",
             text.strip(),
+            re.I,
+        )
+    )
+
+
+def supporting_statement(text: str) -> bool:
+    """Validate a whole supporting statement; unknown prose is not an annotation.
+
+    This deliberately accepts only a small grammar, rather than assuming that
+    the absence of a known negative word makes arbitrary surrounding text safe.
+    """
+    text = text.strip().strip(".,:;।۔ ")
+    if not text or harmless_annotation(text):
+        return True
+    if re.fullmatch(rf"(?:so |therefore,? )?the (?:{VALUE_PATTERN}) is given by", text, re.I):
+        return True
+    relation = re.fullmatch(
+        rf"(?:the (?:corresponding )?(?:{VALUE_PATTERN}|coefficient|drag) is\s+|i\.e\.\s+)"
+        r"(?:[A-Za-z](?:_\{?\w+\}?)?\s*=\s*)?(.+)",
+        text,
+        re.I,
+    )
+    return bool(relation and numeric_value(relation[1]) is not None)
+
+
+def supporting_context(text: str) -> bool:
+    """Require every remaining line, including separate paragraphs, to be supported."""
+    return all(supporting_statement(line) for line in text.splitlines())
+
+
+def choice_gap(text: str) -> bool:
+    """Validate a complete gap between verdicts, without deleting unknown words."""
+    text = text.strip(" \n\t,;:.।۔")
+    return bool(
+        supporting_statement(text)
+        or re.fullmatch(
+            rf"(?:{'|'.join(map(re.escape, CONNECTORS))}|in particular|विशेष रूप से|only|एक\u00ad?मात्र|"
+            rf"(?:the )?(?:{OPTION_PATTERN})|the calculation gives the required (?:ratio|value|result))",
+            text,
             re.I,
         )
     )
@@ -454,8 +494,8 @@ def _roman_to_option(match: re.Match[str]) -> str:
 def choice_assertions(text: str, kind: str, normalize: Callable[[str, str], str | None]) -> str | None:
     """Account for every label in one conclusion, including negative verdicts.
 
-    Only explicit lists and verdicts select options. Surrounding prose can explain
-    them but cannot contain an uncovered label, alternative or negation.
+    Only explicit lists and verdicts select options. Every unmatched fragment
+    must be a supported connective or complete affirmative annotation.
     """
     label = r"(?:[\[(]\s*[A-Da-d]\s*[\])]|(?<![\w{\\])(?-i:[A-D])(?![\w}]))"
     connector = r"\s*(?:,\s*(?:and\s+)?|&|/|" + "|".join(map(re.escape, CONNECTORS)) + r")\s*"
@@ -471,7 +511,7 @@ def choice_assertions(text: str, kind: str, normalize: Callable[[str, str], str 
     selection = re.compile(
         rf"(?:(?:{POSITIVE_PATTERN})(?!\w)\s+{noun}\s*{copula}[:：]?\s*"
         rf"|(?:(?:^|[,;]\s*)(?:the\s+)?|(?:\b(?:which is|this is|quoted as|corresponds to)|i\.e\.)"
-        rf"\s+[^.!?;]{{0,100}}?)\b(?:options?|choices?)\s*(?:(?:is|are)\s*)?[:：]?\s*)"
+        rf"\s+)\b(?:options?|choices?)\s*(?:(?:is|are)\s*)?[:：]?\s*)"
         rf"(?P<labels>{labels})(?:\s+(?:{COPULA_PATTERN})(?!\w))?",
         re.I,
     )
@@ -485,14 +525,18 @@ def choice_assertions(text: str, kind: str, normalize: Callable[[str, str], str 
             values = [re.sub(r"[^A-Da-d]", "", m[0]).upper() for m in re.finditer(label, match["labels"])]
             is_negative = pattern is assertion and match["verdict"].lower() in NEGATIVE_WORDS
             (negative if is_negative else positive).update(values)
-            start, end = match.span() if pattern is assertion else match.span("labels")
+            start, end = match.span()
             covered[start:end] = [True] * (end - start)
     remainder = "".join(" " if covered[i] else char for i, char in enumerate(text))
+    # Keep gaps separate: joining text across a consumed assertion could create
+    # an apparently harmless phrase that was never actually stated.
+    gaps = "".join("\0" if covered[i] else char for i, char in enumerate(text)).split("\0")
     if (
         not positive
         or positive & negative
         or re.search(label, remainder)
         or uncertain(remainder)
+        or not all(choice_gap(gap) for gap in gaps if gap.strip())
         or "?" in text
         or re.search(
             r"\b(?:if|unless|assuming|assume|suppose|whether|considered|possibly|probably|doubt|cannot|can't|don't|doesn't)\b",
@@ -693,7 +737,7 @@ def match_option_text(payload: str, question: str) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def option_verdicts(text: str, kind: str) -> str | None:
+def option_verdicts(text: str, kind: str, normalize: Callable[[str, str], str | None]) -> str | None:
     """Read explicit true/false verdicts only when ALL four options are classified."""
     if kind not in {"MCQ", "MCQ(multiple)"}:
         return None
@@ -710,7 +754,8 @@ def option_verdicts(text: str, kind: str) -> str | None:
     choices = "".join(k for k in "ABCD" if verdicts[k] == {True})
     if kind == "MCQ" and len(choices) != 1:
         return None
-    return choices or "None"
+    # Complete coverage of labels does not license discarding a retraction.
+    return choice_assertions(text, kind, normalize) if choices else None
 
 
 def requested_symbol(question: str) -> str | None:
@@ -748,32 +793,23 @@ def requested_symbol(question: str) -> str | None:
 
 def requested_scalar(text: str, target: str, kind: str, normalize: Callable[[str, str], str | None]) -> str | None:
     """Read affirmative, agreeing assignments with their surrounding context."""
-    start = max(0, len(text) - MAX_PAYLOAD_CHARS)
-    if start:
-        start = text.find("\n", start)
-        if start == -1:
-            return None
-    tail = text[start:]
-    if uncertain(tail) or re.search(r"\b(?:if|unless|unsure|unknown|cannot)\b", tail, re.I):
-        return None
-    assignments = list(re.finditer(rf"(?<![\w\\]){target}\s*(?:=|≈|\\(?:approx|simeq)(?![A-Za-z]))\s*([^\n]+)", tail))
-    if not assignments:
+    # Do not clip away an earlier qualifier to fit a tail window.
+    if len(text) > MAX_PAYLOAD_CHARS or uncertain(text):
         return None
     answers = []
-    for match in assignments:
-        # Never skip a hypothetical/narrative prefix to reach an equality.
-        # The whole assignment line must start with the symbol or an explicit
-        # concluding connective. The context guard above also checks other lines.
-        prefix = tail[tail.rfind("\n", 0, match.start()) + 1 : match.start()]
-        if CONCLUSION_PATTERN.sub("", prefix).strip(" ,:।۔."):
-            return None
+    for line in text.splitlines():
+        conclusion = CONCLUSION_PATTERN.sub("", line).strip(" ,:।۔.")
+        match = re.fullmatch(rf"{target}\s*(?:=|≈|\\(?:approx|simeq)(?![A-Za-z]))\s*(.+)", conclusion)
+        if not match:
+            if not supporting_statement(line):
+                return None
+            continue
         # No prefix/last-number selection from lists, prose or symbolic equations.
-        number = numeric_value(match[1])
-        answer = normalize(number, kind) if number is not None else None
+        answer = payload_answer(conclusion, kind, normalize)
         if answer is None or answer == "None":
             return None
         answers.append(answer)
-    return answers[0] if all(float(a) == float(answers[0]) for a in answers) else None
+    return answers[0] if answers and all(float(a) == float(answers[0]) for a in answers) else None
 
 
 def extract_formatted_answer(
@@ -794,6 +830,9 @@ def extract_formatted_answer(
             depth += (text[end] == "{") - (text[end] == "}")
             end += 1
         payload = text[match.end() : end - 1] if depth == 0 else ""
+        # A box delimits the value, not the subsequent verdict about that value.
+        if not supporting_context(text[end:]):
+            payload = ""
         candidates.append((match.start(), payload, "boxed"))
         boxed_spans.append((match.start(), end))
     for pattern in (ENGLISH_MARKER, LOCAL_MARKER):
@@ -802,11 +841,12 @@ def extract_formatted_answer(
                 break
             if any(start <= match.start() < end for start, end in boxed_spans):
                 continue
-            # Ignore a marker inside an earlier narrative sentence. A same-line
-            # conclusion is accepted only when it has a type-compatible payload.
-            tail = text[match.end() : match.end() + MAX_PAYLOAD_CHARS + 1].lstrip(" \t:*_\n")
-            payload = tail.split("\n", 1)[0].strip()
-            if "\n" not in tail and match.end() + MAX_PAYLOAD_CHARS < len(text):
+            # Include the complete closing context, not just the marker's line.
+            # Check its length before trimming so whitespace cannot hide a later
+            # qualification beyond the payload limit.
+            tail = text[match.end() :].lstrip(" \t:*_\n")
+            payload = tail[: MAX_PAYLOAD_CHARS + 1].strip()
+            if len(tail) > MAX_PAYLOAD_CHARS:
                 payload = ""  # Never accept a prefix cut from a looping/oversized answer.
             # The local phrase 'option C' can have a trailing sentence terminator.
             payload = payload.rstrip("।۔ ")
@@ -839,14 +879,7 @@ def extract_formatted_answer(
     if not candidates and lines and kind in {"Numeric", "Integer"} and normalize(lines[-1], kind) is None:
         target = requested_symbol(question)
         last_paragraph = re.split(r"\n\s*\n", text.strip())[-1].strip()
-        standalone = last_paragraph == lines[-1] and (
-            numeric_value(lines[-1]) is not None
-            or (
-                target
-                and re.match(rf"^{target}\s*(?:=|≈|\\(?:approx|simeq)(?![A-Za-z]))", lines[-1])
-                and payload_answer(lines[-1], kind, normalize) is not None
-            )
-        )
+        standalone = last_paragraph == lines[-1] and numeric_value(lines[-1]) is not None
         if target and not standalone:
             answer = requested_scalar(text, target, kind, normalize)
             return (answer, "requested_variable") if answer is not None else ("None", "unparsed")
@@ -862,6 +895,14 @@ def extract_formatted_answer(
         last_paragraph = re.split(r"\n\s*\n", text.strip())[-1].strip()
         if kind in {"Numeric", "Integer"} and normalize(lines[-1], kind) is None and last_paragraph != lines[-1]:
             answer = None
+        if kind in {"Numeric", "Integer"} and answer is not None and numeric_value(lines[-1]) is None:
+            # An unmarked equation has no explicit final-answer boundary. Its
+            # context must be checked even when the question names no symbol.
+            symbol = re.match(r"^([A-Za-z])\s*(?:=|≈|\\(?:approx|simeq)(?![A-Za-z]))", lines[-1])
+            if symbol:
+                answer = requested_scalar(text, symbol[1], kind, normalize)
+            elif len(lines) > 1:
+                answer = None
         if answer is not None:
             candidates.append((text.rfind(lines[-1]), lines[-1], "bare_final_line"))
     if candidates:
@@ -874,7 +915,7 @@ def extract_formatted_answer(
         return (answer, method) if answer is not None else ("None", "unparsed")
     if not lines:
         return "None", "unparsed"
-    verdict = option_verdicts(text, kind)
+    verdict = option_verdicts(text, kind, normalize)
     if verdict is not None:
         return verdict, "complete_option_verdicts"
     final = lines[-1]
@@ -890,7 +931,8 @@ def extract_formatted_answer(
     else:
         has_conclusion = bool(CONCLUSION_PATTERN.search(last_paragraph))
         has_value_relation = bool(re.search(rf"(?:{VALUE_PATTERN})", last_paragraph, re.I))
-        if has_conclusion or has_value_relation:
+        prefix = text[: text.rfind(last_paragraph)]
+        if has_conclusion or (has_value_relation and supporting_context(prefix)):
             answer = explicit_scalar(last_paragraph, kind, normalize, allow_assignment=has_conclusion)
             if answer is not None:
                 return answer, "concluding_value"

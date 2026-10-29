@@ -386,3 +386,72 @@ async def test_supported_affirmative_answers_retain_credit(server, text, kind, g
     result = await server.verify(body(text, question_type=kind, gold=gold, question="What is the value of $Y$?"))
     assert result.reward == 1 and result.exact_match
     assert not result.extraction_failed and result.extraction_method != "unparsed"
+
+
+@pytest.mark.parametrize("separator", [" ", "\n", "\n\n"])
+@pytest.mark.parametrize("suffix", ["This is ruled out.", "This selection is invalid.", "This fails the test."])
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "Final Answer: (B) is correct.",
+        "B is correct.",
+        r"\boxed{B}",
+        "(A) is false.\n(B) is true.\n(C) is false.\n(D) is false.",
+    ],
+)
+async def test_option_retraction_preserves_all_concluding_context(server, separator, suffix, selection):
+    result = await server.verify(body(selection + separator + suffix))
+    assert result.extracted_answer == "None" and result.extraction_failed
+    assert result.reward == 0 and result.extraction_method == "unparsed"
+
+
+@pytest.mark.parametrize("separator", [" ", "\n", "\n\n"])
+@pytest.mark.parametrize("selection,negation", [("চূড়ান্ত উত্তর: (B) সঠিক", "নয়।"), ("இறுதி விடை: (B) சரி", "அல்ல.")])
+@pytest.mark.parametrize("question", ["", "Select one.\n[A] red\n[B] blue\n[C] green\n[D] yellow"])
+async def test_localized_verdict_cannot_discard_unknown_negation(server, selection, negation, separator, question):
+    result = await server.verify(body(selection + separator + negation, question=question))
+    assert result.extracted_answer == "None" and result.extraction_failed and result.reward == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Try\nY = 2\n\nThis fails the test.",
+        "Y = 2\n\nThis is ruled out.",
+        "Y = 2\n\nThis selection is invalid.",
+        "Consider this trial:\nY = 2\n\nThis is the required coefficient.",
+        "Try\nY = 2\n\nThe corresponding rate is 2e-5.",
+        "Try\n\nY = 2",
+        "Suppose\n\nY = 2",
+        "Y = 2\n\nAn unsupported qualification.",
+        "Final answer: Y = 2\n\nThis is ruled out.",
+        "Final answer: 2\n\nThis fails the test.",
+        "Final answer: 2" + " " * 4096 + "This is ruled out.",
+        "Try\n" + "\n" * 4096 + "Y = 2",
+        "Y = 2\n\nThe corresponding rate is 2e-5. This is ruled out.",
+    ],
+)
+@pytest.mark.parametrize("question", ["What is the value of $Y$?", "Find the answer."])
+async def test_numeric_context_outside_assignment_is_not_discarded(server, text, question):
+    result = await server.verify(body(text, question_type="Numeric", gold="2", question=question))
+    assert result.extracted_answer == "None" and result.extraction_failed
+    assert result.reward == 0 and result.extraction_method == "unparsed"
+
+
+@pytest.mark.parametrize(
+    "text,kind,gold",
+    [
+        ("Final answer: B is correct.\n\nThis is the required answer.", "MCQ", "B"),
+        ("Final answer: B is correct.\nC is not correct.", "MCQ", "B"),
+        ("(A) is false.\n(B) is true.\n(C) is false.\n(D) is false.", "MCQ", "B"),
+        ("চূড়ান্ত উত্তর: (B) সঠিক।", "MCQ", "B"),
+        ("இறுதி விடை: (B) சரி.", "MCQ", "B"),
+        ("Y = 2\n\nThis is the required coefficient.", "Numeric", "2"),
+        ("Therefore, Y = 2\n\nThe corresponding rate is 2e-5.", "Numeric", "2"),
+        ("Try Y = 5. This fails the test.\n\nFinal answer: 2", "Numeric", "2"),
+        ("Try B. This is ruled out.\n\nFinal answer: C", "MCQ", "C"),
+    ],
+)
+async def test_explicit_conclusion_and_supported_context_retain_credit(server, text, kind, gold):
+    result = await server.verify(body(text, question_type=kind, gold=gold, question="What is the value of $Y$?"))
+    assert result.reward == 1 and not result.extraction_failed
