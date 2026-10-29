@@ -89,23 +89,27 @@ class ReasoningGymResourcesServer(SimpleResourcesServer):
         Multi-message agents (DeepAgents through nemo_fabric_agent, Hermes tool loops) emit their planning narration
         as earlier assistant messages, so neither the joined trajectory nor the first delimiter found in it is the
         answer. ``extract_answer`` already keeps the last <answer> match; the \\boxed{} fallback keeps the last
-        balanced box and strips LaTeX text markup, and the no-delimiter fallback scores the last non-empty message.
+        balanced box and strips LaTeX text markup, and the no-delimiter fallback scores the last non-empty message, with
+        all of that message's content parts.
         """
-        assistant_responses = []
+        # One entry per assistant message: a message's output_text parts are fragments of one reply, so they are
+        # joined as before; separate messages are joined with a newline so the last word of one never fuses with
+        # the first word of the next.
+        messages: list[str] = []
         for output_item in response.output:
             if output_item.type != "message":
                 continue
 
             if isinstance(output_item.content, str):
-                assistant_responses.append(output_item.content)
+                messages.append(output_item.content)
             else:
-                for content_item in output_item.content:
-                    if content_item.type != "output_text":
-                        continue
-                    assistant_responses.append(content_item.text)
+                messages.append(
+                    "".join(
+                        content_item.text for content_item in output_item.content if content_item.type == "output_text"
+                    )
+                )
 
-        # Separate messages so the last word of one never fuses with the first word of the next.
-        full_text = "\n".join(assistant_responses)
+        full_text = "\n".join(messages)
 
         # Try <answer> tags first (reasoning gym default); the helper returns the LAST match.
         extracted = extract_answer(full_text, tag_name="answer")
@@ -119,8 +123,8 @@ class ReasoningGymResourcesServer(SimpleResourcesServer):
         if boxed is not None:
             return _normalize_latex_text(boxed)
 
-        # No delimiter: score the last non-empty assistant message, not the whole trajectory.
-        for text in reversed(assistant_responses):
+        # No delimiter: score the last non-empty assistant message (all of its content parts), not the whole trajectory.
+        for text in reversed(messages):
             if text.strip():
                 return text.strip()
         return ""
