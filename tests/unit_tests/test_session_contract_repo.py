@@ -54,9 +54,31 @@ def test_agents_serve_sessions_through_the_base_hooks() -> None:
     assert not violations, "\n".join(violations)
 
 
+def _closing_classes(paths: list[Path]) -> set[str]:
+    """Names of the classes that override close_resources_session, directly or through a base among `paths`."""
+    bases, closing = {}, set()
+    for path in paths:
+        for cls in _classes(path):
+            bases[cls.name] = [ast.unparse(base).rpartition(".")[2] for base in cls.bases]
+            if "close_resources_session" in _methods(cls):
+                closing.add(cls.name)
+    grown = True
+    while grown:
+        grown = False
+        for name, parents in bases.items():
+            if name not in closing and closing.intersection(parents):
+                closing.add(name)
+                grown = True
+    return closing
+
+
 def test_resources_servers_close_through_the_base_route() -> None:
     """The base serves /close_session before subclass routes, so a server's own registration never runs."""
     violations = []
+    # The sandbox owner base closes the sessions it seeds; a server built on it inherits that close.
+    closing = _closing_classes(
+        _sources("resources_servers") + [REPO_ROOT / "nemo_gym/server_runtime/sandbox_owner.py"]
+    )
     for path in _sources("resources_servers"):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
@@ -72,12 +94,9 @@ def test_resources_servers_close_through_the_base_route() -> None:
         for cls in _classes(path):
             methods = _methods(cls)
             seed = methods.get("seed_session")
-            if (
-                seed is not None
-                and "ResourcesSeedSessionRequest" in ast.unparse(seed)
-                and "close_resources_session" not in methods
-            ):
+            if seed is not None and "ResourcesSeedSessionRequest" in ast.unparse(seed) and cls.name not in closing:
                 violations.append(
-                    f"{_location(path, cls)} accepts a typed seed but does not override close_resources_session"
+                    f"{_location(path, cls)} accepts a typed seed but neither it nor a base overrides "
+                    "close_resources_session"
                 )
     assert not violations, "\n".join(violations)

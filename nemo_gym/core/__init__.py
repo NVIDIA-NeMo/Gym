@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from nemo_gym.core.episode import (
         EpisodeId,
         TaskId,
+        current_episode_id,
         current_rollout_id,
         current_verifier_invocation_id,
         maybe_rollout_id_from_run_body,
@@ -164,6 +165,7 @@ _PUBLIC_API = {
     "TaskId": "episode",
     "VERIFIER_ERROR": "failure_kinds",
     "accumulate_response_usage": "responses_api_types",
+    "current_episode_id": "episode",
     "current_rollout_id": "episode",
     "current_verifier_invocation_id": "episode",
     "is_namespaced": "failure_kinds",
