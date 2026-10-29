@@ -70,7 +70,7 @@ from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise
 from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
-from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
+from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime, runtime_setup_admission
 from responses_api_agents.claude_code_agent.sandbox import (
     ClaudeCodeSandboxSession,
     parse_artifact_observations,
@@ -116,6 +116,7 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_local_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    sandbox_install_queue_timeout_seconds: float = Field(default=3600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
 
@@ -617,29 +618,30 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
-                if owns_sandbox:
-                    await sandbox.start(spec)
-                    result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
+            async with runtime_setup_admission(timeout=self.config.sandbox_install_queue_timeout_seconds):
+                async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+                    if owns_sandbox:
+                        await sandbox.start(spec)
+                        result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
+                        self._check_sandbox_setup(result)
+                    result = await sandbox.exec(
+                        f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
+                        cwd="/",
+                        timeout_s=30,
+                    )
                     self._check_sandbox_setup(result)
-                result = await sandbox.exec(
-                    f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
-                    cwd="/",
-                    timeout_s=30,
-                )
-                self._check_sandbox_setup(result)
-                for name in ("sandbox_runner.py", "install_claude_runtime.py"):
-                    await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
-                await install_sandbox_runtime(
-                    sandbox,
-                    version=version,
-                    directory=directory,
-                    runtime=runtime,
-                    timeout=self.config.sandbox_install_timeout_seconds,
-                    source=self.config.sandbox_executable_path,
-                    local_source=self.config.sandbox_local_executable_path,
-                    expected=self.config.sandbox_executable_sha256,
-                )
+                    for name in ("sandbox_runner.py", "install_claude_runtime.py"):
+                        await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
+                    await install_sandbox_runtime(
+                        sandbox,
+                        version=version,
+                        directory=directory,
+                        runtime=runtime,
+                        timeout=self.config.sandbox_install_timeout_seconds,
+                        source=self.config.sandbox_executable_path,
+                        local_source=self.config.sandbox_local_executable_path,
+                        expected=self.config.sandbox_executable_sha256,
+                    )
             return state
         except BaseException as error:
             try:
