@@ -789,12 +789,24 @@ def deadline_events(case):
             *({"type": "message_end", "message": result} for result in results),
             reply("toolUse", bash),
         ]
-    elif case in ("ended", "ended-at-output-limit"):
-        # The run is over; the deadline stops the compaction call Pi makes after it.
-        last = reply("stop" if case == "ended" else "length", {"type": "text", "text": "Done"})
-        recorded = [last, {"type": "agent_end", "messages": [last["message"]]}, {"type": "compaction_start"}]
+    elif case in ("ended", "ended-at-output-limit", "ended-over-the-window"):
+        # The run is over; the deadline stops the compaction call Pi makes after it. Above the configured window, Pi
+        # compacts for an overflow, but it does not retry a `stop` reply.
+        result = {"role": "toolResult", "toolCallId": "tool-2", "toolName": "bash", "content": [], "isError": False}
+        last = reply("length" if case == "ended-at-output-limit" else "stop", {"type": "text", "text": "Done"})
+        compaction = {"type": "compaction_start"}
+        if case == "ended-over-the-window":
+            compaction["reason"] = "overflow"
+        recorded = [
+            reply("toolUse", bash),
+            {"type": "message_end", "message": result},
+            last,
+            {"type": "agent_end", "messages": [last["message"]]},
+            compaction,
+        ]
     elif case == "overflow-at-output-limit":
-        # An empty `length` reply at a full context is an overflow to Pi, which compacts to retry the reply.
+        # An empty `length` reply at a full context is an overflow to Pi, which compacts to retry it (Pi 0.80.2 then
+        # exits with code 1).
         last = reply("length")
         recorded = [
             last,
@@ -832,6 +844,7 @@ def deadline_events(case):
         ("finish-refused", "wall_time"),
         ("ended", None),
         ("ended-at-output-limit", None),
+        ("ended-over-the-window", None),
         ("overflow-at-output-limit", "wall_time"),
         ("stop-with-tool-call", "wall_time"),
         ("retrying", "wall_time"),

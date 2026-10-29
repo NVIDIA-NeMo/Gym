@@ -246,8 +246,9 @@ Response metadata includes `harness_execution: sandbox`, hostname, supervisor PI
 the pinned Pi version. When `timeout` stops a run that was still working and in which no call of a
 `finish_tool_names` tool had succeeded, the metadata also has `stop_reason: wall_time`, as Stirrup reports a timeout,
 so a benchmark can tell a timeout from a run that ended without a submission. A run has ended once a reply stops
-(`stop` or `length`) without a tool call, even if `timeout` then stops Pi's compaction call, unless Pi compacts to
-recover from a context overflow and retry that reply. A timeout while Pi waits to retry a failed model call, or while
+(`stop` or `length`) without a tool call, even if `timeout` then stops Pi's compaction call, unless it is an empty
+`length` reply at a full context window: Pi counts that as a context overflow and compacts to retry it (Pi 0.80.2 then
+exits with code 1, which fails the run). A timeout while Pi waits to retry a failed model call, or while
 the provider gives up on the supervisor after the deadline, is reported the same way. Model-call references and tool
 observations are returned by agent close.
 Tool timestamps are supervisor receipt times, not executor timestamps; unsupported evidence

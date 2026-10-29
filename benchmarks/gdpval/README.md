@@ -498,8 +498,10 @@ gym eval run \
   judged as they are then.
 - Codex sets no `stop_reason: wall_time`, so GDPVal's `agent_timeout` mask does not apply to it. A Codex run that
   reaches its `timeout` is judged on its last `finish` or `abandon_task_finish`, with the files as they are when it
-  stops, or as an empty submission without one. It is not retried. So a Codex run that times out before `finish`
-  scores as an empty submission, where a Pi or Stirrup run is masked.
+  stops, or as an empty submission without one. It is not retried, unless Codex also reported an error during the
+  run, which makes it a failure that `--resume` runs again; the `Reconnecting...` notices Codex prints while it
+  retries a model call do not count. So a Codex run that times out before `finish` scores as an empty submission,
+  where a Pi or Stirrup run is masked.
 - The Codex agent rejects sampling and output limits in the request, so every row fails if `gym eval run` gets
   `--temperature`, `--top-p` or `--max-output-tokens`. Change Codex's own settings, such as `model_context_window`
   and `model_auto_compact_token_limit` for another window, with

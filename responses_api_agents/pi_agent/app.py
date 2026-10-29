@@ -128,8 +128,9 @@ def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
     A finish tool call that succeeded is a submission; gym_mcp.mjs marks only those results terminal. Pi reports each
     call's result when the call ends, but the turn's tool results only after all of the turn's calls end, so a finish
     call batched with a slower tool shows only in the former. A run whose last reply stopped (`stop` or `length`)
-    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless that
-    compaction recovers from a context overflow so that Pi can retry the reply.
+    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless the reply
+    was an empty `length` reply that Pi counts as a context overflow: Pi compacts to retry it (Pi 0.80.2 then exits
+    with code 1, a failure).
     """
     if any(
         event.get("type") == "tool_execution_end"
@@ -151,8 +152,10 @@ def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
     last = events[replies[-1]][1]["message"]
     # Pi keeps a provider's `stop` for a reply with tool calls, and then runs them.
     called_tools = any(isinstance(part, dict) and part.get("type") == "toolCall" for part in last.get("content") or [])
-    # pi-ai also counts an empty `length` reply at a full context as an overflow.
-    recovering = any(
+    # pi-ai also counts an empty `length` reply at a full context as an overflow, and Pi compacts to retry it (Pi
+    # 0.80.2 then exits with code 1, a failure). Pi never retries a `stop` reply, so its compaction for an overflow
+    # after one runs after the run has ended.
+    recovering = last.get("stopReason") == "length" and any(
         event.get("type") == "compaction_start" and event.get("reason") == "overflow"
         for _, event in events[replies[-1] + 1 :]
     )
