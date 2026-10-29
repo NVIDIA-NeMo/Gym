@@ -17,9 +17,8 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.client import ServerClient
-from nemo_gym.models import NeMoGymAsyncOpenAI
+from nemo_gym.models import CaptureStore, NeMoGymAsyncOpenAI
 from nemo_gym.observability.model_calls import read_model_call_records
 from responses_api_models.inference_provider.app import (
     InferenceProvider,

@@ -23,7 +23,6 @@ from omegaconf import DictConfig, OmegaConf
 
 import nemo_gym.config.global_config
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
-from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     TOKEN_CAPTURE_BLOCK,
@@ -32,6 +31,7 @@ from nemo_gym.config.global_config import (
     _load_config_yaml,
     rename_deprecated_config_keys,
 )
+from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
 from nemo_gym.models.token_capture.config import TokenCaptureConfig
 
 
@@ -126,6 +126,6 @@ def test_models_built_without_the_loader_accept_the_old_keys() -> None:
 
 
 def test_an_old_name_resolves_to_its_renamed_object_with_a_warning() -> None:
-    old = importlib.import_module("nemo_gym.token_id_capture.config")
+    old = importlib.import_module("nemo_gym.models.token_capture.config")
     with pytest.warns(DeprecationWarning, match="TokenIdCaptureConfig.*TokenCaptureConfig"):
         assert old.TokenIdCaptureConfig is TokenCaptureConfig
