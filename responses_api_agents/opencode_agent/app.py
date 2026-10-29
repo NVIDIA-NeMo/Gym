@@ -70,6 +70,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
+    ToolCallObservation,
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
@@ -1261,7 +1262,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     record.error_type = "provider_error"
                 elif error or failure:
                     record.error_type = "server_error"
+        cancelled = isinstance(failure, asyncio.CancelledError)
+        timed_out = result is not None and result["timed_out"]
+        if cancelled or timed_out:
+            # Gym stopped the process, so a tool OpenCode left running ended with that stop.
+            termination = "timeout" if timed_out else "cancelled"
+            for record in observations.records:
+                if isinstance(record, ToolCallObservation) and record.status == "incomplete":
+                    record.status = termination
+                    record.error_type = f"invocation_{termination}"
         if result is not None:
+            sandbox_outcome = (
+                "timeout" if timed_out else "cancelled" if cancelled else "failed" if error or failure else "completed"
+            )
             observations.records.append(
                 SandboxObservation(
                     role="agent",
@@ -1271,9 +1284,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         else state.request.sandbox_access.connection.provider_config_ref
                     ),
                     sandbox_id=state.sandbox_id,
-                    outcome="timeout" if result["timed_out"] else "failed" if error or failure else "completed",
+                    outcome=sandbox_outcome,
                     exit_code=result["return_code"],
-                    error_type="process_exit" if reported_error else None,
+                    # The same category the root invocation carries for the stop or failure.
+                    error_type="process_exit"
+                    if reported_error
+                    else {"cancelled": "cancelled", "failed": "server_error"}.get(sandbox_outcome),
                 )
             )
         observations.gaps.append(

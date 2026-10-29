@@ -38,6 +38,10 @@ DATASET_DIGEST_KEY = "_ng_dataset_digest"
 _SINGLE_FILES = ("task.toml", "instruction.md", "README.md", "trajectory.json", "task_data.json")
 _DIRECTORIES = ("environment", "tests", "solution", "steps")
 _IGNORED = ("__pycache__", "*.pyc", ".DS_Store", "*.swp", "*.swo", "*~")
+# The one root file outside the digest that Harbor's packager reads: its ignore rules at `harbor add` and `harbor
+# publish` (`harbor task init` writes one into every task). The renderer and publish keep it where they leave the
+# other hidden root entries behind; it is not part of a task's identity.
+GITIGNORE = ".gitignore"
 
 
 def is_ignored(relative: str) -> bool:
@@ -64,6 +68,20 @@ def _covered_files(path: Path) -> list[Path]:
     for name in _DIRECTORIES:
         files.extend(p for p in (path / name).rglob("*") if p.is_file())
     return sorted(files, key=lambda p: p.relative_to(path).as_posix())
+
+
+def _covered_paths(path: Path) -> list[Path]:
+    """Every entry under the resolved task folder ``path`` that a digest reads, links included: the top-level task
+    files and the covered folders with everything below them. Entries outside them (an author's ``.venv/`` or
+    ``.git/``) are not the task's and never reach a digest."""
+    paths = [path / name for name in _SINGLE_FILES if (path / name).is_symlink() or (path / name).exists()]
+    for name in _DIRECTORIES:
+        folder = path / name
+        if folder.is_symlink() or folder.exists():
+            paths.append(folder)
+        if folder.is_dir() and not folder.is_symlink():
+            paths.extend(folder.rglob("*"))
+    return paths
 
 
 def _record(path: Path, file: Path) -> bytes:
@@ -96,9 +114,9 @@ def archive_hash(path: Path) -> str:
 def content_hash(path: Path) -> str:
     """Digest the task folder at ``path``."""
     path = Path(path).resolve()
-    # rglob does not descend into directory links, so check links before filtering to files
+    # rglob does not descend into directory links, so check the covered links before filtering to files
     # or ignoring cache paths. Reject unsupported links without changing the digest format.
-    for link in path.rglob("*"):
+    for link in _covered_paths(path):
         if not link.is_symlink():
             continue
         relative = link.relative_to(path).as_posix()
