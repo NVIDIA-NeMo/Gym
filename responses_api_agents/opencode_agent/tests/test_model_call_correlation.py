@@ -14,8 +14,8 @@ from nemo_gym.trajectory import (
     ContextCompactionObservation,
     TrajectoryRecord,
     join_agent_model_calls,
+    join_assistant_message_calls,
 )
-from nemo_gym.trajectory.trajectory_record import join_assistant_message_calls
 from responses_api_agents.opencode_agent.app import _parse_opencode_session
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
 from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
