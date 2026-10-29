@@ -876,7 +876,7 @@ layers = [
     # data/
     "nemo_gym.dataset_metrics : nemo_gym.dataset_orchestrator : nemo_gym.gitlab_utils : nemo_gym.hf_utils : nemo_gym.prompt : nemo_gym.task_data : nemo_gym.task_materialization : nemo_gym.tasks.harbor : nemo_gym.train_data_utils : nemo_gym.vision_input",
     # agents/
-    "nemo_gym.agent_activation_types : nemo_gym.agent_outcome : nemo_gym.agent_utils : nemo_gym.base_responses_api_agent : nemo_gym.sandbox.agent_tools : nemo_gym.skills",
+    "nemo_gym.agents",
     # models/
     "nemo_gym.models",
     # server_runtime/
@@ -890,7 +890,7 @@ layers = [
     # trajectory/
     "nemo_gym.trajectory",
     # sandbox/
-    "nemo_gym.sandbox.access : nemo_gym.sandbox.adapters : nemo_gym.sandbox.api : nemo_gym.sandbox.attribution : nemo_gym.sandbox.compose_config : nemo_gym.sandbox.compose_fields : nemo_gym.sandbox.compose_volumes : nemo_gym.sandbox.config : nemo_gym.sandbox.observability : nemo_gym.sandbox.providers : nemo_gym.sandbox.shell : nemo_gym.sandbox.transfer : nemo_gym.sandbox.utils",
+    "nemo_gym.sandbox",
     # client/
     "nemo_gym.client",
     # telemetry/

@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 from pydantic import ValidationError
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.models.chat_completions_converter import message_content_to_text
 
