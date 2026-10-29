@@ -28,7 +28,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
 
 

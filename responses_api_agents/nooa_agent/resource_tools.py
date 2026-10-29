@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
-from nemo_gym.server_utils import raise_for_status, request
+from nemo_gym.client import raise_for_status, request
 from nemo_gym.tool_access import DirectHTTPToolAccess
 
 

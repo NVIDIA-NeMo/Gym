@@ -18,8 +18,8 @@ from unittest.mock import MagicMock
 import yaml
 from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

@@ -8,9 +8,9 @@ import pytest
 from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.sandbox import SandboxResources
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,
     DeepSWEResourcesServerConfig,

@@ -326,7 +326,7 @@ class TestReverificationThroughTheHelper:
         def no_outbound_request(*_args, **_kwargs):
             raise AssertionError("reverification must not send any request here")
 
-        monkeypatch.setattr("nemo_gym.server_utils.request", no_outbound_request)
+        monkeypatch.setattr("nemo_gym.client.server_client.request", no_outbound_request)
         monkeypatch.setattr(
             reverification_module, "_run_verification_payloads", lambda payloads, **_kw: [verify(p) for p in payloads]
         )

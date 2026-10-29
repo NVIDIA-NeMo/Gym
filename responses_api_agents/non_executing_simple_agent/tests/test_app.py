@@ -18,8 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, call
 from fastapi import Request, Response
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.non_executing_simple_agent.app import (
     ModelServerRef,
     NonExecutingSimpleAgent,

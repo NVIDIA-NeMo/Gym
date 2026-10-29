@@ -8,9 +8,9 @@ import json
 
 from pydantic import Field
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import JUDGE_UNPARSEABLE, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
 from nemo_gym.judge import call_judge
-from nemo_gym.server_utils import ServerClient
 from resources_servers.partner_if.engine import aggregate, evaluate, reward_checks
 from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge
 from resources_servers.partner_if.grading_contract import (

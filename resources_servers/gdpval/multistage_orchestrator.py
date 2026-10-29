@@ -70,6 +70,7 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
@@ -115,7 +116,6 @@ from nemo_gym.rollout_collection import (
     observed_elapsed,
     record_resubmit_offset,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.utils import (
     aggregation_sources_path_for,
     failures_path_for,

@@ -18,12 +18,12 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.aviary_agent.app import (
     AviaryAgent,
     AviaryAgentConfig,

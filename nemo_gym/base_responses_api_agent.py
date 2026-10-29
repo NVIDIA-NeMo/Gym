@@ -63,6 +63,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -77,13 +78,7 @@ from nemo_gym.core.responses_api_types import (
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_utils import (
-    BaseRunServerInstanceConfig,
-    BaseServer,
-    SimpleServer,
-    apply_rollout_prefix,
-    rollout_path_prefix,
-)
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup

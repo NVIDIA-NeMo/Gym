@@ -30,6 +30,7 @@ from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPToolSchema
 from pytest import MonkeyPatch
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -40,7 +41,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.haystack_agent import chat_generator as chat_generator_module
 from responses_api_agents.haystack_agent.app import (
     HaystackAgent,
