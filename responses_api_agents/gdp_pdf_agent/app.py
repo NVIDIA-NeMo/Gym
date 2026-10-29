@@ -39,9 +39,11 @@ raise, so the row still gets verified (and scores 0, since an empty answer earns
 rather than being dropped from the run entirely.
 """
 
+import asyncio
 import base64
 import io
 import json
+import logging
 import math
 import re
 from pathlib import Path
@@ -51,10 +53,16 @@ from typing import Any, Literal, Optional
 from aiohttp import ClientResponseError
 from fastapi import Request
 from PIL import Image, ImageDraw
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+)
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
@@ -68,9 +76,19 @@ BASE_DPI = 150
 MIN_DPI = 72
 _COMPOSITE_COLUMNS = 2
 _MAX_PAGES_PER_IMAGE = 4
+LOG = logging.getLogger(__name__)
 
 
 class GdpPdfAgentConfig(SimpleAgentConfig):
+    max_total_output_tokens: int | None = Field(default=None, ge=1)
+    final_answer_tokens: int = Field(default=8192, ge=1)
+
+    @model_validator(mode="after")
+    def validate_episode_budget(self) -> "GdpPdfAgentConfig":
+        if self.max_total_output_tokens is not None and self.final_answer_tokens >= self.max_total_output_tokens:
+            raise ValueError("final_answer_tokens must be smaller than max_total_output_tokens")
+        return self
+
     documents_base_dir: str = Field(
         description="Base directory for resolving verifier_metadata.document_manifest, relative to the Gym root.",
     )
@@ -455,11 +473,67 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
 class GdpPdfAgent(SimpleAgent):
     config: GdpPdfAgentConfig
 
-    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
-        resolved_base = Path(self.config.documents_base_dir)
-        if not resolved_base.is_absolute():
-            resolved_base = PARENT_DIR / resolved_base
+    def _prepare_model_request(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        step: int,
+        output_tokens: int,
+        previous_response: NeMoGymResponse | None,
+    ) -> NeMoGymResponseCreateParamsNonStreaming:
+        if self.config.max_total_output_tokens is None:
+            return body
+        remaining = self.config.max_total_output_tokens - output_tokens
+        if remaining <= 0:
+            raise RuntimeError("Episode output-token budget exhausted")
+        final = (
+            (self.config.max_steps is not None and step >= self.config.max_steps)
+            or remaining <= self.config.final_answer_tokens
+            or (previous_response is not None and previous_response.incomplete_details is not None)
+        )
+        limit = (
+            min(remaining, self.config.final_answer_tokens) if final else remaining - self.config.final_answer_tokens
+        )
+        updates = {"max_output_tokens": min(body.max_output_tokens or limit, limit)}
+        if final:
+            updates["tool_choice"] = "none"
+        return body.model_copy(update=updates)
 
+    def _continue_after_incomplete(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, response: NeMoGymResponse, *, output_tokens: int
+    ) -> bool:
+        return (
+            self.config.max_total_output_tokens is not None
+            and output_tokens < self.config.max_total_output_tokens
+            and body.tool_choice != "none"
+            and response.incomplete_details.reason == "max_output_tokens"
+        )
+
+    def _tool_result_messages(
+        self, call: NeMoGymResponseFunctionToolCall, output: str
+    ) -> list[NeMoGymFunctionCallOutput | NeMoGymEasyInputMessage]:
+        if call.name != "python":
+            return super()._tool_result_messages(call, output)
+        try:
+            result = json.loads(output)
+        except ValueError:
+            return super()._tool_result_messages(call, output)
+        if not isinstance(result, dict) or not isinstance(result.get("content"), list):
+            return super()._tool_result_messages(call, output)
+        content = result["content"]
+        text = "\n".join(part["text"] for part in content if part.get("type") == "input_text")
+        images = any(part.get("type") == "input_image" for part in content)
+        messages = super()._tool_result_messages(call, "Python output follows." if images else text or "[No output]")
+        if images:
+            messages.append(
+                NeMoGymEasyInputMessage(
+                    role="user",
+                    content=[{"type": "input_text", "text": "Output from the preceding Python call:"}, *content],
+                )
+            )
+        return messages
+
+    async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         row = body.model_dump(exclude_unset=True)
         cookies = request.cookies
         seed_session_response = await self.server_client.post(
@@ -470,6 +544,28 @@ class GdpPdfAgent(SimpleAgent):
         )
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
+        try:
+            return await self._run_document(body, row, cookies)
+        finally:
+            if any(tool.get("name") == "python" for tool in body.responses_create_params.tools):
+                try:
+                    async with asyncio.timeout(30):
+                        response = await self.server_client.request(
+                            server_name=self.config.resources_server.name,
+                            url_path="/python",
+                            method="DELETE",
+                            cookies=cookies,
+                        )
+                        await raise_for_status(response)
+                except Exception:
+                    LOG.exception("Could not release GDP.pdf Python session; server shutdown will retry")
+
+    async def _run_document(
+        self, body: SimpleAgentRunRequest, row: dict[str, Any], cookies: Any
+    ) -> SimpleAgentVerifyResponse:
+        resolved_base = Path(self.config.documents_base_dir)
+        if not resolved_base.is_absolute():
+            resolved_base = PARENT_DIR / resolved_base
 
         meta = row.get("verifier_metadata") or {}
         manifest_relpath = meta.get("document_manifest")

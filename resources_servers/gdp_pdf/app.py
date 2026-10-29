@@ -52,16 +52,25 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -73,6 +82,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.gdp_pdf.python_sandbox import (
+    PythonSandboxConfig,
+    run_python,
+    start_python_sandbox,
+    stop_python_sandbox,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +118,28 @@ class GdpPdfConfig(BaseResourcesServerConfig):
     # Bounds concurrent judge calls. A single task can fan out to 30 criteria.
     judge_endpoint_max_concurrency: Optional[int] = 16
 
+    # The optional `python` tool (benchmarks/gdp_pdf/python.yaml). Name a sandbox provider block, such as `sandbox`
+    # from nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, to start one sandbox per rollout that
+    # holds the task's source PDF and a persistent IPython kernel.
+    sandbox_provider: Optional[str] = None
+    sandbox_config: PythonSandboxConfig = Field(default_factory=PythonSandboxConfig)
+    # Base of verifier_metadata.source_pdf; prepare.py downloads the PDFs here.
+    documents_base_dir: str = "data"
+    python_timeout_s: float = 120
+    python_max_output_chars: int = 20_000
+
 
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
+
+
+class GdpPdfSeedSessionRequest(BaseSeedSessionRequest):
+    verifier_metadata: Optional[dict[str, Any]] = None
+
+
+class PythonToolRequest(BaseModel):
+    code: str = Field(description="The Python code to run.")
 
 
 class GdpPdfVerifyRequest(BaseVerifyRequest):
@@ -242,7 +277,92 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         with open(self.config.judge_prompt_template_fpath) as f:
             self._judge_prompt = f.read().strip()
 
-    async def verify(self, body: GdpPdfVerifyRequest) -> GdpPdfVerifyResponse:
+        self._python_sandboxes: dict[str, AsyncSandbox] = {}
+
+    # -------------------------------------------------------------------------
+    # Optional python tool
+    # -------------------------------------------------------------------------
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        if not self.config.sandbox_provider:
+            return app
+
+        app.post("/python")(self.python)
+        app.delete("/python")(self.release_python_session)
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as maybe_state:
+                    yield maybe_state
+            finally:
+                for session_id in list(self._python_sandboxes):
+                    await self._stop_python_sandbox(session_id)
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | GdpPdfSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        if not self.config.sandbox_provider or isinstance(body, ResourcesSeedSessionRequest):
+            return await super().seed_session(body)
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id not in self._python_sandboxes:  # a repeated seed keeps the rollout's sandbox
+            meta = body.verifier_metadata or {}
+            pdf = Path(self.config.documents_base_dir) / str(meta.get("source_pdf") or "")
+            if not pdf.is_file():
+                raise ResourcesSeedRejectedError(f"The python tool needs the task's source PDF, but {pdf} is missing")
+            self._python_sandboxes[session_id] = await start_python_sandbox(
+                self.config.sandbox_provider, self.config.sandbox_config, pdf, task_id=str(meta.get("task_id"))
+            )
+        return BaseSeedSessionResponse()
+
+    async def python(self, request: Request, body: PythonToolRequest) -> JSONResponse:
+        """Run Python in a persistent IPython kernel. The task's source PDF is document.pdf in the working directory.
+
+        Use fitz (PyMuPDF) or pdfplumber to read it, and IPython.display.display to inspect images.
+        Printed text and displayed PNG/JPEG images are returned. Variables persist between calls.
+        """
+        sandbox = self._python_sandboxes.get(request.session.get(SESSION_ID_KEY))
+        if sandbox is None:
+            raise ResourcesSessionLostError("This rollout has no Python sandbox")
+        output = await run_python(
+            sandbox,
+            self.config.sandbox_config,
+            body.code,
+            timeout_s=self.config.python_timeout_s,
+            max_chars=self.config.python_max_output_chars,
+        )
+        return JSONResponse(json.loads(output))
+
+    async def release_python_session(self, request: Request) -> dict[str, bool]:
+        """Release the rollout sandbox, including when grading is deferred or generation fails."""
+        await self._stop_python_sandbox(request.session.get(SESSION_ID_KEY))
+        return {"released": request.session.get(SESSION_ID_KEY) not in self._python_sandboxes}
+
+    async def _stop_python_sandbox(self, session_id: Optional[str]) -> None:
+        sandbox = self._python_sandboxes.get(session_id)
+        if sandbox is None:
+            return
+        try:
+            await stop_python_sandbox(sandbox, self.config.sandbox_config)
+        except Exception as e:  # noqa: BLE001
+            # Kept so the shutdown sweep tries again; grading never depends on the sandbox.
+            print(f"[gdp_pdf] could not stop the Python sandbox: {e!r}", flush=True)
+            return
+        del self._python_sandboxes[session_id]
+
+    # -------------------------------------------------------------------------
+    # Verification
+    # -------------------------------------------------------------------------
+
+    async def verify(self, request: Request, body: GdpPdfVerifyRequest) -> GdpPdfVerifyResponse:
+        # The rollout is over: release its python sandbox, if any, before grading (which never reads it).
+        await self._stop_python_sandbox(request.session.get(SESSION_ID_KEY))
+
         meta = body.verifier_metadata or {}
         criteria = meta.get("criteria") or []
         generated = _extract_generated_answer(body.response)

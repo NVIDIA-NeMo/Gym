@@ -164,6 +164,9 @@ class EnrootCreateConfig:
     extra_import_args: list[str] = field(default_factory=list)
     extra_create_args: list[str] = field(default_factory=list)
     extra_start_args: list[str] = field(default_factory=list)
+    # Some HPC hosts reject Enroot's fresh sysfs mount for --net. Create the
+    # private network first, then let Enroot isolate mounts and processes.
+    network_namespace_before_start: bool = False
 
     def __post_init__(self) -> None:
         for attr in ("import_timeout_s", "create_timeout_s", "start_timeout_s"):
@@ -174,6 +177,8 @@ class EnrootCreateConfig:
             raise ValueError("create.start_poll_s must be > 0")
         if not self.mount_point.startswith("/"):
             raise ValueError("create.mount_point must be an absolute path")
+        if self.network_namespace_before_start and "--net" not in self.extra_start_args:
+            raise ValueError("create.network_namespace_before_start requires --net in extra_start_args")
 
 
 @dataclass(frozen=True)
@@ -329,6 +334,19 @@ class EnrootProvider:
             # defaults this to "no"; we always force it on.
             "ENROOT_UNSHARE_PID": "yes",
         }
+        self._network_prefix: list[str] = []
+        if cfg.network_namespace_before_start:
+            nsenter = shutil.which("enroot-nsenter")
+            if nsenter is None:
+                raise RuntimeError("create.network_namespace_before_start requires enroot-nsenter")
+            self._network_prefix = [nsenter, "--user", "--remap-root", "--net"]
+            # Root is mapped to this unprivileged host user by the prefix.
+            # Reuse that user namespace so exec can rejoin its network;
+            # a second user namespace cannot administer its parent's network.
+            self._enroot_env["ENROOT_ALLOW_SUPERUSER"] = "yes"
+            # The network is already isolated by the prefix; asking Enroot
+            # to isolate it again would trigger the unsupported sysfs mount.
+            self._enroot_env.pop("ENROOT_UNSHARE_NET", None)
         # Serializes concurrent imports of the same image within this process.
         self._import_locks: dict[str, asyncio.Lock] = {}
 
@@ -475,7 +493,7 @@ class EnrootProvider:
         staging_dir = Path(tempfile.mkdtemp(prefix="nemo-gym-enroot-"))
 
         # Build the `enroot start` command line for the long-lived init.
-        argv: list[str] = [self._binary, "start"]
+        argv: list[str] = [*self._network_prefix, self._binary, "start"]
         if self._create_config.rw:
             argv.append("--rw")
         if self._create_config.remap_root:
@@ -496,7 +514,7 @@ class EnrootProvider:
         # command (argv after the container name) runs directly.
         if self._create_config.bypass_entrypoint:
             argv += ["--rc", "/dev/null"]
-        argv += list(self._create_config.extra_start_args)
+        argv += [arg for arg in self._create_config.extra_start_args if not (self._network_prefix and arg == "--net")]
         # Tag the init with the (unique) container name so the nested-in-pyxis PID
         # fallback can find THIS container's init process in /proc unambiguously. The
         # trailing `#` comment is inert to sh but makes the cmdline uniquely greppable.

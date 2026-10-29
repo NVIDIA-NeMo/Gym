@@ -17,6 +17,7 @@ page compositing."""
 
 import base64
 import io
+import json
 import random
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,7 +28,11 @@ from aiohttp import ClientResponseError
 from PIL import Image
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gdp_pdf_agent import app as gdp_pdf_agent_app
 from responses_api_agents.gdp_pdf_agent.app import (
@@ -75,6 +80,27 @@ def _agent_config(**overrides) -> GdpPdfAgentConfig:
 
 def _agent(**overrides) -> GdpPdfAgent:
     return GdpPdfAgent(config=_agent_config(**overrides), server_client=AsyncMock(spec=ServerClient))
+
+
+def test_python_observations_reach_the_model_without_an_image_cap():
+    agent = _agent()
+    call = NeMoGymResponseFunctionToolCall(type="function_call", call_id="cell", name="python", arguments="{}")
+    content = [{"type": "input_image", "image_url": "data:image/png;base64,aA==", "detail": "auto"} for _ in range(6)]
+    messages = agent._tool_result_messages(call, json.dumps({"content": content}))
+    assert messages[0].call_id == "cell"
+    assert messages[0].model_dump(exclude_unset=True)["type"] == "function_call_output"
+    assert sum(part["type"] == "input_image" for part in messages[1].content) == 6
+
+
+def test_python_budget_reserves_a_final_answer_at_the_step_or_token_limit():
+    agent = _agent(max_steps=50, max_total_output_tokens=65536, final_answer_tokens=8192)
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=16384)
+    ordinary = agent._prepare_model_request(body, step=1, output_tokens=0, previous_response=None)
+    assert ordinary.max_output_tokens == 16384
+    for step, used in [(50, 1000), (4, 60000)]:
+        final = agent._prepare_model_request(body, step=step, output_tokens=used, previous_response=None)
+        assert final.tool_choice == "none"
+        assert final.max_output_tokens == min(8192, 65536 - used)
 
 
 def _block_type(block) -> str:

@@ -50,6 +50,9 @@ screenshots at 150 DPI) into `resources_servers/gdp_pdf/data/documents/`, then w
 Set `judge_base_url` / `judge_api_key` / `judge_model_name` in `env.yaml`, then run the benchmark
 with a vision-capable policy model.
 
+`--benchmark gdp_pdf/python` runs the same tasks with a `python` tool over the source PDF in a
+per-rollout sandbox; see "Python Tool" in the resources server README.
+
 ## Comparability
 
 Absolute scores are not directly comparable to Surge's published numbers. Surge's harness hands the
