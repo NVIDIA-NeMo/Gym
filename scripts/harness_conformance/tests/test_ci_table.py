@@ -73,7 +73,10 @@ def test_ci_renders_same_table_without_retaining_json(ci_evidence):
     )
     assert [p.name for p in output.parent.iterdir()] == ["table.mdx"]
     text = output.read_text()
-    assert "`pi` | Failed | 0/7" in text and "`hermes` | Passed | 7/7" in text
+    assert (
+        f"`pi` | Failed | 0/{len(ci_table.SCENARIOS)}" in text
+        and f"`hermes` | Passed | {len(ci_table.SCENARIOS)}/{len(ci_table.SCENARIOS)}" in text
+    )
     assert "`calls.outcome` | ✗" in text and "<sub>Updated" in text
     assert "Generation report" not in text and "Unit-test gates" not in text
 
@@ -105,7 +108,7 @@ def test_ci_invalid_evidence_is_reported_as_unavailable(ci_evidence, problem):
         run_url="https://github.com/NVIDIA-NeMo/Gym/actions/runs/12/attempts/2",
     )
     assert "`pi` | Unavailable | —" in output.read_text()
-    assert "`hermes` | Passed | 7/7" in output.read_text()
+    assert f"`hermes` | Passed | {len(ci_table.SCENARIOS)}/{len(ci_table.SCENARIOS)}" in output.read_text()
     assert "### `pi`" not in output.read_text()
 
 

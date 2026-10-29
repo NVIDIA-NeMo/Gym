@@ -1,0 +1,16 @@
+# Apptainer sandbox for rna_design: one local instance per rollout, no server or API key. Needs `apptainer` on PATH.
+sandbox:
+  default_metadata:
+    sandbox-api: apptainer-cli
+  apptainer:
+    create:
+      # Root on a writable overlay for /work. --containall keeps the host's /tmp (where the tool workers keep their
+      # state) and home out of the box.
+      extra_start_args: ["--fakeroot", "--writable-tmpfs", "--containall"]
+      # A --fakeroot instance takes no CPU or memory limits.
+      apply_resource_limits: false
+    exec:
+      # The instance already runs as root, and exec refuses a second --fakeroot.
+      fakeroot_for_root: false
+      # Don't pass the Gym server's environment (keys included) into the box.
+      extra_exec_args: ["--cleanenv"]

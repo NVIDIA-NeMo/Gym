@@ -165,8 +165,11 @@ gym eval run --no-serve \
   -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-Keep `resources_tool_transports: []`: Kilo provides its own sandbox tools and rejects required
-external tool grants. Collection calls the Environment Server's `/run`, never the agent's `/run`.
+This SWE-bench Pro recipe uses `resources_tool_transports: []` because Kilo operates on the task's
+sandbox files. For Resources MCP tools, use `[mcp]`; required direct HTTP grants remain unsupported.
+See [Kilo MCP and sandbox ownership](https://docs.nvidia.com/nemo/gym/main/agent-server/integrate-existing-agents#kilo-mcp-and-sandbox-ownership)
+for MCP readiness checks and the configuration when Resources supplies no sandbox.
+Collection calls the Environment Server's `/run`, never the agent's `/run`.
 
 Set `context_window` / `max_output_tokens` to the served model's limits and raise `timeout` for
 long-horizon benchmarks. `timeout` also sets Kilo's model-stream watchdog (`chunkTimeout`), because
