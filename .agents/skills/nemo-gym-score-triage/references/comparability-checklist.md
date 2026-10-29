@@ -34,9 +34,28 @@ Read this before comparing a Gym number with a reference that counts failures di
 - A judge reply that arrives but cannot be parsed usually counts as a wrong answer, not as `judge_failed`.
 - Some servers score an incomplete verification as 0 inside the denominator instead of classifying it: Terminal-Bench 2.1 verifier errors, Terminal-Bench 4.0 verifier timeouts and missing rewards (since #5038), and SWE-bench evaluation failures. An infrastructure problem then lowers the score instead of shrinking the denominator. On Terminal-Bench 2.1, Terminal-Bench 4.0 and SWE-bench, count rows with `evaluation_completed: false` to size it.
 
+## Health Reports
+
+At the end of a run, failed runs included, `gym eval run` writes `quality_summary.json` and `rollout_verdicts.jsonl` beside the rollouts. `--no-health-check` skips them, and with `--disable-aggregation` they come from `gym eval aggregate` instead. `fern/versions/latest/pages/evaluation/rollout-health.mdx` defines every field and check. What they contain:
+
+- `run.artifacts`: since #4788, the run accounting against `*_materialized_inputs.jsonl`: `expected`, `failed` (`total`, `final`, `not_final` and `by_class`; a resume does not retry `final` ones), `missing`, `healthy` and `unhealthy_reasons`. `expected`, `missing` and `healthy` are null when the inventory is missing, and `failed` is null when there is no failures file. `coverage` shows how many rollouts each check evaluated, could not observe or ignored.
+- `run.verdicts`: how many saved rollouts are `healthy`, `unhealthy` or `unobserved`. Failed and missing rollouts are not checked; only `run.artifacts` counts them. `run.issues` counts findings per check; `run.findings` lists the run-level ones.
+- `run.stats`: failed model calls by HTTP status, token totals and, since #4841, timeouts (rollouts that timed out, by limit, and the time split between the policy model, other models and tools).
+- `tasks`: verdict counts and flags per task, such as `task_consistently_unhealthy`.
+- `rollout_verdicts.jsonl`: one row per saved rollout, keyed by `_ng_task_index` and `_ng_rollout_index`, with its verdict, its findings and the checks it could not run. Failed and missing rollouts have no row.
+
+Where they mislead:
+
+- `run.artifacts.healthy: true` means only that nothing is missing and no rollout is recorded twice. Failure limits are unset by default, so a run with many failed rollouts still shows `true`; read `failed`.
+- `unobserved` is not healthy: the rollout lacked evidence a check needs, such as a trajectory, agent turns, model calls, or the references that tie calls to turns. When most rollouts are `unobserved`, the report says little about them; `coverage` shows which checks could not run.
+- The printed line (`Rollout health: N checked, ...`) counts only the saved rollouts' verdicts; `gym --json eval health-check` prints the whole result.
+- Each run or `--resume` deletes the previous reports first, so they describe the latest job. A job stopped by SIGTERM leaves only a provisional summary (`partial: true`): the run accounting, without verdicts. A benchmark with its own `rollout_collection_driver`, such as GDPval, runs the full check instead, so its summary does not show that the job was stopped.
+- Reports from before #4788 have no run accounting, those from before #4841 have no timeouts, and check IDs change between commits. To compare the health of runs from different commits, rebuild both runs' reports with the same Gym checkout.
+- `gym eval health-check <run_dir>` rebuilds both reports and overwrites them in the run directory, so copy a shared or read-only run first.
+
 ## Quick Checks
 
-Assume the run wrote `results/rollouts.jsonl`; Gym names the siblings from that stem. This counts expected rollouts, scored rows, masked rows, rollouts whose last attempt failed (by class), and rollouts that left no row. Rows that `+record_omitted_rollouts=true` writes count as no row, as Gym counts them. A `gym eval aggregate` output has no sibling files, so run it on each shard instead:
+Use this when `quality_summary.json` is missing or predates #4788, or to cross-check it. Assume the run wrote `results/rollouts.jsonl`; Gym names the siblings from that stem. This counts expected rollouts, scored rows, masked rows, rollouts whose last attempt failed (by class), and rollouts that left no row. Rows that `+record_omitted_rollouts=true` writes count as no row, as Gym counts them. A `gym eval aggregate` output has no sibling files, so run it on each shard instead:
 
 ```bash
 python - results/rollouts.jsonl <<'EOF'
@@ -57,12 +76,6 @@ failed = collections.Counter(r.get("_ng_failure_class") for k, r in last.items()
 print(f"expected={len(expected)} rows={len(scored)} masked={sum(bool(r.get('mask_sample')) for r in done)} "
       f"failed={sum(failed.values())} no_row={len(expected - scored - (last.keys() - lost))} {dict(failed)}")
 EOF
-```
-
-Then check rollout health: empty or runaway generations, failed model calls, and tasks that are unhealthy in every repeat.
-
-```bash
-gym eval health-check results
 ```
 
 `gym eval profile` also prints completion against the materialized inputs. Its task rows carry `expected_num_rollouts` and `missing_num_rollouts` only for tasks with at least one unmasked rollout, and `expected_num_rollouts` leaves masked rollouts out, so take totals from the completion line or the counts above. Add `++allow_partial_rollouts=True` when rollouts are missing; strict profiling fails otherwise.
