@@ -808,6 +808,82 @@ async def test_expire_write_failing_during_finalization_still_keeps_a_landed_sto
     await session.close(timeout=1)
 
 
+@pytest.mark.parametrize("write_fails", [False, True])
+async def test_a_stop_whose_caller_disconnects_before_its_write_starts_is_delivered_or_retryable(
+    session, receipt_reader, write_fails
+):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER and upload.fail:
+            upload.fail = False
+            raise OSError("no dir")
+
+    upload.fail = write_fails
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        stop = asyncio.create_task(session.expire(timeout=1, reason="budget"))
+        await asyncio.sleep(0)
+        # expire has created its write, which has not run yet, when the stop request disconnects.
+        assert session._expire_write is not None and not session._expire_write.done()
+        stop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop
+        await asyncio.wait({session._expire_write}, timeout=2)
+        assert _expiry_writes(session) == 1
+        if write_fails:
+            assert await session.expire(timeout=1, reason="operator") is True
+            assert _expiry_writes(session) == 2
+        else:
+            assert await session.expire(timeout=1) is False
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired and session.expire_reason == ("operator" if write_fails else "budget")
+    await session.close(timeout=1)
+
+
+async def test_a_stop_write_still_pending_when_finalization_stops_waiting_stays_unattributed(session, receipt_reader):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+    fail_write = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER:
+            await fail_write.wait()
+            raise ConnectionError("upload failed")
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        stop = asyncio.create_task(session.expire(timeout=5, reason="budget"))
+        await asyncio.sleep(0.05)
+        # The harness ends at its own deadline while the write is still pending, past finalization's 1 s bound.
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 3) == "transcript"
+        assert not session.expired and session.expire_reason is None
+        fail_write.set()
+        with pytest.raises(RuntimeError, match="Could not request test expiry"):
+            await asyncio.wait_for(stop, 2)
+    assert not session.expired
+    await session.close(timeout=1)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
 async def test_stop_confirmation_is_bounded_when_every_local_exec_slot_is_held(tmp_path, monkeypatch):
     # The marker check runs during finalization; another workload holding every exec slot must not stall grading.

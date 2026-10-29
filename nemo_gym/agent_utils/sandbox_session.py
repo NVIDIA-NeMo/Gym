@@ -328,7 +328,10 @@ class SandboxSession[Artifacts]:
         if self.launch_started:
             # A task, so that finalization can wait for a write still in flight before it checks the marker.
             self._expire_write = asyncio.create_task(self._write_expiry(timeout=timeout, reason=reason))
-            await self._expire_write
+            # Shielded, so a caller that stops waiting (a disconnected stop request) cannot cancel the write before
+            # it starts and leave the stop requested but never delivered. The write is bounded by ``timeout`` and,
+            # if it fails, makes the stop retryable again.
+            await asyncio.shield(self._expire_write)
         return True
 
     async def _write_expiry(self, *, timeout: float, reason: str | None) -> None:
@@ -418,7 +421,8 @@ class SandboxSession[Artifacts]:
 
         A write still in flight is awaited first, so a failure that arrives during finalization is checked too.
         The whole check, including any wait for provider capacity, is bounded by ``timeout``; without a
-        confirmation the stop stays unattributed and finalization goes on.
+        confirmation the stop stays unattributed and finalization goes on. That includes a write still in flight
+        when the bound runs out: the harness may have ended at its own deadline, before any marker arrived.
         """
         try:
             async with asyncio.timeout(timeout):
@@ -436,6 +440,8 @@ class SandboxSession[Artifacts]:
                     f"[ -e {marker} ] && echo present", cwd=self.workdir, timeout_s=timeout
                 )
         except Exception:
+            if self._expire_write is not None and not self._expire_write.done():
+                self._expire_requested, self.expire_reason = False, None
             LOG.warning(
                 "Could not confirm the %s expiry marker; the stop stays unattributed", self.harness, exc_info=True
             )
