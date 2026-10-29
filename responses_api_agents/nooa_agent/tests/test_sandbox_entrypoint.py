@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 import signal
 import stat
 import sys
@@ -703,3 +704,12 @@ def test_enable_trace_export_writes_otlp_jsonl_per_session(tmp_path: Path) -> No
     assert (trace_dir / "probe-session.jsonl").exists()
     first = json.loads((tmp_path / "traces.jsonl").read_text().splitlines()[0])
     assert "resourceSpans" in first
+
+
+def test_expose_runtime_scripts_puts_the_runtime_bin_first_without_duplicates() -> None:
+    """Console scripts installed with the staged runtime (ripgrep's rg) must be visible to the agent's shells."""
+    bin_dir = os.path.dirname(sys.executable)
+    env = {"PATH": f"/usr/bin:{bin_dir}:/bin"}
+    path = entrypoint.expose_runtime_scripts(env)
+    assert path.split(os.pathsep) == [bin_dir, "/usr/bin", "/bin"]
+    assert entrypoint.expose_runtime_scripts({}) == bin_dir

@@ -296,8 +296,22 @@ def collect_trace_export(trace_dir: str, output: Path) -> int:
     return lines
 
 
+def expose_runtime_scripts(environ: dict[str, str] | None = None) -> str:
+    """Put the staged runtime's ``bin`` first on PATH so the agent's shells see its console scripts.
+
+    The runtime is a private prefix outside the task image; tools it installs as scripts (ripgrep's ``rg``
+    from ``ripgrep-bin``, for example) are otherwise invisible to ``command -v`` in a shell the agent spawns.
+    """
+    env = os.environ if environ is None else environ
+    bin_dir = os.path.dirname(sys.executable)
+    parts = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bin_dir]
+    env["PATH"] = os.pathsep.join([bin_dir, *parts])
+    return env["PATH"]
+
+
 async def _main(input_path: Path, output_path: Path) -> None:
     payload = SandboxInput.model_validate_json(input_path.read_text())
+    expose_runtime_scripts()
     client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
     writer = _CheckpointWriter(output_path.with_name("checkpoint.json"))
     task = asyncio.create_task(execute(payload, on_progress=writer.submit))
