@@ -244,6 +244,8 @@ Credentials are not export settings. `resolved-config.yaml` and `--resolve-only`
 
 **Validation.** Submit rejects, before anything is sent: an unknown exporter or setting, settings the exporter would not accept (for example a missing `agent_version` for `atif`, or an `mlflow` export without a tracking URI and experiment), an export on a benchmark that also enables the same live exporter in its `run` settings (the run would be logged twice), `export` on a benchmark with a `command`, and exports on Kubernetes compute.
 
+The duplicate check only sees the settings written in the benchmark's `run` block. A live exporter that is switched on some other way is not detected before submit: through a config file listed in `config_paths`, through an `env.yaml`, or through a file in the `gym_install` checkout. If you also use an `export` for that backend, the run is logged twice, once live and once as a separate run by the export, and `gym eval export` logs a warning naming the live run. To avoid it, do not enable the live exporter for a backend you export with `export`.
+
 ## job
 
 | Field | Description |
