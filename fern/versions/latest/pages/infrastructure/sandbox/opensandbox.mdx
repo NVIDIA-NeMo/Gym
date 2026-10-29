@@ -172,6 +172,17 @@ left behind by the attempt's metadata key, deletes it and cancels the create req
 deletes the sandbox the server's answer names. `aclose()` waits up to `operations.close_timeout_s` for
 those requests.
 
+Set `create.renew_ttl_s` and `create.renew_interval_s` to keep every sandbox on a lease, as partial-rollout
+checkpoints recommend (`renew_ttl_s: 1200`, `renew_interval_s: 300`, `renew_timeout_s: 30`). Each sandbox is
+then created with `renew_ttl_s`, or the spec's `ttl_s` when that is shorter, and the process that created it
+renews it every `renew_interval_s` (jittered by 10%), with `renew_timeout_s` per call, but never past the
+spec's `ttl_s` from creation. Stopping a sandbox stops its renewal, and so does a crash of the process that
+created it: the service then deletes the sandbox within one `renew_ttl_s` instead of at the end of the spec's
+lifetime. A failed renewal is logged and tried again at the next interval; if the OpenSandbox API is
+unreachable for longer than `renew_ttl_s - renew_interval_s`, live sandboxes expire. Without `renew_ttl_s`,
+`renew_interval_s` alone refreshes the spec's whole `ttl_s` at every interval, and a renewal that fails fails
+the sandbox's later operations.
+
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
 ```bash
@@ -186,9 +197,9 @@ The provider constructor accepts these optional config sections:
 | Section | Purpose |
 | --- | --- |
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
-| `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
+| `create` | Sandbox create timeout, retry, image pull policy, health-check behavior, and the lease (`renew_ttl_s`, `renew_interval_s`, `renew_timeout_s`). |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. |
+| `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. `snapshot_timeout_s` and `snapshot_lookup_grace_s` bound the snapshots of partial-rollout checkpoints. |
 | `diagnostics` | `timeout_s` bounds active diagnostic I/O during one uninterrupted status-read recovery. Status requests and polling sleeps do not spend it; each lookup also respects the recovery and client-wait deadlines. A successful status read resets the diagnostic budget. `request_timeout_s` bounds each diagnostic request; `poll_interval_s` controls diagnostic polling. Recognized control-plane lifecycle reports can confirm OOM; `inspect_oom` enables a deployment-specific fallback and defaults to `false`. See [OOM evidence](./opensandbox-debugging#the-whole-sandbox-died). |
 
 ## Failure reporting and recovery
