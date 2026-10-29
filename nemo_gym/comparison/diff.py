@@ -375,7 +375,7 @@ def build_flip_summary(baseline: LoadedRun, candidate: LoadedRun, *, candidate_i
 
 
 def compare_runs(
-    baseline: LoadedRun, candidates: Sequence[LoadedRun], *, confidence_level: float = 0.95
+    baseline: LoadedRun, candidates: Sequence[LoadedRun], confidence_level: float = 0.95
 ) -> AgentComparison:
     """Build one agent's comparison block: metric rows, flips, and anything worth flagging."""
     rows = build_metric_rows(baseline, candidates, confidence_level=confidence_level)
