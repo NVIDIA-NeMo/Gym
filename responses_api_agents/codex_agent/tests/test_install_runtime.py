@@ -15,12 +15,6 @@ from responses_api_agents.codex_agent.app import _sandbox_prepare_command
 
 INSTALLER = Path(__file__).parents[1] / "install_codex_runtime.sh"
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Codex in the task sandbox requires Linux")
-# On musl the installer looks for the task's C++ library where musl's loader does; this host may lack it there.
-MUSL_LIBSTDCXX = (
-    []
-    if any(Path(d, "libstdc++.so.6").exists() for d in ("/lib", "/usr/local/lib", "/usr/lib"))
-    else ["add --no-cache libstdc++"]
-)
 
 
 @pytest.fixture
@@ -254,8 +248,59 @@ def test_musl_uses_pinned_x64_archive_and_apk(sandbox: tuple[Path, dict[str, str
         in (root / "download.log").read_text()
     )
     tools = ["add --no-cache curl ca-certificates tar gzip coreutils gawk"] if bootstrap else []
-    assert _packages(root) == tools + MUSL_LIBSTDCXX
+    assert _packages(root) == tools
     assert not (root / "runtime/ready").exists()
+
+
+@pytest.mark.parametrize("uid", ["0", "1000"])
+@pytest.mark.parametrize("missing_library", [None, "libstdc++.so.6", "libgcc_s.so.1"])
+def test_musl_library_bootstrap_uses_node_probe(
+    sandbox: tuple[Path, dict[str, str]], uid: str, missing_library: str | None
+) -> None:
+    """Bootstrap missing libraries, accepting usable ones outside the default locations."""
+    root, env = sandbox
+    _use_musl_platform(root)
+    for name, script in {
+        "curl": """for last; do :; done
+if [[ "$*" == *SHASUMS256* ]]; then
+  echo 'stub  node-v22.19.0-linux-x64-musl.tar.gz' > "$last"
+fi
+""",
+        "sha256sum": "while IFS= read -r line; do :; done\n",
+        "tar": ":\n",
+    }.items():
+        _replace_command(root, name, script)
+    _replace_command(
+        root,
+        "apk",
+        'echo "$*" >> "$TEST_ROOT/packages.log"\n: > "$TEST_ROOT/cpp-installed"\n',
+    )
+    node = root / "runtime/node/bin/node"
+    node.parent.mkdir(parents=True)
+    node.write_text("""#!/bin/bash
+if [ -n "$TEST_MISSING_LIBRARY" ] && [ ! -f "$TEST_ROOT/cpp-installed" ]; then
+  echo "Error loading shared library $TEST_MISSING_LIBRARY: No such file or directory" >&2
+  exit 127
+fi
+case "$1" in
+  --version) echo v22.19.0;;
+  */npm-cli.js) echo install >> "$TEST_ROOT/npm.log";;
+  *) echo 'codex-cli 0.144.4';;
+esac
+""")
+    node.chmod(0o755)
+    result = run_installer(root, env | {"TEST_UID": uid, "TEST_MISSING_LIBRARY": missing_library or ""})
+    if missing_library and uid != "0":
+        assert result.returncode == 1
+        assert "requires libstdc++: preinstall them or use a root image" in result.stderr
+        assert _packages(root) == []
+        assert not (root / "npm.log").exists()
+        assert not (root / "runtime/ready").exists()
+        return
+    assert result.returncode == 0, result.stderr
+    assert _packages(root) == (["add --no-cache libstdc++"] if missing_library else [])
+    assert (root / "npm.log").read_text().splitlines() == ["install"]
+    assert (root / "runtime/ready").exists()
 
 
 def test_musl_arm64_is_rejected_before_installation(sandbox: tuple[Path, dict[str, str]]) -> None:
@@ -269,8 +314,9 @@ def test_musl_arm64_is_rejected_before_installation(sandbox: tuple[Path, dict[st
 
 
 @pytest.mark.parametrize("checksum_ok", [True, False])
+@pytest.mark.parametrize("uid", ["0", "1000"])
 def test_old_musl_cpp_repair_is_private_and_checksum_gated(
-    sandbox: tuple[Path, dict[str, str]], checksum_ok: bool
+    sandbox: tuple[Path, dict[str, str]], checksum_ok: bool, uid: str
 ) -> None:
     root, env = sandbox
     _use_musl_platform(root)
@@ -303,7 +349,7 @@ case "$1" in
 esac
 """)
     node.chmod(0o755)
-    result = run_installer(root, env | {"TEST_APK_CHECKSUM_STATUS": "0" if checksum_ok else "1"})
+    result = run_installer(root, env | {"TEST_APK_CHECKSUM_STATUS": "0" if checksum_ok else "1", "TEST_UID": uid})
     assert (
         "3cf66a7164240ef590106496d3c75f486bac46cba9cf2198c0c3b318c53ad027  libstdc++.apk"
         in (root / "checksums.log").read_text()
@@ -320,7 +366,7 @@ esac
     assert "-xzf libstdc++.apk -C libstdcpp usr/lib" in (root / "extract.log").read_text()
     assert (root / "npm.log").read_text().splitlines() == ["install"]
     assert (root / "runtime/ready").exists()
-    assert _packages(root) == MUSL_LIBSTDCXX
+    assert _packages(root) == []
 
 
 def run_prepare(root: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
