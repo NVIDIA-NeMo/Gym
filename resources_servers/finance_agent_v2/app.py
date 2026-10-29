@@ -19,7 +19,9 @@ Tools-only reuse of Vals's finance-agent-v2: the upstream ``finance_agent.tools.
 classes are imported (never reimplemented) and each is exposed as an HTTP endpoint.
 The public release ships no official grader — Vals's is privately licensed and not
 reproduced — so ``/verify`` uses our own: each ``rubric`` criterion is judged
-separately and decided by majority vote.
+separately and decided by majority vote. With ``frontier_finance_grader`` set, the
+official FrontierFinance grader scores the row's ``rubrics`` instead (see
+``frontier_finance_grading.py``).
 
 Upstream tool surface (``finance_agent.tools``):
   - web_search (TavilyWebSearch)              — needs Tavily key
@@ -39,8 +41,9 @@ import json
 import logging
 import os
 import time
+from datetime import date
 from types import SimpleNamespace
-from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence
+from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence, Union
 
 import yaml
 from fastapi import Body, FastAPI
@@ -76,7 +79,16 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json
+from resources_servers.finance_agent_v2.frontier_finance_grading import (
+    FrontierFinanceGrader,
+    FrontierFinanceGraderConfig,
+    FrontierFinanceVerifyResponse,
+    frontier_finance_key_metrics,
+    frontier_finance_metrics,
+    frontier_finance_repeat_metrics,
+)
 from resources_servers.finance_agent_v2.local_tools import LocalEDGARSearch, LocalParseHtmlPage, LocalPriceHistory
+from resources_servers.finance_agent_v2.task_data import FrontierFinanceTaskFields
 from resources_servers.sec_local_index.cache import ToolCache
 from resources_servers.sec_local_index.local_edgar_search import LocalEdgarSearch
 
@@ -106,6 +118,8 @@ _JUDGE_MAX_OUTPUT_TOKENS_CAP = 32768
 # along in every rollout row.
 _MAX_FAILED_REPLY_SAMPLES = 3
 _FAILED_REPLY_SAMPLE_CHARS = 600
+_SUBMIT_TOOL = "submit_final_result"
+_DATE_CAPPED_TOOLS = frozenset({"web_search", "edgar_search", "price_history"})
 
 
 class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
@@ -235,10 +249,29 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
         description="Per-rollout wall-clock budget in seconds. When exceeded, tool calls return an "
         "error asking the model to submit immediately. None disables.",
     )
+    max_tool_calls: Optional[int] = Field(
+        default=None,
+        description="Tool calls allowed per rollout, or null for no limit. Past it, every tool except "
+        "submit_final_result returns an error asking the model to submit.",
+    )
+    max_tool_time_seconds: Optional[float] = Field(
+        default=None,
+        description="Seconds spent inside tool calls allowed per rollout, or null for no limit. Model "
+        "generation time does not count. Past it, every tool except submit_final_result returns an error "
+        "asking the model to submit.",
+    )
     max_end_date: Optional[str] = Field(
         default="2026-03-01",
         description="Informational only. The upstream finance_agent tools self-clamp dates to their "
-        "own MAX_END_DATE (2026-03-01); this server does not re-clamp.",
+        "own MAX_END_DATE (2026-03-01); this server does not re-clamp. A row's as_of_date caps "
+        "web_search, edgar_search and price_history dates further.",
+    )
+
+    # --- FrontierFinance grading ---------------------------------------------
+    frontier_finance_grader: Optional[FrontierFinanceGraderConfig] = Field(
+        default=None,
+        description="When set, /verify grades each row's `rubrics` with the official FrontierFinance "
+        "grader and judge panel instead of grading `rubric` with judge_model_server.",
     )
 
 
@@ -247,11 +280,16 @@ class FinanceAgentV2ResourcesServerConfig(BaseResourcesServerConfig):
 # ============================================================================
 
 
-class FinanceAgentV2RunRequest(BaseRunRequest):
+class FinanceAgentV2SeedSessionRequest(BaseSeedSessionRequest):
+    as_of_date: Optional[str] = None
+
+
+class FinanceAgentV2RunRequest(FrontierFinanceTaskFields, BaseRunRequest):
     """Run request with question and (optional) expected answer.
 
     ``expected_answer`` / ``rubric`` are optional to support an unlabeled
     dry-run that exercises the agent + tools path before labels are available.
+    The FrontierFinance fields are unused unless ``frontier_finance_grader`` is set.
     """
 
     question: str = ""
@@ -302,6 +340,18 @@ class RubricJudgement(BaseModel):
     # the raw text.
     failed_reply_samples: List[str] = Field(default_factory=list)
     error: Optional[str] = None
+
+
+def cap_tool_dates(args: Dict[str, Any], as_of_date: str) -> Dict[str, Any]:
+    """Return ``args`` with ``end_date`` and ``start_date`` no later than ``as_of_date`` (YYYY-MM-DD)."""
+    capped = dict(args)
+    end_date = capped.get("end_date")
+    if not isinstance(end_date, str) or not end_date or end_date > as_of_date:
+        capped["end_date"] = as_of_date
+    start_date = capped.get("start_date")
+    if isinstance(start_date, str) and start_date > as_of_date:
+        capped["start_date"] = as_of_date
+    return capped
 
 
 def aggregate_rubric_scores(judgements: Sequence[RubricJudgement]) -> Dict[str, Any]:
@@ -426,6 +476,14 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         # parse_html_page / retrieve_information tools read and write.
         self._data_storage: Dict[str, Dict[str, str]] = {}
         self._session_start_times: Dict[str, float] = {}
+        self._as_of_dates: Dict[str, str] = {}
+        self._tool_call_counts: Dict[str, int] = {}
+        self._tool_seconds: Dict[str, float] = {}
+        self._frontier_finance_grader: Optional[FrontierFinanceGrader] = (
+            FrontierFinanceGrader(self, self.config.frontier_finance_grader)
+            if self.config.frontier_finance_grader
+            else None
+        )
 
         # Shared disk cache for pricing / edgar / SEC docs (disabled when use_cache is False).
         self._cache = ToolCache(self.config.cache_dir, use_cache=self.config.use_cache, app_name="finance_agent_v2")
@@ -596,9 +654,45 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
             )
         return None
 
-    async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+    def _tool_limit_error(self, session_id: str) -> Optional[str]:
+        used_calls = self._tool_call_counts.get(session_id, 0)
+        max_calls = self.config.max_tool_calls
+        if max_calls is not None and used_calls >= max_calls:
+            reason = f"Tool call limit reached ({used_calls} / {max_calls})"
+        else:
+            used_seconds = self._tool_seconds.get(session_id, 0.0)
+            max_seconds = self.config.max_tool_time_seconds
+            if max_seconds is None or used_seconds < max_seconds:
+                return None
+            reason = f"Tool time limit reached ({used_seconds:.0f}s / {max_seconds:.0f}s)"
+        return json.dumps(
+            {
+                "error": f"{reason}. No further tool calls will be executed. Call submit_final_result "
+                "immediately with your best answer."
+            }
+        )
+
+    def _end_session(self, session_id: str) -> None:
+        for state in (
+            self._data_storage,
+            self._session_start_times,
+            self._as_of_dates,
+            self._tool_call_counts,
+            self._tool_seconds,
+        ):
+            state.pop(session_id, None)
+
+    async def seed_session(self, request: Request, body: FinanceAgentV2SeedSessionRequest) -> BaseSeedSessionResponse:
         """Reset per-question data storage for this session."""
         session_id = request.session[SESSION_ID_KEY]
+        as_of_date = getattr(body, "as_of_date", None)
+        if isinstance(as_of_date, str) and as_of_date:
+            date.fromisoformat(as_of_date)
+            self._as_of_dates[session_id] = as_of_date
+        else:
+            self._as_of_dates.pop(session_id, None)
+        self._tool_call_counts[session_id] = 0
+        self._tool_seconds[session_id] = 0.0
         self._data_storage[session_id] = {}
         self._session_start_times[session_id] = time.monotonic()
         logger.debug("seed_session: reset data storage for session %s", session_id)
@@ -640,6 +734,21 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         if timeout_msg := self._check_time_budget(session_id):
             return {"results": timeout_msg}
 
+        if tool_name == _SUBMIT_TOOL:
+            return await self._run_tool(tool_name, session_id, args)
+        if limit_error := self._tool_limit_error(session_id):
+            return {"results": limit_error}
+        self._tool_call_counts[session_id] = self._tool_call_counts.get(session_id, 0) + 1
+        as_of_date = self._as_of_dates.get(session_id)
+        if as_of_date and tool_name in _DATE_CAPPED_TOOLS and isinstance(args, dict):
+            args = cap_tool_dates(args, as_of_date)
+        start = time.monotonic()
+        try:
+            return await self._run_tool(tool_name, session_id, args)
+        finally:
+            self._tool_seconds[session_id] = self._tool_seconds.get(session_id, 0.0) + time.monotonic() - start
+
+    async def _run_tool(self, tool_name: str, session_id: str, args: Any) -> Dict[str, str]:
         tool = self._tools.get(tool_name)
         if tool is None:
             return {
@@ -1000,18 +1109,23 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
                 return payload
         return {}
 
-    async def verify(self, request: Request, body: FinanceAgentV2VerifyRequest) -> FinanceAgentV2VerifyResponse:
+    async def verify(
+        self, request: Request, body: FinanceAgentV2VerifyRequest
+    ) -> Union[FinanceAgentV2VerifyResponse, FrontierFinanceVerifyResponse]:
         """Score the agent's answer against the dataset's rubric criteria.
 
         Each criterion is judged independently by majority vote, then aggregated into
         Partial Credit, which becomes the reward. An unresolved criterion counts as
         not passed and gates like one, but also sets ``judge_error`` so a judge outage
-        never reads as a model failure.
+        never reads as a model failure. With ``frontier_finance_grader`` set, the
+        FrontierFinance grader scores ``rubrics`` instead.
         """
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id:
-            self._data_storage.pop(session_id, None)
-            self._session_start_times.pop(session_id, None)
+            self._end_session(session_id)
+
+        if self._frontier_finance_grader is not None:
+            return await self._frontier_finance_grader.verify(body)
 
         question = ""
         for msg in body.responses_create_params.input or []:
@@ -1124,6 +1238,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         rollouts = [r for task in tasks for r in task]
         if not rollouts:
             return {}
+        if self._frontier_finance_grader is not None:
+            return frontier_finance_metrics(rollouts)
 
         # Gave up: nothing was judged and the judge did not fail either. A
         # pre-weighting rollout also carries no judgements, but it does carry a
@@ -1204,6 +1320,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
 
     def compute_repeat_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Apply the full-run rubric scoring rules to each repeat's means."""
+        if self._frontier_finance_grader is not None:
+            return frontier_finance_repeat_metrics(self.compute_metrics(tasks))
         return {name: value for name, value in self.compute_metrics(tasks).items() if name.startswith("mean/")}
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -1213,6 +1331,8 @@ class FinanceAgentV2ResourcesServer(SimpleResourcesServer):
         third of its criteria should not be read as a low score, and that is only
         obvious if the failure count sits next to the score.
         """
+        if self._frontier_finance_grader is not None:
+            return frontier_finance_key_metrics(agent_metrics)
         key = {k: v for k, v in agent_metrics.items() if k.startswith("mean/")}
         for k in (
             "rubric/criteria_unresolved",
