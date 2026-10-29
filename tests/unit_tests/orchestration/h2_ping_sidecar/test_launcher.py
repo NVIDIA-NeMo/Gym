@@ -23,9 +23,9 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.h2_ping_sidecar import launcher
-from nemo_gym.h2_ping_sidecar.config import H2PingSidecarConfig, is_loopback_host, parse_duration_seconds
-from nemo_gym.h2_ping_sidecar.launcher import (
+from nemo_gym.orchestration.h2_ping_sidecar import launcher
+from nemo_gym.orchestration.h2_ping_sidecar.config import H2PingSidecarConfig, is_loopback_host, parse_duration_seconds
+from nemo_gym.orchestration.h2_ping_sidecar.launcher import (
     H2PingSidecarManager,
     NodeSidecars,
     SidecarError,
