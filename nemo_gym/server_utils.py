@@ -2221,7 +2221,21 @@ def _url_root(url: str) -> tuple[str, Optional[str], Optional[int], list[str]]:
     """Scheme, lowercased host, effective port and path segments, as HTTP clients normalize them."""
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
-    return scheme, parts.hostname, parts.port or _DEFAULT_PORTS.get(scheme), [s for s in parts.path.split("/") if s]
+    port = parts.port if parts.port is not None else _DEFAULT_PORTS.get(scheme)
+    return scheme, parts.hostname, port, [s for s in parts.path.split("/") if s]
+
+
+def _end_of_segments(path: str, count: int) -> int:
+    """The index in ``path`` just past its first ``count`` non-empty segments; repeated slashes are kept as sent."""
+    seen = 0
+    index = 0
+    while seen < count:
+        while index < len(path) and path[index] == "/":
+            index += 1
+        while index < len(path) and path[index] != "/":
+            index += 1
+        seen += 1
+    return index
 
 
 def with_rollout_prefix(url: str, base_urls: Sequence[str]) -> str:
@@ -2253,11 +2267,12 @@ def with_rollout_prefix(url: str, base_urls: Sequence[str]) -> str:
             logger.debug(f"No current rollout, so {url} is sent without a rollout prefix and is not captured")
             return url
         parts = urlsplit(url)
-        base_path = "".join(f"/{segment}" for segment in base_segments)
-        return urlunsplit(
-            parts._replace(path=base_path + rollout_path_prefix(rollout_id) + parts.path[len(base_path) :])
-        )
+        cut = _end_of_segments(parts.path, len(base_segments))
+        return urlunsplit(parts._replace(path=parts.path[:cut] + rollout_path_prefix(rollout_id) + parts.path[cut:]))
     return url
+
+
+_ORIGINAL_URL_EXTENSION = "nemo_gym.original_url"
 
 
 class RewritableRequest(Protocol):
@@ -2272,7 +2287,11 @@ def rollout_prefix_hook(base_urls: Sequence[str]) -> Callable[[RewritableRequest
         raise TypeError("base_urls must be a sequence of base URLs, not a single string")
 
     def hook(request: RewritableRequest) -> None:
-        request.url = type(request.url)(with_rollout_prefix(str(request.url), base_urls))
+        # A request object sent again (under another rollout, or none) is rewritten from the URL it was built with,
+        # so an earlier send's prefix is never mistaken for an explicit one.
+        extensions = getattr(request, "extensions", None)
+        original = extensions.setdefault(_ORIGINAL_URL_EXTENSION, str(request.url)) if extensions is not None else None
+        request.url = type(request.url)(with_rollout_prefix(original or str(request.url), base_urls))
 
     return hook
 

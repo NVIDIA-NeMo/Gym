@@ -91,6 +91,19 @@ def server_url() -> Iterator[str]:
         ("http://gym:8000/api10/v1/responses", ["http://gym:8000/api1"], "http://gym:8000/api10/v1/responses"),
         ("https://gym:8000/v1/responses", ["http://gym:8000"], "https://gym:8000/v1/responses"),
         ("http://other:8000/v1/responses", ["http://gym:8000"], "http://other:8000/v1/responses"),
+        # Port 0 is a port, not the default one.
+        ("http://gym:0/v1/responses", ["http://gym"], "http://gym:0/v1/responses"),
+        # Repeated slashes are kept as sent; the prefix goes right after the base's segments.
+        (
+            "http://gym:8000//api/v1/responses",
+            ["http://gym:8000/api"],
+            "http://gym:8000//api/ng-rollout/3-0-a1/v1/responses",
+        ),
+        (
+            "http://gym:8000/api//v1/responses",
+            ["http://gym:8000//api/"],
+            "http://gym:8000/api/ng-rollout/3-0-a1//v1/responses",
+        ),
         # A prefix already on the request wins, so a client addressing another key is left alone.
         (
             "http://gym:8000/ng-rollout/7-1/v1/responses",
@@ -165,3 +178,29 @@ async def test_a_shared_async_client_tags_each_concurrent_request_with_its_own_r
 
         rollout_ids = [f"{task}-0" for task in range(20)]
         assert await asyncio.gather(*(call(rollout_id) for rollout_id in rollout_ids)) == rollout_ids
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync hook", "async hook"])
+async def test_a_request_sent_again_is_rewritten_for_the_current_rollout(asynchronous: bool) -> None:
+    """A retried or replayed request object must not keep the rollout of its first send."""
+    base_url = "http://gym-model"
+    hook = async_rollout_prefix_hook([base_url]) if asynchronous else rollout_prefix_hook([base_url])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=_echo_app()), base_url=base_url) as client:
+        request = client.build_request("POST", "/v1/responses")
+
+        async def send(rollout_id: str | None) -> dict:
+            if rollout_id is None:
+                if asynchronous:
+                    await hook(request)
+                else:
+                    hook(request)
+            else:
+                with rollout_context(rollout_id):
+                    if asynchronous:
+                        await hook(request)
+                    else:
+                        hook(request)
+            return (await client.send(request)).json()
+
+        seen = [(await send(rollout_id))["rollout_id"] for rollout_id in ("first", "second", None)]
+    assert seen == ["first", "second", None]
