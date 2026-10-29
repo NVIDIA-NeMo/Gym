@@ -51,6 +51,7 @@ if TYPE_CHECKING:
         StepType,
         seed_rebinds_tools,
         seed_restarts,
+        seed_restores_before_agent_close,
         seed_verify_step_type,
     )
     from nemo_gym.server_runtime._checkpoint.store import write_participant_state
@@ -105,6 +106,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
+    from nemo_gym.server_runtime.sandbox_owner import SandboxOwnerConfig, SandboxOwnerResourcesServer, SessionSetup
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
@@ -178,6 +180,9 @@ _PUBLIC_API = {
     "RolloutContextMiddleware": "request_handling.rollout_context",
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
+    "SandboxOwnerConfig": "sandbox_owner",
+    "SandboxOwnerResourcesServer": "sandbox_owner",
+    "SessionSetup": "sandbox_owner",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
     "SingleAgentTurnFailure": "single_agent_turn_types",
@@ -203,6 +208,7 @@ _PUBLIC_API = {
     "require_rollout": "_checkpoint.agent",
     "seed_rebinds_tools": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
+    "seed_restores_before_agent_close": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
     "write_participant_state": "_checkpoint.store",
