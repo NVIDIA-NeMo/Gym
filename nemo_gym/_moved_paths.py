@@ -67,6 +67,7 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.cli_setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
     "nemo_gym.benchmarks": MovedPath(new="nemo_gym.environment.benchmarks", since="0.8.0"),
     "nemo_gym.deliverables": MovedPath(new="nemo_gym.environment.deliverables", since="0.8.0"),
     "nemo_gym.registry": MovedPath(new="nemo_gym.environment.registry", since="0.8.0"),

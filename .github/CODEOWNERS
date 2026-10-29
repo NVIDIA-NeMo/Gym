@@ -52,7 +52,6 @@ uv.lock @nvidia-nemo/automation
 # suggest: /benchmarks/ @nvidia-nemo/gym_env_benchmarks
 # suggest: /environments/ @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/cli/ @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/cli_setup_command.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/environment/benchmarks.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/data/dataset_orchestrator.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/data/gitlab_utils.py @nvidia-nemo/gym_env_benchmarks
