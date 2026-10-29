@@ -19,7 +19,7 @@ from pathlib import Path
 import orjson
 
 from nemo_gym.comparison.schema import ReportFormat
-from nemo_gym.comparison.suite_schema import SuiteComparisonResult, SuiteStatistics
+from nemo_gym.comparison.suite.schema import SuiteComparisonResult, SuiteStatistics
 from nemo_gym.config_types import ConfigError
 
 

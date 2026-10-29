@@ -21,10 +21,10 @@ import orjson
 import pytest
 import yaml
 
-from nemo_gym.comparison.suite_loading import load_suite_run
-from nemo_gym.comparison.suite_processing import compare_suite_cell
-from nemo_gym.comparison.suite_runner import build_suite_comparison
-from nemo_gym.comparison.suite_schema import (
+from nemo_gym.comparison.suite.loading import load_suite_run
+from nemo_gym.comparison.suite.processing import compare_suite_cell
+from nemo_gym.comparison.suite.runner import build_suite_comparison
+from nemo_gym.comparison.suite.schema import (
     SuiteComparisonConfig,
     SuiteComparisonResult,
     SuiteMetricResult,
