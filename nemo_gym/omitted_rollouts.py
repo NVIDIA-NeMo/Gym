@@ -21,6 +21,9 @@ collection writes nothing for them, so their absence is the only evidence. With
 ``_ng_omitted_rollout``. No reader counts that row as a failure or an attempt, so scoring and the
 resume attempt count are unchanged and resume still runs the rollout. When readers pick a rollout's
 latest attempt, an interrupted one counts and hides older failures; one never started is skipped.
+
+A failed agent ``/run`` that ends the run because ``route_failures_to_sidecar`` is off gets the same row, whatever
+``record_omitted_rollouts`` says: its reply was lost, so the rollout produced no result.
 """
 
 from typing import Any, Dict, Mapping

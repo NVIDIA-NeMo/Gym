@@ -37,7 +37,13 @@ import orjson
 import pytest
 import uvicorn
 import yaml
-from aiohttp import ClientConnectorError, ClientResponseError, ClientSession, ServerDisconnectedError
+from aiohttp import (
+    ClientConnectorError,
+    ClientPayloadError,
+    ClientResponseError,
+    ClientSession,
+    ServerDisconnectedError,
+)
 from anyio import CancelScope
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
@@ -116,6 +122,7 @@ from nemo_gym.rollout_collection import (
     _round_robin_by_agent,
     _trajectory_identity,
     get_max_rollout_attempts,
+    is_omitted_rollout_row,
     is_terminal_failure,
     loads_jsonl_line,
 )
@@ -3574,10 +3581,8 @@ class TestRolloutCollection:
         with pytest.raises(ClientResponseError):
             await RolloutCollectionHelper().run_from_config(config)
 
-        assert (
-            not _failures_path_for(output_jsonl_fpath).exists()
-            or not _failures_path_for(output_jsonl_fpath).read_bytes()
-        )
+        rows = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        assert rows and all(is_omitted_rollout_row(row) for row in rows)
 
     async def test_run_from_config_reports_rollouts_dropped_by_the_agent_with_routing_off(
         self,
@@ -4430,6 +4435,7 @@ class TestRolloutCollection:
                 drain_margin_s=None,
                 latency_tracker=None,
                 run_timing=None,
+                record_unrouted_failures=False,
             ):
                 awaitables = map(
                     lambda row: self._post(
@@ -12343,3 +12349,127 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     assert "failure_kind" not in rollout_collection._counted_failure_row(record)
     plain = rollout_collection._episode_record(reply | {"failure": {"failure_reason": "bad task", "terminal": True}})
     assert "failure_kind" not in plain and not any(key.endswith("_step") for key in plain)
+
+
+class TestUnroutedRunFailure:
+    """route_failures_to_sidecar off: the failed /run still ends the run, after a row no reader counts records it."""
+
+    @staticmethod
+    def _input(tmp_path: Path, n: int) -> Path:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                + "\n"
+                for i in range(n)
+            )
+        )
+        return input_jsonl_fpath
+
+    @staticmethod
+    def _install(monkeypatch: pytest.MonkeyPatch, failure: BaseException) -> Counter:
+        """Row x=1 fails with ``failure``: raised by the body read for a cut-off body, else by the call."""
+        runs: Counter = Counter()
+        cut_off = isinstance(failure, ClientPayloadError)
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            assert url_path == "/run", url_path
+            runs[json["x"]] += 1
+            if json["x"] == 1 and not cut_off:
+                raise failure
+            return FakeResponse(200, None if json["x"] == 1 else {"reward": 1.0, "response": {"usage": {}}})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        read_body = nemo_gym.rollout_collection.get_response_json
+
+        async def get_response_json(response: FakeResponse):
+            if cut_off and response.payload is None:
+                raise failure
+            return await read_body(response)
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", get_response_json)
+        return runs
+
+    def _config(self, tmp_path: Path, n: int, **kwargs) -> RolloutCollectionConfig:
+        return RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._input(tmp_path, n)),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            num_samples_in_parallel=1,
+            disable_health_check=True,
+            **kwargs,
+        )
+
+    @pytest.mark.parametrize(
+        ("failure", "status"),
+        [
+            pytest.param(ClientPayloadError("Response payload is not completed"), 200, id="body-cut-off-after-200"),
+            pytest.param(http_error(500, "agent handler raised"), 500, id="agent-500"),
+        ],
+    )
+    async def test_the_failed_run_is_recorded_before_the_same_error_ends_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, failure, status
+    ) -> None:
+        runs = self._install(monkeypatch, failure)
+        config = self._config(tmp_path, 3, require_complete=True)
+
+        with pytest.raises(type(failure)) as raised:
+            await RolloutCollectionHelper().run_from_config(config)
+
+        # Still fail-fast with the original error; the failed row was sent once and nothing was resent.
+        assert raised.value is failure
+        assert runs[1] == 1 and runs[2] <= 1
+        output = Path(config.output_jsonl_fpath)
+        assert [orjson.loads(line)[TASK_INDEX_KEY_NAME] for line in output.read_bytes().splitlines()] == [0]
+        [row] = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+        assert (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME], row[AGENT_REF_KEY_NAME]) == (
+            1,
+            0,
+            {"name": "my_agent"},
+        )
+        assert is_omitted_rollout_row(row) and row[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+        assert row["_ng_failure_http_status"] == status and row["_ng_failure_type"] == type(failure).__name__
+        assert NG_FAILURE_MAX_ATTEMPTS_KEY not in row and "reward" not in row and "response" not in row
+        # The canonical report names the collection's own failure, caused by the dispatch error.
+        failure_event = row["_ng_failure_events"][row["_ng_failure_id"]]
+        assert (failure_event["boundary"], failure_event["operation"]) == ("collection", "collection.run")
+        assert failure_event["foreign_error"]["exception_type"].endswith(type(failure).__name__)
+
+    async def test_resume_and_scoring_do_not_count_the_record(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        self._install(monkeypatch, ClientPayloadError("Response payload is not completed"))
+        config = self._config(tmp_path, 3)
+        with pytest.raises(ClientPayloadError):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        dispatched, *_ = RolloutCollectionHelper()._load_from_cache(
+            config.model_copy(update={"resume_from_cache": True})
+        )
+
+        # As without the record: the scored row stays done, the failed and the unfinished rows run as first attempts.
+        assert {row["x"]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched} == {1: None, 2: None}
+        output = Path(config.output_jsonl_fpath)
+        assert (
+            _failure_rows_counted_as_zero([_failures_path_for(output)], [AGENT_RUN_ERROR_FAILURE_CLASS], {(0, 0)})
+            == []
+        )
+
+    @pytest.mark.parametrize("failure", [asyncio.CancelledError(), ValueError("not a dispatch failure")])
+    async def test_cancellation_and_other_errors_are_neither_recorded_nor_resent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, failure
+    ) -> None:
+        runs = self._install(monkeypatch, failure)
+        config = self._config(tmp_path, 3)
+
+        with pytest.raises(type(failure)):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        assert runs[1] == 1
+        failures = _failures_path_for(Path(config.output_jsonl_fpath))
+        assert not failures.exists() or failures.read_bytes() == b""
+
+    async def test_run_examples_callers_still_get_the_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._install(monkeypatch, ClientPayloadError("Response payload is not completed"))
+
+        with pytest.raises(ClientPayloadError):
+            await next(RolloutCollectionHelper().run_examples([{**failing_row(1), "x": 1}]))
