@@ -237,6 +237,52 @@ The recipe records its own choices explicitly: a 300-second command deadline, fo
 with hidden grading behavior. This server uses the supplied task schema and its documented comparison policy;
 it does not call an external grading API.
 
+### Semantic answer validators
+
+Some tasks admit several valid outputs: a protocol can be split into more stages without changing its result, and
+different bases can span the same vector space. An expected-value comparison cannot establish those properties.
+For these tasks, an operator can register a semantic validator in the resources-server configuration:
+
+```yaml
+critpt_custom_grader:
+  resources_servers:
+    critpt_custom_grader:
+      semantic_validators:
+        plane_basis:
+          entrypoint: validate
+          source: |
+            def validate(*, observed, expected, args, kwargs, config):
+                # Synthetic example: any integer basis for the xy-plane in R^3.
+                if type(observed) is not list or len(observed) != 2:
+                    return False
+                if any(type(row) is not list or len(row) != 3 for row in observed):
+                    return False
+                if any(type(value) is not int for row in observed for value in row):
+                    return False
+                a, b = observed
+                return a[2] == b[2] == 0 and a[0] * b[1] - a[1] * b[0] != 0
+```
+
+The task selects the registered identifier with `semantic_validator: {id: plane_basis, config: {}}`. It still supplies
+a reference implementation and value expectations for its cases. Tasks cannot supply validator source, paths,
+entry points or execution limits. Omitting `semantic_validator` preserves the expected-value comparison policy.
+
+The validator receives the decoded observed value, stored expected value, original positional and keyword inputs,
+and its bounded JSON configuration. Input-conversion code is not run in the comparator: symbolic text remains an
+inert codec value, and callables or candidate-defined objects are not deserialized. The validator must return an
+exact Python `bool`. It owns its numerical tolerances and acceptance rules; ordinary comparison tolerances are not
+automatically applied to it. Define any objective target, feasibility boundary and rounding rule explicitly in the
+validator or configuration.
+
+Only the operator's selected source is delivered to the protected comparator sandbox. It runs in a fresh namespace
+for each case, within the existing resource limits and comparison deadlines; module initialization is included in
+that deadline. The same validator first checks the reference outputs. A rejected reference makes the task
+unscorable and prevents candidate execution. After a successful preflight, a candidate rejection scores zero.
+Validator exceptions, non-Boolean returns and timeouts remain unscorable, even if another case rejects the answer.
+Changing validator source, entry point or task configuration invalidates the reference-preflight cache.
+
+These are task-authoring mechanisms, not a supplied implementation of any benchmark's hidden acceptance policy.
+
 ### Startup check
 
 Before it reports ready, the server starts one sandbox from the operator's `sandbox_spec` and checks that commands run
@@ -309,7 +355,7 @@ could not tell such runtimes apart. Daytona also refuses a `snapshot_id` beside 
 E2B, map the image to its template with `create.template_map`.
 
 Network isolation is a provider setting. The sandbox runtime's hard limits must allow an `RLIMIT_FSIZE` of at least
-156,303,360 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the runner sets on every task
+161,546,240 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the runner sets on every task
 process; otherwise every run fails as `runner_error: limits` (non-terminal).
 
 ### Configuration

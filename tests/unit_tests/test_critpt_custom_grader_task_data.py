@@ -881,3 +881,55 @@ class TestTaskComparisonPolicy:
             defaults.get("default_rtol"),
             defaults.get("default_atol"),
         )
+
+
+class TestSemanticValidatorMetadata:
+    def test_task_selection_preserves_only_id_and_exact_json_parameters(self):
+        selected = TaskData.model_validate(task(semantic_validator={"id": "span", "config": {"rank": 2}}))
+        assert selected.semantic_validator.model_dump() == {"id": "span", "config": {"rank": 2}}
+        assert TaskData.model_validate(task()).semantic_validator is None
+
+    @pytest.mark.parametrize(
+        "selection",
+        [
+            {"id": "../span"},
+            {"id": "span", "source": "def validate(): pass"},
+            {"id": "span", "config": []},
+            {"id": "span", "config": {"rank": object()}},
+            {"id": "span", "config": {"payload": "x" * 16385}},
+        ],
+    )
+    def test_task_cannot_supply_executable_or_unbounded_validator_metadata(self, selection):
+        with pytest.raises(ValidationError):
+            TaskData.model_validate(task(semantic_validator=selection))
+
+    def test_semantic_selection_requires_value_expectations(self):
+        with pytest.raises(ValidationError):
+            TaskData.model_validate(
+                task(semantic_validator={"id": "span"}, test_cases=[canonical_case(expected={"kind": "exception"})])
+            )
+
+    def test_operator_registry_is_bounded_without_executing_source(self):
+        source = "raise AssertionError('must stay inert')\n"
+        registry = schema.validate_semantic_registry({"span": {"source": source}})
+        assert registry["span"].source == source
+        assert registry["span"].entrypoint == "validate"
+        with pytest.raises(ValidationError):
+            registry["span"].source = "changed"
+
+    @pytest.mark.parametrize(
+        "registry",
+        [
+            [],
+            {1: {"source": "pass"}},
+            {"../span": {"source": "pass"}},
+            {"span": {"source": "\x00"}},
+            {"span": {"source": "é" * 131073}},
+            {"span": {"source": "pass", "entrypoint": "lambda"}},
+            {f"v{index}": {"source": "pass"} for index in range(65)},
+            {f"v{index}": {"source": "#" * 262144} for index in range(9)},
+        ],
+    )
+    def test_operator_registry_refuses_invalid_names_source_and_aggregate_size(self, registry):
+        with pytest.raises((ValueError, ValidationError)):
+            schema.validate_semantic_registry(registry)

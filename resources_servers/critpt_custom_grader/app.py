@@ -74,7 +74,14 @@ from resources_servers.critpt_custom_grader.submission import (
     extract_finish_source,
     finish_acknowledgement,
 )
-from resources_servers.critpt_custom_grader.task_data import MAX_TASK_BYTES, TaskData, bounded_json, tolerance_text
+from resources_servers.critpt_custom_grader.task_data import (
+    MAX_TASK_BYTES,
+    SemanticValidatorDefinition,
+    TaskData,
+    bounded_json,
+    tolerance_text,
+    validate_semantic_registry,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -151,6 +158,7 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     sandbox_spec: SandboxSpecConfig = Field(default_factory=SandboxSpecConfig)
     execution: ExecutionPolicy = Field(default_factory=ExecutionPolicy)
     comparison: ComparisonDefaults = Field(default_factory=ComparisonDefaults)
+    semantic_validators: dict[str, SemanticValidatorDefinition] = Field(default_factory=dict)
     reference_cache_dir: str | None = None
     startup_probe: bool = True
     answer_source: Literal["output_text", "finish_tool"] = "output_text"
@@ -167,6 +175,11 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     allowed_model_types: Any = None
     verified_url: str | None = None
     grading_mode: str | None = None
+
+    @field_validator("semantic_validators", mode="before")
+    @classmethod
+    def bounded_semantic_registry(cls, value: object) -> dict[str, SemanticValidatorDefinition]:
+        return validate_semantic_registry(value)
 
     @model_validator(mode="after")
     def consistent_sandbox_bounds(self) -> "CritPtCustomGraderConfig":
@@ -446,6 +459,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
                 default_rtol=self.config.comparison.default_rtol,
                 default_atol=self.config.comparison.default_atol,
                 reference_cache=ReferenceCache(self.config.reference_cache_dir),
+                semantic_validators=self.config.semantic_validators,
             )
             self._agentic_sessions = self._execution_sessions()
         except BaseException:

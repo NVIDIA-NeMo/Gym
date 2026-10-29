@@ -33,8 +33,8 @@ critpt_custom_grader:
         # Must equal execution.workdir (default /work); every grading domain works in a directory below it.
         workdir: /work
         ready_timeout_s: 600
-        # Provider-side orphan backstop: job_timeout_s (9700) plus a margin. Startup refuses a value below
-        # job_timeout_s + cleanup_timeout_s (9760); null leaves the lifetime to the provider's default. docker,
+        # Provider-side orphan backstop: job_timeout_s (9800) plus a margin. Startup refuses a value below
+        # job_timeout_s + cleanup_timeout_s (9860); null leaves the lifetime to the provider's default. docker,
         # opensandbox, e2b and ecs_fargate enforce it; apptainer, enroot, openshell and local ignore it. Daytona does
         # not read it: its stop, archive and delete intervals (create.auto_stop_interval,
         # create.auto_archive_interval, create.auto_delete_interval) are the backstop there.
@@ -62,10 +62,10 @@ critpt_custom_grader:
         # The runner needs suite_deadline plus its 15 s reap/sweep budget to write a timeout result; keep >= 15.
         exec_timeout_margin_s: 20
         # At least every bound one job awaits: two runs and two compare batches at their deadlines plus two margins,
-        # three creates, 27 file transfers at transfer_timeout_s + 5 s and three stops:
-        # 2 * (1800 + 40) + 2 * (600 + 40) + 3 * 900 + 27 * (60 + 5) + 3 * 60 = 9595, rounded up to the next 100 s
-        # (9600) plus a 100 s buffer. Startup refuses a value below that sum.
-        job_timeout_s: 9700
+        # three creates, 29 file transfers at transfer_timeout_s + 5 s and three stops:
+        # 2 * (1800 + 40) + 2 * (600 + 40) + 3 * 900 + 29 * (60 + 5) + 3 * 60 = 9725, rounded up to the next 100 s.
+        # Startup refuses a value below that sum.
+        job_timeout_s: 9800
         cleanup_timeout_s: 60
         max_candidate_source_bytes: 65536
         # Jobs graded at once by this process; Gym's num_samples_in_parallel bounds the client side.

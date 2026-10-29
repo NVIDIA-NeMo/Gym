@@ -29,7 +29,7 @@ critpt_custom_grader:
       execution:
         interpreter: /usr/local/bin/python3
         exec_user: grader
-        job_timeout_s: 9700
+        job_timeout_s: 9800
         max_concurrent_jobs: 4
       comparison:
         default_rtol: "5e-12"
