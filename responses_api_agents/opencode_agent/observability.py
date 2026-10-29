@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Policy turns from OpenCode's persisted provider-step and message boundaries."""
+"""Policy turns and tool outcomes from OpenCode's persisted provider steps, messages and tool parts."""
 
 import json
 import math
+import re
 from collections import defaultdict
 from sqlite3 import Row
-from typing import Any
+from typing import Any, NamedTuple
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.rollout_observability import (
@@ -201,3 +202,64 @@ def scope_opencode_activation(
     for turn in trajectory.turns:
         turn.invocation_id = scoped(turn.invocation_id)
         turn.activation_id = activation_id
+
+
+# OpenCode's shell tool reports a timeout or an abort only as this trailer on a completion with a null exit code.
+_SHELL_TERMINATION_TRAILER = re.compile(
+    r"\n\n<shell_metadata>\n(?:(?P<timeout>shell tool terminated command after exceeding timeout \d+ ms\.[^\n]*)"
+    r"|(?P<aborted>User aborted the command))\n</shell_metadata>\Z"
+)
+_COMPACTED_TOOL_OUTPUT = "[Old tool result content cleared]"
+
+
+class OpenCodeToolOutcome(NamedTuple):
+    """What one persisted OpenCode tool part says about its execution."""
+
+    status: str
+    error_type: str | None
+    # The model-visible output; for a tool still running when OpenCode stopped, its persisted partial output.
+    output: str | None
+    gap: str | None
+
+
+def opencode_tool_outcome(tool: Any, state: dict[str, Any]) -> OpenCodeToolOutcome:
+    """Map a tool part's state to its Gym outcome, reading only what OpenCode recorded."""
+    opencode_status = state.get("status")
+    metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+    opencode_time = state.get("time") if isinstance(state.get("time"), dict) else {}
+    raw_output = state.get("output")
+    interrupted = opencode_status == "error" and metadata.get("interrupted") is True
+    if opencode_status == "completed" and opencode_time.get("compacted") is not None:
+        # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
+        output = _COMPACTED_TOOL_OUTPUT
+    elif opencode_status in {"running", "pending"} or (interrupted and isinstance(metadata.get("output"), str)):
+        # OpenCode streams a running tool's output into its metadata and sends that to the model on an abort.
+        output = metadata.get("output") if isinstance(metadata.get("output"), str) else None
+    else:
+        output = raw_output if raw_output is not None else state.get("error")
+    output = None if output is None else str(output)
+
+    if opencode_status in {"running", "pending"}:
+        return OpenCodeToolOutcome(
+            "incomplete", None, output, "tool_output_partial" if output is not None else "tool_output_unavailable"
+        )
+    if interrupted:
+        return OpenCodeToolOutcome("cancelled", "tool_aborted", output, None)
+    if opencode_status == "error":
+        return OpenCodeToolOutcome("failed", "tool_error", output, None)
+    if opencode_status != "completed":
+        return OpenCodeToolOutcome("unknown", None, output, None)
+    if tool != "bash":
+        return OpenCodeToolOutcome("completed", None, output, None)
+    # Completion describes the tool lifecycle, not shell success: a timeout or an abort also completes it.
+    exit_code = metadata.get("exit")
+    if type(exit_code) is int:
+        return OpenCodeToolOutcome(
+            "completed" if exit_code == 0 else "failed", None if exit_code == 0 else "tool_error", output, None
+        )
+    trailer = _SHELL_TERMINATION_TRAILER.search(raw_output) if isinstance(raw_output, str) else None
+    if trailer is not None and trailer.group("timeout") is not None:
+        return OpenCodeToolOutcome("timeout", "tool_timeout", output, None)
+    if trailer is not None:
+        return OpenCodeToolOutcome("cancelled", "tool_aborted", output, None)
+    return OpenCodeToolOutcome("unknown", None, output, "tool_outcome_unavailable")
