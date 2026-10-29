@@ -169,9 +169,15 @@ class OpenCodeSandboxSession(AgentSessionState):
     files. ``persistent_directory`` is the session root, where legacy one-shot
     calls run and continuation calls retain their conversation.
     SandboxSession owns finalization and removal of the entire directory tree.
+
+    A ``checkpointed`` session pauses its harness in place at a checkpoint, and relaunches it in
+    ``launch-K`` directories under the same root when a pause failed or a crash interrupted it,
+    resuming the conversation kept in the root. A session a restore installed has no sandbox
+    connection (``session`` is ``None``) until its replacement attempt's seed re-binds it;
+    ``restored`` keeps what the checkpoint exported until then.
     """
 
-    session: SandboxSession[str]
+    session: SandboxSession[str] | None
     runtime: str
     sandbox_id: str | None = None
     model_ref: ModelServerRef | None = None
@@ -212,6 +218,14 @@ class OpenCodeSandboxSession(AgentSessionState):
     _capture_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
     # Every model-call label read so far; the label file only grows, so an earlier read stays valid.
     _labels: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
+    checkpointed: bool = False
+    # Launches of the harness so far, and what each ended with, for the checkpoint and the reply's evidence.
+    launch_count: int = 0
+    launch_records: list[dict[str, JsonValue]] = field(default_factory=list)
+    # The activation this session completed and its reply, given again to a caller that sends it again.
+    completed_activation: int = 0
+    completed_reply: dict[str, JsonValue] | None = None
+    restored: dict[str, JsonValue] | None = None
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -231,6 +245,54 @@ class OpenCodeSandboxSession(AgentSessionState):
     def persistent_directory(self) -> str:
         """Private OpenCode session storage that survives process activations."""
         return self.session.root_dir
+
+    def require_session(self) -> SandboxSession[str]:
+        """The sandbox session; a restored session gets one when its replacement attempt's seed re-binds it."""
+        if self.session is None:
+            raise RuntimeError(
+                "OpenCode session was restored from a checkpoint and has not been re-bound to a sandbox"
+            )
+        return self.session
+
+    async def prepare_launch(self, launch: int, *, timeout: float) -> None:
+        """Rearm the supervisor in ``launch-K`` under the session root, keeping the conversation in the root."""
+        assert self.checkpointed and launch > 1
+        directory = f"{self.persistent_directory}/launch-{launch}"
+        await self.session.begin_activation(session_dir=directory, timeout=timeout)
+        result = await self.session.sandbox.exec(f"mkdir -p -- {quote(directory)}", cwd="/", timeout_s=timeout)
+        if result.error_type == "timeout":
+            raise TimeoutError("OpenCode launch directory preparation timed out")
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot prepare OpenCode launch directory: {result.stderr}")
+
+    async def inspect_conversation(self, *, timeout: float) -> dict[str, JsonValue] | None:
+        """Export the conversation OpenCode saved in this session's root, or ``None`` when there is none."""
+        with tempfile.TemporaryDirectory(prefix="opencode-resume-") as directory:
+            if not await self._download_database(Path(directory), timeout):
+                return None
+            try:
+                await asyncio.to_thread(
+                    snapshot,
+                    Path(directory) / "opencode.db",
+                    Path(directory),
+                    harness_session_id=None,
+                    previous_message_ids=(),
+                )
+                return json.loads((Path(directory) / "export.json").read_text())
+            except Exception:
+                LOG.warning("The saved OpenCode conversation cannot be read", exc_info=True)
+                return None
+
+    async def discard_conversation(self, *, timeout: float) -> None:
+        """Set the saved conversation aside, so the next launch starts afresh in an empty data directory."""
+        data = f"{self.persistent_directory}/data"
+        result = await self.session.sandbox.exec(
+            f"if [ -e {quote(data)} ]; then mv -- {quote(data)} {quote(data)}.discarded-{self.launch_count}; fi",
+            cwd="/",
+            timeout_s=timeout,
+        )
+        if result.return_code != 0 or result.error_type:
+            raise RuntimeError(f"Cannot set the saved OpenCode conversation aside: {result.stderr}")
 
     async def prepare_activation(self, activation_id: int, *, timeout: float) -> None:
         """Keep one conversation while rearming the supervised execution lifecycle."""
@@ -335,6 +397,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         timeout: float,
         close_timeout: float,
         deadline: float | None = None,
+        pause_allowance_s: float = 0.0,
     ) -> str:
         """Run through the common lifecycle; the adapter validates terminal events."""
         artifacts = await self.session.execute(
@@ -343,6 +406,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             timeout=timeout,
             close_timeout=close_timeout,
             deadline=deadline,
+            pause_allowance_s=pause_allowance_s,
         )
         if self.session.closing:
             raise asyncio.CancelledError
@@ -361,7 +425,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 self.session.sandbox, path=f"{self.session.session_dir}/instructions.md", text=payload["instructions"]
             )
         # OpenCode 2 loads the Gym plugin from the session's private storage, staged at seed.
-        if self.is_continuation and not self.opencode2:
+        if (self.is_continuation or self.session.session_dir != self.persistent_directory) and not self.opencode2:
             await self.session.sandbox.upload(
                 TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{self.session.session_dir}/{TASK_ENVIRONMENT_PLUGIN_FILE}"
             )
@@ -383,6 +447,11 @@ class OpenCodeSandboxSession(AgentSessionState):
         if media:
             for path in await stage_media(self.session.sandbox, media):
                 command.extend(["--file", path])
+        if payload.get("resume") is not None:
+            # The request body resume_opencode.sh re-posts: the saved last user message, with no new parts.
+            await upload_text(
+                self.session.sandbox, path=f"{directory}/resume.json", text=json.dumps(payload["resume"])
+            )
         env = payload["env"]
         params = {
             "cwd": payload["cwd"],
@@ -572,7 +641,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             raise
         # Messages that predate this activation (earlier activations, an imported prefix) are history, not output.
         scoped = self.is_continuation or bool(self.message_ids)
-        if self.is_continuation:
+        if self.is_continuation or self.checkpointed:
             export_text = await self._read_export(directory)
             export = json.loads(export_text)
             harness_session_id = export.get("session_id")
@@ -581,7 +650,9 @@ class OpenCodeSandboxSession(AgentSessionState):
             if self.harness_session_id is not None and harness_session_id != self.harness_session_id:
                 raise RuntimeError("OpenCode resumed a different OpenCode session")
             self.harness_session_id = harness_session_id
-            self.message_ids = export["message_ids"]
+            if self.is_continuation:
+                # A one-activation session's reply covers the whole conversation, across every launch.
+                self.message_ids = export["message_ids"]
         elif scoped:
             export = json.loads(await self._read_export(directory))
         try:
@@ -674,7 +745,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 and (previous_session_id is None or self.harness_session_id == previous_session_id)
                 and self.session.cleanup is not None
                 and self.session.cleanup["cleanup_confirmed"]
-                and self.session.cleanup["timed_out"]
+                and (self.session.cleanup["timed_out"] or self.session.cleanup.get("stopped", False))
                 and export.get("activation_message_ids") == []
                 and export.get("messages") == []
             ):
@@ -775,20 +846,8 @@ class OpenCodeSandboxSession(AgentSessionState):
         self._capture_gaps = []
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
-        deadline = asyncio.get_running_loop().time() + timeout
-        try:
-            async with asyncio.timeout_at(deadline):
-                names = await self.list_store(timeout=timeout)
-        except Exception as error:
-            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
-        if "opencode.db" not in names:
+        if not await self._download_database(directory, timeout):
             return  # No export: collection reports the missing result with the CLI logs.
-        try:
-            async with asyncio.timeout_at(deadline):
-                await self.download_store(names, directory)
-        except Exception:
-            LOG.warning("OpenCode session database unavailable", exc_info=True)
-            return
         try:
             await asyncio.to_thread(
                 snapshot,
@@ -799,3 +858,21 @@ class OpenCodeSandboxSession(AgentSessionState):
             )
         except Exception as error:
             raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
+
+    async def _download_database(self, directory: Path, timeout: float) -> bool:
+        """Copy OpenCode's database, with its write-ahead log, into ``directory``; ``False`` when there is none."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        try:
+            async with asyncio.timeout_at(deadline):
+                names = await self.list_store(timeout=timeout)
+        except Exception as error:
+            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
+        if "opencode.db" not in names:
+            return False
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self.download_store(names, directory)
+        except Exception:
+            LOG.warning("OpenCode session database unavailable", exc_info=True)
+            return False
+        return True
