@@ -25,6 +25,11 @@ any Python with aiohttp and PyYAML, for example as a job submitted by file path.
     snapshots.py --connection-config env.yaml --sandbox-id <id> --reap
     snapshots.py --connection-config env.yaml --kill-paused --reap    # also delete paused sandboxes
     snapshots.py --domain <host> --api-key <key> --snapshot-id <id> --reap
+    snapshots.py --connection-config env.yaml --name-prefix "ng-$(cat <state_dir>/run_id)-" --reap
+
+Partial-rollout checkpoints name their snapshots ``ng-<run id>-...``, with the run id in
+``<checkpoint.state_dir>/run_id``. A running job deletes the snapshots of checkpoints it dropped; once a job
+has ended for good, the last line deletes the rest of its snapshots.
 """
 
 import argparse
@@ -54,25 +59,35 @@ async def cleanup_snapshots(
     snapshot_ids: list[str] | None,
     kill_paused: bool,
     reap: bool,
+    name_prefix: str | None = None,
 ) -> int:
     """List matching snapshots (and paused sandboxes) and optionally delete them.
 
     ``snapshot_ids=None`` lists snapshots; a list, even an empty one, names them
-    exactly. Blank selectors are rejected rather than widening the scope.
+    exactly. ``name_prefix`` keeps only listed snapshots whose name starts with it;
+    the API's name filter matches whole names, so it is applied here. Blank
+    selectors are rejected rather than widening the scope.
     """
     for name, values in (
         ("sandbox_id", [] if sandbox_id is None else [sandbox_id]),
         ("states", states or []),
         ("snapshot_ids", snapshot_ids or []),
+        ("name_prefix", [] if name_prefix is None else [name_prefix]),
     ):
         if any(not isinstance(value, str) or not value.strip() for value in values):
             raise ValueError(f"{name} must contain non-empty strings, got {values!r}")
     sandbox_id = None if sandbox_id is None else sandbox_id.strip()
     states = [state.strip() for state in states or []]
     snapshot_ids = None if snapshot_ids is None else [snapshot_id.strip() for snapshot_id in snapshot_ids]
+    name_prefix = None if name_prefix is None else name_prefix.strip()
     if snapshot_ids is not None and kill_paused:
         # Snapshot ids carry no sandbox scope; this would select every paused sandbox.
         raise ValueError("kill_paused cannot be combined with snapshot_ids; scope it with sandbox_id instead")
+    if name_prefix is not None and snapshot_ids is not None:
+        raise ValueError("name_prefix cannot be combined with snapshot_ids")
+    if name_prefix is not None and kill_paused:
+        # A snapshot name carries no sandbox scope either.
+        raise ValueError("kill_paused cannot be combined with name_prefix; scope it with sandbox_id instead")
     base_url = domain.strip().rstrip("/")
     if "://" not in base_url:
         base_url = f"{protocol}://{base_url}"
@@ -126,6 +141,8 @@ async def cleanup_snapshots(
             else:
                 params = [] if sandbox_id is None else [("sandboxId", sandbox_id)]
                 snapshots = await list_all("snapshots", [*params, *(("state", state) for state in states)])
+                if name_prefix is not None:
+                    snapshots = [item for item in snapshots if str(item.get("name") or "").startswith(name_prefix)]
             paused: list[dict[str, Any]] = []
             if kill_paused:
                 # Servers disagree on state casing, so match paused sandboxes client-side.
@@ -213,6 +230,7 @@ def _run(
                 snapshot_ids=args.snapshot_ids,
                 kill_paused=args.kill_paused,
                 reap=args.reap,
+                name_prefix=args.name_prefix,
             )
         )
     except (aiohttp.ClientError, OSError, TypeError, ValueError) as error:
@@ -243,6 +261,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Exact snapshot ids instead of a listing; repeatable.",
     )
     parser.add_argument(
+        "--name-prefix",
+        help="Only snapshots whose name starts with this, such as a checkpointed run's ng-<run id>-.",
+    )
+    parser.add_argument(
         "--kill-paused",
         action="store_true",
         help="Also delete paused sandboxes and their checkpoints; every paused sandbox unless --sandbox-id is given.",
@@ -254,10 +276,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--snapshot-id cannot be combined with --sandbox-id or --state")
     if args.snapshot_ids and args.kill_paused:
         parser.error("--kill-paused cannot be combined with --snapshot-id; scope it with --sandbox-id instead")
+    if args.name_prefix is not None and args.snapshot_ids:
+        parser.error("--name-prefix cannot be combined with --snapshot-id")
+    if args.name_prefix is not None and args.kill_paused:
+        parser.error("--kill-paused cannot be combined with --name-prefix; scope it with --sandbox-id instead")
     for name, values in (
         ("sandbox-id", [args.sandbox_id]),
         ("state", args.states),
         ("snapshot-id", args.snapshot_ids),
+        ("name-prefix", [args.name_prefix]),
     ):
         if any(value is not None and not value.strip() for value in values or []):
             parser.error(f"--{name} must not be empty")
