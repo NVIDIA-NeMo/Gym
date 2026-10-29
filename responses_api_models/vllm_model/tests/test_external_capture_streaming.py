@@ -12,10 +12,10 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 from nemo_gym.client import ServerClient
 from nemo_gym.models import chat_streaming, current_capture_context, responses_streaming
 from nemo_gym.models.anthropic_converter import AnthropicConverter
+from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
 from nemo_gym.models.token_capture.adapters.vllm import VLLMCaptureAdapter
 from nemo_gym.models.token_capture.lineage import FileLineageStore
 from nemo_gym.models.token_capture.records import ENGINE_REFUSED_CALL_REASON, UNCOMMITTED_CALL_REASON

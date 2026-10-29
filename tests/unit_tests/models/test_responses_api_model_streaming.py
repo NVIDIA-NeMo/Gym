@@ -33,13 +33,6 @@ from fastapi import Body, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.base_responses_api_model import (
-    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
-    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
-    BaseResponsesAPIModelConfig,
-    CaptureStore,
-    SimpleResponsesAPIModel,
-)
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
@@ -50,7 +43,14 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseReasoningInputItemForTraining,
     NeMoGymResponseReasoningItemForTraining,
 )
+from nemo_gym.models.base_responses_api_model import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+    BaseResponsesAPIModelConfig,
+    SimpleResponsesAPIModel,
+)
 from nemo_gym.models.chat_completions_converter import ResponsesConverter
+from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.models.responses_streaming import (
     flatten_namespace_tools,
     is_responses_lifecycle_chunk,
@@ -1326,7 +1326,7 @@ class TestResponsesStreamKeepalive:
 
     def test_capture_records_the_id_the_stream_announced(self) -> None:
         client, _ = _keepalive_client(_SlowFixedIdModel)
-        with patch("nemo_gym.base_responses_api_model.capture_tokens", new=AsyncMock()) as capture:
+        with patch("nemo_gym.models.base_responses_api_model.capture_tokens", new=AsyncMock()) as capture:
             resp = client.post("/v1/responses", json=self.STREAM_BODY)
 
         events = _sse_payloads(resp.text)

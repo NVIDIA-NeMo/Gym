@@ -199,8 +199,8 @@ _LAZY_EXPORTS: dict[str, str] = {
     # Agent and model extension points
     "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
-    "BaseResponsesAPIModelConfig": "base_responses_api_model",
-    "SimpleResponsesAPIModel": "base_responses_api_model",
+    "BaseResponsesAPIModelConfig": "models.base_responses_api_model",
+    "SimpleResponsesAPIModel": "models.base_responses_api_model",
     # Common server-client utilities
     "ServerClient": "client.server_client",
     "raise_for_status": "client.http_client",
