@@ -49,8 +49,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.responses_api_types import (
@@ -75,8 +73,10 @@ from nemo_gym.models._checkpoint_workers import (
     PolicyWorkerLink,
     coordinator_socket_path,
 )
-from nemo_gym.responses_converter import CustomToolStrategy
-from nemo_gym.responses_streaming import (
+from nemo_gym.models.anthropic_converter import AnthropicConverter
+from nemo_gym.models.chat_completions_converter import CustomToolStrategy
+from nemo_gym.models.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.models.responses_streaming import (
     NamespaceMap,
     is_responses_lifecycle_chunk,
     restore_namespace_tool_calls,
@@ -86,13 +86,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
-from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
-from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
-from nemo_gym.server_runtime.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
-from nemo_gym.telemetry.endpoints import traced_endpoint
-from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.token_capture import (
     CaptureContext,
     capture_tokens,
     current_capture_context,
@@ -106,18 +100,24 @@ from nemo_gym.token_id_capture import (
 
 # The store factory needs Gym's server stack.
 # The leaf package does not re-export it.
-from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
-from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
-from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.protocols import (
+from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_id_capture_config
+from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
+from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
     CaptureLedger,
     LineageResolver,
     ParentResolutionMode,
 )
-from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.models.token_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.store import make_token_store
+from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.server_runtime.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.telemetry.endpoints import traced_endpoint
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
@@ -574,7 +574,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ``responses()``, preserving the historical non-streaming behavior. When the client
         requests ``stream: true`` (blackbox Responses-over-SSE harnesses like the Codex CLI
         always do), the request is first sanitized from the streaming wire dialect (extra
-        bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.responses_streaming``),
+        bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.models.responses_streaming``),
         delegated to the same ``responses()``, and the complete response is re-emitted as a
         synthesized Responses SSE event stream. Upstream HTTP errors and ``HTTPException``
         retain their status before the stream starts. Other ``responses()`` failures become terminal
@@ -737,7 +737,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         standard 422 shape). When the client sends ``stream: true`` (blackbox
         Chat-Completions-over-SSE harnesses like the OpenClaw agent always do), the request is
         sanitized onto that same strict model (drop ``stream``/``stream_options``; see
-        ``nemo_gym.chat_streaming``), validated identically, delegated to the same
+        ``nemo_gym.models.chat_streaming``), validated identically, delegated to the same
         ``chat_completions()``, and the complete response is buffered and re-emitted as a
         synthesized ``chat.completion.chunk`` SSE stream. Keepalive comments maintain the
         connection while the backend computes; model output is still buffer-then-replay.

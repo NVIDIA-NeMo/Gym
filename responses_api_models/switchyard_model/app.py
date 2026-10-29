@@ -63,7 +63,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models import NeMoGymAsyncOpenAI
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

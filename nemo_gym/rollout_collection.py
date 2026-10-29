@@ -162,9 +162,7 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
-from nemo_gym.skills import SkillsConfig, load_skill_directory
-from nemo_gym.task_materialization import TASK_ID_FIELDS
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.token_capture import (
     TokenCaptureStore,
     TokenIdCaptureConfig,
     clear_token_captures_for_rollouts,
@@ -172,13 +170,15 @@ from nemo_gym.token_id_capture import (
     mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
-from nemo_gym.token_id_capture.delivery import (
+from nemo_gym.models.token_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.models.token_capture.delivery import (
     MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
+from nemo_gym.skills import SkillsConfig, load_skill_directory
+from nemo_gym.task_materialization import TASK_ID_FIELDS
 
 
 logger = logging.getLogger(__name__)

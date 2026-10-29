@@ -32,7 +32,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.responses_converter import ResponsesConverter, chat_completion_usage_to_response_usage
+from nemo_gym.models import ResponsesConverter, chat_completion_usage_to_response_usage
 from responses_api_agents.conversational_tool_use_policy_tool_generation.generation import PolicyToolGenerator
 from responses_api_agents.conversational_tool_use_policy_tool_generation.models import (
     CallPhase,

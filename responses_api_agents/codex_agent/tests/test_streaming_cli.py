@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.responses_streaming import flatten_namespace_tools, synthesize_responses_sse
+from nemo_gym.models import flatten_namespace_tools, synthesize_responses_sse
 from nemo_gym.server_runtime import BaseResourcesServerConfig, SimpleResourcesServer
 from nemo_gym.server_runtime.mcp_auto_exposure import install_auto_exposure
 from responses_api_agents.codex_agent.app import parse_exec_jsonl, toml_dumps

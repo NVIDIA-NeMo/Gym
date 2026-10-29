@@ -19,8 +19,8 @@ import threading
 
 import pytest
 
-from nemo_gym.token_id_capture import (
-    CaptureContext,
+from nemo_gym.models import CaptureContext, reset_token_sink, resolve_parent, set_token_sink
+from nemo_gym.models.token_capture import (
     FileLineageStore,
     InMemoryLineageStore,
     ParentResolutionStatus,
@@ -31,17 +31,15 @@ from nemo_gym.token_id_capture import (
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
-    reset_token_sink,
-    set_token_sink,
     stamp_continuation,
     stamp_lineage,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.records import TokenEntry
-from nemo_gym.token_id_capture.sink import commit_entry, resolve_parent
-from nemo_gym.token_id_capture.store import TokenCaptureStore
+from nemo_gym.models.token_capture.records import TokenEntry
+from nemo_gym.models.token_capture.sink import commit_entry
+from nemo_gym.models.token_capture.store import TokenCaptureStore
 
 
 def _entry(mcid, prompt, gen, parent=None, lp=None, created_at=0.0, finish_reason=None):
@@ -344,7 +342,7 @@ def test_consumer_reads_and_freezes_an_external_source():
 
 
 def test_external_source_offloads_trajectory_assembly(monkeypatch):
-    import nemo_gym.token_id_capture.consumer as consumer_module
+    import nemo_gym.models.token_capture.consumer as consumer_module
 
     assemble_threads = []
     original_assemble = consumer_module._assemble
@@ -783,7 +781,7 @@ def test_the_builder_runs_once_per_rollout(tmp_path, monkeypatch):
     Metrics and trajectories must use the same chaining pass.
     Chaining is quadratic without parent links.
     """
-    import nemo_gym.token_id_capture.consumer as consumer_module
+    import nemo_gym.models.token_capture.consumer as consumer_module
 
     store = TokenCaptureStore(tmp_path)
     store.append(_entry("c1", [1, 2, 3], [4, 5]))

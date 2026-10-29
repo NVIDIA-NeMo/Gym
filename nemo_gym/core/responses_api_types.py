@@ -649,7 +649,7 @@ def training_variant_of(item_cls: type) -> type:
     except KeyError:
         raise NotImplementedError(
             f"{item_cls.__name__} has no ForTraining variant, so token IDs and logprobs cannot be "
-            f"attached to it. Add it to RESPONSES_TO_TRAIN in nemo_gym/openai_utils.py if the policy "
+            f"attached to it. Add it to RESPONSES_TO_TRAIN in nemo_gym/models/openai_utils.py if the policy "
             f"samples this item's tokens; provider-executed hosted calls should not reach this path."
         ) from None
 

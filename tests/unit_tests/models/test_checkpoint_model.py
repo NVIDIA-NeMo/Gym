@@ -15,9 +15,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 from nemo_gym.base_responses_api_model import _CaptureMiddleware
-from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.core import EpisodeId, current_rollout_id
-from nemo_gym.models import note_generation_backend
+from nemo_gym.models import CaptureAdmissionError, CaptureContext, current_capture_context, note_generation_backend
 from nemo_gym.models._checkpoint import (
     ModelRecord,
     PolicyAdmissionMiddleware,
@@ -27,7 +26,22 @@ from nemo_gym.models._checkpoint import (
     import_model_records,
     ledger_removal_refusal,
 )
-from nemo_gym.responses_streaming import synthesize_responses_keepalive_sse
+from nemo_gym.models.chat_streaming import SSE_KEEPALIVE
+from nemo_gym.models.responses_streaming import synthesize_responses_keepalive_sse
+from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
+from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
+from nemo_gym.models.token_capture.lineage import FileLineageStore
+from nemo_gym.models.token_capture.protocols import RolloutRetiredError
+from nemo_gym.models.token_capture.records import ParentResolutionStatus
+from nemo_gym.models.token_capture.sink import NG_COMMIT_COORDS_FIELD
+from nemo_gym.models.token_capture.staging.records import (
+    INVALID_COMMIT_COORDS_REASON,
+    CaptureAdmission,
+    CaptureLedgerCommit,
+    CommitCoords,
+    GenerationCutContinuation,
+    RolloutManifest,
+)
 from nemo_gym.server_runtime import RolloutContextMiddleware
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointRequest,
@@ -43,21 +57,7 @@ from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
-from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.protocols import CaptureAdmissionError, RolloutRetiredError
-from nemo_gym.token_id_capture.records import ParentResolutionStatus
-from nemo_gym.token_id_capture.sink import NG_COMMIT_COORDS_FIELD, CaptureContext, current_capture_context
-from nemo_gym.token_id_capture.staging.records import (
-    INVALID_COMMIT_COORDS_REASON,
-    CaptureAdmission,
-    CaptureLedgerCommit,
-    CommitCoords,
-    GenerationCutContinuation,
-    RolloutManifest,
-)
-from tests.unit_tests.test_token_capture_ledger import (
+from tests.unit_tests.models.test_token_capture_ledger import (
     ASSISTANT_1,
     ASSISTANT_2,
     USER_1,
@@ -657,7 +657,7 @@ async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
         effective_output_limit=10,
     )
     from nemo_gym.models._checkpoint import GenerationCutRecord
-    from nemo_gym.token_id_capture.fingerprint import conversation_digest
+    from nemo_gym.models.token_capture.fingerprint import conversation_digest
 
     first._restored_cuts["r"] = GenerationCutRecord(
         model_call_id="c2",
@@ -707,7 +707,7 @@ async def test_a_restored_cut_not_yet_reused_survives_the_next_checkpoint(tmp_pa
 
 async def test_a_newer_cut_replaces_the_restored_cut_a_resumed_call_keeps_for_its_retry(tmp_path: Path) -> None:
     from nemo_gym.models._checkpoint import GenerationCutRecord
-    from nemo_gym.token_id_capture.fingerprint import conversation_digest
+    from nemo_gym.models.token_capture.fingerprint import conversation_digest
 
     request_items = [USER_1, ASSISTANT_1, USER_2]
     continuation = GenerationCutContinuation(
@@ -887,7 +887,7 @@ async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -
 def test_a_batched_ledger_import_syncs_the_directory_per_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym.token_id_capture.lineage as lineage
+    import nemo_gym.models.token_capture.lineage as lineage
 
     ledger = FileLineageStore(tmp_path / "ledger")
     directory_opens = []

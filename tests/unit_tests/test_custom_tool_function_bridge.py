@@ -33,14 +33,11 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCustomToolCallForTraining,
     training_variant_of,
 )
-from nemo_gym.responses_converter import _CUSTOM_TOOL_BRIDGE_PARAMETER, ResponsesConverter
-from nemo_gym.responses_streaming import (
-    flatten_namespace_tools,
-    restore_namespace_tool_calls,
-    sanitize_streaming_responses_body,
-)
-from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
-from nemo_gym.token_id_capture.terminal import _item_content_key, _served_item_id
+from nemo_gym.models import ResponsesConverter, flatten_namespace_tools, restore_namespace_tool_calls
+from nemo_gym.models.chat_completions_converter import _CUSTOM_TOOL_BRIDGE_PARAMETER
+from nemo_gym.models.responses_streaming import sanitize_streaming_responses_body
+from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
+from nemo_gym.models.token_capture.terminal import _item_content_key, _served_item_id
 
 
 EXEC_TOOL = {
@@ -168,7 +165,7 @@ def test_decode_returns_malformed_arguments_verbatim() -> None:
 
 
 def test_decode_logs_each_malformed_shape_with_the_call_context(caplog) -> None:
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.responses_converter"):
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.models.chat_completions_converter"):
         assert ResponsesConverter._decode_bridged_input("not json", tool_name="exec", call_id="call_a") == "not json"
         assert (
             ResponsesConverter._decode_bridged_input('{"input": 5}', tool_name="exec", call_id="call_b")
@@ -417,7 +414,7 @@ def test_bridge_lowers_a_custom_tool_without_a_description() -> None:
 
 def test_grammar_drop_is_warned_once_per_tool_name(caplog) -> None:
     tool = dict(EXEC_TOOL, name="exec_grammar_once")
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.responses_converter"):
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.models.chat_completions_converter"):
         ResponsesConverter._custom_tool_to_bridged_function(tool)
         ResponsesConverter._custom_tool_to_bridged_function(tool)
     assert caplog.text.count("exec_grammar_once") == 1

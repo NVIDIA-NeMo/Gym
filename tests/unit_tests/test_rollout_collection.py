@@ -43,9 +43,9 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
 import nemo_gym.batch_status
+import nemo_gym.models.token_capture.delivery
 import nemo_gym.rollout_collection
 import nemo_gym.server_runtime.server_utils
-import nemo_gym.token_id_capture.delivery
 from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.artifacts.rollout_rows import _rollout_for_export
 from nemo_gym.batch_status import observe_materialized_rows
@@ -66,6 +66,24 @@ from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, ma
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
 from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.metrics import compute_aggregate_metrics, compute_subset_metrics
+from nemo_gym.models.token_capture import (
+    LineageResolution,
+    ParentResolutionStatus,
+    TokenCaptureSnapshot,
+    TokenCaptureStore,
+    TokenEntry,
+    clear_token_captures_for_rollouts,
+    stamp_lineage,
+)
+from nemo_gym.models.token_capture.config import TokenIdCaptureConfig
+from nemo_gym.models.token_capture.delivery import (
+    MASK_SAMPLE_KEY,
+    TOKEN_CAPTURE_KEY,
+    capture_build_can_retire,
+    finalize_rollout_token_capture,
+    retire_rollout_token_capture,
+    rollout_carries_token_ids,
+)
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -117,24 +135,6 @@ from nemo_gym.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
-from nemo_gym.token_id_capture import (
-    LineageResolution,
-    ParentResolutionStatus,
-    TokenCaptureSnapshot,
-    TokenCaptureStore,
-    TokenEntry,
-    clear_token_captures_for_rollouts,
-    stamp_lineage,
-)
-from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
-from nemo_gym.token_id_capture.delivery import (
-    MASK_SAMPLE_KEY,
-    TOKEN_CAPTURE_KEY,
-    capture_build_can_retire,
-    finalize_rollout_token_capture,
-    retire_rollout_token_capture,
-    rollout_carries_token_ids,
-)
 from nemo_gym.utils import aggregation_sources_path_for, materialized_path_for
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 

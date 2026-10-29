@@ -18,21 +18,20 @@ import nemo_gym.base_responses_api_model
 import nemo_gym.client.server_client
 import nemo_gym.server_runtime.server_utils
 from nemo_gym.base_responses_api_model import _CaptureMiddleware, _reconstruct_streamed_response
-from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
-from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
-from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER
-from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
-from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models import CAPTURE_REFUSAL_HEADER, NeMoGymAsyncOpenAI
+from nemo_gym.models.chat_streaming import SSE_KEEPALIVE
+from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
+from nemo_gym.models.token_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
+from nemo_gym.models.token_capture.staging.capture import RolloutTokenCapture
+from nemo_gym.models.token_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
     CaptureAdmission,
     RolloutManifest,
     StageResult,
 )
+from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.tests.test_external_capture_streaming import _request
 
@@ -101,7 +100,7 @@ def make_capture_harness(
             "external_staging": True,
             "parent_resolution": parent_resolution_mode,
             "rebuild_response": False,
-            "lineage_store": "nemo_gym.token_id_capture.lineage:FileLineageStore",
+            "lineage_store": "nemo_gym.models.token_capture.lineage:FileLineageStore",
             "lineage_store_kwargs": {"root": str(tmp_path / "lineage")},
         }
     }

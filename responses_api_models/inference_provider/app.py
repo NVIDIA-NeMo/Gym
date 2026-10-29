@@ -39,8 +39,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models import NeMoGymAsyncOpenAI, ResponsesConverter
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

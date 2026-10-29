@@ -48,14 +48,12 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputItem,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.responses_streaming import (
-    flatten_namespace_tools,
+from nemo_gym.models import ResponsesConverter, flatten_namespace_tools, synthesize_responses_sse
+from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
     synthesize_responses_keepalive_sse,
-    synthesize_responses_sse,
     validate_streaming_responses_params,
 )
 

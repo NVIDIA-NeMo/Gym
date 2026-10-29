@@ -67,6 +67,13 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.openai_utils": MovedPath(new="nemo_gym.models.openai_utils", since="0.8.0"),
+    "nemo_gym.anthropic_utils": MovedPath(new="nemo_gym.models.anthropic_utils", since="0.8.0"),
+    "nemo_gym.anthropic_converter": MovedPath(new="nemo_gym.models.anthropic_converter", since="0.8.0"),
+    "nemo_gym.responses_converter": MovedPath(new="nemo_gym.models.chat_completions_converter", since="0.8.0"),
+    "nemo_gym.chat_streaming": MovedPath(new="nemo_gym.models.chat_streaming", since="0.8.0"),
+    "nemo_gym.responses_streaming": MovedPath(new="nemo_gym.models.responses_streaming", since="0.8.0"),
+    "nemo_gym.token_id_capture": MovedPath(new="nemo_gym.models.token_capture", since="0.8.0"),
     "nemo_gym.server_utils": MovedPath(new="nemo_gym.server_runtime.server_utils", since="0.8.0"),
     "nemo_gym._checkpoint.model": MovedPath(new="nemo_gym.models._checkpoint", since="0.8.0"),
     "nemo_gym._checkpoint.model_workers": MovedPath(new="nemo_gym.models._checkpoint_workers", since="0.8.0"),

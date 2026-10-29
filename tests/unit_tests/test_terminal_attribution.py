@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.token_capture import (
     EngineRefusalRecord,
     ParentResolutionStatus,
     TokenCaptureStore,
@@ -34,9 +34,9 @@ from nemo_gym.token_id_capture import (
     apply_capture_incomplete_verdict,
     stamp_lineage,
 )
-from nemo_gym.token_id_capture.builder import run_builder
-from nemo_gym.token_id_capture.consumer import _assemble
-from nemo_gym.token_id_capture.delivery import (
+from nemo_gym.models.token_capture.builder import run_builder
+from nemo_gym.models.token_capture.consumer import _assemble
+from nemo_gym.models.token_capture.delivery import (
     MASK_SAMPLE_KEY,
     TERMINAL_CALL_KEY,
     TERMINAL_RESPONSE_ID_KEY,
@@ -44,10 +44,10 @@ from nemo_gym.token_id_capture.delivery import (
     capture_build_can_retire,
     finalize_rollout_token_capture,
 )
-from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
-from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
-from nemo_gym.token_id_capture.staging.records import CallRecord
-from nemo_gym.token_id_capture.terminal import resolve_terminal
+from nemo_gym.models.token_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.models.token_capture.staging.digest import EMPTY_EXTRAS_DIGEST
+from nemo_gym.models.token_capture.staging.records import CallRecord
+from nemo_gym.models.token_capture.terminal import resolve_terminal
 
 
 # --- helpers ------------------------------------------------------------------

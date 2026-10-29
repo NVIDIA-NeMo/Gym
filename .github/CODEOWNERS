@@ -66,10 +66,10 @@ uv.lock @nvidia-nemo/automation
 # Core-Arch + RL
 # suggest: /responses_api_models/ @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_runtime/server_utils.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/openai_utils.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/anthropic_utils.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/anthropic_converter.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/responses_converter.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/models/openai_utils.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/models/anthropic_utils.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/models/anthropic_converter.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/models/chat_completions_converter.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_runtime/base_resources_server.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/base_responses_api_agent.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/base_responses_api_model.py @nvidia-nemo/gym_core
@@ -81,8 +81,8 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/server_runtime/server_status.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/train_data_utils.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_core
-# suggest: /nemo_gym/chat_streaming.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/responses_streaming.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/models/chat_streaming.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/models/responses_streaming.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/discovery.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/model_registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/resources_server_registry.py @nvidia-nemo/gym_core

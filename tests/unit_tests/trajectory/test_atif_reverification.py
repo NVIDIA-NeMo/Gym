@@ -27,7 +27,7 @@ from pydantic import ValidationError
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models import ResponsesConverter
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,
