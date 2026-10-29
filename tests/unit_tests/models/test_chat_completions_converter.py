@@ -56,7 +56,7 @@ from nemo_gym.models.chat_completions_converter import (
     chat_completion_usage_to_response_usage,
     split_responses_input_output_items,
 )
-from nemo_gym.observability.model_calls import _cache_signal
+from nemo_gym.trajectory.model_call_record import _cache_signal
 
 
 FIXED_UUID = "123"
