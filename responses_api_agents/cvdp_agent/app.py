@@ -26,7 +26,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
+from time import time
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Request, Response
@@ -44,7 +46,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.global_config import TASK_INDEX_KEY_NAME, get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -52,7 +54,15 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseUsage,
     accumulate_response_usage,
+)
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -61,11 +71,16 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.task_materialization import TASK_ID_FIELDS
 
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
 
 _RUNNER_SOURCE_PATH = Path(__file__).with_name("sandbox_entrypoint.py")
+# Carries the model-call evidence of one /v1/responses self-call back to /run, which removes it before /verify.
+_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+# False on a /v1/responses reply whose usage is a partial sum over its calls; /run removes it before /verify.
+_INTERNAL_USAGE_COMPLETE_KEY = "_ng_usage_complete"
 
 _ARCHES = {
     "amd64": ("amd64", "x86_64-unknown-linux-gnu", "linux-x64"),
@@ -283,8 +298,15 @@ class CVDPAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
+        turns: list[TrajectoryTurn] = []
+        gaps: list[ObservationGap] = []
+
         new_outputs = []
         usage = None
+        usage_complete = True
         step = 0
         model_server_cookies = None  # update the cookies on every model response
         resources_server_cookies = request.cookies  # update the cookies on every resources server response
@@ -293,6 +315,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
 
+            turn_timestamp = time()
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
                 url_path=self.url_path_for_request("/v1/responses", request),
@@ -312,7 +335,48 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
             output = model_response.output
             new_outputs.extend(output)
+            if collect_trajectory:
+                try:
+                    # The id the model server returned is the call this agent made; a call without one stays unowned.
+                    refs = (
+                        [ModelCallRef(model_ref=self.config.model_server, response_id=model_response.id)]
+                        if model_response.id
+                        else []
+                    )
+                    if not refs:
+                        gaps.append(
+                            ObservationGap(
+                                code="model_call_reference_unavailable", invocation_id="root", detail=f"turn:{step}"
+                            )
+                        )
+                    turns.append(
+                        TrajectoryTurn(
+                            invocation_id="root",
+                            task_id="unscoped",
+                            rollout_id=rollout_id,
+                            turn_no=step,
+                            timestamp=turn_timestamp,
+                            question=new_body.input,
+                            answer=[item for item in output if item.type != "reasoning"],
+                            reasoning_content=[
+                                item.model_dump(mode="json") for item in output if item.type == "reasoning"
+                            ]
+                            or None,
+                            step_count=step,
+                            model_calls=refs,
+                        )
+                    )
+                except Exception as error:
+                    # Evidence never changes the episode: an unrecordable turn is a gap, not a failed call.
+                    gaps.append(
+                        ObservationGap(
+                            code="agent_observations_invalid",
+                            invocation_id="root",
+                            detail=f"turn:{step}:{type(error).__name__}",
+                        )
+                    )
 
+            usage_complete = usage_complete and model_response.usage is not None
             usage = accumulate_response_usage(usage, model_response.usage)
 
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
@@ -325,6 +389,10 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             if not all_fn_calls and all_output_messages:
                 break
 
+            if collect_trajectory and all_fn_calls:
+                gaps.append(
+                    ObservationGap(code="tool_timing_unavailable", invocation_id="root", detail=f"turn:{step}")
+                )
             for output_function_call in all_fn_calls:
                 api_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -352,7 +420,15 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
         model_response.output = new_outputs
         model_response.usage = usage
-        return model_response
+        evidence = {}
+        if usage is not None and not usage_complete:
+            # Only a partial sum needs the flag; a reply without usage already reports it as unknown.
+            evidence[_INTERNAL_USAGE_COMPLETE_KEY] = False
+        if collect_trajectory:
+            evidence[_INTERNAL_TRAJECTORY_KEY] = TrajectoryRecord(
+                task_id="unscoped", rollout_id=rollout_id, turns=turns, gaps=gaps
+            ).model_dump(mode="json")
+        return model_response.model_copy(update=evidence) if evidence else model_response
 
     async def _run_simple(self, request: Request, body: CVDPAgentRunRequest) -> CVDPAgentVerifyResponse:
         cookies = request.cookies
@@ -376,7 +452,16 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             else getattr(body.verifier_metadata, "task_id", None)
         )
         retries_left = self.config.llm_parse_retries
+        # Evidence of every attempt, so the record owns the calls of retried attempts as well as the last one.
+        rollout_id = self.rollout_id_from_run(body)
+        collect_trajectory = self._model_call_capture_enabled() and rollout_id is not None
+        turns: list[TrajectoryTurn] = []
+        gaps: list[ObservationGap] = []
+        attempt_usages: list[Optional[NeMoGymResponseUsage]] = []
+        attempt = 0
         while True:
+            attempt += 1
+            replied = False
             try:
                 response = await self.server_client.post(
                     server_name=self.config.name,
@@ -387,9 +472,22 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(response)
                 cookies = response.cookies
 
-                verify_request = CVDPAgentVerifyRequest.model_validate(
-                    body.model_dump() | {"response": await get_response_json(response)}
+                response_json = await get_response_json(response)
+                # Removed before /verify, so the verifier receives the bytes it received without evidence.
+                raw_trajectory = response_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
+                usage_complete = response_json.pop(_INTERNAL_USAGE_COMPLETE_KEY, True) is not False
+                replied = True
+                self._record_attempt(
+                    attempt,
+                    response_json.get("usage") if usage_complete else None,
+                    raw_trajectory if collect_trajectory else None,
+                    turns=turns,
+                    gaps=gaps,
+                    attempt_usages=attempt_usages,
+                    collect_trajectory=collect_trajectory,
                 )
+
+                verify_request = CVDPAgentVerifyRequest.model_validate(body.model_dump() | {"response": response_json})
 
                 verify_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,
@@ -407,14 +505,123 @@ class CVDPAgent(SimpleResponsesAPIAgent):
                     print(f"[RETRY] parse_failed for task_id={task_id}, retries_left={retries_left}")
                     continue
 
-                return result
+                # Accounted outside the retry handler, so recording evidence can never start another attempt.
+                break
 
             except Exception as e:
+                if collect_trajectory and not replied:
+                    gaps.append(
+                        ObservationGap(
+                            code="model_call_reference_unavailable", invocation_id="root", detail=f"attempt:{attempt}"
+                        )
+                    )
                 if retries_left > 0:
                     retries_left -= 1
                     print(f"[RETRY] exception for task_id={task_id}, retries_left={retries_left}, error={e}")
                     continue
                 raise
+        return self._with_attempt_evidence(result, body, rollout_id, turns, gaps, attempt_usages)
+
+    @staticmethod
+    def _record_attempt(
+        attempt: int,
+        usage_json: Any,
+        raw_trajectory: Any,
+        *,
+        turns: list[TrajectoryTurn],
+        gaps: list[ObservationGap],
+        attempt_usages: list[Optional[NeMoGymResponseUsage]],
+        collect_trajectory: bool,
+    ) -> None:
+        """Keep one replied attempt's usage (None when unknown) and its turns; evidence errors become gaps."""
+        try:
+            attempt_usages.append(NeMoGymResponseUsage.model_validate(usage_json) if usage_json is not None else None)
+        except Exception:
+            attempt_usages.append(None)
+        if not collect_trajectory:
+            return
+        if not isinstance(raw_trajectory, dict):
+            gaps.append(
+                ObservationGap(
+                    code="model_call_reference_unavailable", invocation_id="root", detail=f"attempt:{attempt}"
+                )
+            )
+            return
+        try:
+            attempt_trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+        except Exception as error:
+            gaps.append(
+                ObservationGap(
+                    code="agent_observations_invalid",
+                    invocation_id="root",
+                    detail=f"attempt:{attempt}:{type(error).__name__}",
+                )
+            )
+            return
+        offset = len(turns)
+        turns.extend(
+            turn.model_copy(update={"turn_no": offset + n, "step_count": offset + n})
+            for n, turn in enumerate(attempt_trajectory.turns, start=1)
+        )
+        gaps.extend(attempt_trajectory.gaps)
+
+    def _with_attempt_evidence(
+        self,
+        result: CVDPAgentVerifyResponse,
+        body: CVDPAgentRunRequest,
+        rollout_id: Optional[str],
+        turns: list[TrajectoryTurn],
+        gaps: list[ObservationGap],
+        attempt_usages: list[Optional[NeMoGymResponseUsage]],
+    ) -> CVDPAgentVerifyResponse:
+        """Account the verified result for every attempt that reached a reply, after verification ran.
+
+        The response stays the last attempt's. With retries, its usage becomes the episode total that rollout health
+        compares against the owned calls; it is unknown when any finished call's usage is missing.
+        """
+        if len(attempt_usages) > 1 or None in attempt_usages:
+            total: Optional[NeMoGymResponseUsage] = None
+            if None not in attempt_usages:
+                for usage in attempt_usages:
+                    total = accumulate_response_usage(total, usage)
+            result.response.usage = total
+        if rollout_id is None or not self._model_call_capture_enabled():
+            return result
+        try:
+            return result.model_copy(
+                update={
+                    "ng_trajectory": self._trajectory(body, rollout_id, result, turns, gaps).model_dump(mode="json")
+                }
+            )
+        except Exception:
+            # Without a valid trajectory the record keeps no ownership evidence, as before this agent reported any.
+            return result
+
+    @staticmethod
+    def _trajectory(
+        body: CVDPAgentRunRequest,
+        rollout_id: str,
+        result: CVDPAgentVerifyResponse,
+        turns: list[TrajectoryTurn],
+        gaps: list[ObservationGap],
+    ) -> TrajectoryRecord:
+        fields = body.model_dump()
+        task_id = next(
+            (str(fields[key]) for key in TASK_ID_FIELDS if fields.get(key) is not None),
+            str(fields.get(TASK_INDEX_KEY_NAME, "unknown")),
+        )
+        invocation = AgentInvocation(
+            invocation_id="root",
+            status="incomplete" if result.response.incomplete_details else "completed",
+            model_calls=[ref for turn in turns for ref in turn.model_calls],
+        )
+        return TrajectoryRecord(
+            task_id=task_id,
+            rollout_id=rollout_id,
+            invocations=[invocation],
+            turns=[turn.model_copy(update={"task_id": task_id, "rollout_id": rollout_id}) for turn in turns],
+            gaps=gaps,
+        )
 
     def _provision_deps(self) -> Path:
         """Install the configured agent's portable dependency prefix once."""
