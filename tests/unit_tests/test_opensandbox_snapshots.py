@@ -79,13 +79,18 @@ class Session:
         return [url for request_method, url, _kwargs in self.requests if request_method == method]
 
 
-def snapshot(snapshot_id: str, *, sandbox_id: str = "sb-1", state: str = "Ready") -> dict[str, object]:
-    return {
+def snapshot(
+    snapshot_id: str, *, sandbox_id: str = "sb-1", state: str = "Ready", name: str | None = None
+) -> dict[str, object]:
+    item: dict[str, object] = {
         "id": snapshot_id,
         "sandboxId": sandbox_id,
         "status": {"state": state},
         "createdAt": "2026-09-01T00:00:00Z",
     }
+    if name is not None:
+        item["name"] = name
+    return item
 
 
 def sandbox(sandbox_id: str, *, state: str = "Paused") -> dict[str, object]:
@@ -125,6 +130,7 @@ def run_cleanup(
     snapshot_ids: list[str] | None = None,
     kill_paused: bool = False,
     reap: bool = True,
+    name_prefix: str | None = None,
 ) -> int:
     return asyncio.run(
         snapshots.cleanup_snapshots(
@@ -136,6 +142,7 @@ def run_cleanup(
             snapshot_ids=snapshot_ids,
             kill_paused=kill_paused,
             reap=reap,
+            name_prefix=name_prefix,
         )
     )
 
@@ -241,6 +248,56 @@ def test_explicit_snapshot_ids_skip_listing_and_404_is_idempotent(
     assert "snapshot gone was already gone" in out
 
 
+def test_a_name_prefix_selects_one_runs_snapshots_on_every_listing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = "ng-0123456789ab-"
+    session = Session(
+        page(
+            [snapshot("snap-a", name=f"{run}srv-c1-k-1"), snapshot("other", name="ng-ffffffffffff-srv-c1-k-1")],
+            has_next_page=True,
+        ),
+        page([snapshot("unnamed"), snapshot("snap-b", name=f"{run}srv-c2-k-1")]),
+        # A re-list after the sweep: snap-a lingers, the other run's snapshot is still not touched.
+        page([snapshot("snap-a", name=f"{run}srv-c1-k-1"), snapshot("other", name="ng-ffffffffffff-srv-c1-k-1")]),
+        page([snapshot("other", name="ng-ffffffffffff-srv-c1-k-1")]),
+        delete_responses={
+            f"{BASE}/snapshots/snap-a": Response(status=204),
+            f"{BASE}/snapshots/snap-b": Response(status=204),
+        },
+    )
+    install_session(monkeypatch, session)
+
+    assert run_cleanup(name_prefix=f" {run} ") == 0
+
+    # The API's name filter matches whole names, so the listing is unfiltered and the prefix applies client-side.
+    assert all("name" not in dict(kwargs["params"]) for method, _url, kwargs in session.requests if method == "GET")
+    assert sorted(session.urls("DELETE")) == [
+        f"{BASE}/snapshots/snap-a",
+        f"{BASE}/snapshots/snap-a",
+        f"{BASE}/snapshots/snap-b",
+    ]
+    assert "Deleting 2 OpenSandbox snapshot(s) and 0 paused sandbox(es)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"name_prefix": "ng-", "snapshot_ids": ["snap-a"]}, "name_prefix cannot be combined with snapshot_ids"),
+        ({"name_prefix": "ng-", "kill_paused": True}, "kill_paused cannot be combined with name_prefix"),
+    ],
+)
+def test_a_name_prefix_refuses_selectors_it_cannot_scope(
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any], message: str
+) -> None:
+    _connector_calls, session_calls, _connector = install_session(monkeypatch, Session())
+
+    with pytest.raises(ValueError, match=message):
+        run_cleanup(**kwargs)
+
+    assert session_calls == [], "no request may be made before the scope check fails"
+
+
 def test_kill_paused_refuses_explicit_snapshot_ids_without_a_sandbox_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     # Direct callers bypass the CLI check.
     _connector_calls, session_calls, _connector = install_session(monkeypatch, Session())
@@ -259,6 +316,7 @@ def test_kill_paused_refuses_explicit_snapshot_ids_without_a_sandbox_scope(monke
         {"states": ["Ready", ""]},
         {"snapshot_ids": [" "]},
         {"snapshot_ids": [None]},
+        {"name_prefix": " "},
     ],
 )
 def test_blank_selectors_are_rejected_before_any_request(
@@ -470,6 +528,9 @@ def test_rejects_invalid_domain() -> None:
         [*SANDBOX_ARGS, "--state", ""],
         [*SANDBOX_ARGS, "--snapshot-id", "snap-a", "--snapshot-id", " "],
         [*SANDBOX_ARGS, "--snapshot-id", "snap-a", "--kill-paused"],
+        [*SANDBOX_ARGS, "--name-prefix", "ng-", "--snapshot-id", "snap-a"],
+        [*SANDBOX_ARGS, "--name-prefix", "ng-", "--kill-paused"],
+        [*SANDBOX_ARGS, "--name-prefix", " "],
         [*SANDBOX_ARGS, "--unknown"],
     ],
 )
@@ -506,6 +567,7 @@ def test_cli_forwards_arguments_and_return_codes(
             "snapshot_ids": None,
             "kill_paused": True,
             "reap": True,
+            "name_prefix": None,
         }
     ]
 
@@ -523,6 +585,19 @@ def test_cli_forwards_arguments_and_return_codes(
     stderr = capsys.readouterr().err
     assert "OpenSandbox snapshot cleanup failed: down" in stderr
     assert TEST_ACCESS_KEY not in stderr
+
+
+def test_cli_forwards_a_name_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    async def record_cleanup(**kwargs: object) -> int:
+        calls.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(snapshots, "cleanup_snapshots", record_cleanup)
+    assert snapshots.main([*SANDBOX_ARGS, "--name-prefix", "ng-0123456789ab-", "--reap"]) == 0
+    assert calls[0]["name_prefix"] == "ng-0123456789ab-"
+    assert calls[0]["snapshot_ids"] is None and calls[0]["kill_paused"] is False and calls[0]["reap"] is True
 
 
 @pytest.mark.parametrize(("configured_protocol", "expected_protocol"), [(None, "http"), ("https", "https")])
@@ -561,6 +636,7 @@ def test_cli_uses_standalone_connection_config(
             "snapshot_ids": ["snap-a", "snap-b"],
             "kill_paused": False,
             "reap": False,
+            "name_prefix": None,
         }
     ]
 
