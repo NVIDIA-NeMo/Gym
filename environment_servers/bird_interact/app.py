@@ -40,7 +40,6 @@ from resources_servers.bird_interact.schemas import (
     AskRequest,
     AskResponse,
     BirdInteractSeedSessionResponse,
-    BirdInteractTask,
     BirdInteractVerifyRequest,
     BirdInteractVerifyResponse,
     EpisodeContext,
@@ -49,6 +48,7 @@ from resources_servers.bird_interact.schemas import (
     SubmitRequest,
     SubmitResponse,
 )
+from resources_servers.bird_interact.task_data import BirdInteractTask
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)

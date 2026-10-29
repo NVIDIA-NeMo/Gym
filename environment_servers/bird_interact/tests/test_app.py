@@ -29,7 +29,7 @@ from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServe
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from resources_servers.bird_interact.app import BirdInteractResourcesServer, BirdInteractResourcesServerConfig
-from resources_servers.bird_interact.schemas import BirdInteractTask
+from resources_servers.bird_interact.task_data import BirdInteractTask
 
 
 DATA = Path(__file__).parents[2].parent / "resources_servers/bird_interact/data"

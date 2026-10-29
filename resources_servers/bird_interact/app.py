@@ -49,7 +49,6 @@ from resources_servers.bird_interact.schemas import (
     AskRequest,
     AskResponse,
     BirdInteractSeedSessionResponse,
-    BirdInteractTask,
     BirdInteractVerifyRequest,
     BirdInteractVerifyResponse,
     ColumnMeaningRequest,
@@ -68,6 +67,7 @@ from resources_servers.bird_interact.simulator import (
     parse_action,
     responder_prompt,
 )
+from resources_servers.bird_interact.task_data import BirdInteractTask
 
 
 LOGGER = logging.getLogger(__name__)

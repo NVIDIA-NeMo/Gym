@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from resources_servers.bird_interact.schemas import AmbiguityPoint, BirdInteractTask
+from resources_servers.bird_interact.task_data import AmbiguityPoint, BirdInteractTask
 
 
 UNANSWERABLE_REPLY = "Sorry, I can't help with that question. Please work with what you have."

@@ -21,8 +21,9 @@ from resources_servers.bird_interact.app import (
     BirdInteractResourcesServerConfig,
 )
 from resources_servers.bird_interact.grading import grade, main, split_statements, strip_round_calls
-from resources_servers.bird_interact.schemas import BirdInteractSeedSessionResponse, BirdInteractTask
+from resources_servers.bird_interact.schemas import BirdInteractSeedSessionResponse
 from resources_servers.bird_interact.simulator import UNANSWERABLE_REPLY, parse_action
+from resources_servers.bird_interact.task_data import BirdInteractTask
 
 
 DATA = Path(__file__).parents[1] / "data"
