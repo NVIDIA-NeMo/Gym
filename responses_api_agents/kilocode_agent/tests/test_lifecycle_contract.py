@@ -87,9 +87,12 @@ async def test_capture_follows_confirmed_cleanup_and_keeps_output():
 async def test_bad_cleanup_keeps_state_retryable_without_capture(invalid):
     state, sandbox = session()
     sandbox.result.update(invalid)
-    with pytest.raises((RuntimeError, NgFailureEvent)) as raised:
+    negative_receipt = invalid["cleanup_confirmed"] is False
+    # A negative receipt is the harness boundary's failure; a malformed one stays an unknown RuntimeError.
+    with pytest.raises(NgFailureEvent if negative_receipt else RuntimeError) as raised:
         await execute(state)
-    assert is_harness_termination_failure(raised.value) is (invalid["cleanup_confirmed"] is False)
+    if negative_receipt:
+        assert is_harness_termination_failure(raised.value)
     assert state.session.cleanup is None
     assert state.session.artifacts is None
     assert "read stdout.jsonl" not in sandbox.events and "snapshot" not in sandbox.events
