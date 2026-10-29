@@ -1806,6 +1806,18 @@ class TestApp:
         with raises(ValueError, match=error) if error else nullcontext():
             VLLMModelConfig(**fields)
 
+    @mark.parametrize(
+        ("backend", "dynamo_frontend", "error"),
+        [
+            # A judge shares the global dynamo_worker capture block without speaking the dialect.
+            ("dynamo_worker", False, None),
+            ("vllm_worker", True, "needs token_id_capture.external_staging_backend=dynamo_worker"),
+        ],
+    )
+    def test_dynamo_worker_backend_pairing(self, monkeypatch: MonkeyPatch, backend, dynamo_frontend, error) -> None:
+        with raises(ValueError, match=error) if error else nullcontext():
+            self._setup_server(monkeypatch, external_staging_backend=backend, dynamo_frontend=dynamo_frontend)
+
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
         for worker in workers:

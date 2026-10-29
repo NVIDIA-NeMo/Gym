@@ -179,7 +179,7 @@ class TokenIdCaptureSettings(BaseModel):
     # No additional in-memory coordinator is used.
     external_staging: bool = False
     # Every backend stages a canonical delta before returning coordinates.
-    # ``dynamo_worker`` requires the model server to set ``dynamo_frontend: true``.
+    # ``dynamo_worker`` serves the policy model server, which sets ``dynamo_frontend: true``.
     external_staging_backend: ExternalStagingBackend = "vllm_worker"
     # Name of the environment variable containing the manifest-route bearer token.
     # The serving process reads the token without adding it to serialized configuration.

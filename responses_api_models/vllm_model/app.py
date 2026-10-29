@@ -885,10 +885,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                     "worker custody replaces the token echo"
                 )
             backend = capture_config.token_id_capture.external_staging_backend
-            if (backend == "dynamo_worker") != self.config.dynamo_frontend:
+            # The capture block is global, so judges see dynamo_worker too; only a dialect server must match it.
+            if self.config.dynamo_frontend and backend != "dynamo_worker":
                 raise ValueError(
-                    "token_id_capture.external_staging_backend=dynamo_worker and dynamo_frontend=true "
-                    "must be set together"
+                    f"`{self.config.name}` sets dynamo_frontend=true, which needs "
+                    "token_id_capture.external_staging_backend=dynamo_worker"
                 )
             self._external_capture_handler = make_external_capture_handler(backend)
 
