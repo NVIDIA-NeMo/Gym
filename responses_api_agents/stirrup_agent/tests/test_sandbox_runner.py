@@ -450,3 +450,34 @@ def test_the_staged_files_have_no_broken_imports():
                 assert not module.startswith(("nemo_gym", "resources_servers")), f"{name} imports {module}"
                 if module.startswith("responses_api_agents"):
                     assert f"{module.rsplit('.', 1)[-1]}.py" in HARNESS_FILES, f"{name} imports {module}"
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_compaction_observer_retains_all_summary_attempts_without_policy_calls(failed):
+    from types import SimpleNamespace
+
+    observer = Observer()
+    observer.response_ids.append("policy-before")
+    logged = []
+    agent = SimpleNamespace(_logger=SimpleNamespace(context_summarization_complete=lambda *args: logged.append(args)))
+
+    async def summarize(*args):
+        observer.response_ids.extend(["summary-rejected", "summary-accepted"])
+        if failed:
+            raise RuntimeError("unusable summary")
+        agent._logger.context_summarization_complete("Retain the changes.", "bridge")
+        return [], ["bridge"]
+
+    agent.summarize_messages = summarize
+    observer.watch_compaction(agent)
+    if failed:
+        with pytest.raises(RuntimeError, match="unusable summary"):
+            await agent.summarize_messages([], {})
+    else:
+        assert await agent.summarize_messages([], {}) == ([], ["bridge"])
+    observer.response_ids.append("policy-after")
+    event = observer.compactions[0]
+    assert [ref["response_id"] for ref in event["model_calls"]] == ["summary-rejected", "summary-accepted"]
+    assert event["outcome"] == ("failed" if failed else "completed")
+    assert event["summary"] == (None if failed else "Retain the changes.")
+    assert event["trigger"] == "automatic"
