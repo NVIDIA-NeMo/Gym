@@ -108,3 +108,8 @@ def batch_status_path_for(output_fpath: Path) -> Path:
 def provenance_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_provenance.json`."""
     return output_fpath.with_stem(output_fpath.stem + "_provenance").with_suffix(".json")
+
+
+def service_declaration_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_service_declaration.json`."""
+    return output_fpath.with_stem(output_fpath.stem + "_service_declaration").with_suffix(".json")
