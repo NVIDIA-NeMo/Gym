@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
+import importlib.util
 import os
 import platform
 import re
@@ -335,7 +336,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # the lock in case another server completes installation before this one.
     setup_command = [
         sys.executable,
-        str(Path(__file__).with_name("_venv_setup.py")),
+        # Found by module name rather than next to this file, because the script may live in another package.
+        # The script itself runs without importing Gym.
+        importlib.util.find_spec("nemo_gym.cli._venv_setup").origin,
         "--venv",
         str(venv_path),
         "--command",
