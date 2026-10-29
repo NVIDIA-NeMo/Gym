@@ -121,6 +121,9 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # changes in the request/response. Validated at config load so a typo dies at
     # startup rather than 400-ing every live query mid-run.
     exa_search_type: str = "auto"
+    # Image links (with alt text, in page order) that `browse` lists per page, from Exa's
+    # richImageLinks extra. 0 sends no extra and keeps the text-only output. For a vision tool.
+    exa_browse_image_links: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
@@ -134,6 +137,8 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError(
                 f"exa_search_type must be one of {sorted(_EXA_SEARCH_TYPES)}, got {self.exa_search_type!r}"
             )
+        if self.exa_browse_image_links and self.search_provider != "exa":
+            raise ValueError("exa_browse_image_links needs search_provider='exa': only Exa lists page images")
         return self
 
 
@@ -564,8 +569,10 @@ class ExaAIOHTTPClient(BaseModel):
             body["excludeDomains"] = list(exclude_domains)
         return await self._post("/search", body)
 
-    async def get_contents(self, urls: List[str], max_characters: int) -> Dict[str, Any]:
-        body = {"urls": list(urls), "text": {"maxCharacters": max_characters}}
+    async def get_contents(self, urls: List[str], max_characters: int, image_links: int = 0) -> Dict[str, Any]:
+        body: Dict[str, Any] = {"urls": list(urls), "text": {"maxCharacters": max_characters}}
+        if image_links:
+            body["extras"] = {"richImageLinks": image_links}
         return await self._post("/contents", body)
 
 
@@ -889,6 +896,17 @@ class _PageWriter:
 # 10-attempt/30s-cap schedule (~2.9 min total) and falsely zeroed 25 samples in one
 # full-400 run; 15 attempts capped at 120s gives ~18 min of cumulative window.
 JUDGE_BACKOFF_CAP_S = 120
+
+
+def _format_image_links(result: dict) -> str:
+    """The [Images] block for one browsed page; empty when the provider listed none."""
+    lines = []
+    for image in result.get("images") or []:
+        url = image.get("url") if isinstance(image, dict) else None
+        if url:
+            alt = " ".join(str(image.get("alt") or "").split())[:120]
+            lines.append(f"- {url}" + (f" (alt: {alt})" if alt else ""))
+    return "[Images]:\n" + "\n".join(lines) + "\n" if lines else ""
 
 
 def _judge_backoff_s(attempt: int) -> int:
@@ -1386,14 +1404,21 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             exa_client = self._select_exa_client()
             print(f"[exa_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
             try:
-                raw = await exa_client.get_contents(urls=urls, max_characters=max_per_url_length)
+                raw = await exa_client.get_contents(
+                    urls=urls, max_characters=max_per_url_length, image_links=self.config.exa_browse_image_links
+                )
             except Exception as e:
                 self._record_call(metrics, "browse", "exa", "error", start_time)
                 print(f"[browsecomp][tool_fail][exa_extract] urls={urls} error={e}", flush=True)
                 return BrowseResponse(results_string=f"Failed to extract content: {e}")
             self._record_call(metrics, "browse", "exa", "success", start_time)
             result_list = [
-                {"url": r.get("url", "") or "", "raw_content": r.get("text", "") or ""} for r in raw.get("results", [])
+                {
+                    "url": r.get("url", "") or "",
+                    "raw_content": r.get("text", "") or "",
+                    "images": (r.get("extras") or {}).get("richImageLinks") or [],
+                }
+                for r in raw.get("results", [])
             ]
         else:
             async_tavily_client = self._select_tavily_client()
@@ -1442,9 +1467,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                         content = content[: self.config.max_page_bytes]
                     saved = page_writer.write_browse_page(url, "", content)
                     preview = content[:500].replace("\n", " ")
-                    blocks.append(f"[URL]: {url}\n[Saved to]: {saved} ({len(content)} bytes)\n[Preview]: {preview}\n")
+                    blocks.append(
+                        f"[URL]: {url}\n[Saved to]: {saved} ({len(content)} bytes)\n[Preview]: {preview}\n"
+                        + _format_image_links(result)
+                    )
                 else:
-                    blocks.append(f"[URL]: {url}\n[Empty content]\n")
+                    blocks.append(f"[URL]: {url}\n[Empty content]\n" + _format_image_links(result))
             return BrowseResponse(results_string="\n\n".join(blocks))
 
         # inline mode: return content directly
@@ -1454,7 +1482,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             content = result.get("raw_content", "")
             if len(content) > max_per_url_length:
                 content = content[:max_per_url_length] + "\n... [truncated]"
-            blocks.append(f"[URL]: {url}\n[Content]:\n{content}\n")
+            blocks.append(f"[URL]: {url}\n[Content]:\n{content}\n" + _format_image_links(result))
 
         results_string = "\n\n".join(blocks)
         return BrowseResponse(results_string=results_string)

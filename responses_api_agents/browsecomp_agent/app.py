@@ -175,6 +175,76 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # result) before the reset fires; without progress the reset fires
     # immediately as before. (ported from the reference harness)
     progress: bool = False
+    # Show the images a tool returns ({"results_string": ..., "images": [data URLs]}, e.g. view_image) to the
+    # model. A chat tool message carries text only, so they go in one user message after the round's tool
+    # outputs. Off, such a reply reaches the model as raw JSON text, as before.
+    tool_images: bool = False
+    # Tool images kept in context, newest first; older ones become a text marker. Prompt images are not counted.
+    max_tool_images_in_context: int = Field(default=8, ge=0)
+
+
+TOOL_IMAGES_HEADER = "[Images returned by the tool calls above]"
+TOOL_IMAGE_DROPPED = "[Image removed from context to save space. Call the tool again to see it.]"
+
+
+def _unwrap_tool_output(raw: str, accept_images: bool) -> tuple[str, List[str]]:
+    """The text the model sees for a tool reply, and the image data URLs it carries.
+
+    The resources server wraps every tool result in a one-field JSON envelope ({"results_string": "..."}),
+    which JSON-escapes newlines, so the model would see a single escaped line instead of raw multi-line
+    text (reference-harness parity). A vision tool adds an "images" list next to it. Error bodies
+    (another JSON shape) and non-JSON payloads are returned untouched.
+    """
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw, []
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("results_string"), str):
+        return raw, []
+    if set(parsed) == {"results_string"}:
+        return parsed["results_string"], []
+    if accept_images and set(parsed) == {"results_string", "images"} and isinstance(parsed["images"], list):
+        return parsed["results_string"], [i for i in parsed["images"] if isinstance(i, str) and i]
+    return raw, []
+
+
+def _nudge_target_index(items: list) -> Optional[int]:
+    """Index of the tool output a [SYSTEM NOTE] is appended to: the last item, or the one before a
+    trailing tool-image message. None when the latest round did not end in tool outputs."""
+    i = len(items) - 1
+    if i >= 0 and getattr(items[i], "role", None) == "user":
+        i -= 1
+    if i >= 0 and getattr(items[i], "type", None) == "function_call_output":
+        return i
+    return None
+
+
+def _tool_image_message(image_urls: List[str]) -> NeMoGymEasyInputMessage:
+    content = [{"type": "input_text", "text": TOOL_IMAGES_HEADER}]
+    content += [{"type": "input_image", "image_url": url, "detail": "auto"} for url in image_urls]
+    return NeMoGymEasyInputMessage(role="user", content=content)
+
+
+def _cap_tool_images(items: list, keep: int) -> list:
+    """Replace all but the newest `keep` tool images with TOOL_IMAGE_DROPPED.
+
+    Each image costs prompt tokens on every later call, and vLLM rejects a prompt past
+    --limit-mm-per-prompt. The prompt's own images live in the request input, not in `items`.
+    """
+    seen = 0
+    for i in range(len(items) - 1, -1, -1):
+        item = items[i]
+        if getattr(item, "role", None) != "user" or not isinstance(getattr(item, "content", None), list):
+            continue
+        content = []
+        for part in reversed(item.content):
+            if isinstance(part, dict) and part.get("type") == "input_image":
+                seen += 1
+                if seen > keep:
+                    part = {"type": "input_text", "text": TOOL_IMAGE_DROPPED}
+            content.append(part)
+        items[i] = item.model_copy(update={"content": content[::-1]})
+    return items
 
 
 class BrowsecompAgentRunRequest(BaseRunRequest):
@@ -432,15 +502,16 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             f"{reset_threshold} — board-save warning injected; reset fires after this turn",
                             flush=True,
                         )
-                        if new_outputs and new_outputs[-1].type == "function_call_output":
-                            new_outputs[-1] = new_outputs[-1].model_copy(
+                        tool_idx = _nudge_target_index(new_outputs)
+                        if tool_idx is not None:
+                            new_outputs[tool_idx] = new_outputs[tool_idx].model_copy(
                                 update={
-                                    "output": new_outputs[-1].output
+                                    "output": new_outputs[tool_idx].output
                                     + PRE_RESET_BOARD_NUDGE.format(kept=_pre_reset_kept_desc())
                                 }
                             )
                             if full_trajectory:
-                                full_trajectory[-1] = new_outputs[-1]
+                                full_trajectory[-1] = new_outputs[tool_idx]
                             new_body = body.model_copy(update={"input": body.input + new_outputs})
                     else:
                         reset_count += 1
@@ -561,6 +632,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 break
 
             # --- Execute tool calls ---
+            round_images: List[str] = []
             for output_function_call in all_fn_calls:
                 num_tool_calls += 1
                 # The model can emit syntactically invalid JSON for `arguments` (observed
@@ -623,22 +695,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         break
                     # We don't raise for status here since it's a valid return for the API to error e.g. if the model outputs an invalid call or something.
                     resources_server_cookies = api_response.cookies
-                    # reference-harness parity: the resources server wraps every tool result in a one-field
-                    # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
-                    # model then sees a single escaped line instead of raw multi-line text. This was
-                    # the last remaining materialized-prompt difference vs the reference harness.
-                    # Unwrap it so the model sees the raw text. Error bodies (different JSON shape)
-                    # and non-JSON payloads are left untouched.
-                    try:
-                        parsed_tool_output = json.loads(tool_output)
-                        if (
-                            isinstance(parsed_tool_output, dict)
-                            and set(parsed_tool_output) == {"results_string"}
-                            and isinstance(parsed_tool_output["results_string"], str)
-                        ):
-                            tool_output = parsed_tool_output["results_string"]
-                    except json.JSONDecodeError:
-                        pass
+                    tool_output, images = _unwrap_tool_output(tool_output, self.config.tool_images)
+                    round_images.extend(images)
                     if api_response.status >= 400:
                         print(
                             f"[browsecomp][tool_fail][{qid}] step={step} tool={output_function_call.name} "
@@ -658,16 +716,23 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 full_trajectory.append(tool_response)
             if timed_out:
                 break
+            if round_images:
+                # Model context only: a Response's output cannot hold an input message, and the
+                # tool output text already names each image's source.
+                new_outputs.append(_tool_image_message(round_images))
+                new_outputs = _cap_tool_images(new_outputs, self.config.max_tool_images_in_context)
 
             # --- Pre-reset warning: last chance to save the progress board ---
-            if pre_reset_nudge_due and new_outputs and new_outputs[-1].type == "function_call_output":
-                new_outputs[-1] = new_outputs[-1].model_copy(
+            tool_idx = _nudge_target_index(new_outputs)
+            if pre_reset_nudge_due and tool_idx is not None:
+                new_outputs[tool_idx] = new_outputs[tool_idx].model_copy(
                     update={
-                        "output": new_outputs[-1].output + PRE_RESET_BOARD_NUDGE.format(kept=_pre_reset_kept_desc())
+                        "output": new_outputs[tool_idx].output
+                        + PRE_RESET_BOARD_NUDGE.format(kept=_pre_reset_kept_desc())
                     }
                 )
                 if full_trajectory:
-                    full_trajectory[-1] = new_outputs[-1]
+                    full_trajectory[-1] = new_outputs[tool_idx]
 
             # --- Nudge the model at milestone steps ---
             if self.config.nudge_steps and all_fn_calls:
@@ -701,12 +766,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         "a line by itself.]" % (step, self.config.max_steps)
                     )
 
-                if nudge_msg:
-                    last_tool = new_outputs[-1]
+                tool_idx = _nudge_target_index(new_outputs)
+                if nudge_msg and tool_idx is not None:
+                    last_tool = new_outputs[tool_idx]
                     new_output = last_tool.output + nudge_msg
-                    new_outputs[-1] = last_tool.model_copy(update={"output": new_output})
+                    new_outputs[tool_idx] = last_tool.model_copy(update={"output": new_output})
                     if full_trajectory:
-                        full_trajectory[-1] = new_outputs[-1]
+                        full_trajectory[-1] = new_outputs[tool_idx]
 
             # --- Armed reset: fires after the warned board-save turn completes ---
             # (post-call mode; in tokenize mode the next pre-call check fires it)
@@ -1008,7 +1074,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """
         Extract the last n complete tool-call rounds from new_outputs.
         A round = one or more function_call items + their corresponding
-        function_call_output items. Returns a flat list preserving order.
+        function_call_output items, plus the tool-image message after them
+        (tool_images). Returns a flat list preserving order.
         n defaults to context_reset_keep_rounds; the /tokenize adaptive-shrink
         path passes smaller n to find a window that fits under the threshold.
         """
@@ -1020,6 +1087,14 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         rounds = []
         i = len(new_outputs) - 1
         while i >= 0 and len(rounds) < n:
+            images = []
+            if (
+                getattr(new_outputs[i], "role", None) == "user"
+                and i > 0
+                and new_outputs[i - 1].type == "function_call_output"
+            ):
+                images = [new_outputs[i]]
+                i -= 1
             if new_outputs[i].type == "function_call_output":
                 # Walk backwards to collect all tool messages for this round
                 tool_outputs = []
@@ -1033,7 +1108,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     i -= 1
                 # Add to rounds
                 if fn_calls:
-                    rounds.insert(0, (fn_calls, tool_outputs))
+                    rounds.insert(0, (fn_calls, tool_outputs + images))
             else:
                 i -= 1
 
