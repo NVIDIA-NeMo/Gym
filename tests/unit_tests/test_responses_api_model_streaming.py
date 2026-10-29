@@ -21,6 +21,7 @@ is re-emitted as a synthesized SSE event stream. Non-streaming requests keep the
 strict-validation behavior.
 """
 
+import asyncio
 import json
 from time import time
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -32,7 +33,13 @@ from fastapi import Body, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, CaptureStore, SimpleResponsesAPIModel
+from nemo_gym.base_responses_api_model import (
+    CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+    BaseResponsesAPIModelConfig,
+    CaptureStore,
+    SimpleResponsesAPIModel,
+)
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -43,8 +50,10 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
+    is_responses_lifecycle_chunk,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
+    synthesize_responses_keepalive_sse,
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
@@ -834,6 +843,34 @@ class TestSynthesizeSSE:
         assert failed["error"] == {"code": "server_error", "message": "boom"}
         assert failed["output"] == []
 
+    def test_keepalive_events_open_the_stream_once(self) -> None:
+        placeholder = {"id": "resp_k", "object": "response", "status": "in_progress", "output": []}
+        opening = self._events("".join(synthesize_responses_keepalive_sse("resp_k", include_created=True)))
+        repeat = self._events("".join(synthesize_responses_keepalive_sse("resp_k", include_created=False)))
+        assert opening == [
+            {"type": "response.created", "response": placeholder},
+            {"type": "response.in_progress", "response": placeholder},
+        ]
+        assert repeat == [{"type": "response.in_progress", "response": placeholder}]
+
+    def test_stream_opened_by_keepalives_omits_only_the_created_event(self) -> None:
+        response = _build_response([_function_call_item("exec_command"), _message_item("done")]).model_dump(
+            mode="json"
+        )
+        full = "".join(synthesize_responses_sse(response))
+        continued = "".join(synthesize_responses_sse(response, include_created=False))
+        assert self._events(full)[0]["type"] == "response.created"
+        assert full.endswith(continued)
+        assert self._events(continued) == self._events(full)[1:]
+
+    def test_failure_after_keepalives_ends_the_announced_response(self) -> None:
+        events = self._events(
+            "".join(synthesize_responses_failure_sse("boom", response_id="resp_k", include_created=False))
+        )
+        assert [e["type"] for e in events] == ["response.failed"]
+        assert events[0]["response"]["id"] == "resp_k"
+        assert events[0]["response"]["error"] == {"code": "server_error", "message": "boom"}
+
 
 # The streaming sanitizer intentionally removes these input item types.
 # The transcript preservation check excludes them.
@@ -855,11 +892,14 @@ def test_no_dead_entries_in_streaming_consumed_types() -> None:
 
 
 class _EchoModel(SimpleResponsesAPIModel):
-    """Fake model server capturing the params its responses() receives."""
+    """Fake model server capturing the params its responses() receives. It mints its response ids."""
 
     config: BaseResponsesAPIModelConfig
     last_params: object = None
     model_config = {"arbitrary_types_allowed": True}
+
+    def _mints_response_ids(self) -> bool:
+        return True
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         object.__setattr__(self, "last_params", body)
@@ -1110,6 +1150,263 @@ class TestResponsesDispatchRoute:
         client, _ = _client(_FailingModel)
         with pytest.raises(RuntimeError, match="backend exploded"):
             client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+
+
+_SLOW_CALL_S = 0.3
+_KEEPALIVE_S = 0.02
+
+
+class _SlowEchoModel(_EchoModel):
+    """Echo model whose backend call outlasts several keepalive intervals."""
+
+    served: object = None
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        response = await super().responses(body)
+        object.__setattr__(self, "served", response)
+        return response
+
+
+class _SlowFailingModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        raise RuntimeError("backend exploded late")
+
+
+def _upstream_error(status: int, message: str, body: bytes) -> ClientResponseError:
+    request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions?api-key=secret-value")
+    error = ClientResponseError(request_info, (), status=status, message=message)
+    error.response_content = body
+    return error
+
+
+class _SlowUpstreamErrorModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        raise _upstream_error(502, "Bad Gateway", b"engine restarted")
+
+
+class _SlowContextOverflowModel(_EchoModel):
+    """Raises a length refusal the server marked for propagation, as vllm_model does."""
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        error = _upstream_error(
+            400,
+            "Bad Request",
+            b'{"error": {"message": "This model\'s maximum context length is 8 tokens.", "param": "input"}}',
+        )
+        setattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, CONTEXT_LENGTH_EXCEEDED_ERROR_CODE)
+        raise error
+
+
+class _SlowUnpropagatedErrorModel(_SlowUpstreamErrorModel):
+    def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
+        return False
+
+
+class _SlowFixedIdModel(_EchoModel):
+    """Returns ``resp_backend``, completed or cut at the output limit, after several keepalive intervals."""
+
+    status: str = "completed"
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        response = await super().responses(body)
+        update = {"id": "resp_backend", "status": self.status}
+        if self.status == "incomplete":
+            update["incomplete_details"] = {"reason": "max_output_tokens"}
+        return response.model_copy(update=update)
+
+
+class _UpstreamIdModel(_EchoModel):
+    """Serves the ids an upstream Responses API issued, which a keepalive stream cannot announce."""
+
+    def _mints_response_ids(self) -> bool:
+        return False
+
+
+class _SlowUnknownUsageModel(_UnknownUsageModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        return await super().responses(body)
+
+
+def _keepalive_client(
+    model_cls, keepalive_s: float = _KEEPALIVE_S, *, global_config_dict: dict | None = None
+) -> tuple[TestClient, SimpleResponsesAPIModel]:
+    server = model_cls(
+        config=BaseResponsesAPIModelConfig(
+            host="0.0.0.0", port=8099, entrypoint="", name="", stream_keepalive_s=keepalive_s
+        ),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict or {}),
+    )
+    return TestClient(server.setup_webserver()), server
+
+
+def _sse_payloads(text: str) -> list[dict]:
+    return [json.loads(line[len("data: ") :]) for line in text.splitlines() if line.startswith("data: ")]
+
+
+def test_only_a_single_lifecycle_event_is_liveness() -> None:
+    created, progress = (
+        event.encode() for event in synthesize_responses_keepalive_sse("resp_x", include_created=True)
+    )
+    assert is_responses_lifecycle_chunk(created)
+    assert is_responses_lifecycle_chunk(progress)
+    # A chunk that carries output too is output.
+    assert not is_responses_lifecycle_chunk(created + b"event: response.completed\ndata: {}\n\n")
+    assert not is_responses_lifecycle_chunk(b"event: response.output_item.done\ndata: {}\n\n")
+    assert not is_responses_lifecycle_chunk(b": keep-alive\n\n")
+
+
+class TestResponsesStreamKeepalive:
+    """``stream_keepalive_s`` holds a buffered Responses stream open while the backend computes."""
+
+    STREAM_BODY = {"stream": True, "input": [{"role": "user", "content": "hi"}]}
+
+    def test_off_by_default(self) -> None:
+        config = BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="")
+        assert config.stream_keepalive_s is None
+
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_rejects_non_positive_intervals(self, value: float) -> None:
+        with pytest.raises(ValidationError):
+            BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="", stream_keepalive_s=value)
+
+    @pytest.mark.parametrize("status", ["completed", "incomplete"])
+    def test_every_event_names_the_response_the_stream_ends_with(self, status: str) -> None:
+        client, server = _keepalive_client(_SlowFixedIdModel)
+        object.__setattr__(server, "status", status)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        events = _sse_payloads(resp.text)
+        assert events[1]["type"] == "response.in_progress", "keepalives opened the stream"
+        assert events[-1]["type"] == f"response.{status}"
+        assert {event["response"]["id"] for event in events if "response" in event} == {events[0]["response"]["id"]}
+        # A client that keys on the id response.created announced reaches the terminal state.
+        assert events[-1]["response"]["status"] == status
+
+    def test_capture_records_the_id_the_stream_announced(self) -> None:
+        client, _ = _keepalive_client(_SlowFixedIdModel)
+        with patch("nemo_gym.base_responses_api_model.capture_tokens", new=AsyncMock()) as capture:
+            resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        events = _sse_payloads(resp.text)
+        [call] = capture.await_args_list
+        assert call.args[0].id == events[0]["response"]["id"] == events[-1]["response"]["id"]
+
+    def test_refused_on_a_server_that_serves_upstream_ids(self) -> None:
+        with pytest.raises(ValueError, match="stream_keepalive_s"):
+            _keepalive_client(_UpstreamIdModel)
+
+    def test_long_call_sends_keepalives_then_the_unchanged_response(self) -> None:
+        client, server = _keepalive_client(_SlowEchoModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        events = _sse_payloads(resp.text)
+        keepalives = [event for event in events if event["type"] in ("response.created", "response.in_progress")]
+        assert events[: len(keepalives)] == keepalives
+        assert keepalives[0]["type"] == "response.created"
+        assert len(keepalives) >= 3, "the call outlasts several intervals"
+        assert all(event["type"] == "response.in_progress" for event in keepalives[1:])
+        assert {event["response"]["id"] for event in keepalives} == {keepalives[0]["response"]["id"]}
+        assert all(event["response"]["status"] == "in_progress" for event in keepalives)
+        # After the keepalives, the stream is exactly what the buffered path sends after its response.created,
+        # for the response under the id the keepalives announced.
+        served = server.served.model_dump(mode="json", by_alias=True) | {"id": keepalives[0]["response"]["id"]}
+        expected = "".join(synthesize_responses_sse(served, include_created=False))
+        assert resp.text.endswith(expected)
+        assert events[len(keepalives) :] == _sse_payloads(expected)
+        assert events[-1]["type"] == "response.completed"
+
+    def test_capture_after_keepalives_keeps_unknown_usage_counts(self, tmp_path) -> None:
+        client, _ = _keepalive_client(
+            _SlowUnknownUsageModel,
+            global_config_dict={"observability_enabled": True, "model_call_capture_dir": str(tmp_path)},
+        )
+        resp = client.post("/ng-rollout/r-0/v1/responses", json=self.STREAM_BODY)
+        assert resp.status_code == 200
+        events = _sse_payloads(resp.text)
+        assert events[1]["type"] == "response.in_progress", "keepalives opened the stream"
+        assert events[-1]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
+        [exchange] = CaptureStore(tmp_path).read("r-0")
+        assert exchange["response"]["usage"]["input_tokens_details"] == {"cached_tokens": None}
+        assert exchange["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": None}
+
+    def test_fast_call_keeps_the_buffered_stream(self) -> None:
+        client, _ = _keepalive_client(_EchoModel, keepalive_s=30.0)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+        assert resp.status_code == 200
+        assert [event["type"] for event in _sse_payloads(resp.text)] == [
+            "response.created",
+            "response.output_item.done",
+            "response.completed",
+        ]
+
+    def test_failure_after_keepalives_ends_with_response_failed(self) -> None:
+        client, _ = _keepalive_client(_SlowFailingModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        assert resp.status_code == 200
+        events = _sse_payloads(resp.text)
+        assert events[0]["type"] == "response.created"
+        assert events[1]["type"] == "response.in_progress"
+        assert [event["type"] for event in events].count("response.failed") == 1
+        failed = events[-1]
+        assert failed["type"] == "response.failed"
+        assert failed["response"]["id"] == events[0]["response"]["id"]
+        assert failed["response"]["status"] == "failed"
+        assert failed["response"]["error"] == {"code": "server_error", "message": "backend exploded late"}
+        assert "response.completed" not in resp.text
+
+    def test_upstream_error_after_keepalives_is_reported_without_its_url(self) -> None:
+        client, _ = _keepalive_client(_SlowUpstreamErrorModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        assert resp.status_code == 200
+        failed = _sse_payloads(resp.text)[-1]
+        assert failed["type"] == "response.failed"
+        assert failed["response"]["error"] == {
+            "code": "server_error",
+            "message": "Upstream HTTP 502: engine restarted",
+        }
+        assert "secret-value" not in resp.text
+
+    def test_refusal_after_keepalives_keeps_its_error_code(self) -> None:
+        # Before the stream opens the client gets the refusal's OpenAI envelope; after, the same code.
+        client, _ = _keepalive_client(_SlowContextOverflowModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        assert resp.status_code == 200
+        failed = _sse_payloads(resp.text)[-1]
+        assert failed["type"] == "response.failed"
+        assert failed["response"]["error"] == {
+            "code": "context_length_exceeded",
+            "message": "This model's maximum context length is 8 tokens.",
+        }
+
+    def test_unpropagated_upstream_error_after_keepalives_is_a_server_error(self) -> None:
+        client, _ = _keepalive_client(_SlowUnpropagatedErrorModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        failed = _sse_payloads(resp.text)[-1]
+        assert failed["response"]["error"] == {"code": "server_error", "message": "HTTP 500: Model request failed"}
+        assert "engine restarted" not in resp.text
+
+    def test_fast_upstream_error_keeps_its_http_status(self) -> None:
+        error = ClientResponseError(
+            MagicMock(), (), status=429, message="slow down", headers={"Content-Type": "application/json"}
+        )
+        error.response_content = b'{"error":{"code":"rate_limit_exceeded"}}'
+        with patch.object(_EchoModel, "responses", AsyncMock(side_effect=error)):
+            client, _ = _keepalive_client(_EchoModel, keepalive_s=30.0)
+            resp = client.post("/v1/responses", json=self.STREAM_BODY)
+        assert resp.status_code == 429
+        assert resp.content == error.response_content
 
 
 class TestUnionItemTypesThroughDispatch:

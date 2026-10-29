@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import ClientResponseError
 
 from environment_servers.swe_together import app, evaluation
 from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnvironmentServer, memory_mib
@@ -124,6 +125,29 @@ async def test_simulator_one_call_even_on_noop_text(tmp_path):
     result = await server(tmp_path)._next_user_turn(value, activation())
     assert result.synthetic and result.responses_create_params.input[0].content == "continue"
     assert llm.call.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_simulator_turn_artifact_keeps_upstream_status(tmp_path):
+    value, llm = state(tmp_path, [])
+    upstream = ClientResponseError(
+        SimpleNamespace(real_url="https://model.example/v1/chat/completions"),
+        (),
+        status=408,
+        message="gateway timeout",
+    )
+    upstream.response_content = b"provider request timed out"
+
+    llm.call.side_effect = upstream
+    with pytest.raises(RuntimeError, match="User simulator request failed"):
+        await server(tmp_path)._next_user_turn(value, activation())
+
+    artifact = json.loads((tmp_path / "turn-0-simulator.json").read_text())
+    detail = artifact["error_detail"]
+    assert detail["message"] == "User simulator request failed"
+    assert detail["cause"].startswith("ClientResponseError: 408")
+    assert detail["status_code"] == 408
+    assert detail["body"] == "provider request timed out"
 
 
 @pytest.mark.asyncio
@@ -302,6 +326,51 @@ async def test_webserver_lifespan_closes_runtime_helper(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path, monkeypatch):
+    policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.1"}]}
+    environment = server(
+        tmp_path,
+        dependency_proxy_url="http://10.0.0.3:3128",
+        sandbox_config={
+            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed"},
+            "provider_options": {"network_policy": policy},
+        },
+        judge_sandbox_config={"metadata": {}},
+    )
+    environment.server_client = SimpleNamespace(global_config_dict={})
+    specs = {}
+
+    class Sandbox:
+        def __init__(self, provider):
+            pass
+
+        async def start(self, spec):
+            specs[spec.metadata["role"]] = spec
+
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=0, error_type=None)
+
+    monkeypatch.setattr(app, "AsyncSandbox", Sandbox)
+    monkeypatch.setattr(app, "resolve_provider_config", lambda *_: object())
+    monkeypatch.setattr(app, "install_trust_bundle", AsyncMock())
+    episode = Episode(request(), request().task.task_input.task_data, tmp_path, tmp_path)
+    episode.task_metadata = {"environment": {"memory": "4G"}}
+    episode.runtime = SimpleNamespace(
+        metadata=lambda: {"placement": "shared"}, mount_options=lambda *_: {"volumes": []}
+    )
+    episode.dependency_access = SimpleNamespace(
+        certificate=AsyncMock(return_value="cert"), sandbox_settings=lambda token, policy, cert: (policy, {}, {})
+    )
+    await environment._new_sandbox(episode)
+    await environment._new_sandbox(episode, judge=True)
+    candidate, judge = specs["candidate"].metadata, specs["judge"].metadata
+    assert candidate["nemo.nvidia.com/oom-kill"] == "process"
+    assert candidate["placement"] == "shared" and judge["placement"] == "shared"
+    assert "nemo.nvidia.com/oom-kill" not in judge
+    assert specs["candidate"].resources.memory_mib == 4096
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("activation_error", [False, True])
 async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, monkeypatch, activation_error):
     environment = server(tmp_path)
@@ -342,6 +411,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
             "reward": 1,
             "judge_score": 1,
             "task_id": "task",
+            "evaluation_completed": True,
         }
 
     async def post(name, path, *, json, cookies, headers=None, _control=False):
@@ -462,6 +532,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
             "reward": 0,
             "judge_score": 0,
             "task_id": "task",
+            "evaluation_completed": True,
         }
 
     async def post(name, path, *, json, cookies, **kwargs):
@@ -536,3 +607,20 @@ async def test_setup_failures_preserve_retry_classification_and_evidence(tmp_pat
     assert result.failure.dependency_error["message"] == str(error)
     saved = json.loads((tmp_path / "one" / "failure.json").read_text())
     assert saved["failure_reason"].endswith(str(error))
+
+
+async def test_wrapped_simulator_failure_keeps_upstream_status_in_failure(tmp_path, monkeypatch):
+    from aiohttp import ClientResponseError
+
+    url = "http://127.0.0.1:1/ng-rollout/one/v1/chat/completions"
+    request_info = SimpleNamespace(url=url, real_url=url, method="POST", headers={})
+    upstream = ClientResponseError(request_info=request_info, history=(), status=408, message="Request Timeout")
+    upstream.response_content = b'{"error":{"message":"litellm.Timeout: Timeout passed=360.0"}}'
+    error = RuntimeError("User simulator request failed")
+    error.__cause__ = upstream
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", AsyncMock(side_effect=error))
+    result = await server(tmp_path).run_request(request())
+    saved = json.loads((tmp_path / "one" / "failure.json").read_text())["dependency_error"]
+    assert saved == result.failure.dependency_error
+    assert saved["status_code"] == 408 and "Timeout passed=360.0" in saved["body"]
+    assert saved["cause"].startswith("ClientResponseError: 408")

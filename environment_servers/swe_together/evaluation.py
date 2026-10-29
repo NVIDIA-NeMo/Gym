@@ -186,6 +186,9 @@ async def run_judge(
     except Exception as error:
         original_error = error
         evidence["judge_transport_error"] = f"{type(error).__name__}: {error}"
+    except BaseException as error:
+        original_error = error
+        raise
     finally:
         try:
             async with asyncio.timeout(cleanup_timeout):
@@ -206,10 +209,18 @@ async def run_judge(
         except Exception as error:
             evidence["judge_close_error"] = str(error)
             (artifact_dir / "judge-close-error.json").write_text(json.dumps({"error": str(error)}))
-            raise RuntimeError("Judge cleanup was not confirmed") from error
+            # A seed or execution failure is the primary cause; the close failure stays in the evidence.
+            if original_error is None:
+                raise RuntimeError("Judge cleanup was not confirmed") from error
+            if isinstance(original_error, Exception):
+                raise original_error
+            # Otherwise a cancellation is already propagating; let it continue.
     try:
         raw = await read_text(sandbox, path="/tmp/judge_inputs/verdict.json")
     except Exception as error:
+        # A verdict saved before a lost response is still graded; without one, the primary error is the cause.
+        if original_error is not None:
+            raise original_error
         raise RuntimeError(
             "Judge produced no readable verdict; outcome="
             + json.dumps(evidence.get("judge_outcome"))

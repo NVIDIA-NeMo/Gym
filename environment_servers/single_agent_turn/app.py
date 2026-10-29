@@ -95,7 +95,8 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     model_config = ConfigDict(extra="forbid")
 
-    resources_server: ResourcesServerRef
+    # Unset, the bound agent's own resources server, the one its /run used under the legacy_agent relay.
+    resources_server: ResourcesServerRef | None = None
     agent_server: AgentServerRef
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
@@ -113,6 +114,28 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     checkpoint_mode = "exported"
     response_model = SingleAgentTurnResponse
 
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        # Fail at startup, not on the first episode, when there is no resources server to bind.
+        self.resources_server_name
+
+    @property
+    def resources_server_name(self) -> str:
+        """The resources server this server binds: its own setting, or else its agent's."""
+        if self.config.resources_server is not None:
+            return self.config.resources_server.name
+        agent_config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.agent_server.name,
+        )
+        name = (agent_config.get("resources_server") or {}).get("name")
+        if not name:
+            raise ValueError(
+                f"Environment Server {self.config.name!r} sets no resources_server, "
+                f"and its agent {self.config.agent_server.name!r} names none either."
+            )
+        return name
+
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Forward to the resources server, which owns verification in this protocol.
 
@@ -127,7 +150,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             return AggregateMetrics()
         response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
+            server_name=self.resources_server_name,
             url_path="/aggregate_metrics",
             json=body,
         )
@@ -308,7 +331,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         task_input = request.task.task_input
         try:
             seed_http_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
+                server_name=self.resources_server_name,
                 url_path="/seed_session",
                 json=ResourcesSeedSessionRequest(
                     resources_session_id=handles.resources_session_id,
@@ -338,7 +361,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     async def _seed_agent(
         self, request: SingleAgentTurnRequest, handles: "SessionHandles", seed: ResourcesSeedSessionResponse
     ) -> None:
-        resources_base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
+        resources_base_url = self.server_client._resolve_base_url(self.resources_server_name).rstrip("/")
         tool_accesses: list[ToolAccess] = []
         if "direct_http" in self.config.resources_tool_transports:
             # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt,
@@ -351,7 +374,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             tool_accesses.append(
                 DirectHTTPToolAccess(
-                    name=f"{self.config.resources_server.name}.direct_http",
+                    name=f"{self.resources_server_name}.direct_http",
                     required=True,
                     base_url=tools_base_url,
                     cookies=handles.resources_cookies,
@@ -462,7 +485,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
     async def _close_resources(self, request: SingleAgentTurnRequest, handles: "SessionHandles") -> None:
         close_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
+            server_name=self.resources_server_name,
             url_path="/close_session",
             json=ResourcesCloseSessionRequest(
                 resources_session_id=handles.resources_session_id,
@@ -483,7 +506,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         verifier_invocations = None
         try:
             verify_http_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
+                server_name=self.resources_server_name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
                 json=self._verify_body(request, agent_response),

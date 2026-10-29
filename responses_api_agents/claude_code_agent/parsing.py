@@ -66,8 +66,12 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     output_items: list[Any] = []
     pending_calls: dict[str, NeMoGymResponseFunctionToolCall] = {}
     buffered_think: str | None = None
-    total_input = 0
-    total_output = 0
+    # Token usage. The result event carries the run's cumulative usage, so it is the total when present.
+    # Without one (the CLI was killed or timed out), sum the assistant messages' usage, once per message:
+    # stream-json emits one assistant event per content block, each repeating its message's usage.
+    result_usage: Optional[tuple[int, int]] = None
+    message_usage: dict[str, tuple[int, int]] = {}
+    unidentified_input = unidentified_output = 0
     num_turns: Optional[int] = None
     result_metadata: dict[str, Any] = {}
     compacting_sessions: set[str] = set()
@@ -78,9 +82,13 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         etype = event.get("type")
 
         if etype == "result":
-            usage = event.get("usage") or {}
-            total_input += int(usage.get("input_tokens") or 0)
-            total_output += int(usage.get("output_tokens") or 0)
+            usage = event.get("usage")
+            if isinstance(usage, dict) and ("input_tokens" in usage or "output_tokens" in usage):
+                previous = result_usage or (0, 0)
+                result_usage = (
+                    previous[0] + int(usage.get("input_tokens") or 0),
+                    previous[1] + int(usage.get("output_tokens") or 0),
+                )
             # Claude Code's authoritative turn counter (what --max-turns bounds).
             if event.get("num_turns") is not None:
                 num_turns = int(event["num_turns"])
@@ -96,8 +104,13 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
             message = event.get("message", {})
             content = message.get("content") or []
             usage = message.get("usage") or {}
-            total_input += int(usage.get("input_tokens") or 0)
-            total_output += int(usage.get("output_tokens") or 0)
+            counts = (int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
+            message_id = message.get("id")
+            if isinstance(message_id, str) and message_id:
+                message_usage[message_id] = counts
+            else:
+                unidentified_input += counts[0]
+                unidentified_output += counts[1]
 
             # Subagent frames belong to a different captured chain. Keep their usage accounting,
             # but never let their text or tool ids testify to the main conversation's terminal call.
@@ -204,6 +217,11 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     compaction_attempts.extend(
         {"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting_sessions
     )
+    if result_usage is not None:
+        total_input, total_output = result_usage
+    else:
+        total_input = unidentified_input + sum(counts[0] for counts in message_usage.values())
+        total_output = unidentified_output + sum(counts[1] for counts in message_usage.values())
     metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
     if terminal_response_id:
         metadata["terminal_response_id"] = terminal_response_id
