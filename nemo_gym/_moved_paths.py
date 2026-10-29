@@ -631,6 +631,76 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
     },
+    "nemo_gym.cli.env": {
+        # Split out of env.
+        **_names(
+            "nemo_gym.orchestration.server_supervisor",
+            "0.8.0",
+            """
+            RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME ServerSpinupTimeoutError _BASE_URL_KEY_SUFFIX _ConfiguredServer
+            _DEFAULT_MODEL_ENDPOINT_READINESS_TIMEOUT_SEC _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC _ENDPOINT_ANSWERING
+            _ENDPOINT_POLL_INTERVAL_SEC _ENDPOINT_PROBE_TIMEOUT_SEC _ENDPOINT_REFUSED _ENDPOINT_STARTING
+            _ENDPOINT_STARTING_STATUS_CODES _ENDPOINT_UNRESOLVABLE _FORCE_KILL_REAP_TIMEOUT_SEC
+            _GRACEFUL_SHUTDOWN_TIMEOUT_SEC _MODEL_SERVER_TYPE _SERVER_PROBE_TIMEOUT_SEC _collect_model_endpoints
+            _configured_servers _endpoint_probe_url _is_dns_failure _model_endpoint_timeout_seconds
+            _probe_endpoint _ray_server_names _server_launch_command _server_spinup_timeout_seconds
+            _startup_outcome _wait_for_model_endpoints
+            """,
+        ),
+        # Moved, and still imported by env for its own use.
+        **_names("nemo_gym.orchestration.server_supervisor", "0.8.0", "RunHelper _resolve_server_dir"),
+        # env imported these for code that moved out of it.
+        **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient ServerStatus"),
+        **_names(
+            "nemo_gym.config.global_config",
+            "0.8.0",
+            """
+            DRY_RUN_KEY_NAME HEAD_SERVER_KEY_NAME MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME
+            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
+            SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.h2_ping_sidecar.launcher",
+            "0.8.0",
+            """
+            H2PingSidecarManager start_h2_ping_sidecar
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.server_supervisor",
+            "0.8.0",
+            """
+            ListConfig _resolve_under_cwd_or_install pprint
+            """,
+        ),
+        **_names(
+            "nemo_gym.server_runtime.ray_support",
+            "0.8.0",
+            """
+            entrypoint_ray_enabled initialize_ray ray_is_installed
+            """,
+        ),
+        **_names("nemo_gym.server_runtime.registry_server", "0.8.0", "HeadServer ServerInstanceDisplayConfig"),
+        **_names("nemo_gym.telemetry.config", "0.8.0", "MemoryProfilingConfig"),
+        **_names(
+            "nemo_gym.telemetry.memory",
+            "0.8.0",
+            """
+            MemoryProfiler ServerMemoryTarget process_tree_memory_supported
+            """,
+        ),
+        **_names("nemo_gym.telemetry.metrics", "0.8.0", "record_active_servers"),
+        **_names(
+            "nemo_gym.telemetry.setup",
+            "0.8.0",
+            """
+            configure_telemetry_env get_telemetry init_telemetry is_telemetry_metrics_enabled
+            memory_profiling_config_from_env shutdown_telemetry telemetry_config_from_global_config
+            """,
+        ),
+        **_names("nemo_gym.telemetry.startup", "0.8.0", "STARTUP_SETUP_DONE_NS_ENV SupervisorStartup"),
+    },
 }
 
 

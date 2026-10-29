@@ -26,6 +26,7 @@ from pytest import MonkeyPatch
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 import nemo_gym.config.global_config as gc
+import nemo_gym.orchestration.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
@@ -740,6 +741,7 @@ class TestFriendlyValidationError:
                 raise AssertionError("RunHelper must not be built for a malformed head_server")
 
         monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 

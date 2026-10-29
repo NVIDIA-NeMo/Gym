@@ -41,7 +41,6 @@ from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
 )
-from nemo_gym.cli.env import RunHelper
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
     exit_unknown_component,
@@ -125,6 +124,7 @@ from nemo_gym.eval_plan import (
     write_eval_plan,
 )
 from nemo_gym.orchestration.jobs import installed_gym_commit
+from nemo_gym.orchestration.server_supervisor import RunHelper
 from nemo_gym.package_info import __version__
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources

@@ -445,7 +445,7 @@ def test_lifespan_work_is_part_of_the_uvicorn_startup_stage(otel):
     [("timeout", "timeout"), ("interrupt", "interrupted"), ("other", "failed")],
 )
 def test_the_outcome_names_how_startup_ended(error, outcome):
-    from nemo_gym.cli.env import ServerSpinupTimeoutError, _startup_outcome
+    from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError, _startup_outcome
 
     errors = {"timeout": ServerSpinupTimeoutError("t"), "interrupt": KeyboardInterrupt(), "other": ValueError("v")}
     assert _startup_outcome(errors[error]) == outcome

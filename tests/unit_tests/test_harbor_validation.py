@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
 import json
 import logging
 import sys
@@ -12,6 +11,7 @@ import yaml
 
 import nemo_gym.cli.main as main_module
 import nemo_gym.config.global_config as global_config
+import nemo_gym.orchestration.server_supervisor
 from nemo_gym.data.tasks.harbor.prepare import build_run, prepare_target, resolve_agent
 from nemo_gym.data.tasks.harbor.validation_report import summarize_validation
 from nemo_gym.utils import failures_path_for, materialized_path_for
@@ -359,7 +359,11 @@ def test_validate_needs_no_model_even_with_unused_endpoint_settings(tmp_path, mo
         assert "policy_model" not in config
         for key, value in settings.items():
             assert config[key] == value
-        monkeypatch.setattr(env, "_probe_endpoint", lambda *args: pytest.fail("Oracle must not probe an unused model"))
+        monkeypatch.setattr(
+            nemo_gym.orchestration.server_supervisor,
+            "_probe_endpoint",
+            lambda *args: pytest.fail("Oracle must not probe an unused model"),
+        )
         env.RunHelper().wait_for_model_endpoints(config)
         write_jsonl(Path(config.output_jsonl_fpath), [result()])
 
