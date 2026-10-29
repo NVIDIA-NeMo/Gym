@@ -173,7 +173,8 @@ mkdir -p /build/python /build/source/cache /build/wheels
 uname -m > /build/architecture.txt
 if getconf GNU_LIBC_VERSION > /build/libc.txt 2>/dev/null; then :; else
   # musl reports its version on stderr: "musl libc (x86_64)" then "Version 1.2.5".
-  ldd --version 2>&1 | awk '/^musl libc/ { kind = "musl" } /^Version / && kind { print kind, $2; exit }' > /build/libc.txt
+  # ldd exits non-zero on musl; the pipeline must not abort under pipefail before awk prints.
+  (ldd --version 2>&1 || true) | awk '/^musl libc/ { kind = "musl" } /^Version / && kind { print kind, $2; exit }' > /build/libc.txt
 fi
 tar -xzf /build/bundle/python.tar.gz -C /build/python --strip-components=1
 tar -xzf /build/source.tar.gz -C /build/source
