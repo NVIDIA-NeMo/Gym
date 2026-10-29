@@ -6318,6 +6318,44 @@ class TestRolloutCollection:
         assert [result["case"] for result in actual_failure_results] == ["case-1"]
         assert actual_failure_results[0][NG_FAILURE_CLASS_KEY] == "verify_failed"
 
+    @pytest.mark.parametrize("timing_report", [False, True])
+    async def test_completed_cache_resume_preserves_results_with_timing_report(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        timing_report: bool,
+        capsys: pytest.CaptureFixture,
+    ) -> None:
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=True,
+            dispatch_start_report_within_s=60 if timing_report else None,
+            disable_aggregation=True,
+        )
+        row = {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            "responses_create_params": {"input": [{"role": "user", "content": "What is 1 + 1?"}]},
+        }
+        saved_result = {**row, "reward": 1.0, "response": {"output": []}}
+        config.materialized_jsonl_fpath.write_bytes(orjson.dumps(row) + b"\n")
+        saved_output = orjson.dumps(saved_result) + b"\n"
+        output_path = Path(config.output_jsonl_fpath)
+        output_path.write_bytes(saved_output)
+        post = AsyncMock(side_effect=AssertionError("A completed rollout must not be dispatched again"))
+        install_fake_server_client(monkeypatch, post)
+
+        results = await RolloutCollectionHelper().run_from_config(config)
+
+        assert results == [saved_result]
+        assert output_path.read_bytes() == saved_output
+        post.assert_not_awaited()
+        output = capsys.readouterr().out
+        assert ("Run timing summary: no rollouts to dispatch." in output) == timing_report
+
     async def test_run_from_config_aggregate_metrics_includes_cached_persisted_rows(
         self, tmp_path: Path, empty_global_config: MagicMock
     ) -> None:
