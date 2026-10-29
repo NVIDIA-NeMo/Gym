@@ -80,16 +80,33 @@ async def test_non_adjacent_failures_score_every_rollout(server):
     assert all(r.genrm_failed_comparison_rate_per_group == 2 / 16 for r in results)
 
 
-async def test_adjacent_failures_fail_the_group_without_waiting(server):
+async def test_adjacent_failures_fail_the_group_without_waiting(server, caplog):
     cancelled = set()
     # Both of rollout 1's comparisons fail; (2, 3) and (3, 0) would never finish on their own.
     server._run_single_comparison = judge_failing({(0, 1), (1, 2)}, blocked={(2, 3), (3, 0)}, cancelled=cancelled)
-    results = await asyncio.wait_for(verify_cohort(server, 4), 1)
+    with caplog.at_level("WARNING"):
+        results = await asyncio.wait_for(verify_cohort(server, 4), 1)
+    # The group error names only the last failure, so each dropped comparison is logged when it fails.
+    assert "dropped comparison (0, 1)" in caplog.text and "dropped comparison (1, 2)" in caplog.text
     assert all(isinstance(r, genrm.JudgeError) for r in results)
     assert all("rollout_index=1 has no successful comparison" in str(r) and NO_VERDICT in str(r) for r in results)
     assert cancelled == {(2, 3), (3, 0)}
     (cohort,) = server._verify_cohorts.values()
     assert cohort.phase == "failed" and cohort.failure_kind == "judge"
+
+
+@pytest.mark.parametrize("failing_pairs", [{(0, 1), (0, 2)}, {(0, 1), (0, 2), (0, 3)}], ids=["one_left", "none_left"])
+async def test_all_pairs_fails_the_group_only_when_every_pair_of_a_rollout_failed(server, failing_pairs):
+    # Under all_pairs each rollout has three comparisons in a group of 4, not two as under circular.
+    server.config.comparison_strategy = "all_pairs"
+    server._run_single_comparison = judge_failing(failing_pairs)
+    results = await verify_cohort(server, 4)
+    if len(failing_pairs) == 3:
+        assert all(isinstance(r, genrm.JudgeError) for r in results)
+        assert all("rollout_index=0 has no successful comparison after 3 of 6" in str(r) for r in results)
+        return
+    assert [r.reward for r in results] == approx(SCORES[:4])
+    assert all(r.genrm_failed_comparison_rate_per_group == approx(2 / 6) for r in results)
 
 
 async def test_every_failed_comparison_fails_the_group(server):

@@ -1369,6 +1369,14 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         raise error
                     position = positions[task]
                     failed[position] = error
+                    # Log now: a later failure can end the group, and its error carries only its own text.
+                    logger.warning(
+                        "GenRM dropped comparison %s (judge %s) of %s after a judge failure: %s",
+                        metadata[position][:2],
+                        metadata[position][2],
+                        len(tasks),
+                        str(error)[:500],
+                    )
                     for index in metadata[position][:2]:
                         if index not in remaining:
                             continue
@@ -1384,14 +1392,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
 
-        for position in sorted(failed):
-            logger.warning(
-                "GenRM dropped comparison %s (judge %s) of %s after a judge failure: %s",
-                metadata[position][:2],
-                metadata[position][2],
-                len(tasks),
-                str(failed[position])[:500],
-            )
         return [None if position in failed else task.result() for position, task in enumerate(tasks)]
 
     async def _run_compare(

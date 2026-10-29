@@ -465,11 +465,13 @@ There is no configuration key for this.
 
 - **What counts as failed:** a comparison that raises a `JudgeError`:
   - no completed answer within the retry budget;
-  - a judge HTTP error that is non-retryable or exhausts its retries;
-  - a `judge_request_timeout_s` expiry.
+  - an error from the judge HTTP request that is not retried or that uses up its retries, such as an HTTP
+    error, a connection error or a reply that is not JSON;
+  - a `judge_request_timeout_s` expiry, but only if it comes before the `cohort_evaluation_timeout_s`
+    deadline. Both default to 1,800 seconds, so by default the group deadline wins and the group fails.
 
-  A completed but malformed answer keeps the default-score fallback. Any other error still fails the group
-  with HTTP 503, and `cohort_evaluation_timeout_s` still bounds the whole group.
+  A completed but malformed answer keeps the default-score fallback. An error outside the judge request
+  still fails a `/verify` group with HTTP 503. `cohort_evaluation_timeout_s` still bounds the whole group.
 - **Scoring:** while every member keeps at least one successful comparison, each member is scored from the
   comparisons it has left, and nothing is masked. Under `circular`, a member that lost one of its two
   comparisons is scored from the other. In `fixed_baseline` mode, a member is scored from its remaining judge
@@ -486,7 +488,8 @@ There is no configuration key for this.
   - Token-usage metrics count completed comparisons only.
   - Each dropped comparison is logged with its failure.
 - **Trade-off:** the two members next to a dropped comparison are scored from fewer comparisons, so their
-  scores are noisier.
+  scores are noisier. The dropped comparison showed one of them as `response_1` and the other as
+  `response_2`, so a judge that favors one position now moves their two scores in opposite directions.
 
 ### Replacement attempts and retention
 
