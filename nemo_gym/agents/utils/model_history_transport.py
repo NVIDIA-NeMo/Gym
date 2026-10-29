@@ -278,9 +278,12 @@ def configure_transport(stack: ExitStack, params: dict, *, harness: str) -> None
         config["providers"]["nemo"]["baseUrl"] = local_url
         path.write_text(json.dumps(config))
     elif harness == "codex":
-        # Insert before the prompt separator; only this invocation's provider changes.
-        index = params["command"].index("--")
-        params["command"][index:index] = ["-c", "model_providers.gym.base_url=" + json.dumps(local_url)]
+        # Keep the upstream Node launcher's 429 proxy and environment handling.
+        # Its proxy targets this helper, which alone changes the history wire format.
+        path = directory / "input.json"
+        config = json.loads(path.read_text())
+        config["model_base_url"] = local_url
+        path.write_text(json.dumps(config))
     else:
         raise ValueError("Unknown native history transport harness")
 

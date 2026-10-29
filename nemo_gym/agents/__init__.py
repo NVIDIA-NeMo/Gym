@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+    from nemo_gym.agents.utils.model_history_transport import stage_cli_transport
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
@@ -153,6 +154,7 @@ _PUBLIC_API = {
     "sandbox_server_url": "agent_tools",
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",
+    "stage_cli_transport": "utils.model_history_transport",
     "stage_skills": "skills",
     "verification_failure_fields": "agent_tools",
     "verify_agent_response": "agent_tools",

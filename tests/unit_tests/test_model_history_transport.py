@@ -316,20 +316,27 @@ def test_pi_configuration_redirects_provider_without_changing_models(tmp_path, m
         assert params["command"] == ["node", "pi.js"]
 
 
-def test_codex_configuration_inserts_provider_override_before_prompt_separator(tmp_path, model_server):
+def test_codex_configuration_redirects_launcher_proxy_without_changing_cli_arguments(tmp_path, model_server):
+    launcher = {
+        "command": ["node", "codex.js", "exec", "--", "-"],
+        "model_base_url": model_server.url,
+        "invocation_id": "rollout-1",
+        "timeout": 5,
+        "env": {"OPENAI_API_KEY": "gym"},  # pragma: allowlist secret
+    }
+    path = tmp_path / "input.json"
+    path.write_text(json.dumps(launcher))
     params = {
         "directory": str(tmp_path),
         "history_transport": {"base_url": model_server.url, "timeout": 5},
-        "command": ["node", "codex.js", "exec", "--", "-"],
+        "command": ["node", "sandbox_launcher.mjs", str(path)],
     }
 
     with ExitStack() as stack:
         configure_transport(stack, params, harness="codex")
-        provider_override = params["command"][4]
-        prefix = "model_providers.gym.base_url="
-
-        assert provider_override.startswith(prefix)
-        local_url = json.loads(provider_override.removeprefix(prefix))
+        rewritten = json.loads(path.read_text())
+        local_url = rewritten["model_base_url"]
         assert local_url != model_server.url
         assert local_url.startswith("http://127.0.0.1:")
-        assert params["command"] == ["node", "codex.js", "exec", "-c", provider_override, "--", "-"]
+        assert rewritten == {**launcher, "model_base_url": local_url}
+        assert params["command"] == ["node", "sandbox_launcher.mjs", str(path)]

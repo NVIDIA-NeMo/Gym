@@ -10,12 +10,14 @@ import signal
 import subprocess
 import sys
 import time
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import pytest
 
 from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT, SandboxSession
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, RAISE_OOM_SCORE_ADJ, CodexSandboxSession
+from responses_api_agents.codex_agent.tests.test_sandbox_launcher import upstream_server
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
 
 
@@ -85,6 +87,67 @@ def wait_for(path):
             return
         time.sleep(0.01)
     raise AssertionError(f"{path} never appeared")
+
+
+def test_delta_wraps_the_node_launcher_and_retains_its_forwarder(tmp_path):
+    requests = []
+
+    class Model(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append((self.path, self.headers["x-session-id"], body))
+            payload = b'{"id":"response","output":[]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    # Stand in for the CLI only: use the provider override supplied by the
+    # real Node launcher, then send two full histories through its 429 proxy.
+    cli = tmp_path / "fake_codex.mjs"
+    cli.write_text('''
+const args = process.argv.slice(2);
+const override = args[args.indexOf("-c") + 1];
+const base = JSON.parse(override.slice(override.indexOf("=") + 1));
+const first = {role: "user", content: "task"};
+const second = {role: "user", content: "continue"};
+for (const input of [[first], [first, second]]) {
+    const response = await fetch(base + "/responses", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({model: "test", input}),
+    });
+    if (response.status !== 200) throw new Error(await response.text());
+    await response.text();
+}
+console.log(JSON.stringify({type: "test.done"}));
+''')
+    with upstream_server(Model) as upstream:
+        process = launch(
+            tmp_path,
+            [shutil.which("node"), str(cli), "exec", "--", "-"],
+            model_base_url=f"{upstream}/v1",
+            history_transport={"base_url": f"{upstream}/v1", "timeout": 5},
+            timeout=5,
+        )
+        summary = result(tmp_path, process)
+
+    assert summary["return_code"] == 0, (tmp_path / "stderr.log").read_text()
+    assert summary["cleanup_confirmed"] is True
+    assert len(requests) == 2
+    first_path, first_session, first = requests[0]
+    second_path, second_session, second = requests[1]
+    assert first_path == second_path == "/v1/responses"
+    assert first_session == second_session == "invocation"
+    assert first["input"] == [{"role": "user", "content": "task"}]
+    assert first["_gym_history"]["mode"] == "full"
+    assert second["input"] == [{"role": "user", "content": "continue"}]
+    assert second["_gym_history"]["mode"] == "append"
+    attempts = [json.loads(line) for line in (tmp_path / "model_attempts.jsonl").read_text().splitlines()]
+    assert [attempt["status"] for attempt in attempts] == [200, 200]
 
 
 def test_capture_stdin_and_environment(tmp_path, monkeypatch):

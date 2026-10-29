@@ -11,7 +11,14 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession, shell_assignments
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    AgentSessionState,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+    stage_cli_transport,
+)
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -138,9 +145,24 @@ class CodexSandboxSession(AgentSessionState):
             await self.upload_text(name, text)
         await self.upload_json("input.json", payload)
         await self.upload_text("prompt.txt", payload["prompt"])
+        command = await stage_cli_transport(
+            self.session.sandbox,
+            {
+                "history_transport": payload.get("history_transport"),
+                "directory": directory,
+                "command": [
+                    f"{self.runtime}/node/bin/node",
+                    f"{directory}/{LAUNCHER_FILE}",
+                    f"{directory}/input.json",
+                ],
+                "cwd": self.session.workdir,
+                "env": {},
+            },
+            harness="codex",
+        )
         params = {
             "cwd": self.session.workdir,
-            "command": [f"{self.runtime}/node/bin/node", f"{directory}/{LAUNCHER_FILE}", f"{directory}/input.json"],
+            "command": command,
             "stdin": f"{directory}/prompt.txt",
             "stdout": f"{directory}/stdout.log",
             "stderr": f"{directory}/stderr.log",
