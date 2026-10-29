@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import signal
 import stat
 import sys
@@ -671,3 +672,32 @@ async def test_only_checkpoint_publication_failures_are_best_effort(
         assert not destination.exists()
         assert entrypoint.SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text()).partial
     client.close.assert_awaited_once()
+
+
+def test_collect_trace_export_joins_session_files_and_tolerates_absence(tmp_path: Path) -> None:
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "a.jsonl").write_text('{"resourceSpans":[1]}\n\n{"resourceSpans":[2]}\n')
+    (traces / "b.jsonl").write_text('{"resourceSpans":[3]}\n')
+    (traces / "notes.txt").write_text("ignored")
+    out = tmp_path / "traces.jsonl"
+    assert entrypoint.collect_trace_export(str(traces), out) == 3
+    assert out.read_text().splitlines() == ['{"resourceSpans":[1]}', '{"resourceSpans":[2]}', '{"resourceSpans":[3]}']
+    assert entrypoint.collect_trace_export(str(tmp_path / "absent"), tmp_path / "empty.jsonl") == 0
+    assert (tmp_path / "empty.jsonl").read_text() == ""
+
+
+def test_enable_trace_export_writes_otlp_jsonl_per_session(tmp_path: Path) -> None:
+    """The real NOOA exporter: a span stamped with session.id lands in <trace_dir>/<session>.jsonl as OTLP JSON."""
+    pytest.importorskip("nooa.tracing")
+    from opentelemetry import trace
+
+    trace_dir = tmp_path / "traces"
+    entrypoint.enable_trace_export(str(trace_dir))
+    with trace.get_tracer("test").start_as_current_span("probe") as span:
+        span.set_attribute("session.id", "probe-session")
+    lines = entrypoint.collect_trace_export(str(trace_dir), tmp_path / "traces.jsonl")
+    assert lines >= 1
+    assert (trace_dir / "probe-session.jsonl").exists()
+    first = json.loads((tmp_path / "traces.jsonl").read_text().splitlines()[0])
+    assert "resourceSpans" in first

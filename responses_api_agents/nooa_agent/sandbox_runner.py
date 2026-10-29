@@ -5,6 +5,7 @@
 import asyncio
 import logging
 from dataclasses import replace
+from pathlib import Path
 from shlex import quote
 from uuid import uuid4
 
@@ -41,6 +42,8 @@ class SandboxNOOARunner:
         context_window: int | None = None,
         timeout: float = 21600,
         close_timeout: float = 30,
+        trace_jsonl: bool = False,
+        artifacts_dir: Path | None = None,
     ) -> None:
         self.sandbox = sandbox
         self.python = python
@@ -51,6 +54,10 @@ class SandboxNOOARunner:
         self.context_window = context_window
         self.timeout = timeout
         self.close_timeout = close_timeout
+        self.trace_jsonl = trace_jsonl
+        self.artifacts_dir = artifacts_dir
+        self.rollout_id: str | None = None
+        self.trace_file: Path | None = None
         # Construct before prepare so failed setup can release the borrowed client.
         self.session = SandboxSession[None](
             sandbox=sandbox,
@@ -76,6 +83,7 @@ class SandboxNOOARunner:
             raise RuntimeError("Could not prepare NOOA session directory")
 
     async def _stage_activation(self, request: NOOARunRequest) -> SandboxCommand:
+        self.rollout_id = request.rollout_id
         payload = SandboxInput(
             invocation=self.invocation,
             request=request,
@@ -83,6 +91,7 @@ class SandboxNOOARunner:
             model_server_name=self.model_server_name,
             max_policy_calls=self.max_policy_calls,
             context_window=self.context_window,
+            trace_dir=f"{self.directory}/traces" if self.trace_jsonl else None,
         )
         await upload_text(self.sandbox, path=f"{self.directory}/input.json", text=payload.model_dump_json())
         return SandboxCommand(
@@ -197,8 +206,26 @@ class SandboxNOOARunner:
             LOGGER.warning("Retrying NOOA %s capture after %s", name, type(error).__name__)
         return await read_text(self.sandbox, path=f"{self.directory}/{name}")
 
+    async def _collect_trace(self) -> None:
+        """Copy the worker's joined OTLP JSONL trace to the host; diagnostics only, so failures are logged."""
+        if not self.trace_jsonl or self.artifacts_dir is None or self.rollout_id is None:
+            return
+        try:
+            text = await self._read_artifact("traces.jsonl")
+        except FileNotFoundError:
+            LOGGER.info("NOOA rollout %s left no trace file", self.rollout_id)
+            return
+        except Exception:  # noqa: BLE001 - a trace is never allowed to fail the rollout
+            LOGGER.warning("NOOA rollout %s trace capture failed", self.rollout_id, exc_info=True)
+            return
+        target = self.artifacts_dir / self.rollout_id / "traces.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        self.trace_file = target
+
     async def _collect_artifacts(self) -> None:
         """Prefer terminal evidence; recovered checkpoints can never establish completion."""
+        await self._collect_trace()
         capture_error: Exception | None = None
         try:
             artifact = SandboxResult.model_validate_json(await self._read_artifact("result.json"))
