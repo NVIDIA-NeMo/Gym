@@ -64,6 +64,13 @@ Output: `results/<recipe>/evaluator_rollouts.jsonl` with the resolved config sav
 the failures sidecar. `gym eval export atif --rollouts results/<recipe>/evaluator_rollouts.jsonl` writes
 ATIF trajectories.
 
+### Arms
+
+`NOOA_ATOM_TURN_METHOD` selects Atom's root turn method per submission: `handle_batch` (default, one agent
+unattended) or `handle_orchestrate` (the root may delegate to child sessions). Everything else in the recipe is
+identical, so two submissions differing only in that variable are a matched pair; the resolved config saved beside
+the rollouts records the value each run used.
+
 ### On Slurm
 
 ```bash

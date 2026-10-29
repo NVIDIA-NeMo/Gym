@@ -60,7 +60,9 @@ swebench_pro_nooa_agent:
       artifacts_dir: ${oc.env:NOOA_ARTIFACTS_DIR,nooa-artifacts}
       nooa:
         init_kwargs:
-          turn_method: handle_batch
+          # Atom's root turn method: handle_batch (one agent, unattended) or handle_orchestrate (the root may
+          # delegate to child sessions). One arm per value; set NOOA_ATOM_TURN_METHOD per submission.
+          turn_method: ${oc.env:NOOA_ATOM_TURN_METHOD,handle_batch}
 
 policy_model:
   responses_api_models:
