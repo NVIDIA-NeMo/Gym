@@ -14,8 +14,8 @@
 # limitations under the License.
 from pathlib import Path
 
-from nemo_gym.discovery import merge_by_name
-from nemo_gym.model_registry import _discover_models_in_dir
+from nemo_gym.environment.discovery import merge_by_name
+from nemo_gym.environment.model_registry import _discover_models_in_dir
 
 
 def _make_model(models_dir: Path, name: str, *, app: bool = True, flavors=()) -> Path:

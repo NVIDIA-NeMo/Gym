@@ -28,7 +28,6 @@ from pydantic import TypeAdapter, ValidationError
 
 import benchmarks.hle_diamond.prepare as prepare_module
 import benchmarks.hle_diamond.prepare_text as prepare_text_module
-from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParserConfig, ModelServerRef, get_first_server_config_dict
 from nemo_gym.config.config_types import is_almost_server, maybe_get_server_instance_config
@@ -39,7 +38,13 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.data import fill_prompt, load_prompt_config
-from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
+from nemo_gym.environment.benchmarks import (
+    BENCHMARKS_DIR,
+    BenchmarkConfig,
+    _benchmark_config_name,
+    _benchmark_config_paths,
+)
+from nemo_gym.environment.discovery import _parse_no_environment_tolerating_unset_values
 from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
 from nemo_gym.metrics import compute_aggregate_metrics

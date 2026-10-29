@@ -21,7 +21,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.cli.models import list_models
-from nemo_gym.model_registry import ModelEntry
+from nemo_gym.environment.model_registry import ModelEntry
 
 
 def _mock_global_config(config: dict = None):

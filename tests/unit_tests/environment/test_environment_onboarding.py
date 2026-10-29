@@ -14,9 +14,9 @@ from nemo_gym.environment.onboarding import (
     _runtime_component_paths,
     verify_environment,
 )
+from nemo_gym.environment.registry import EnvironmentCatalogEntry
 from nemo_gym.environment.scaffold import scaffold_environment
 from nemo_gym.environment.validation import EnvironmentValidationError
-from nemo_gym.registry import EnvironmentCatalogEntry
 
 
 def _scaffold_entry(

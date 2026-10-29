@@ -4,7 +4,7 @@
 
 from pathlib import Path
 
-from nemo_gym.deliverables import IGNORE_FILES, is_deliverable
+from nemo_gym.environment.deliverables import IGNORE_FILES, is_deliverable
 
 
 def test_is_deliverable_distinguishes_output_from_run_state(tmp_path: Path) -> None:

@@ -110,7 +110,7 @@ The existing campaign driver environment supplied the installed dependencies.
 ```bash
 python -m pytest tests/unit_tests/test_indic_ifeval.py \
   tests/unit_tests/test_rollout_seed_metadata.py \
-  tests/unit_tests/test_indic_aime_2026.py tests/unit_tests/test_benchmarks.py \
+  tests/unit_tests/test_indic_aime_2026.py tests/unit_tests/environment/test_benchmarks.py \
   tests/unit_tests/data/test_prompt.py -q --tb=short
 python -m pytest resources_servers/instruction_following/tests \
   responses_api_models/vllm_model/tests/test_app.py -q --tb=short

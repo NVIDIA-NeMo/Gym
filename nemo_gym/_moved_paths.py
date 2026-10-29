@@ -67,6 +67,15 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.benchmarks": MovedPath(new="nemo_gym.environment.benchmarks", since="0.8.0"),
+    "nemo_gym.deliverables": MovedPath(new="nemo_gym.environment.deliverables", since="0.8.0"),
+    "nemo_gym.registry": MovedPath(new="nemo_gym.environment.registry", since="0.8.0"),
+    "nemo_gym.discovery": MovedPath(new="nemo_gym.environment.discovery", since="0.8.0"),
+    "nemo_gym.resources_server_registry": MovedPath(
+        new="nemo_gym.environment.resources_server_registry", since="0.8.0"
+    ),
+    "nemo_gym.agent_registry": MovedPath(new="nemo_gym.environment.agent_registry", since="0.8.0"),
+    "nemo_gym.model_registry": MovedPath(new="nemo_gym.environment.model_registry", since="0.8.0"),
     "nemo_gym.rollout_reverification": MovedPath(new="nemo_gym.eval.rollout_reverification", since="0.8.0"),
     "nemo_gym.eval_plan": MovedPath(new="nemo_gym.eval.eval_plan", since="0.8.0"),
     "nemo_gym.comparison": MovedPath(new="nemo_gym.eval.comparison", since="0.8.0"),

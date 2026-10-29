@@ -20,8 +20,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.agent_registry import AgentEntry
 from nemo_gym.cli.agents import list_agents
+from nemo_gym.environment.agent_registry import AgentEntry
 
 
 def _mock_global_config(config: dict = None):
