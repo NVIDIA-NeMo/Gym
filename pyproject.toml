@@ -803,9 +803,6 @@ extend-exclude = [
     "*.ipynb",
     # Vendored apple/ToolSandbox source — kept verbatim (see its VENDORING.md).
     "resources_servers/toolsandbox/tool_sandbox",
-    # Original strict policy bodies are checked against their frozen source hashes.
-    "resources_servers/agentic_if_realworld/benchmark/policy/validate_response_judge.py",
-    "resources_servers/agentic_if_realworld/benchmark/policy/test_contract.py",
 ]
 [tool.ruff.lint]
 # Configure linting rules
