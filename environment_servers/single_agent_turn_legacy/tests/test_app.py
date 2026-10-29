@@ -327,6 +327,52 @@ def test_task_source_naming_another_instance_is_rejected() -> None:
         )
 
 
+def _unbound_adapter() -> tuple[SingleAgentTurnLegacyEnvironmentServer, _Client]:
+    # A server that replaced a legacy_agent relay names no resources server and binds its agent's.
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
+    )
+    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**environment_server.config.model_dump(), "resources_server": None}
+    )
+    return SingleAgentTurnLegacyEnvironmentServer(config=config, server_client=client), client
+
+
+@pytest.mark.parametrize("task_source", [None, "agents_resources"])
+def test_an_unbound_adapter_takes_its_agents_resources_server_as_the_taskset(task_source: str | None) -> None:
+    adapter, _ = _unbound_adapter()
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0, "responses_create_params": {"input": "task"}}
+
+    request = adapter._episode_request_from_row(row if task_source is None else {**row, "task_source": task_source})
+
+    assert request.task.task_id.taskset == "agents_resources"
+
+
+def test_an_unbound_adapter_rejects_a_row_naming_another_resources_server() -> None:
+    adapter, _ = _unbound_adapter()
+
+    with pytest.raises(ValueError, match="names none of this Environment Server's instances"):
+        adapter._episode_request_from_row(
+            {
+                "task_source": "resources",
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": "task"},
+            }
+        )
+
+
+def test_an_unbound_adapter_forwards_aggregate_metrics_to_its_agents_resources_server() -> None:
+    adapter, client = _unbound_adapter()
+    client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]
+
+    response = TestClient(adapter.setup_webserver()).post("/aggregate_metrics", json={"verify_responses": []})
+
+    assert response.status_code == 200
+    assert [(server, path) for server, path, _ in client.calls] == [("agents_resources", "/aggregate_metrics")]
+
+
 async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     legacy_environment, legacy_client = _environment_server()
     episode_environment, episode_client = _environment_server()
@@ -361,6 +407,31 @@ async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     episode_result = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
 
     assert episode_result == legacy_result
+
+
+async def test_a_flat_row_keeps_the_agents_skip_verification_after_leaving_the_relay() -> None:
+    # Under the legacy_agent relay, the agent's /run honored the setting Gym copies into agent configs.
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"skip_verification": True, "skip_verification_reward": 0.25}
+    )
+    del client.responses[4]
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    result = await adapter.run_legacy(
+        {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "instance_id": "task",
+            "responses_create_params": {"input": "task"},
+        }
+    )
+
+    assert result["reward"] == 0.25
+    assert result["verification_skipped"] is True
+    assert result["agent_ref"] == {"name": "agent"}
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert [path for _, path, _ in client.calls][-1] == "/close_session"
 
 
 class _BlockingAgentClient(_Client):

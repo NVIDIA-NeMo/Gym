@@ -184,6 +184,32 @@ def test_validate_filters_solutionless_before_limit_and_checks_repeats(
     assert ("missing result" in output) is missing_repeat
 
 
+@pytest.mark.parametrize("override", [None, "+num_repeats=2"])
+def test_validate_plays_each_solution_once_unless_the_command_line_says_otherwise(
+    tmp_path, monkeypatch, capsys, validation_cli, override
+):
+    """A dataset's `[gym.defaults].num_repeats` is an evaluation default; the oracle's result does not vary, so
+    `gym dataset validate` adds `+num_repeats=1` unless the command line sets a count, and sizes its report so."""
+    write_task(tmp_path / "ds" / "a")
+    (tmp_path / "ds" / "dataset.toml").write_text("[gym.defaults]\nnum_repeats = 3\n")
+    seen = {}
+
+    def collect(target, tokens):
+        monkeypatch.setattr(sys, "argv", ["e2e", *tokens])
+        config = global_config.get_global_config_dict()
+        seen["num_repeats"] = config.num_repeats
+        seen["tokens"] = [token for token in tokens if token.lstrip("+").startswith("num_repeats=")]
+        write_jsonl(Path(config.output_jsonl_fpath), [result(repeat=i) for i in range(config.num_repeats)])
+
+    monkeypatch.setattr(main_module, "dispatch", collect)
+    validation_cli(*([override] if override else []))
+    assert seen["num_repeats"] == (2 if override else 1)
+    assert seen["tokens"] == ([override] if override else ["+num_repeats=1"])
+    output = capsys.readouterr().out
+    assert f"validating {seen['num_repeats']} oracle rollout(s)" in output
+    assert ("a [repeat 1]" in output) is bool(override) and "a [repeat 2]" not in output
+
+
 @pytest.mark.parametrize("with_solution", [False, True])
 def test_validate_fails_for_skipped_tasks_even_with_no_solutions(
     tmp_path, monkeypatch, capsys, validation_cli, with_solution
@@ -563,6 +589,53 @@ def test_validate_resume_rejects_results_another_agent_wrote(
 
 
 @pytest.mark.usefixtures("validation_cli")
+def test_validate_renders_a_template_where_eval_run_does(tmp_path, monkeypatch, capsys):
+    """A template is rendered into results/harbor/<taskset>/rendered/ by `gym dataset validate` as by `gym eval run`:
+    the rendered folder is the dataset root prepare records into, so one copy means one manifest and a template's
+    image built and pushed once, while the oracle's rows and results still live under results/harbor/validation/."""
+    from nemo_gym.tasks.harbor.records import read_built_images
+    from tests.unit_tests.test_harbor_authoring import write_template
+
+    write_template(tmp_path / "ds")
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+    outputs = []
+
+    def collect(target, tokens):
+        monkeypatch.setattr(sys, "argv", ["e2e", *tokens])
+        output = Path(global_config.get_global_config_dict().output_jsonl_fpath)
+        outputs.append(output.resolve())
+        write_jsonl(output, [result("q-1"), result("q-2", index=1)])
+
+    monkeypatch.setattr(main_module, "dispatch", collect)
+    monkeypatch.setattr(sys, "argv", ["gym", "dataset", "validate", str(tmp_path / "ds"), "--sandbox", "docker"])
+    main_module.main()
+    rendered = (tmp_path / "results/harbor/ds/rendered").resolve()
+    assert sorted(p.name for p in rendered.iterdir() if p.is_dir()) == ["q-1", "q-2"]
+    assert not (tmp_path / "results/harbor/validation/ds/rendered").exists()
+    assert outputs == [(tmp_path / "results/harbor/validation/ds/rollouts.jsonl").resolve()]
+    out = capsys.readouterr().out
+    assert (
+        f"Rendered 2 task(s) from {tmp_path / 'ds'} into {rendered}" in out and "q-2 [repeat 0]\toracle solved" in out
+    )
+    manifest = (rendered / "manifest.toml").read_bytes()
+    built = {"abc": {"image": "registry.invalid/hb__abc", "tasks": ["q-1", "q-2"], "tool": "buildah", "pushed": True}}
+    (rendered / "built-images.json").write_text(json.dumps(built))
+    inodes = {p.name: p.stat().st_ino for p in rendered.iterdir()}
+
+    # The model run prepares the same template into the same folder: the manifest, the built image and every rendered
+    # task folder are the ones validate left, and its rows and results are its own.
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    model = ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", "hermes_agent", "--sandbox", "docker"]
+    model += ["--model-type", "vllm_model", "+policy_model_name=m", "+policy_base_url=http://localhost:1"]
+    monkeypatch.setattr(sys, "argv", [*model, "+policy_api_key=none"])
+    main_module.main()
+    assert outputs[-1] == (tmp_path / "results/harbor/ds/rollouts.jsonl").resolve()
+    assert (rendered / "manifest.toml").read_bytes() == manifest and read_built_images(rendered) == built
+    assert {p.name: p.stat().st_ino for p in rendered.iterdir()} == inodes
+    assert sorted(p.name for p in (tmp_path / "results/harbor").iterdir()) == ["ds", "validation"]
+
+
+@pytest.mark.usefixtures("validation_cli")
 def test_eval_run_with_the_oracle_is_a_validation_run(tmp_path, monkeypatch, capsys):
     """`gym eval run --agent harbor_oracle` writes under results/harbor/validation/ like `gym dataset validate`, so a
     model run on the same target, resumed or not, never finds the reference solution's rewards as its own."""
@@ -597,3 +670,40 @@ def test_eval_run_with_the_oracle_is_a_validation_run(tmp_path, monkeypatch, cap
     assert outputs[-1] == evaluation / "rollouts.jsonl"
     assert not materialized_path_for(evaluation / "rollouts.jsonl").exists()
     assert json.loads((validation / "rollouts.jsonl").read_text())["response"]["metadata"]["oracle"] == "solved"
+
+
+def test_validate_keeps_a_multi_step_task_whose_solutions_are_per_step(tmp_path, monkeypatch, capsys, validation_cli):
+    """G7 round 24, attempt 4: the MemoryArena task keeps its reference solutions in `steps/<name>/solution/` and has
+    no top-level `solution/`, so `gym dataset validate` filtered it out as "no solution/" before any server started.
+    A multi-step task counts as validatable when every step has a solution, its own or the task's; a step with
+    neither leaves the task unvalidated, as a single-turn task without `solution/` is."""
+    from tests.unit_tests.test_harbor_tasks import write_multi_step_task
+
+    def multi_step(name: str, *, own: tuple[str, ...], top_level: bool) -> None:
+        root = write_multi_step_task(tmp_path / "ds" / name)
+        if not top_level:
+            (root / "solution" / "solve.sh").unlink()
+            (root / "solution").rmdir()
+        for step in own:
+            (root / "steps" / step / "solution").mkdir()
+            (root / "steps" / step / "solution" / "solve.sh").write_text("#!/bin/bash\necho ok\n")
+
+    multi_step("per_step", own=("01_plan", "02_implement"), top_level=False)
+    multi_step("mixed", own=("01_plan",), top_level=True)
+    multi_step("incomplete", own=("01_plan",), top_level=False)
+
+    def collect(target, tokens):
+        monkeypatch.setattr(sys, "argv", ["e2e", *tokens])
+        config = global_config.get_global_config_dict()
+        agent = config.harbor_ds_agent.responses_api_agents.harbor_oracle_agent
+        rows = [json.loads(line) for line in Path(agent.datasets[0].jsonl_fpath).read_text().splitlines()]
+        assert [row["task_id"]["task_id"] for row in rows] == ["mixed", "per_step"]
+        assert all(len(row["task_input"]["turns"]) == 2 for row in rows)
+        write_jsonl(Path(config.output_jsonl_fpath), [result("mixed", index=0), result("per_step", index=1)])
+
+    monkeypatch.setattr(main_module, "dispatch", collect)
+    validation_cli()
+    out = capsys.readouterr().out
+    # Listed as unvalidated, as a single-turn task without solution/ is (the report's existing rule for them).
+    assert "incomplete\tunvalidated (no solution/)" in out
+    assert "per_step [repeat 0]\toracle solved\t1.0" in out and "mixed [repeat 0]\toracle solved\t1.0" in out

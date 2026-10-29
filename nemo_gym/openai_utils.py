@@ -287,6 +287,24 @@ class NeMoGymResponseReasoningItem(BaseModel):
     # status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
 
 
+class NeMoGymResponseReasoningInputItem(NeMoGymResponseReasoningItem):
+    """A reasoning item replayed as request input without its id, as the Codex CLI sends it.
+
+    Providers bind ``encrypted_content`` to the id of the item that produced it and reject a replay
+    under any other id, so a missing id must stay missing rather than be filled in.
+    """
+
+    id: Optional[str] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_inventing_id(self, handler: Any) -> dict[str, Any]:
+        # A full dump must not write ``"id": null``: that dict selects the id-requiring reasoning model.
+        payload = handler(self)
+        if "id" not in self.model_fields_set:
+            payload.pop("id", None)
+        return payload
+
+
 class NeMoGymLogprobTopLogprob(TypedDict, total=False):
     """Copy of openai.types.responses.response_output_text_param.LogprobTopLogprob with List in place of Iterable."""
 
@@ -626,6 +644,10 @@ class NeMoGymResponseReasoningItemForTraining(NeMoGymResponseReasoningItem, Toke
     pass
 
 
+class NeMoGymResponseReasoningInputItemForTraining(NeMoGymResponseReasoningInputItem, TokenIDLogProbMixin):
+    pass
+
+
 class NeMoGymResponseCustomToolCallForTraining(NeMoGymResponseCustomToolCall, TokenIDLogProbMixin):
     pass
 
@@ -636,6 +658,7 @@ RESPONSES_TO_TRAIN = {
     NeMoGymResponseOutputMessage: NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseFunctionToolCall: NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseReasoningItem: NeMoGymResponseReasoningItemForTraining,
+    NeMoGymResponseReasoningInputItem: NeMoGymResponseReasoningInputItemForTraining,
     NeMoGymResponseCustomToolCall: NeMoGymResponseCustomToolCallForTraining,
 }
 
@@ -688,7 +711,15 @@ _OUTPUT_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
 _TRAINING_TAG_SUFFIX = "__training"
 # Tags whose models have a ForTraining variant registered in RESPONSES_TO_TRAIN.
 _TRAINABLE_ITEM_TAGS = frozenset(
-    {"easy_message", "input_message", "output_message", "function_call", "custom_tool_call", "reasoning"}
+    {
+        "easy_message",
+        "input_message",
+        "output_message",
+        "function_call",
+        "custom_tool_call",
+        "reasoning",
+        "reasoning_input",
+    }
 )
 
 # Exact member class -> union tag, populated from the annotated unions defined below.
@@ -789,6 +820,8 @@ def _discriminate_response_input_item(value: Any) -> Optional[str]:
         tag = _discriminate_untyped_input_item(value)
     else:
         return None
+    if tag == "reasoning" and "id" not in value:
+        tag = "reasoning_input"
     return _training_variant_tag(tag, value)
 
 
@@ -823,6 +856,7 @@ NeMoGymResponseInputItem = Annotated[
         Annotated[NeMoGymResponseFunctionToolCall, Tag("function_call")],
         Annotated[NeMoGymFunctionCallOutput, Tag("function_call_output")],
         Annotated[NeMoGymResponseReasoningItem, Tag("reasoning")],
+        Annotated[NeMoGymResponseReasoningInputItem, Tag("reasoning_input")],
         Annotated[NeMoGymResponseMcpCall, Tag("mcp_call")],
         Annotated[NeMoGymResponseMcpListTools, Tag("mcp_list_tools")],
         Annotated[NeMoGymResponseMcpApprovalRequest, Tag("mcp_approval_request")],
@@ -856,6 +890,7 @@ NeMoGymResponseInputItem = Annotated[
         Annotated[NeMoGymResponseFunctionToolCallForTraining, Tag("function_call__training")],
         Annotated[NeMoGymResponseCustomToolCallForTraining, Tag("custom_tool_call__training")],
         Annotated[NeMoGymResponseReasoningItemForTraining, Tag("reasoning__training")],
+        Annotated[NeMoGymResponseReasoningInputItemForTraining, Tag("reasoning_input__training")],
     ],
     Discriminator(_discriminate_response_input_item),
     BeforeValidator(_validate_atomic_token_metadata),
@@ -1752,6 +1787,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         if self._permanent_trip is not None:
             self._raise_permanent_error()
         request_headers = request_kwargs.pop("headers", {})
+        connection_retries = self.max_connection_retries
+        if connection_retries is None and request_kwargs.get("_resend_after_disconnect") is False:
+            connection_retries = MAX_NUM_TRIES
         headers = self.default_headers | request_headers | {"Authorization": f"Bearer {self.api_key}"}
         request_id = _rollout_request_id(headers)
         if request_id is not None:
@@ -1760,7 +1798,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "headers": headers,
             "_internal": self.internal,
             "_max_num_tries": self.max_num_tries,
-            "_max_connection_retries": self.max_connection_retries,
+            "_max_connection_retries": connection_retries,
         }
         if self.request_timeout_seconds is not None:
             request_kwargs["timeout"] = ClientTimeout(
@@ -1772,7 +1810,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
             self._raise_permanent_error()
-        max_num_tries = self.max_num_tries or self.max_http_attempts
+        resend = request_kwargs.get("_resend_after_disconnect", True)
+        # A status response may follow generation too. Keep permanent-error detection,
+        # but do not resend it; safe connection setup retries remain in the transport.
+        max_num_tries = (self.max_num_tries or self.max_http_attempts) if resend else 1
         tries = 0
         waited = 0.0
         while tries < max_num_tries:
@@ -1800,10 +1841,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # out until max_rate_limit_wait_seconds is spent: a positive budget ends the
             # request even when max_http_attempts allows more tries, and 0 leaves 429
             # and 503 on the max_http_attempts count.
-            if self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
+            if resend and self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                 max_num_tries += 1
             elif (
-                self.max_num_tries is None
+                resend
+                and self.max_num_tries is None
                 and response.status in WAIT_OUT_ERROR_CODES
                 and self.max_rate_limit_wait_seconds > 0
             ):
@@ -1839,11 +1881,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
 
-    async def create_chat_completion(self, **kwargs):
+    async def create_chat_completion(self, *, _resend_after_disconnect: bool = True, **kwargs) -> Dict[str, Any]:
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
         )
+        if not _resend_after_disconnect:
+            request_kwargs["_resend_after_disconnect"] = False
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
@@ -1873,6 +1917,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         base_url = self.base_url.removesuffix("/v1")
         request_kwargs = dict(
             url=f"{base_url}/tokenize",
+            json=kwargs,
+        )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return await get_response_json(response)
+
+    async def create_embeddings(self, **kwargs):
+        """POST ``{base_url}/embeddings`` with ``kwargs`` as the JSON body and return the parsed response dict."""
+        request_kwargs = dict(
+            url=f"{self.base_url}/embeddings",
             json=kwargs,
         )
         response = await self._request(method="POST", **request_kwargs)

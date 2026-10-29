@@ -166,10 +166,9 @@ finish. For example, set `openclaw_agent.responses_api_agents.openclaw_agent.mod
 to `1200` for a 20-minute model-call limit. Increase the separate `timeout` and EnvironmentServer episode
 deadline when a task needs more total time; increasing those alone does not raise the model-idle limit.
 
-The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64, with Python 3.8 or later for the
-supervisor. Session setup installs missing Python and Bash with apt-get or apk
-when running as root; otherwise preinstall Python 3.8+ and Bash. Existing tools
-are preserved. Node 22.19.0 and OpenClaw are installed under
+The installer supports Linux glibc on x86_64/aarch64 and musl on x86_64. The task image needs no Python:
+the supervisor and harness runner are Bash scripts. Session setup installs a missing Bash with apt-get or apk
+when running as root; otherwise preinstall Bash. Existing tools are preserved. Node 22.19.0 and OpenClaw are installed under
 `/tmp/nemo-gym-openclaw-node-22.19.0-<version>`. Node archives are checked against upstream SHA-256
 sums; the installed package version is verified before caching and when reusing a cached runtime.
 A version-scoped `flock` serializes runtime installation and cache validation across session setup
@@ -237,14 +236,18 @@ An explicit wall or model-output limit returns partial output as `incomplete`; u
 raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 The sandbox launcher sets `OPENCLAW_NO_RESPAWN=1` to keep the CLI in the supervised group.
+The supervisor and the runner above OpenClaw are bash scripts, so a task agent's
+`pkill -f python3`, `pkill python3` or `killall python3` does not end OpenClaw.
 Services must use task-owned files rather than the temporary agent session directory. Close is serialized and checks the receipt, process handle,
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
 or negative termination evidence block verification. Missing evidence remains retryable;
