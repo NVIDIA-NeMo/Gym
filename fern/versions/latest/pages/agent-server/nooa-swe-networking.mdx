@@ -73,7 +73,13 @@ python benchmarks/swebench/pro/prepare.py
 
 The bundle contains portable Python, the pinned NOOA packages, the Gym runtime,
 and all dependency wheels. Its manifest binds the source, Python and wheel checksums,
-architecture, and builder glibc version. Task setup uses local wheels with
+architecture, and the builder's C library and version. A bundle serves one C library:
+`--target x86_64/gnu` for glibc task images (most Debian and Ubuntu based images) and
+`--target x86_64/musl` for musl images (Alpine and BusyBox based). Set
+`runtime_wheelhouse` to the glibc bundle and, when the task set contains musl images,
+`runtime_wheelhouse_musl` to the musl one; setup picks the bundle that matches the task
+image and fails rather than installing from the network when the matching bundle is
+missing. Task setup uses local wheels with
 `--no-index --no-deps` in a private prefix. It preserves the task image and its Python.
 Missing, incompatible, or corrupted bundles fail setup without an online fallback.
 Source or dependency changes require a fresh bundle directory. An existing empty output directory is

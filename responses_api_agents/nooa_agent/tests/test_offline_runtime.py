@@ -122,7 +122,7 @@ async def test_loader_rejects_incompatible_manifest_or_unsafe_wheels(
     if case == "source":
         manifest["source_fingerprint"] = "other-source"
     elif case == "glibc":
-        manifest["glibc"] = "unknown"
+        manifest["glibc"] = manifest["libc_version"] = "unknown"
     else:
         with tarfile.open(output / "wheels.tar.gz", "w:gz") as archive:
             if case != "empty":
@@ -194,3 +194,28 @@ async def test_validate_only_expands_tilde(
     monkeypatch.setenv("HOME", str(tmp_path))
     await offline_runtime.prepare_runtime_wheelhouse(Path("~/bundle"), target="x86_64/gnu")
     assert offline_runtime.validate_runtime_wheelhouse(Path("~/bundle"), target="x86_64/gnu")["target"] == "x86_64/gnu"
+
+
+@pytest.mark.asyncio
+async def test_builder_publishes_a_musl_bundle_and_the_loader_keeps_targets_apart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, builder: AsyncMock
+) -> None:
+    monkeypatch.setitem(offline_runtime._PYTHON_SHA256, "x86_64/musl", offline_runtime._PYTHON_SHA256["x86_64/gnu"])
+    original = builder.side_effect
+
+    async def command(*arguments: str, **kwargs: object) -> str:
+        if arguments[1] == "run" and "stat" not in arguments:
+            work = Path(arguments[arguments.index("--volume") + 1].removesuffix(":/build"))
+            result = await original(*arguments, **kwargs)
+            (work / "libc.txt").write_text("musl 1.2.5\n")
+            return result
+        return await original(*arguments, **kwargs)
+
+    builder.side_effect = command
+    output = await offline_runtime.prepare_runtime_wheelhouse(tmp_path / "musl", target="x86_64/musl")
+    pull = builder.await_args_list[0].args
+    assert pull[1] == "pull" and pull[-1] == "quay.io/pypa/musllinux_1_2_x86_64:latest"
+    manifest = offline_runtime.validate_runtime_wheelhouse(output, target="x86_64/musl")
+    assert manifest["libc"] == "musl" and manifest["libc_version"] == "1.2.5" and "glibc" not in manifest
+    with pytest.raises(ValueError, match="incompatible with this source/platform"):
+        offline_runtime.validate_runtime_wheelhouse(output, target="x86_64/gnu")

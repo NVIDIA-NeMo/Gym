@@ -139,6 +139,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 runner.python = await prepare_nooa_runtime(
                     sandbox,
                     wheelhouse_path=self.config.runtime_wheelhouse,
+                    musl_wheelhouse_path=self.config.runtime_wheelhouse_musl,
                 )
                 await runner.prepare()
             except BaseException as error:

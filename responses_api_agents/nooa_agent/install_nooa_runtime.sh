@@ -28,7 +28,6 @@ probe() {
     done
     [[ -n "$libc" ]] || fail 'cannot identify glibc or musl; use a supported task image'
   fi
-  [[ "$libc" = gnu ]] || fail 'current NOOA runtime requires glibc; musl task images are unsupported'
   printf '%s/%s\n' "$arch" "$libc"
 }
 
