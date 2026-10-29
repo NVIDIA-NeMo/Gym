@@ -493,6 +493,32 @@ async def test_a_retired_session_frees_its_episode_and_stays_closed(server):
     assert client.post("/seed_session", json=seed).status_code == 409
 
 
+@pytest.mark.parametrize("seed_first", [False, True])
+def test_close_retains_episode_identity_for_retries(server, seed_first):
+    resource, _, seed = server
+    client = TestClient(resource.setup_webserver())
+    if seed_first:
+        assert client.post("/seed_session", json=seed).status_code == 200
+    close = {key: seed[key] for key in ("resources_session_id", "episode_id")}
+    assert client.post("/close_session", json=close).status_code == 200
+    assert client.post("/close_session", json=close).status_code == 200
+    other = close | {"episode_id": {**close["episode_id"], "rollout_id": "other"}}
+    assert client.post("/close_session", json=other).status_code == 409
+    assert client.post("/seed_session", json=seed).status_code == 409
+
+
+async def test_retire_retains_a_known_episode_identity(server):
+    resource, _, seed = server
+    client = TestClient(resource.setup_webserver())
+    assert client.post("/seed_session", json=seed).status_code == 200
+    await resource.retire_session_state(seed["resources_session_id"])
+    close = {key: seed[key] for key in ("resources_session_id", "episode_id")}
+    other = close | {"episode_id": {**close["episode_id"], "rollout_id": "other"}}
+    assert client.post("/close_session", json=other).status_code == 409
+    assert client.post("/close_session", json=close).status_code == 200
+    assert client.post("/seed_session", json=seed).status_code == 409
+
+
 async def test_closed_ids_are_remembered_for_the_close_retry_window(tmp_path, plugin, monkeypatch):
     clock = [0.0]
     monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])

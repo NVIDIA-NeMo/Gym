@@ -53,7 +53,7 @@ class LocalWorkerSandbox:
     async def exec(
         self, command: str, *, cwd: str, timeout_s: float | None, preserve_background_services: bool = False
     ) -> SandboxExecResult:
-        if "process_supervisor.py" in command:
+        if "process_supervisor.sh" in command:
             # Run the actual entrypoint from this checkout. The installed sandbox's
             # isolated interpreter and Linux descendant reaper are not under test.
             with (self.directory / "output.log").open("wb") as stdout:

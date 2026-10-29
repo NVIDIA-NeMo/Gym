@@ -139,7 +139,7 @@ class TestPreconvertDirSurfacesFailures:
         (tmp_path / "a.docx").write_text("x")
         (tmp_path / "b.xlsx").write_text("x")
 
-        def _convert(path: Path, output_pdf: Path | None = None) -> tuple[Path, bool, str]:
+        def _convert(path: Path, output_pdf: Path | None = None, **_kwargs) -> tuple[Path, bool, str]:
             return path, False, f"forced fail on {path.name}"
 
         monkeypatch.setattr(pcv, "convert_to_pdf", _convert)
@@ -156,7 +156,7 @@ class TestPreconvertDirSurfacesFailures:
     def test_success_path_returns_no_errors(self, tmp_path: Path, monkeypatch) -> None:
         (tmp_path / "a.docx").write_text("x")
 
-        def _convert(path: Path, output_pdf: Path | None = None) -> tuple[Path, bool, str]:
+        def _convert(path: Path, output_pdf: Path | None = None, **_kwargs) -> tuple[Path, bool, str]:
             (output_pdf or path.with_suffix(".pdf")).write_text("p")
             return path, True, "ok"
 
@@ -302,7 +302,7 @@ def test_roundtrip_ooxml_copy_uses_format_library_and_preserves_source(tmp_path:
 async def test_preconvert_dir_async_propagates_results(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "a.docx").write_text("x")
 
-    monkeypatch.setattr(pcv, "convert_to_pdf", lambda p, output_pdf=None: (p, False, "boom"))
+    monkeypatch.setattr(pcv, "convert_to_pdf", lambda p, output_pdf=None, **_kwargs: (p, False, "boom"))
     ok, fail, errors = await pcv.preconvert_dir_async(str(tmp_path))
     assert (ok, fail) == (0, 1)
     assert errors == ["boom"]

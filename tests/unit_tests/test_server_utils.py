@@ -15,14 +15,18 @@
 import asyncio
 import logging
 import multiprocessing
+import os
 import pickle
 import socket
+import sys
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo, TCPConnector
+from aiohttp import ClientOSError, ClientResponseError, RequestInfo, ServerDisconnectedError, TCPConnector
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -44,6 +48,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import (
+    IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME,
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
@@ -88,7 +93,146 @@ def _return_exception_from_child_process(error: ClientResponseError) -> ClientRe
     return error
 
 
+class TestRequestRetries:
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("traced", [False, True])
+    @mark.parametrize("metrics", [False, True])
+    @mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_single_attempt_preserves_failure_after_execution(
+        self, monkeypatch: MonkeyPatch, internal: bool, traced: bool, metrics: bool, failure_type: type[Exception]
+    ) -> None:
+        effects = []
+        failure = failure_type("response lost after execution")
+
+        async def execute_then_fail(**kwargs):
+            effects.append("applied")
+            raise failure
+
+        send = AsyncMock(side_effect=execute_then_fail)
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: traced)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_trace_exporter_active", lambda: traced)
+        counts = SimpleNamespace(outbound_in_flight=0)
+        monkeypatch.setattr(nemo_gym.server_utils, "request_counts", lambda: counts if metrics else None)
+        monkeypatch.setattr("nemo_gym.telemetry.spans.client_span", lambda _: nullcontext(None))
+        monkeypatch.setattr("nemo_gym.telemetry.contrib.inject_trace_context", lambda headers: None)
+
+        with raises(failure_type) as exc_info:
+            await nemo_gym.server_utils.request(
+                "POST",
+                "http://server.test/step",
+                _internal=internal,
+                _resend_after_disconnect=False,
+                json={"action": "move"},
+            )
+
+        assert exc_info.value is failure
+        assert effects == ["applied"]
+        send.assert_awaited_once_with(
+            method="POST",
+            url="http://server.test/step",
+            data=b'{"action":"move"}',
+            headers={"Content-Type": "application/json"},
+        )
+        sleep.assert_not_awaited()
+        assert counts.outbound_in_flight == 0
+
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_default_retries_recover(
+        self, monkeypatch: MonkeyPatch, internal: bool, failure_type: type[Exception]
+    ) -> None:
+        response = MagicMock()
+        send = AsyncMock(side_effect=[failure_type("transient failure"), response])
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
+
+        actual = await nemo_gym.server_utils.request("POST", "http://server.test/step", _internal=internal)
+
+        assert actual is response
+        assert send.await_count == 2
+        sleep.assert_awaited_once_with(0.5)
+
+
 class TestServerUtils:
+    def test_global_aiohttp_client_exit_uses_owner_loop(self, monkeypatch: MonkeyPatch) -> None:
+        owner_loop = asyncio.new_event_loop()
+
+        class LoopBoundClient:
+            closed = False
+
+            async def close(self) -> None:
+                assert asyncio.get_running_loop() is owner_loop
+                self.closed = True
+
+        client = LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
+
+        try:
+            nemo_gym.server_utils.global_aiohttp_client_exit()
+        finally:
+            owner_loop.close()
+
+        assert client.closed
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY is False
+
+    async def test_global_aiohttp_client_exit_from_owner_loop_is_non_blocking(self, monkeypatch: MonkeyPatch) -> None:
+        owner_loop = asyncio.get_running_loop()
+
+        class LoopBoundClient:
+            closed = False
+
+            async def close(self) -> None:
+                assert asyncio.get_running_loop() is owner_loop
+                self.closed = True
+
+        client = LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
+
+        nemo_gym.server_utils.global_aiohttp_client_exit()
+
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY is False
+        await asyncio.sleep(0)
+        assert client.closed
+
+    def test_global_aiohttp_client_exit_closes_control_client_on_owner_loop(self, monkeypatch: MonkeyPatch) -> None:
+        owner_loop = asyncio.new_event_loop()
+
+        class LoopBoundClient:
+            closed = False
+
+            async def close(self) -> None:
+                assert asyncio.get_running_loop() is owner_loop
+                self.closed = True
+
+        data_client, control_client = LoopBoundClient(), LoopBoundClient()
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", data_client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CONTROL_CLIENT", control_client)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_LOOP", owner_loop)
+
+        try:
+            nemo_gym.server_utils.global_aiohttp_client_exit()
+        finally:
+            owner_loop.close()
+
+        assert data_client.closed
+        assert control_client.closed
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT is None
+        assert nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT_LOOP is None
+
     async def test_raise_for_status_preserves_message_across_process_boundary(self) -> None:
         headers = CIMultiDictProxy(
             CIMultiDict(
@@ -245,6 +389,32 @@ class TestServerUtils:
 
         actual_client = ServerClient.load_from_global_config()
         assert {"a": 2} == actual_client.global_config_dict
+
+    def test_ServerClient_uses_loopback_for_wildcard_bind_hosts(self, monkeypatch: MonkeyPatch) -> None:
+        global_config_dict = DictConfig(
+            {
+                "head_server": {
+                    "host": "0.0.0.0",
+                    "port": 11000,
+                }
+            }
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        response = MagicMock(content=b'"head_server: {}"')
+        requests_get = MagicMock(return_value=response)
+        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", requests_get)
+
+        client = ServerClient.load_from_global_config()
+
+        requests_get.assert_called_once_with("http://127.0.0.1:11000/global_config_dict_yaml")
+        assert client._build_server_base_url(DictConfig({"host": "0.0.0.0", "port": 11000})) == (
+            "http://127.0.0.1:11000"
+        )
+        assert client._build_server_base_url(DictConfig({"host": "::", "port": 11000})) == ("http://[::1]:11000")
 
     def test_ServerClient_load_from_global_config_fetches_when_config_was_not_injected(
         self, monkeypatch: MonkeyPatch
@@ -507,6 +677,66 @@ class TestServerUtils:
             url="http://model/ng-rollout/rollout-1/training-token-capture/v1/chat/completions",
             headers={"x-existing": "value"},
         )
+
+    async def test_get_global_aiohttp_client_uses_defaults_without_config_or_cli_parse(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """A process Gym did not launch (a Ray task worker) has no config and argv that is not Gym's.
+
+        The client must come up with the default limits instead of parsing that argv and exiting.
+        """
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "/usr/lib/python3/site-packages/ray/_private/workers/default_worker.py",
+                "--node-ip-address=127.0.0.1",
+                "--node-manager-port=40000",
+                "--worker-type=WORKER",
+            ],
+        )
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+
+        try:
+            client = nemo_gym.server_utils.get_global_aiohttp_client()
+        except SystemExit as e:
+            fail(f"get_global_aiohttp_client parsed the process argv as Gym CLI overrides and exited: {e!r}")
+
+        try:
+            defaults = GlobalAIOHTTPAsyncClientConfig()
+            assert client.connector.limit == defaults.global_aiohttp_connector_limit
+            assert client.connector.limit_per_host == defaults.global_aiohttp_connector_limit_per_host
+            assert nemo_gym.global_config._GLOBAL_CONFIG_DICT is None
+        finally:
+            await client.close()
+
+    async def test_get_global_aiohttp_client_parses_an_explicit_parser_config(self, monkeypatch: MonkeyPatch) -> None:
+        """A caller that passes a parser config gets the limits it describes, not the defaults."""
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
+        parser_config = nemo_gym.global_config.GlobalConfigDictParserConfig(
+            initial_global_config_dict=DictConfig(
+                {"global_aiohttp_connector_limit": 7, "global_aiohttp_connector_limit_per_host": 3}
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        client = nemo_gym.server_utils.get_global_aiohttp_client(global_config_dict_parser_config=parser_config)
+        try:
+            assert (client.connector.limit, client.connector.limit_per_host) == (7, 3)
+        finally:
+            await client.close()
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
@@ -1136,7 +1366,8 @@ class TestServerUtils:
 
         class TestSimpleServer(SimpleServer):
             def __init__(self, *args, **kwargs):
-                pass
+                # Only the config: the startup checks before the dry-run return read it.
+                object.__setattr__(self, "config", MagicMock(num_workers=None))
 
             def setup_webserver(self):
                 assert False
@@ -1146,6 +1377,29 @@ class TestServerUtils:
                 pass
 
         TestSimpleServer.run_webserver()
+
+    def test_dry_run_reports_unsupported_num_workers(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_ray_return_value(monkeypatch, True)
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", MagicMock(spec=ServerClient))
+
+        class RefusingServer(SimpleServer):
+            def __init__(self, *args, **kwargs):
+                object.__setattr__(self, "config", MagicMock(num_workers=2))
+                self.config.name = "refusing_server"
+
+            def multiple_workers_unsupported_reason(self) -> str:
+                return "sessions live in this process"
+
+            def setup_webserver(self):
+                assert False
+
+            @classmethod
+            def load_config_from_global_config(cls) -> None:
+                pass
+
+        with raises(ValueError, match="^refusing_server needs num_workers=1: sessions live in this process$"):
+            RefusingServer.run_webserver()
 
     def test_setup_liveness_exposes_conventional_probe_surface(self) -> None:
         from fastapi import FastAPI
@@ -2175,6 +2429,8 @@ class TestRunWebserverProxyKwargs:
         num_workers: int | None,
         ray_enabled: bool | None = None,
         is_worker: bool = False,
+        routes_sessions: bool = False,
+        unsupported_reason: str | None = None,
     ) -> dict:
         from fastapi import FastAPI
 
@@ -2207,10 +2463,17 @@ class TestRunWebserverProxyKwargs:
 
         class TestSimpleServer(SimpleServer):
             ray_enabled = ray_setting
+            routes_sessions_to_owner = routes_sessions
+
+            def claimed_session_routing(self) -> dict:
+                return {}
 
             @classmethod
             def load_config_from_global_config(cls):
                 return server_config
+
+            def multiple_workers_unsupported_reason(self) -> str | None:
+                return unsupported_reason
 
             def setup_webserver(self) -> FastAPI:
                 return FastAPI()
@@ -2246,6 +2509,34 @@ class TestRunWebserverProxyKwargs:
         assert 4 == kwargs["workers"]
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_server_with_a_reason_refuses_several_workers_before_uvicorn_starts(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        # Recorded with monkeypatch, so the variable is restored even if a launch sets it.
+        monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "")
+        monkeypatch.delenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME)
+
+        with raises(ValueError, match="^my_server needs num_workers=1: sessions live in this process$"):
+            self._capture_uvicorn_kwargs(
+                monkeypatch, {}, num_workers=2, unsupported_reason="sessions live in this process"
+            )
+
+        assert self.uvicorn_kwargs == {}
+        # The refusal comes before the multi-worker launch sets up the workers' environment.
+        assert IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME not in os.environ
+
+    def test_server_with_a_reason_still_runs_one_worker(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch, {}, num_workers=1, unsupported_reason="sessions live in this process"
+        )
+
+        assert "workers" not in kwargs
+
+    def test_server_without_a_reason_runs_several_workers(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=2)
+
+        assert 2 == kwargs["workers"]
 
     def test_undeclared_server_does_not_join_a_configured_cluster(self, monkeypatch: MonkeyPatch) -> None:
         self._capture_uvicorn_kwargs(monkeypatch, {"ray_head_node_address": "10.0.0.1:6379"}, num_workers=1)
@@ -2372,6 +2663,33 @@ class TestRunWebserverProxyKwargs:
         assert self.uvicorn_kwargs == {}
         report.assert_not_called()
 
+    @mark.parametrize("num_workers", [1, 4])
+    def test_listen_backlog_defaults_above_uvicorns(self, monkeypatch: MonkeyPatch, num_workers: int) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=num_workers)
+
+        assert 16384 == kwargs["backlog"]
+
+    def test_listen_backlog_comes_from_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4)
+
+        assert 4096 == kwargs["backlog"]
+
+    def test_a_workers_private_socket_gets_the_listen_backlog(self, monkeypatch: MonkeyPatch) -> None:
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "install_session_routing", install)
+
+        self._capture_uvicorn_kwargs(
+            monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4, is_worker=True, routes_sessions=True
+        )
+
+        assert 4096 == install.call_args.kwargs["backlog"]
+
+    def test_a_listen_backlog_below_one_fails_before_uvicorn_starts(self, monkeypatch: MonkeyPatch) -> None:
+        with raises(ValidationError, match="uvicorn_backlog"):
+            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 0}, num_workers=1)
+
+        assert self.uvicorn_kwargs == {}
+
 
 class TestHeadServerProxyKwargs:
     """The independently launched head server must use the same proxy-header policy."""
@@ -2416,6 +2734,10 @@ class TestHeadServerProxyKwargs:
 
         assert kwargs["proxy_headers"] is True
         assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
+
+    def test_listen_backlog_follows_the_global_config(self, monkeypatch: MonkeyPatch) -> None:
+        assert 16384 == self._capture_uvicorn_kwargs(monkeypatch, {})["backlog"]
+        assert 4096 == self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 4096})["backlog"]
 
 
 @mark.parametrize("header", [None, b"X-Other-Harness-Reply"])
