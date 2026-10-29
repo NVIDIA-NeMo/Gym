@@ -47,7 +47,12 @@ from nemo_gym.sandbox.agent_tools import (
 )
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_utils import (
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    is_nemo_gym_fastapi_worker,
+    raise_for_status,
+)
 from responses_api_agents.pi_agent.app import (
     MCP_SETUP_ERROR_EXIT_CODE,
     PiAgent,
@@ -64,13 +69,16 @@ _RUN: ContextVar[dict[str, Any] | None] = ContextVar("pi_sandboxed_run", default
 DEPRECATION_WARNING = (
     "DEPRECATED: pi_sandboxed_agent runs each episode through its own legacy /run path and will be removed after "
     "the environment-server migration. Use pi_agent with sandbox sessions under an environment server instead. "
+    "The HLE search presets, which use tool_servers, have no session path yet and keep working here. "
     "See responses_api_agents/pi_agent/README.md#configure-and-run."
 )
 
 
 @cache
 def _warn_deprecated_once() -> None:
-    LOG.warning(DEPRECATION_WARNING)
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOG.warning(DEPRECATION_WARNING)
 
 
 class PiSandboxedAgentConfig(PiAgentConfig):

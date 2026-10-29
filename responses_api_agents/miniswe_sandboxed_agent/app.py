@@ -41,6 +41,7 @@ from nemo_gym.server_utils import (
     get_response_json,
     get_server_url,
     is_nemo_gym_fastapi_entrypoint,
+    is_nemo_gym_fastapi_worker,
     raise_for_status,
 )
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
@@ -65,16 +66,18 @@ LOGGER = logging.getLogger(__name__)
 # resources_server selects, is.
 DEPRECATION_WARNING = (
     "DEPRECATED: miniswe_sandboxed_agent is configured for its legacy /run path (resources_server is set), which "
-    "will be removed after the environment-server migration. Run it on episode sessions under an environment "
-    "server instead (resources_server: null, as Harbor task runs do), or use a session-capable harness such as "
-    "pi_agent, codex_agent or opencode_agent. "
+    "will be removed after the environment-server migration. Run Harbor tasks on episode sessions instead "
+    "(gym eval run <tasks> --agent miniswe_sandboxed_agent; for TB4, gym eval run terminal_bench_4 --agent "
+    "miniswe_sandboxed_agent). Terminal-Bench-Science has no session path yet and keeps working here. "
     "See responses_api_agents/miniswe_sandboxed_agent/README.md#harbor-episodes."
 )
 
 
 @cache
 def _warn_deprecated_once() -> None:
-    LOGGER.warning(DEPRECATION_WARNING)
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOGGER.warning(DEPRECATION_WARNING)
 
 
 # The harbor resources server leaves the task's in-sandbox tool declarations here at seed time.

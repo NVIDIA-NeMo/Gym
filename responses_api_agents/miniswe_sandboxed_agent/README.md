@@ -8,12 +8,13 @@
 > warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
 >
 > Episode sessions under an environment server are not deprecated: see [Harbor episodes](#harbor-episodes).
-> For other benchmarks, use a session-capable harness such as `pi_agent`, `codex_agent`, `opencode_agent`
-> or `openclaw_agent`.
+> Terminal Bench 4 runs that way from its Harbor task folders (`gym eval run terminal_bench_4 --agent
+> miniswe_sandboxed_agent`; see [`environments/harbor/terminal_bench_4`](../../environments/harbor/terminal_bench_4/README.md)).
+> Terminal-Bench-Science has no session path yet and stays on `/run` until it does.
 
 Run pinned mini-SWE 2.4.6 directly in a resource-owned Linux sandbox, using its
 native CLI, `DefaultAgent`, `LocalEnvironment`, and `litellm_response` model.
-Use [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
+The legacy `/run` path uses [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
 [TB4 resources](../../resources_servers/terminal_bench_4/README.md).
 
 `harness.py` supplies execution and trajectory conversion; it imports no benchmark

@@ -29,7 +29,12 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_utils import (
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    is_nemo_gym_fastapi_worker,
+    raise_for_status,
+)
 from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop, split_input
 
 
@@ -44,7 +49,9 @@ DEPRECATION_WARNING = (
 
 @cache
 def _warn_deprecated_once() -> None:
-    LOG.warning(DEPRECATION_WARNING)
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOG.warning(DEPRECATION_WARNING)
 
 
 MAX_OUTPUT_BYTES = 1024 * 1024

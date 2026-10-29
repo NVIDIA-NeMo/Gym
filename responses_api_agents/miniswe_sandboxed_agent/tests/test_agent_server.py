@@ -14,7 +14,7 @@ from httpx import ASGITransport, AsyncClient
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, SESSION_ID_KEY, ServerClient
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 from responses_api_agents.miniswe_sandboxed_agent.models import MiniSWERunRequest, SeedSessionResponse
@@ -496,10 +496,16 @@ async def test_cancellation_during_cleanup_delays_transport_release_and_verifica
     assert not f.agent._sessions
 
 
-@pytest.mark.parametrize("legacy_run", [True, False])
-def test_only_the_legacy_run_configuration_logs_the_deprecation_once(tmp_path, caplog, legacy_run):
-    """A resources_server selects the deprecated flat /run path; episode sessions start without a warning."""
+@pytest.mark.parametrize(("legacy_run", "worker"), [(True, False), (False, False), (True, True)])
+def test_only_the_legacy_run_configuration_logs_the_deprecation_once(
+    tmp_path, caplog, monkeypatch, legacy_run, worker
+):
+    """A resources_server selects the deprecated flat /run path; episode sessions start without a warning.
+
+    Workers of a multi-worker server rebuild it after the main process has logged the warning.
+    """
     module._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
     config = module.MiniSWESandboxedConfig(
         host="localhost",
         port=1,
@@ -514,7 +520,11 @@ def test_only_the_legacy_run_configuration_logs_the_deprecation_once(tmp_path, c
             module.MiniSWESandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
     warnings = [r.getMessage() for r in caplog.records if r.name == module.__name__]
-    assert warnings == ([module.DEPRECATION_WARNING] if legacy_run else [])
-    if legacy_run:
-        for phrase in ("miniswe_sandboxed_agent", "legacy /run", "episode sessions", "README.md#harbor-episodes"):
-            assert phrase in warnings[0]
+    assert warnings == ([module.DEPRECATION_WARNING] if legacy_run and not worker else [])
+    for phrase in (
+        "legacy /run",
+        "gym eval run terminal_bench_4",
+        "Terminal-Bench-Science",
+        "README.md#harbor-episodes",
+    ):
+        assert phrase in module.DEPRECATION_WARNING

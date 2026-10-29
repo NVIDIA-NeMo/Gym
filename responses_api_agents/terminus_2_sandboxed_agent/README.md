@@ -9,7 +9,9 @@
 >
 > Episode sessions under an environment server are not deprecated: Harbor task folders run this agent
 > that way (`gym eval run <tasks> --agent terminus_2_sandboxed_agent`; see the
-> [`harbor` environment server](../../environment_servers/harbor/README.md)). For other benchmarks, use a
+> [`harbor` environment server](../../environment_servers/harbor/README.md)). Terminal Bench 2.1 runs that way from
+> its Harbor task folders (`gym eval run terminal_bench_2_1 --agent terminus_2_sandboxed_agent`; see
+> [`environments/harbor/terminal_bench_2_1`](../../environments/harbor/terminal_bench_2_1/README.md)). For other benchmarks, use a
 > session-capable harness such as `pi_agent`, `codex_agent`, `opencode_agent` or `openclaw_agent`; see
 > [Choose a harness](../../benchmarks/terminal_bench_2_1/README.md#choose-a-harness).
 

@@ -83,6 +83,7 @@ from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     is_nemo_gym_fastapi_entrypoint,
+    is_nemo_gym_fastapi_worker,
     raise_for_status,
 )
 from responses_api_agents.opencode_agent.observability import (
@@ -101,14 +102,20 @@ LOGGER = logging.getLogger(__name__)
 
 DEPRECATION_WARNING = (
     "DEPRECATED: opencode_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
-    "after the environment-server migration. Use opencode_agent with sandbox sessions under an environment server "
-    "instead. See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
+    "after the environment-server migration. Where the resources server returns sandbox_access, switch to a session "
+    "harness in its allowed_agents under an environment server: opencode_agent where listed (Terminal Bench 2.1), "
+    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro). Setups with no session path yet keep "
+    "working here: SWE resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others), "
+    "the HLE search presets (tool_servers) and vibench_agent. "
+    "See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
 )
 
 
 @cache
 def _warn_deprecated_once() -> None:
-    LOGGER.warning(DEPRECATION_WARNING)
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOGGER.warning(DEPRECATION_WARNING)
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"

@@ -3,9 +3,15 @@
 > [!WARNING]
 > **Deprecated.** `opencode_sandboxed_agent` runs each episode through its own legacy `/run` path, behind a
 > `legacy_agent` environment server, and will be removed after the environment-server migration.
-> Do not build new benchmarks, agents or configs on this harness. Use
-> [`opencode_agent`](../opencode_agent/README.md#environmentserver-sessions) with sandbox sessions under an environment server instead.
-> Existing configs keep working; the agent logs a deprecation warning when it starts.
+> Do not build new benchmarks, agents or configs on this harness. Where the resources server returns
+> `sandbox_access`, switch to a session harness that its `allowed_agents` lists, under an environment server:
+> [`opencode_agent`](../opencode_agent/README.md#environmentserver-sessions) where it is listed (Terminal Bench 2.1),
+> otherwise another such as `pi_agent` or `codex_agent` (SWE-bench Pro).
+>
+> Some setups have no session path yet and stay on this agent until they do: the SWE resources servers that
+> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`), the HLE search presets
+> (`tool_servers`), and `vibench_agent`, which extends this agent. Existing configs keep working; the agent logs a
+> deprecation warning when it starts.
 
 ```bash
 # In terminal 1

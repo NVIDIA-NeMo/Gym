@@ -54,7 +54,7 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
@@ -91,16 +91,27 @@ class TestOpenCodeSandboxedAgent:
             token_id_capture=True,
         )
 
-    def test_startup_logs_the_deprecation_once_per_process(self, caplog: LogCaptureFixture) -> None:
+    @mark.parametrize("worker", [False, True])
+    def test_only_the_main_process_logs_the_deprecation_once(
+        self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch, worker: bool
+    ) -> None:
+        """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
         app_module._warn_deprecated_once.cache_clear()
+        monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
         with caplog.at_level(logging.WARNING, logger=app_module.__name__):
             for _ in range(2):
                 OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
 
         warnings = [r.getMessage() for r in caplog.records if r.name == app_module.__name__]
-        assert warnings == [app_module.DEPRECATION_WARNING]
-        for phrase in ("opencode_sandboxed_agent", "legacy /run", "Use opencode_agent", "opencode_agent/README.md"):
-            assert phrase in warnings[0]
+        assert warnings == ([] if worker else [app_module.DEPRECATION_WARNING])
+        for phrase in (
+            "legacy /run",
+            "allowed_agents",
+            "sandbox_handle",
+            "vibench_agent",
+            "opencode_agent/README.md",
+        ):
+            assert phrase in app_module.DEPRECATION_WARNING
 
     async def test_start_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()
