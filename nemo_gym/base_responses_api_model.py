@@ -35,7 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Iterable, Literal, NotRequired, Optional, TypedDict
@@ -79,9 +79,11 @@ from nemo_gym.openai_utils import (
 from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
+    is_responses_lifecycle_chunk,
     restore_namespace_tool_calls,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
+    synthesize_responses_keepalive_sse,
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
@@ -126,7 +128,6 @@ logger = logging.getLogger(__name__)
 
 _CHAT_KEEPALIVE_SECONDS = 15.0
 _SSE_KEEPALIVE = SSE_KEEPALIVE
-
 # A model server sets this attribute on an engine refusal it propagates on purpose (a length
 # refusal under its propagation setting). Its value is the envelope's string code:
 # ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` when the engine's message names the context window,
@@ -310,6 +311,23 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
+    stream_keepalive_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Hold streaming /v1/responses requests open with keepalive events while the backend computes. "
+            "Responses streaming is buffered, so a client sees no event until the whole generation returns, "
+            "and a client that bounds the silence between events (the Codex CLI's stream_idle_timeout_ms, "
+            "300 s by default) abandons a long turn and re-sends it. SSE comments do not help: such a client's "
+            "event parser drops them. When set, a call still running after this many seconds opens the stream "
+            "with response.created and then sends response.in_progress every this many seconds; the item and "
+            "terminal events that follow are unchanged. These events name the response before it exists, so "
+            "the response the stream serves (and capture records) takes the id they announced; servers whose "
+            "response ids come from an upstream Responses API refuse the setting at startup. A call that fails "
+            "after the stream opened ends with response.failed instead of an HTTP error status. Off (null) by "
+            "default, which sends nothing until the response is complete."
+        ),
+    )
     custom_tool_strategy: CustomToolStrategy = Field(
         default="passthrough",
         description=(
@@ -372,7 +390,21 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """Allow adapters to retain an explicit upstream-status compatibility policy."""
         return True
 
+    def _mints_response_ids(self) -> bool:
+        """Whether the ids of the responses ``responses()`` returns are this server's own.
+
+        A keepalive stream (``stream_keepalive_s``) names its response before ``responses()`` returns,
+        so that response takes the announced id. An id an upstream Responses API issued must reach the
+        client unchanged, so a server that serves those cannot keep a stream alive.
+        """
+        return False
+
     def setup_webserver(self) -> FastAPI:
+        if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
+            raise ValueError(
+                f"stream_keepalive_s is not supported on {type(self).__name__}: its responses carry the ids "
+                "an upstream Responses API issued, which a keepalive stream cannot announce before they exist"
+            )
         app = FastAPI()
 
         @app.exception_handler(ClientResponseError)
@@ -549,7 +581,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         delegated to the same ``responses()``, and the complete response is re-emitted as a
         synthesized Responses SSE event stream. Upstream HTTP errors and ``HTTPException``
         retain their status before the stream starts. Other ``responses()`` failures become terminal
-        ``response.failed`` events; bad-request validation still fails eagerly.
+        ``response.failed`` events; bad-request validation still fails eagerly. With
+        ``stream_keepalive_s`` set, a call that outlasts it opens the stream early and keeps it alive
+        with ``response.in_progress`` events, and any later failure becomes ``response.failed``.
         """
         context = current_capture_context()
         if context is not None and context.parent_resolution_mode == "source_history":
@@ -581,17 +615,35 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
     ) -> StreamingResponse:
         """Serve the same converted response to capture and Responses SSE clients."""
+        keepalive_s = self.config.stream_keepalive_s
+        if keepalive_s is None:
+            return await self._stream_buffered_responses(request, self._invoke_responses(request, params), ns_map)
+
+        # Keepalive events name the response before it exists, so the response takes this id.
+        response_id = f"resp_{uuid4().hex}"
+        pending = asyncio.create_task(self._invoke_responses(request, params, response_id=response_id))
         try:
-            response = await self._invoke_responses(request, params)
-            response_json = (
-                response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
-            )
-            response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
-            streamed = await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
-            if "usage" in response_json:
-                # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.
-                request.state.nemo_gym_internal_usage = response_json["usage"]
-            return streamed
+            # StreamingResponse commits HTTP headers before iterating its body. Wait one interval
+            # first, so a call that finishes sooner keeps the buffered events and HTTP error statuses.
+            done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
+        except BaseException:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise
+        if done:
+            return await self._stream_buffered_responses(request, pending, ns_map)
+        return StreamingResponse(
+            self._responses_keepalive_events(request, pending, ns_map, keepalive_s, response_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def _stream_buffered_responses(
+        self, request: Request, invocation: Awaitable[Any], ns_map: NamespaceMap
+    ) -> StreamingResponse:
+        """Stream a completed response; until it completes nothing is sent to the client."""
+        try:
+            return await self._serve_responses_sse(request, await invocation, ns_map)
         except (ClientResponseError, HTTPException):
             # Generation is buffered: no headers or SSE bytes have been sent yet.
             # Let the shared HTTP handler retain the upstream error code and body.
@@ -604,6 +656,80 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 synthesize_responses_failure_sse(str(exc)),
                 media_type="text/event-stream",
             )
+
+    async def _responses_keepalive_events(
+        self,
+        request: Request,
+        pending: "asyncio.Task[Any]",
+        ns_map: NamespaceMap,
+        keepalive_s: float,
+        response_id: str,
+    ) -> AsyncIterator[str | bytes]:
+        """Keep an opened Responses stream alive until ``pending``, which serves ``response_id``, completes."""
+        try:
+            for event in synthesize_responses_keepalive_sse(response_id, include_created=True):
+                yield event
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
+                if done:
+                    break
+                for event in synthesize_responses_keepalive_sse(response_id, include_created=False):
+                    yield event
+            try:
+                served = await self._serve_responses_sse(request, pending.result(), ns_map, include_created=False)
+            except Exception as exc:
+                # The stream is already open, so only a terminal event can report the failure.
+                code, message = self._streamed_responses_failure(exc)
+                for event in synthesize_responses_failure_sse(
+                    message, code=code, response_id=response_id, include_created=False
+                ):
+                    yield event
+                return
+            async for event in served.body_iterator:
+                yield event
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    def _streamed_responses_failure(self, exc: Exception) -> tuple[Optional[str], str]:
+        """The ``(code, message)`` of the ``response.failed`` event that reports a failure after keepalives.
+
+        Mirrors what the client would have seen before the stream opened: a refusal the server
+        propagates keeps its OpenAI error code (``context_length_exceeded`` tells a harness to compact
+        and retry), and an upstream HTTP error follows the server's propagation policy. Upstream
+        errors never report their request URL.
+        """
+        if is_propagated_refusal(exc):
+            message, code, _ = context_overflow_error_fields(exc)
+            logger.warning("responses() refused a streaming request after keepalive events with %s: %s", code, message)
+            return code, message
+        logger.exception("responses() failed after streaming keepalive events were sent")
+        if isinstance(exc, ClientResponseError):
+            if not self._should_propagate_upstream_http_error(exc):
+                return "server_error", "HTTP 500: Model request failed"
+            detail = getattr(exc, "response_content", None) or exc.message
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            return "server_error", f"Upstream HTTP {exc.status}: {detail}"
+        if isinstance(exc, HTTPException):
+            return "server_error", f"HTTP {exc.status_code}: {exc.detail}"
+        return "server_error", str(exc)
+
+    async def _serve_responses_sse(
+        self, request: Request, response: Any, ns_map: NamespaceMap, *, include_created: bool = True
+    ) -> StreamingResponse:
+        response_json = (
+            response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
+        )
+        response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
+        streamed = await self._stream_served_response(
+            response_json, synthesize_responses_sse(response_json, include_created=include_created)
+        )
+        if "usage" in response_json:
+            # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.
+            request.state.nemo_gym_internal_usage = response_json["usage"]
+        return streamed
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
@@ -787,7 +913,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return dispatched
 
     async def _invoke_responses(
-        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, *, response_id: Optional[str] = None
     ) -> NeMoGymResponse:
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
@@ -811,6 +937,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             response = await self.responses(request=request, body=params)
         else:
             response = await self.responses(body=params)
+        if response_id is not None:
+            # A keepalive stream announced this id; capture records it and the client keeps it.
+            response = (
+                response.model_copy(update={"id": response_id})
+                if isinstance(response, BaseModel)
+                else {**response, "id": response_id}
+            )
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
         # The assembled response still carries them here for every dialect.
@@ -1692,7 +1825,13 @@ class _CaptureMiddleware:
                 state["streaming"] = content_type.startswith(b"text/event-stream")
             elif message_type == "http.response.body":
                 chunk = message.get("body", b"") or b""
-                if chunk and chunk != _SSE_KEEPALIVE and state["ttft_ms"] is None:
+                if (
+                    chunk
+                    and chunk != _SSE_KEEPALIVE
+                    # Lifecycle events open a `stream_keepalive_s` stream long before the first output item.
+                    and not is_responses_lifecycle_chunk(chunk)
+                    and state["ttft_ms"] is None
+                ):
                     state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
                 if state["streaming"] and chunk and not defer_response:
