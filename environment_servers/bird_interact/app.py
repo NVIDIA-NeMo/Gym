@@ -5,19 +5,24 @@
 
 c-Interact is environment-driven: each agent reply is a clarifying question or an SQL submission, and the next user
 message is the simulator's answer, the debug prompt or the follow-up question. a-Interact is agent-driven: the agent
-gets one turn and reaches the user, the database and the grader through tools on the Resources Server.
+gets one turn and reaches the user, the database and the grader through tools on the Resources Server, over direct
+HTTP or MCP.
 """
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 from uuid import uuid4
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Self
 
 from nemo_gym.base_environment_server import CleanupContext
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.base_resources_server import (
+    MCPServerMetadata,
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+)
 from nemo_gym.base_user_simulation_environment_server import (
     AgentAccess,
     BaseUserSimulationEnvironmentServer,
@@ -35,8 +40,9 @@ from nemo_gym.failure_kinds import FailureStage
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
 from resources_servers.bird_interact.schemas import (
+    A_INTERACT_TOOLS,
     AskRequest,
     AskResponse,
     BirdInteractSeedSessionResponse,
@@ -77,37 +83,24 @@ The submit tool tells you whether your SQL is right. If the user then asks a fol
 again. Stop calling tools when the task is finished."""
 
 
-def _function(name: str, description: str, properties: dict[str, str] | None = None) -> dict[str, Any]:
-    properties = properties or {}
+def _function(name: str, description: str, request_model: type[BaseModel] | None) -> dict[str, Any]:
+    """A function tool for a direct HTTP grant. Over MCP the Resources Server describes the same tool."""
+    fields = request_model.model_fields if request_model is not None else {}
     return {
         "type": "function",
         "name": name,
         "description": description,
         "parameters": {
             "type": "object",
-            "properties": {key: {"type": "string", "description": text} for key, text in properties.items()},
-            "required": list(properties),
+            "properties": {key: {"type": "string", "description": info.description} for key, info in fields.items()},
+            "required": list(fields),
             "additionalProperties": False,
         },
         "strict": True,
     }
 
 
-A_INTERACT_TOOLS = [
-    _function("ask", "Ask the user one clarifying question.", {"question": "The question."}),
-    _function("submit", "Submit your final SQL for the current question.", {"sql": "The SQLite query."}),
-    _function("execute", "Run an exploratory SQLite query and see up to 20 rows.", {"sql": "The SQLite query."}),
-    _function("get_schema", "Read the database schema, with sample rows."),
-    _function("get_all_column_meanings", "Read the meaning of every column."),
-    _function(
-        "get_column_meaning",
-        "Read the meaning of one column.",
-        {"table_name": "The table.", "column_name": "The column."},
-    ),
-    _function("get_all_external_knowledge_names", "List the names of the knowledge-base entries."),
-    _function("get_knowledge_definition", "Read one knowledge-base entry.", {"knowledge_name": "The entry's name."}),
-    _function("get_all_knowledge_definitions", "Read every knowledge-base entry."),
-]
+A_INTERACT_FUNCTIONS = [_function(name, *tool) for name, tool in A_INTERACT_TOOLS.items()]
 
 
 class BirdInteractEnvironmentServerConfig(UserSimulationEnvironmentServerConfig):
@@ -115,11 +108,15 @@ class BirdInteractEnvironmentServerConfig(UserSimulationEnvironmentServerConfig)
 
     resources_server: ResourcesServerRef
     mode: InteractionMode
+    # a-Interact: how the agent reaches the tools. `mcp` needs `expose_tools_over_mcp` on the Resources Server.
+    resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=lambda: ["direct_http"])
 
     @model_validator(mode="after")
-    def a_interact_has_one_turn(self) -> Self:
+    def a_interact_has_one_turn_and_tools(self) -> Self:
         if self.mode == "a_interact" and self.max_turns != 1:
             raise ValueError("a_interact runs in one agent turn; set max_turns to 1")
+        if self.mode == "a_interact" and not self.resources_tool_transports:
+            raise ValueError("a_interact needs a tool transport; set resources_tool_transports")
         return self
 
 
@@ -147,6 +144,8 @@ class _Episode:
     resources_session_id: str = field(default_factory=lambda: f"resources-session-{uuid4().hex}")
     resources_cookies: dict[str, str] = field(default_factory=dict)
     context: EpisodeContext | None = None
+    # The MCP endpoint and session token from the seed reply, when the Resources Server exposes its tools over MCP.
+    resources_tools: MCPServerMetadata | None = None
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None
 
 
@@ -183,23 +182,41 @@ class BirdInteractEnvironmentServer(
             BirdInteractSeedSessionResponse,
             stage="seed",
         )
-        episode.context = seed.context
+        episode.context, episode.resources_tools = seed.context, seed.resources_tools
+        if self._grants_mcp() and seed.resources_tools is None:
+            # The same configuration fails every episode, so the failure is terminal.
+            raise self.failure(
+                ValueError("The Resources Server returned no MCP access; set expose_tools_over_mcp on it"),
+                stage="seed",
+            )
         return episode
 
     async def agent_access(self, episode: _Episode) -> AgentAccess:
         if self.config.mode == "c_interact":
             return AgentAccess()
         base_url = self.server_client._resolve_base_url(self.config.resources_server.name).rstrip("/")
-        return AgentAccess(
-            tool_accesses=[
+        tool_accesses: list[ToolAccess] = []
+        if "direct_http" in self.config.resources_tool_transports:
+            tool_accesses.append(
                 DirectHTTPToolAccess(
-                    name=f"{self.config.resources_server.name}.a_interact",
+                    name=f"{self.config.resources_server.name}.direct_http",
                     required=True,
-                    base_url=f"{base_url}/a_interact",
+                    base_url=base_url,
                     cookies=episode.resources_cookies,
                 )
-            ]
-        )
+            )
+        if self._grants_mcp():
+            tools = episode.resources_tools
+            tool_accesses.append(
+                MCPToolAccess(
+                    name=tools.server_name,
+                    required=True,
+                    connection=MCPStreamableHTTPConnection(
+                        url=f"{base_url}/{tools.url_path.lstrip('/')}", headers=tools.headers
+                    ),
+                )
+            )
+        return AgentAccess(tool_accesses=tool_accesses)
 
     async def responses_create_params(self, episode: _Episode) -> NeMoGymResponseCreateParamsNonStreaming:
         context = episode.context
@@ -214,7 +231,8 @@ class BirdInteractEnvironmentServer(
         else:
             instructions = A_INTERACT_INSTRUCTIONS.format(coin_budget=context.coin_budget)
             message = f"Database: {context.database}\n\nMy request:\n{context.question}"
-            tools = A_INTERACT_TOOLS
+            # An MCP agent lists the tools from the server, and some harnesses refuse a request that declares tools.
+            tools = A_INTERACT_FUNCTIONS if "direct_http" in self.config.resources_tool_transports else []
         episode.responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
             input=[{"role": "system", "content": instructions}, {"role": "user", "content": message}], tools=tools
         )
@@ -262,6 +280,9 @@ class BirdInteractEnvironmentServer(
                 failure_reason=verification.failure_reason,
             ),
         )
+
+    def _grants_mcp(self) -> bool:
+        return self.config.mode == "a_interact" and "mcp" in self.config.resources_tool_transports
 
     async def _call_resources(
         self, episode: _Episode, path: str, body: BaseModel, model: type[ModelT], *, stage: FailureStage

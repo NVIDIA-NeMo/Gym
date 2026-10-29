@@ -5,9 +5,9 @@
 
 One session holds one task. Its database lives in a sandbox that the session starts at seed and stops at close; the
 agent's SQL and the grading run there (``grading.py``). In c-Interact the Environment Server calls the routes under
-``/c_interact/``. In a-Interact the agent calls the same actions as tools under ``/a_interact/``, where each one costs
-BIRD-COIN. Only that prefix is granted to the agent, and the agent never gets the sandbox itself. Each mode's routes
-refuse a session of the other mode.
+``/c_interact/``. In a-Interact the agent calls the same actions as tools, at the server's root or over MCP, and each
+one costs BIRD-COIN. The agent never gets the sandbox itself. Each mode's routes refuse a session of the other mode,
+and an MCP token lists the tools only for an a-Interact session.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
@@ -46,6 +46,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config,
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
 from resources_servers.bird_interact.grading import MAX_PREVIEW_ROWS
 from resources_servers.bird_interact.schemas import (
+    A_INTERACT_TOOLS,
     AskRequest,
     AskResponse,
     BirdInteractSeedSessionResponse,
@@ -68,6 +69,10 @@ from resources_servers.bird_interact.simulator import (
     responder_prompt,
 )
 from resources_servers.bird_interact.task_data import BirdInteractTask
+
+
+if TYPE_CHECKING:
+    from nemo_gym.mcp_auto_exposure import MCPTool
 
 
 LOGGER = logging.getLogger(__name__)
@@ -224,16 +229,29 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
         app.router.lifespan_context = lifespan
         app.post("/c_interact/ask")(self.ask)
         app.post("/c_interact/submit")(self.submit)
-        app.post("/a_interact/ask")(self.tool_ask)
-        app.post("/a_interact/submit")(self.tool_submit)
-        app.post("/a_interact/execute")(self.tool_execute)
-        app.post("/a_interact/get_schema")(self.tool_get_schema)
-        app.post("/a_interact/get_all_column_meanings")(self.tool_get_all_column_meanings)
-        app.post("/a_interact/get_column_meaning")(self.tool_get_column_meaning)
-        app.post("/a_interact/get_all_external_knowledge_names")(self.tool_get_all_external_knowledge_names)
-        app.post("/a_interact/get_knowledge_definition")(self.tool_get_knowledge_definition)
-        app.post("/a_interact/get_all_knowledge_definitions")(self.tool_get_all_knowledge_definitions)
+        tools = {
+            "ask": self.tool_ask,
+            "submit": self.tool_submit,
+            "execute": self.tool_execute,
+            "get_schema": self.tool_get_schema,
+            "get_all_column_meanings": self.tool_get_all_column_meanings,
+            "get_column_meaning": self.tool_get_column_meaning,
+            "get_all_external_knowledge_names": self.tool_get_all_external_knowledge_names,
+            "get_knowledge_definition": self.tool_get_knowledge_definition,
+            "get_all_knowledge_definitions": self.tool_get_all_knowledge_definitions,
+        }
+        # MCP auto-exposure describes each tool with its route's description.
+        for name, (description, _) in A_INTERACT_TOOLS.items():
+            app.post(f"/{name}", description=description)(tools[name])
         return app
+
+    def mcp_tools(self, harvested: list["MCPTool"], catchall: Any) -> list["MCPTool"]:
+        """The a-Interact tools only; the ``/c_interact/`` routes are the Environment Server's."""
+        return [tool for tool in harvested if tool.name in A_INTERACT_TOOLS]
+
+    def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str]:
+        """Every tool for an a-Interact session; none for a c-Interact session, whose agent has no tools."""
+        return list(A_INTERACT_TOOLS) if seed_body.get("interaction_mode") == "a_interact" else []
 
     # ----- session lifecycle ----- #
 

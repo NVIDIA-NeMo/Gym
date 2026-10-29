@@ -6,11 +6,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import Response
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
+from nemo_gym.base_resources_server import NEMO_GYM_MCP_SESSION_TOKEN_HEADER, ResourcesSeedSessionRequest
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
@@ -21,7 +24,7 @@ from resources_servers.bird_interact.app import (
     BirdInteractResourcesServerConfig,
 )
 from resources_servers.bird_interact.grading import grade, main, split_statements, strip_round_calls
-from resources_servers.bird_interact.schemas import BirdInteractSeedSessionResponse
+from resources_servers.bird_interact.schemas import A_INTERACT_TOOLS, BirdInteractSeedSessionResponse
 from resources_servers.bird_interact.simulator import UNANSWERABLE_REPLY, parse_action
 from resources_servers.bird_interact.task_data import BirdInteractTask
 
@@ -348,10 +351,8 @@ class TestAgenticMode:
         client = TestClient(_server()[0].setup_webserver())
         _seed(client, "bookshop_1", mode="a_interact")
 
-        names = client.post("/a_interact/get_all_external_knowledge_names").json()
-        meaning = client.post(
-            "/a_interact/get_column_meaning", json={"table_name": "SALES", "column_name": "quantity"}
-        ).json()
+        names = client.post("/get_all_external_knowledge_names").json()
+        meaning = client.post("/get_column_meaning", json={"table_name": "SALES", "column_name": "quantity"}).json()
 
         # 6 + 2 for each of the two ambiguities + 6 patience = 16; the two lookups cost 0.5 each.
         assert meaning["coins_left"] == 15.0
@@ -362,10 +363,10 @@ class TestAgenticMode:
         client = TestClient(_server(coin_patience=0)[0].setup_webserver())
         _seed(client, "bookshop_1", mode="a_interact")
         for _ in range(10):
-            client.post("/a_interact/execute", json={"sql": "SELECT 1"})
+            client.post("/execute", json={"sql": "SELECT 1"})
 
-        refused = client.post("/a_interact/get_schema").json()
-        submitted = client.post("/a_interact/submit", json={"sql": CORRECT_1}).json()
+        refused = client.post("/get_schema").json()
+        submitted = client.post("/submit", json={"sql": CORRECT_1}).json()
 
         assert refused["observation"] == "Your budget is spent. Only submit is allowed now."
         assert "That's right" in submitted["observation"]
@@ -376,9 +377,9 @@ class TestAgenticMode:
         client = TestClient(_server(coin_patience=0)[0].setup_webserver())
         _seed(client, "bookshop_1", mode="a_interact")
         for _ in range(10):
-            client.post("/a_interact/execute", json={"sql": "SELECT 1"})
+            client.post("/execute", json={"sql": "SELECT 1"})
 
-        submitted = client.post("/a_interact/submit", json={"sql": "SELECT name FROM authors"}).json()
+        submitted = client.post("/submit", json={"sql": "SELECT name FROM authors"}).json()
 
         assert "the task ends here" in submitted["observation"]
         verification = _verify(client)
@@ -389,7 +390,7 @@ class TestAgenticMode:
         client = TestClient(_server()[0].setup_webserver())
         _seed(client, "bookshop_1", mode="a_interact")
 
-        result = client.post("/a_interact/execute", json={"sql": "SELECT s.sale_id FROM sales s, authors a"}).json()
+        result = client.post("/execute", json={"sql": "SELECT s.sale_id FROM sales s, authors a"}).json()
 
         assert result["observation"].startswith("95 rows\n(1,)")
         assert result["observation"].endswith("... 75 more rows")
@@ -400,7 +401,7 @@ class TestAgenticMode:
         client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
         _seed(client, "bookshop_1", mode="a_interact")
 
-        assert client.post("/a_interact/ask", json={"question": "?"}).status_code == 500
+        assert client.post("/ask", json={"question": "?"}).status_code == 500
 
         verification = _verify(client)
         assert (verification["mask_sample"], verification["failure_kind"]) == (True, USER_SIMULATOR_FAILED)
@@ -409,7 +410,54 @@ class TestAgenticMode:
         client = TestClient(_server()[0].setup_webserver())
         _seed(client, "bookshop_1")
 
-        assert client.post("/a_interact/get_schema").status_code == 409
+        assert client.post("/get_schema").status_code == 409
+
+
+def _mcp_app(server: BirdInteractResourcesServer) -> FastAPI:
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    return app
+
+
+def _mcp_token(seeded: Response) -> str:
+    return seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+
+
+def _rpc(client: TestClient, token: str, method: str, params: dict) -> dict:
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        NEMO_GYM_MCP_SESSION_TOKEN_HEADER: token,
+    }
+    reply = client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+    return reply.json()["result"]
+
+
+class TestMCP:
+    def test_an_a_interact_token_lists_and_calls_the_nine_tools(self) -> None:
+        with TestClient(_mcp_app(_server(expose_tools_over_mcp=True)[0])) as client:
+            token = _mcp_token(_seed(client, "bookshop_1", mode="a_interact"))
+
+            tools = {tool["name"]: tool for tool in _rpc(client, token, "tools/list", {})["tools"]}
+            arguments = {"table_name": "SALES", "column_name": "quantity"}
+            called = _rpc(client, token, "tools/call", {"name": "get_column_meaning", "arguments": arguments})
+
+        assert set(tools) == set(A_INTERACT_TOOLS)
+        # The same descriptions as the function tools of a direct HTTP grant.
+        assert tools["submit"]["description"] == "Submit your final SQL for the current question."
+        assert tools["get_column_meaning"]["inputSchema"]["properties"]["table_name"]["description"] == "The table."
+        observation = json.loads(called["content"][0]["text"])
+        assert observation == {"observation": "Number of copies sold in the sale.", "coins_left": 15.5}
+
+    def test_a_c_interact_token_lists_and_calls_no_tool(self) -> None:
+        with TestClient(_mcp_app(_server(expose_tools_over_mcp=True)[0])) as client:
+            token = _mcp_token(_seed(client, "bookshop_1"))
+
+            listed = _rpc(client, token, "tools/list", {})["tools"]
+            called = _rpc(client, token, "tools/call", {"name": "submit", "arguments": {"sql": CORRECT_1}})
+
+            assert (listed, called["isError"]) == ([], True)
+            assert _verify(client)["phases"] == []
 
 
 class TestSessionSandbox:
@@ -433,7 +481,7 @@ class TestSessionSandbox:
         client = TestClient(_server()[0].setup_webserver())
         _seed(client, "bookshop_1", mode="a_interact", preprocess_sql=["DELETE FROM sales"])
 
-        result = client.post("/a_interact/execute", json={"sql": "SELECT COUNT(*) FROM sales"}).json()
+        result = client.post("/execute", json={"sql": "SELECT COUNT(*) FROM sales"}).json()
 
         assert result["observation"] == "1 rows\n(0,)"
 
@@ -467,7 +515,7 @@ class TestSessionSandbox:
         _seed(client, "bookshop_1", mode="a_interact")
         (_sandbox_root(server, "bookshop_1") / "grading.py").unlink()
 
-        assert client.post("/a_interact/execute", json={"sql": "SELECT 1"}).status_code == 503
+        assert client.post("/execute", json={"sql": "SELECT 1"}).status_code == 503
 
         verification = _verify(client)
         assert (verification["mask_sample"], verification["failure_kind"]) == (True, SANDBOX_FAILED)

@@ -5,7 +5,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse, ResourcesSeedSessionResponse
 
@@ -43,7 +43,7 @@ class BirdInteractSeedSessionResponse(ResourcesSeedSessionResponse):
 class AskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    question: str
+    question: str = Field(description="The question.")
 
 
 class AskResponse(BaseModel):
@@ -74,20 +74,35 @@ class SubmitResponse(BaseModel):
 class SQLRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    sql: str
+    sql: str = Field(description="The SQLite query.")
 
 
 class ColumnMeaningRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    table_name: str
-    column_name: str
+    table_name: str = Field(description="The table.")
+    column_name: str = Field(description="The column.")
 
 
 class KnowledgeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    knowledge_name: str
+    knowledge_name: str = Field(description="The entry's name.")
+
+
+# The a-Interact tools as the agent sees them over either transport: each tool's description, and the request model of
+# the Resources Server route that serves it (None for a tool without arguments).
+A_INTERACT_TOOLS: dict[str, tuple[str, type[BaseModel] | None]] = {
+    "ask": ("Ask the user one clarifying question.", AskRequest),
+    "submit": ("Submit your final SQL for the current question.", SQLRequest),
+    "execute": ("Run an exploratory SQLite query and see up to 20 rows.", SQLRequest),
+    "get_schema": ("Read the database schema, with sample rows.", None),
+    "get_all_column_meanings": ("Read the meaning of every column.", None),
+    "get_column_meaning": ("Read the meaning of one column.", ColumnMeaningRequest),
+    "get_all_external_knowledge_names": ("List the names of the knowledge-base entries.", None),
+    "get_knowledge_definition": ("Read one knowledge-base entry.", KnowledgeRequest),
+    "get_all_knowledge_definitions": ("Read every knowledge-base entry.", None),
+}
 
 
 class ToolObservation(BaseModel):

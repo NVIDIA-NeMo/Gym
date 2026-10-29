@@ -38,6 +38,8 @@ bird_interact_resources:
       user_model:
         type: responses_api_models
         name: user_model
+      # The a-Interact tools are also served over MCP, for harnesses that take only MCP grants (Codex, Pi, Hermes).
+      expose_tools_over_mcp: true
       # Each session's database runs in its own sandbox. `sandbox` names the provider block that a provider config
       # binds, such as nemo_gym/sandbox/providers/docker/configs/docker.yaml; add one with a second --config.
       sandbox_provider: sandbox
@@ -102,6 +104,8 @@ bird_interact_a_interact:
         type: resources_servers
         name: bird_interact_resources
       mode: a_interact
+      # simple_agent calls the tools over direct HTTP. Set [mcp] for an agent that takes only MCP grants.
+      resources_tool_transports: [direct_http]
       max_turns: 1
       turn_timeout_seconds: 1800
       default_episode_timeout_seconds: 3600

@@ -27,7 +27,9 @@ from environment_servers.bird_interact.app import (
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
+from nemo_gym.tool_access import MCPToolAccess
 from resources_servers.bird_interact.app import BirdInteractResourcesServer, BirdInteractResourcesServerConfig
 from resources_servers.bird_interact.task_data import BirdInteractTask
 
@@ -141,7 +143,15 @@ def _sql(sql: str) -> AgentTurn:
     return _says(f"Here is my query:\n```sqlite\n{sql}\n```")
 
 
-def _servers(mode: str, agent_turns: list[AgentTurn], *, max_turns: int, user_model_replies: list[str] = ()):
+def _servers(
+    mode: str,
+    agent_turns: list[AgentTurn],
+    *,
+    max_turns: int,
+    user_model_replies: list[str] = (),
+    transports: tuple[str, ...] = ("direct_http",),
+    expose_tools_over_mcp: bool = False,
+):
     resources_client = MagicMock(spec=ServerClient)
     resources_client.global_config_dict = {}
     resources_client.post = AsyncMock(
@@ -156,15 +166,18 @@ def _servers(mode: str, agent_turns: list[AgentTurn], *, max_turns: int, user_mo
             database_dir=str(DATA / "example_databases"),
             user_model=ModelServerRef(type="responses_api_models", name="user_model"),
             sandbox_provider=LOCAL_SANDBOX,
+            expose_tools_over_mcp=expose_tools_over_mcp,
         ),
         server_client=resources_client,
     )
+    resources_app = resources.setup_webserver()
+    maybe_auto_expose(resources, resources_app)
     client = _Client(
         head_server_config=BaseServerConfig(host="head", port=1),
         global_config_dict=OmegaConf.create(
             {"agent": {"responses_api_agents": {"simple_agent": {"host": "agent", "port": 1, "entrypoint": "app.py"}}}}
         ),
-        resources=TestClient(resources.setup_webserver()),
+        resources=TestClient(resources_app),
         agent_turns=agent_turns,
         agent_calls=[],
     )
@@ -177,6 +190,7 @@ def _servers(mode: str, agent_turns: list[AgentTurn], *, max_turns: int, user_mo
             agent_server=AgentServerRef(type="responses_api_agents", name="agent"),
             resources_server=ResourcesServerRef(type="resources_servers", name="bird_interact"),
             mode=mode,
+            resources_tool_transports=list(transports),
             max_turns=max_turns,
             turn_timeout_seconds=30,
             cleanup_timeout_seconds=5,
@@ -276,11 +290,20 @@ class TestConversationalMode:
         assert client.agent_calls == []
 
 
+def _mcp(resources: TestClient, access: MCPToolAccess, method: str, params: dict) -> dict:
+    headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    reply = resources.post(
+        URL(str(access.connection.url)).path, headers=headers | access.connection.headers, json=body
+    )
+    return reply.json()["result"]
+
+
 class TestAgenticMode:
     async def test_the_agent_works_through_tools_in_one_turn(self) -> None:
         def agent_uses_tools(body: dict, resources: TestClient) -> str:
-            resources.post("/a_interact/get_all_knowledge_definitions")
-            resources.post("/a_interact/submit", json={"sql": TASKS["bookshop_1"]["sol_sql"][0]})
+            resources.post("/get_all_knowledge_definitions")
+            resources.post("/submit", json={"sql": TASKS["bookshop_1"]["sol_sql"][0]})
             return "Submitted."
 
         environment, client = _servers("a_interact", [agent_uses_tools], max_turns=1)
@@ -291,23 +314,64 @@ class TestAgenticMode:
         assert response.result.coins_spent == 4.0
         seed = AgentSeedSessionRequest.model_validate(client.agent_calls[0][1])
         assert seed.continuation is None
-        assert str(seed.tool_accesses[0].base_url) == "http://bird_interact:8000/a_interact"
+        assert str(seed.tool_accesses[0].base_url) == "http://bird_interact:8000/"
         opening = next(body for path, body in client.agent_calls if path.endswith("/v1/responses"))
         assert len(opening["tools"]) == 9
 
-    def test_a_interact_runs_in_one_turn(self) -> None:
-        with pytest.raises(ValidationError, match="max_turns to 1"):
+    async def test_over_mcp_the_agent_lists_the_tools_from_the_resources_server(self) -> None:
+        listed: list[str] = []
+
+        def agent_uses_mcp(body: dict, resources: TestClient) -> str:
+            (access,) = AgentSeedSessionRequest.model_validate(client.agent_calls[0][1]).tool_accesses
+            listed.extend(tool["name"] for tool in _mcp(resources, access, "tools/list", {})["tools"])
+            submit = {"name": "submit", "arguments": {"sql": TASKS["bookshop_1"]["sol_sql"][0]}}
+            _mcp(resources, access, "tools/call", submit)
+            return "Submitted."
+
+        environment, client = _servers(
+            "a_interact", [agent_uses_mcp], max_turns=1, transports=("mcp",), expose_tools_over_mcp=True
+        )
+
+        with client.resources:
+            response = await environment.run_request(_request("bookshop_1"))
+
+        assert (response.result.reward, response.result.coins_spent) == (0.7, 3.0)
+        (access,) = AgentSeedSessionRequest.model_validate(client.agent_calls[0][1]).tool_accesses
+        assert (access.kind, str(access.connection.url)) == ("mcp", "http://bird_interact:8000/mcp")
+        assert len(listed) == 9
+        # The tools come from the MCP server; Codex refuses a request that also declares them.
+        opening = next(body for path, body in client.agent_calls if path.endswith("/v1/responses"))
+        assert opening["tools"] == []
+
+    async def test_mcp_without_exposure_on_the_resources_server_fails_at_seed_for_good(self) -> None:
+        environment, client = _servers("a_interact", [], max_turns=1, transports=("mcp",))
+
+        response = await environment.run_request(_request("bookshop_1"))
+
+        assert (response.failure.stage, response.failure.terminal) == ("seed", True)
+        assert "expose_tools_over_mcp" in response.failure.failure_reason
+        assert client.agent_calls == []
+
+    @pytest.mark.parametrize(
+        ("overrides", "message"),
+        [({"max_turns": 2}, "max_turns to 1"), ({"resources_tool_transports": []}, "resources_tool_transports")],
+    )
+    def test_a_interact_runs_in_one_turn_with_a_tool_transport(self, overrides: dict, message: str) -> None:
+        with pytest.raises(ValidationError, match=message):
             BirdInteractEnvironmentServerConfig(
-                name="environment",
-                host="environment",
-                port=8001,
-                entrypoint="app.py",
-                agent_server=AgentServerRef(type="responses_api_agents", name="agent"),
-                resources_server=ResourcesServerRef(type="resources_servers", name="bird_interact"),
-                mode="a_interact",
-                max_turns=2,
-                turn_timeout_seconds=30,
-                cleanup_timeout_seconds=5,
+                **{
+                    "name": "environment",
+                    "host": "environment",
+                    "port": 8001,
+                    "entrypoint": "app.py",
+                    "agent_server": AgentServerRef(type="responses_api_agents", name="agent"),
+                    "resources_server": ResourcesServerRef(type="resources_servers", name="bird_interact"),
+                    "mode": "a_interact",
+                    "max_turns": 1,
+                    "turn_timeout_seconds": 30,
+                    "cleanup_timeout_seconds": 5,
+                }
+                | overrides
             )
 
 

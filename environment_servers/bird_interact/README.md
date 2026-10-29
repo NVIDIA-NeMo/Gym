@@ -7,11 +7,14 @@ database sandbox, user simulator and grader; see `resources_servers/bird_interac
 | `mode` | Turns | Agent access | `next_user_turn` |
 |---|---|---|---|
 | `c_interact` | Up to `max_turns`. The agent must resume its session across turns. | None | A reply with a ```` ```sql ```` or ```` ```sqlite ```` block is a submission (`/c_interact/submit`); any other reply is a question (`/c_interact/ask`). The next user message is the simulator's answer, the debug prompt or the follow-up question. |
-| `a_interact` | One (`max_turns: 1`). | The Resources Server's tools under `/a_interact/` | `Stop("agent_finished")` |
+| `a_interact` | One (`max_turns: 1`). | The Resources Server's tools, over each transport in `resources_tool_transports`: `direct_http` (the default) or `mcp` | `Stop("agent_finished")` |
 
-The first turn's `responses_create_params` has the instructions and the user's ambiguous request. In c-Interact it also has the schema,
-the column meanings and the visible knowledge base. In a-Interact it has the nine tool definitions instead. It is
-built from the context in the Resources Server's seed reply.
+The first turn's `responses_create_params` has the instructions and the user's ambiguous request. In c-Interact it
+also has the schema, the column meanings and the visible knowledge base. In a-Interact over `direct_http` it has the
+nine function tools instead. Over `mcp` alone it declares none: the agent lists the tools from the Resources Server,
+and Codex refuses a request that declares tools. It is built from the context in the Resources Server's seed reply.
+
+`mcp` needs `expose_tools_over_mcp` on the Resources Server. Without it, every episode fails at seed.
 
 `finish_episode` calls the Resources Server's `/verify`. The result has the base fields (`reward`, `turns`,
 `stop_reason`, agent observations) and BIRD's (`phases`, `questions_asked`, `coins_spent`, `finished`).
