@@ -23,6 +23,35 @@ Stop reasons: `solved`, `failed` (the second attempt failed), `no_sql_submitted`
 budget, after a submission, or in phase 2), `agent_finished` (a-Interact), and the base class's `max_turns` and
 `interaction_timeout`.
 
+## Harnesses
+
+What each harness's Gym adapter accepts today, read from its session seed checks. These rows are not results from
+runs: no harness has run BIRD with a model yet.
+
+| Harness | c-Interact | a-Interact |
+|---|---|---|
+| `simple_agent` | Yes | Yes, over `direct_http` |
+| Codex, Pi, Hermes | No: the adapter has no multi-turn sessions | Yes, over `mcp`, in the harness's own sandbox |
+| Stirrup | No: no multi-turn sessions | Yes, over `direct_http`, in its own sandbox. `code_exec: false` leaves out its shell. |
+| OpenCode | Yes, in its own sandbox. `opencode_config.tools` turns off its built-in tools. | No: it refuses required tool grants |
+| Claude Code, Kilo, OpenClaw | No: no multi-turn sessions | No: they refuse required tool grants, MCP included |
+
+- **c-Interact needs multi-turn sessions.** With `max_turns` above 1, the seed asks the agent to resume its session
+  across turns, and an adapter without that support refuses the seed.
+- **Neither mode grants a sandbox.** BIRD's sandbox holds the database and the ground truth. A sandboxed harness
+  runs in its own sandbox, from the `sandbox_provider` in the agent's config, with its built-in tools such as a
+  shell. Those tools cannot reach the database, but BIRD-Interact has no such tools. Turn them off where the adapter
+  allows it, so scores stay comparable with the paper's.
+- **Over `mcp`, the harness calls the Resources Server from inside its sandbox**, so the Resources Server's address
+  must be reachable from there, as the model server's already must be. To run a-Interact on Codex or Pi, point
+  `agent_server` at the harness and set `resources_tool_transports: [mcp]`. `benchmarks/gdpval/codex.yaml` and
+  `benchmarks/gdpval/pi.yaml` show the agent settings, such as the version and the model's limits.
+
+The gaps are in the adapters, not in BIRD: multi-turn sessions in Codex, Pi, Hermes, Stirrup, Claude Code, Kilo and
+OpenClaw for c-Interact, and tool grants in Claude Code, Kilo, OpenClaw and OpenCode for a-Interact.
+
+## Configuration
+
 The configuration is in `resources_servers/bird_interact/configs/bird_interact.yaml`. It defines one Environment
 Server for each mode and routes the tasksets `bird_interact:c_interact_example` and
 `bird_interact:a_interact_example` to them.

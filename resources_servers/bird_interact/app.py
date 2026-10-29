@@ -502,6 +502,11 @@ class BirdInteractResourcesServer(SimpleResourcesServer):
             return await self._submit(session, body.sql)
 
     async def verify(self, request: Request, body: BirdInteractVerifyRequest) -> BirdInteractVerifyResponse:
+        """Grade the session from its state: the phases that each submission recorded.
+
+        The request's response is echoed back, not read: in c-Interact the SQL was graded turn by turn, and in
+        a-Interact through the ``submit`` tool.
+        """
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
         if session is None:
             return BirdInteractVerifyResponse(
