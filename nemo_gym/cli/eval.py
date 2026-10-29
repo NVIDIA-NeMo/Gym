@@ -950,9 +950,9 @@ def compare() -> None:  # pragma: no cover
 @exit_cleanly_on_config_error
 def compare_suite() -> None:
     """Compare baseline and candidate runs across a configured benchmark and model suite."""
-    from nemo_gym.comparison.suite_report import render_suite_summary, write_suite_reports
-    from nemo_gym.comparison.suite_runner import build_suite_comparison, invoked_command
-    from nemo_gym.comparison.suite_schema import SuiteComparisonConfig
+    from nemo_gym.comparison.suite.report import render_suite_summary, write_suite_reports
+    from nemo_gym.comparison.suite.runner import build_suite_comparison, invoked_command
+    from nemo_gym.comparison.suite.schema import SuiteComparisonConfig
 
     config_dict = get_global_config_dict()
     if not config_dict.get("suite_fpath"):

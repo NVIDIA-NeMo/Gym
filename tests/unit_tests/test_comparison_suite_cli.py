@@ -23,8 +23,8 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 
 import nemo_gym.cli.eval as cli_eval
 from nemo_gym.cli.main import build_parser, main
-from nemo_gym.comparison.suite_report import render_suite_markdown, render_suite_summary
-from nemo_gym.comparison.suite_schema import SuiteComparisonResult
+from nemo_gym.comparison.suite.report import render_suite_markdown, render_suite_summary
+from nemo_gym.comparison.suite.schema import SuiteComparisonResult
 
 
 def _saved_run(directory: Path, values: list[float]) -> str:

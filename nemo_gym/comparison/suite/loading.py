@@ -24,7 +24,7 @@ from pydantic import ValidationError
 
 from nemo_gym.comparison.loading import _read_agent_entries
 from nemo_gym.comparison.statistics.unpaired_welch_fixed_suite import MetricScale, normalize_score
-from nemo_gym.comparison.suite_schema import (
+from nemo_gym.comparison.suite.schema import (
     SuiteBenchmarkDefinition,
     SuiteManifest,
     SuiteMetricResult,
