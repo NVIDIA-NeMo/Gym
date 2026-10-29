@@ -5149,7 +5149,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         unknown = sorted(requested - available)
         if not unknown:
             return
-        from nemo_gym.cli.utils import listed_names
+        from nemo_gym.utils.text import listed_names
 
         instances_by_agent_type: Dict[str, List[str]] = defaultdict(list)
         for name in sorted(available):
@@ -6568,4 +6568,3 @@ def __getattr__(name: str) -> Any:
         return _moved_names(name)
     except AttributeError:
         return _moved_cli_entry_points(name)
-
