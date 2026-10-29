@@ -37,6 +37,7 @@ from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolv
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
@@ -372,7 +373,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             access.name for access in tool_accesses if isinstance(access, MCPToolAccess) and access.name in TOOLSETS
         ]
         if colliding:
-            raise ValueError("MCP tool grants collide with Hermes toolsets: " + ", ".join(sorted(colliding)))
+            raise AgentSeedRejectedError(
+                "MCP tool grants collide with Hermes toolsets: " + ", ".join(sorted(colliding))
+            )
         return await self._initialize_agent_session_state(body.agent_session_id, body)
 
     def _require_agent_session(self, agent_session_id: str) -> HermesSandboxSession:
@@ -488,7 +491,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         owns_sandbox = body.sandbox_access is None
         if owns_sandbox:
             if self.config.sandbox_provider is None:
-                raise ValueError(
+                raise AgentSeedRejectedError(
                     "Hermes requires sandbox_access or a configured sandbox_provider for an episode session"
                 )
             provider_ref = self.config.sandbox_provider
@@ -496,7 +499,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         else:
             connection = body.sandbox_access.connection
             if not isinstance(connection, DirectSandboxConnection):
-                raise ValueError("Hermes currently supports only direct sandbox connections")
+                raise AgentSeedRejectedError("Hermes currently supports only direct sandbox connections")
             provider_ref = connection.provider_config_ref
             workdir = body.sandbox_access.workdir
 

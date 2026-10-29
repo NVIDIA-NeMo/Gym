@@ -3,7 +3,6 @@
 
 import asyncio
 import json
-import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -13,40 +12,34 @@ from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym.server_utils import ServerClient
+from responses_api_agents.pi_agent.tests.test_sandbox import _pinned_pi_package
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
 def test_outcome_extension_uses_pinned_pi_context_classifier(tmp_path: Path) -> None:
-    node, pi = shutil.which("node"), shutil.which("pi")
-    if not node or not pi:
-        pytest.skip("Installed Pi and Node are required for the real extension-loader contract")
-    package = Path(pi).resolve().parents[1]
-    manifest = package / "package.json"
-    if not manifest.exists() or json.loads(manifest.read_text()).get("version") != "0.80.2":
-        pytest.skip("This integration targets pinned Pi 0.80.2")
+    node, package = _pinned_pi_package()
     loader = package / "dist/core/extensions/loader.js"
     extension = Path(__file__).parents[1] / "outcome.mjs"
     script = """
 import assert from 'node:assert/strict';
+// Pi's JSON mode points process.stdout.write, which console.log uses, at stderr before extensions load.
+process.stdout.write = (chunk) => process.stderr.write(chunk);
 const { loadExtensions } = await import(process.argv[1]);
 const loaded = await loadExtensions([process.argv[2]], process.argv[3]);
 assert.deepEqual(loaded.errors, []);
 const [handler] = loaded.extensions[0].handlers.get('message_end');
-const records = [];
-console.log = line => records.push(JSON.parse(line));
-for (const [errorMessage, expected] of [
-  ['400 maximum context length is 262144 tokens', true],
-  ['429 Too many requests: rate limit exceeded', false],
-  ['503 Service unavailable', false],
-  ['Connection error.', false],
-  ['401 Incorrect API key', false],
+for (const errorMessage of [
+  '400 maximum context length is 262144 tokens',
+  '429 Too many requests: rate limit exceeded',
+  '503 Service unavailable',
+  'Connection error.',
+  '401 Incorrect API key',
+  '400 status code (no body)',
+  '413 status code (no body)',
 ]) {
   await handler({message: {role: 'assistant', stopReason: 'error', errorMessage}}, {model: {contextWindow: 262144}});
-  assert.deepEqual(records.at(-1), {type: 'ng_pi_outcome', context_overflow: expected});
 }
-const count = records.length;
 await handler({message: {role: 'toolResult'}}, {});
-assert.equal(records.length, count);
 """
     result = subprocess.run(
         [node, "--input-type=module", "-e", script, loader.as_uri(), str(extension), str(tmp_path)],
@@ -56,6 +49,11 @@ assert.equal(records.length, count);
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+    # The events reach the real stdout, which the sandbox runner records; tool results add none.
+    assert [json.loads(line) for line in result.stdout.splitlines()] == [
+        {"type": "ng_pi_outcome", "context_overflow": overflow}
+        for overflow in (True, False, False, False, False, False, False)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -72,13 +70,7 @@ assert.equal(records.length, count);
 def test_pinned_pi_classifies_model_server_http_error(
     monkeypatch: pytest.MonkeyPatch, status: int, message: str, context_overflow: bool, delayed: bool
 ) -> None:
-    node, pi = shutil.which("node"), shutil.which("pi")
-    if not node or not pi:
-        pytest.skip("Installed Pi and Node are required for the real SDK contract")
-    package = Path(pi).resolve().parents[1]
-    manifest = package / "package.json"
-    if not manifest.exists() or json.loads(manifest.read_text()).get("version") != "0.80.2":
-        pytest.skip("This integration targets pinned Pi 0.80.2")
+    node, package = _pinned_pi_package()
     sdk = package / "node_modules/@earendil-works/pi-ai/dist"
     server = SimpleModelServer(
         config=SimpleModelServerConfig(

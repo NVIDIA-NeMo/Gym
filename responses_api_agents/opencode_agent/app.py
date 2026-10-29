@@ -37,7 +37,7 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -70,6 +70,7 @@ from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
+    ToolCallObservation,
     TrajectoryRecord,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
@@ -140,7 +141,6 @@ def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "OpenCode sandbox execution requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -155,16 +155,28 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
-    validate_paths = (
-        "from pathlib import Path; import sys; "
-        "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
-        "assert workdir.is_dir(), 'OpenCode task workdir is missing'; "
-        "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
-        "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
-    )
+    # Resolve symlinks like realpath -m: storage roots need not exist yet.
+    validate_paths = """resolve() {
+    if [ -e "$1" ]; then (cd -P "$1" && pwd -P); else
+        parent=${1%/*}
+        parent=$(resolve "${parent:-/}") && printf '%s/%s\\n' "${parent%/}" "${1##*/}"
+    fi
+}
+[ -d "$1" ] || { echo 'OpenCode task workdir is missing' >&2; exit 1; }
+workdir=$(resolve "$1")
+shift
+for root in "$@"; do
+    root=$(resolve "$root")
+    case "$root/" in "${workdir%/}"/*) overlap=1 ;; esac
+    case "$workdir/" in "${root%/}"/*) overlap=1 ;; esac
+done
+[ -z "${overlap-}" ] || { echo 'OpenCode runtime/session storage overlaps the task workdir' >&2; exit 1; }
+"""
     return (
-        bootstrap + f"python3 -I -c {quote(validate_paths)} {quote(workdir)} "
-        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
+        bootstrap
+        + f"set -- {quote(workdir)} {quote(str(PurePosixPath(directory).parent))} {quote(runtime)}\n"
+        + validate_paths
+        + f"mkdir -p {quote(directory)}"
     )
 
 
@@ -192,6 +204,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
+
+    # Optional verified, preinstalled runtime for sandboxes without download egress.
+    sandbox_path_prefix: list[str] = Field(default_factory=list)
+    sandbox_executable_path: str | None = None
+    sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # The native model ID affects OpenCode's model-family prompts and tools.
+    # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
+    sandbox_model_id: str = "dummy_model"
 
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
@@ -745,11 +765,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     f"{directory}/{installer}",
                     runtime,
                     self.config.opencode_version,
+                    self.config.sandbox_executable_path or "",
+                    self.config.sandbox_executable_sha256 or "",
+                    ":".join(self.config.sandbox_path_prefix),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/sandbox_runner.py")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
             await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
             if self._model_call_capture_enabled():
                 await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
@@ -1074,8 +1097,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         previous_session_id = state.harness_session_id
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
-            "model": "nemo_gym/dummy_model",
-            "small_model": "nemo_gym/dummy_model",
+            "model": "nemo_gym/" + self.config.sandbox_model_id,
+            "small_model": "nemo_gym/" + self.config.sandbox_model_id,
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
@@ -1088,7 +1111,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         "timeout": False,
                     },  # pragma: allowlist secret
                     "models": {
-                        "dummy_model": {
+                        self.config.sandbox_model_id: {
+                            **(
+                                {"reasoning": self.config.thinking}
+                                if self.config.sandbox_model_id != "dummy_model"
+                                else {}
+                            ),
                             "interleaved": {"field": "reasoning_content"},
                             "limit": {
                                 "context": self.config.context_window,
@@ -1114,13 +1142,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.extend(["--session", state.harness_session_id])
         payload = {
             "instructions": system,
-            "directory": state.session.session_dir,
+            "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
-            "harness_session_id": state.harness_session_id,
-            "previous_message_ids": state.message_ids,
-            "activation_id": state.activation_id,
             "env": {
                 "HOME": f"{state.persistent_directory}/home",
                 "XDG_DATA_HOME": f"{state.persistent_directory}/data",
@@ -1237,7 +1262,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     record.error_type = "provider_error"
                 elif error or failure:
                     record.error_type = "server_error"
+        cancelled = isinstance(failure, asyncio.CancelledError)
+        timed_out = result is not None and result["timed_out"]
+        if cancelled or timed_out:
+            # Gym stopped the process, so a tool OpenCode left running ended with that stop.
+            termination = "timeout" if timed_out else "cancelled"
+            for record in observations.records:
+                if isinstance(record, ToolCallObservation) and record.status == "incomplete":
+                    record.status = termination
+                    record.error_type = f"invocation_{termination}"
         if result is not None:
+            sandbox_outcome = (
+                "timeout" if timed_out else "cancelled" if cancelled else "failed" if error or failure else "completed"
+            )
             observations.records.append(
                 SandboxObservation(
                     role="agent",
@@ -1247,9 +1284,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         else state.request.sandbox_access.connection.provider_config_ref
                     ),
                     sandbox_id=state.sandbox_id,
-                    outcome="timeout" if result["timed_out"] else "failed" if error or failure else "completed",
+                    outcome=sandbox_outcome,
                     exit_code=result["return_code"],
-                    error_type="process_exit" if reported_error else None,
+                    # The same category the root invocation carries for the stop or failure.
+                    error_type="process_exit"
+                    if reported_error
+                    else {"cancelled": "cancelled", "failed": "server_error"}.get(sandbox_outcome),
                 )
             )
         observations.gaps.append(

@@ -7,23 +7,25 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from responses_api_agents.opencode_agent import sandbox_runner
+from responses_api_agents.opencode_agent.tests.test_sandbox_runner import stage
+
+
+PLUGIN = Path(__file__).parents[1] / "task_environment.mjs"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the OpenCode plugin")
 @pytest.mark.parametrize("custom_xdg", [False, True])
-def test_shell_environment_keeps_task_files_after_session_close(tmp_path: Path, custom_xdg: bool) -> None:
+async def test_shell_environment_keeps_task_files_after_session_close(tmp_path: Path, custom_xdg: bool) -> None:
     session = tmp_path / "session"
     session.mkdir()
     home = tmp_path / "task-home"
     home.mkdir()
     plugin = session / "task_environment.mjs"
-    shutil.copyfile(Path(sandbox_runner.__file__).with_name(plugin.name), plugin)
+    shutil.copyfile(PLUGIN, plugin)
     # Use a subprocess-local environment: no task directories come from the agent-server host.
     env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
     env["HOME"] = str(home)
@@ -49,22 +51,8 @@ execFileSync("/bin/sh", ["-c", 'mkdir -p "$XDG_CONFIG_HOME"; printf task > "$HOM
 console.log(JSON.stringify({cli: process.env.XDG_CONFIG_HOME, cliHome: process.env.HOME, tool: output.env}));
 """
     (session / "probe.mjs").write_text(script)
-    params = {
-        "directory": str(session),
-        "command": [shutil.which("node"), str(session / "probe.mjs")],
-        "cwd": str(session),
-        "env": cli_env,
-        "prompt": "",
-    }
-    input_path = session / "input.json"
-    input_path.write_text(json.dumps(params))
-    result = subprocess.run(
-        [sys.executable, "-I", sandbox_runner.__file__, str(input_path)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    argv = await stage(session, [shutil.which("node"), str(session / "probe.mjs")], env=cli_env)
+    result = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert (session / "task-environment.ready").read_text() == "ready\n"
     observed = json.loads((session / "stdout.jsonl").read_text())
@@ -84,7 +72,7 @@ console.log(JSON.stringify({cli: process.env.XDG_CONFIG_HOME, cliHome: process.e
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the OpenCode plugin")
 @pytest.mark.parametrize("failure", ["missing", "malformed", "missing_home", "relative_home", "invalid_xdg"])
 def test_invalid_task_environment_cannot_acknowledge_hook_initialization(tmp_path: Path, failure: str) -> None:
-    shutil.copyfile(Path(sandbox_runner.__file__).with_name("task_environment.mjs"), tmp_path / "task_environment.mjs")
+    shutil.copyfile(PLUGIN, tmp_path / "task_environment.mjs")
     env = {
         "HOME": "/task/home",
         "XDG_CONFIG_HOME": "/task/config",
@@ -116,29 +104,6 @@ def test_invalid_task_environment_cannot_acknowledge_hook_initialization(tmp_pat
     assert not (tmp_path / "task-environment.ready").exists()
 
 
-def test_runner_removes_stale_task_environment_receipt_before_launch(tmp_path: Path) -> None:
-    receipt = tmp_path / "task-environment.ready"
-    receipt.write_text("ready\n")
-    params = {
-        "directory": str(tmp_path),
-        "command": [sys.executable, "-c", "print('CLI continued without loading the hook')"],
-        "cwd": str(tmp_path),
-        "env": {},
-        "prompt": "",
-    }
-    input_path = tmp_path / "input.json"
-    input_path.write_text(json.dumps(params))
-    result = subprocess.run(
-        [sys.executable, "-I", sandbox_runner.__file__, str(input_path)],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "CLI continued" in (tmp_path / "stdout.jsonl").read_text()
-    assert not receipt.exists()
-
-
 @pytest.mark.parametrize("task_environment", ["valid", "missing", "malformed", "plugin_error"])
 def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, task_environment: str) -> None:
     configured_binary = os.environ.get("GYM_TEST_OPENCODE_BINARY")
@@ -150,7 +115,7 @@ def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, 
         pytest.skip("PATH OpenCode is not 1.17.11; set GYM_TEST_OPENCODE_BINARY to the pinned executable")
     assert version.returncode == 0 and version.stdout.strip() == "1.17.11"
     plugin = tmp_path / "task_environment.mjs"
-    shutil.copyfile(Path(sandbox_runner.__file__).with_name(plugin.name), plugin)
+    shutil.copyfile(PLUGIN, plugin)
     env = {
         **os.environ,
         "HOME": str(tmp_path / "home"),
@@ -191,3 +156,15 @@ def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, 
     else:
         assert "failed to load plugin" in result.stderr
         assert not receipt.exists()
+
+
+@pytest.mark.parametrize("home", ["/task/a\tb", "/task/new\nline", '/task/"quoted"\\back'])
+def test_recorded_task_directories_are_valid_json(tmp_path: Path, home: str) -> None:
+    from responses_api_agents.opencode_agent.sandbox import runner_setup
+
+    env = {"PATH": os.environ["PATH"], "HOME": home, "XDG_CONFIG_HOME": f"{home}\x01\x1fconfig"}
+    setup = runner_setup(str(tmp_path), [str(tmp_path / "private")])
+    result = subprocess.run(["bash", "-c", setup], env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    recorded = json.loads((tmp_path / "task-env.json").read_text())
+    assert recorded["HOME"] == home and recorded["XDG_CONFIG_HOME"] == f"{home}\x01\x1fconfig"

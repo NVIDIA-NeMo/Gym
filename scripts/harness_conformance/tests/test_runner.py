@@ -18,6 +18,7 @@ from scripts.harness_conformance.provider import Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.harness_capabilities.cli import json_rows
 from nemo_gym.observability.model_calls import build_model_call_record
 from nemo_gym.server_utils import ServerClient
@@ -56,7 +57,13 @@ def test_catalog_covers_p0_without_exposing_expectations():
 @pytest.mark.parametrize("use_agent_sessions", [False, True])
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
-    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
+    config = _config(
+        harness,
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+        use_agent_sessions=use_agent_sessions,
+    )
     from omegaconf import OmegaConf
 
     from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
@@ -76,9 +83,16 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         SingleAgentTurnEnvironmentServerConfig.model_validate(
             config["probe_environment"]["environment_servers"][environment_type]
         )
-        assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
         assert "resources_server" not in agent
-        assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
+        if harness == "simple":
+            assert "sandbox_provider" not in agent
+            assert "probe_sandbox" not in config
+            assert config["probe_environment"]["environment_servers"][environment_type][
+                "resources_tool_transports"
+            ] == ["direct_http"]
+        else:
+            assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
+            assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
         if harness == "codex":
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":
@@ -255,7 +269,12 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
 def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_name):
     from omegaconf import OmegaConf
 
-    config = _config("opencode", tmp_path, [10001, 10002, 10003, 10004], 12)
+    config = _config(
+        "opencode",
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+    )
     server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
     header = server_client.assistant_message_header("policy_model")
     assert header is not None
@@ -479,13 +498,32 @@ def retained_episode(tmp_path):
     return tmp_path, witness
 
 
-@pytest.mark.parametrize("mutation", [None, "missing_response", "completed", "missing_error", "lost_detail"])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "missing_response",
+        "completed",
+        "missing_error",
+        "lost_detail",
+        "missing_metadata",
+        "missing_outcome",
+        "malformed_outcome",
+        "unknown_kind",
+        "unregistered_kind",
+        "wrong_status",
+        "invalid_status",
+    ],
+)
 def test_terminal_model_error_must_be_reported_to_environment(retained_episode, mutation):
     directory, witness = retained_episode
     witness["attempts"] = [
         {"status_code": 400, "request": {}, "response": {"error": {"message": "controlled model failure"}}}
     ]
     response = {"status": "failed", "error": {"code": "server_error", "message": "HTTP 400: controlled model failure"}}
+    response["metadata"] = {
+        AGENT_OUTCOME_METADATA_KEY: json.dumps({"failure_kind": "model_request_error", "status_code": 400})
+    }
     witness["agent_responses"] = [response]
     if mutation == "missing_response":
         witness["agent_responses"] = []
@@ -495,6 +533,18 @@ def test_terminal_model_error_must_be_reported_to_environment(retained_episode, 
         response["error"] = None
     elif mutation == "lost_detail":
         response["error"]["message"] = "unknown failure"
+    elif mutation == "missing_metadata":
+        del response["metadata"]
+    elif mutation == "missing_outcome":
+        response["metadata"] = {}
+    elif mutation is not None:
+        response["metadata"][AGENT_OUTCOME_METADATA_KEY] = {
+            "malformed_outcome": "{",
+            "unknown_kind": json.dumps({"failure_kind": "unknown"}),
+            "unregistered_kind": json.dumps({"failure_kind": "invented"}),
+            "wrong_status": json.dumps({"failure_kind": "model_request_error", "status_code": 503}),
+            "invalid_status": json.dumps({"failure_kind": "model_request_error", "status_code": "400"}),
+        }[mutation]
     (directory / "witness.json").write_text(json.dumps(witness))
     result = inspect_episode(SCENARIO["model_error"], directory, {"returncode": 0, "timed_out": False})
     check = next(c for c in result["checks"] if c["id"] == "model.terminal_error")
@@ -822,3 +872,17 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+def test_missing_judge_reference_fails_p1_without_blocking_p0(retained_episode):
+    from dataclasses import replace
+
+    directory, _ = retained_episode
+    scenario = replace(SCENARIO["verifier_failure"], judge_verifier=True)
+    result = inspect_episode(scenario, directory, {"returncode": 0, "timed_out": False})
+    check = next(c for c in result["checks"] if c["id"] == "verifier.judge_reference")
+    assert check["tier"] == "P1"
+    assert check["status"] == "fail"
+    assert result["behavioral_status"] == "fail"
+    assert result["verdict"] == "fulfilled"
+    assert all(c["status"] in {"pass", "not_applicable"} for c in result["checks"] if c["tier"] == "P0")

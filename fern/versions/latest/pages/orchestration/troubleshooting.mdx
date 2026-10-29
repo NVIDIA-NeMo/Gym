@@ -106,19 +106,20 @@ Rename the colliding service. `X-prefill` and `X-decode` are reserved by a `vllm
 
 ## Collector (OpenTelemetry) errors
 
-The collector is on by default, so these appear first on a fresh config. See [Collector for Submitted Jobs](/observability/eval-submit-collector) for the details.
+The collector is on by default. Missing or empty auth disables remote export with a warning while retaining local dumps. See [Collector for Submitted Jobs](/observability/eval-submit-collector) for the details.
 
 ### Collector destination not set
 
 **Error:** `The OTel collector is enabled but otel.endpoint and otel.service_name is not set`
 
-Set them, or `otel: {enabled: false}`. Typically a cluster-wide config fragment supplies them.
+Set them for remote export, or use `otel: {remote_export: false}` to keep local dumps only. Typically a cluster-wide config fragment supplies the destination.
 
 ### Collector token not set
 
-**Error:** `The OTel collector is enabled but 'OTEL_TOKEN' is not set in the submitting shell's environment`
+**Warning:** `'OTEL_TOKEN' is missing or empty in the submitting shell; setting otel.remote_export=false.`
 
-Export the token under the name in `otel.token_env`, or disable the collector.
+Local dumps remain enabled. Export the token under the name in `otel.token_env` to enable remote export,
+or set `otel.remote_export: false` explicitly to request local-only collection without a warning.
 
 ### Gym telemetry needs an install
 
@@ -220,7 +221,7 @@ Yes: `--dry-run` prints every script, and `--resolve-only` prints the validated 
 
 ### Do I need the collector?
 
-It is on by default, but you can disable it with `otel.enabled: false`. A dry run or submit with it enabled requires its endpoint, service name, and token.
+It is on by default, but you can disable it with `otel.enabled: false`. Use `otel.remote_export: false` to retain local dumps without a backend. Missing or empty auth automatically disables remote export with a warning; when remote export is enabled, its endpoint and service name are required.
 
 ### Are my secrets stored on the cluster?
 
