@@ -396,11 +396,12 @@ def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(colle
         ("resources", "/ng-rollout//work/item-{index}", 404, "<unmatched>"),
         # The model server resolves the correlation prefix and answers a malformed one with 400.
         ("model", "/ng-rollout//work/item-{index}", 400, "<unmatched>"),
+        # A resources server strips the whole correlation prefix, the training tag included.
         (
             "resources",
             "/ng-rollout/task-{index}/training-token-capture/work/item-{index}",
             200,
-            "/training-token-capture/work/{item_id}",
+            "/work/{item_id}",
         ),
     ],
 )

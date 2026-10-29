@@ -14,7 +14,6 @@
 # limitations under the License.
 """The episode that the current request or task belongs to."""
 
-import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -22,7 +21,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from nemo_gym.core.correlation import validate_agent_instance
+from nemo_gym.core.correlation import ROLLOUT_ID_PATTERN, validate_agent_instance
 from nemo_gym.core.episode_types import EpisodeId
 
 
@@ -36,12 +35,6 @@ _VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifi
 _AGENT_INSTANCE: ContextVar[Optional[str]] = ContextVar("nemo_gym_agent_instance", default=None)
 # Within one environment server episode: each named agent instance's last activation response id.
 _AGENT_ACTIVATIONS: ContextVar[Optional[dict[str, str]]] = ContextVar("nemo_gym_agent_activations", default=None)
-
-# A capture id is a path segment in ``/ng-rollout/<id>/...``.
-# Restrict it to characters that survive a path round trip.
-# Exclude leading dots because stores also use the id as a filename component.
-# Middleware uses the same pattern.
-ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:

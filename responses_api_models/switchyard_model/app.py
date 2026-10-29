@@ -32,7 +32,6 @@ import hashlib
 import importlib.metadata
 import json
 import logging
-import re
 import tomllib
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, nullcontext
@@ -47,7 +46,6 @@ from nemo_gym.client import NeMoGymAsyncOpenAI, request
 from nemo_gym.config import (
     DISALLOWED_PORTS_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
-    ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_BLOCK,
     find_open_port,
     get_global_config_dict,
@@ -58,6 +56,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.core.correlation import CorrelationPathError, resolve
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
@@ -76,7 +75,6 @@ _ROLLOUT_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 # _validate_rollout_id check on the capture path. It matters more here than it does there: this id
 # leaves the process as an HTTP header value, so anything outside the contract's alphabet is
 # dropped rather than forwarded.
-_ROLLOUT_PATH_RE = re.compile(rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[A-Za-z0-9][A-Za-z0-9._-]*)/.*$")
 
 
 class _RolloutSessionMiddleware:
@@ -94,8 +92,12 @@ class _RolloutSessionMiddleware:
             await self._app(scope, receive, send)
             return
 
-        match = _ROLLOUT_PATH_RE.match(scope.get("path", ""))
-        token = _ROLLOUT_ID.set(match.group("rollout_id") if match else None)
+        try:
+            resolved = resolve(scope)
+        except CorrelationPathError:
+            # An id outside the contract's alphabet is dropped, never forwarded as a header value.
+            resolved = None
+        token = _ROLLOUT_ID.set(resolved[0].capture_key if resolved is not None else None)
         try:
             await self._app(scope, receive, send)
         finally:

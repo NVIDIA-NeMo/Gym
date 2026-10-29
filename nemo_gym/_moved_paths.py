@@ -494,6 +494,8 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         # rollout_correlation imported these and they stay importable through it.
         **_names("nemo_gym.core.episode_types", "0.8.0", "EpisodeId"),
         # rollout_correlation imported these and they stay importable through it.
+        **_names("nemo_gym.config.config_types", "0.8.0", "ROLLOUT_PATH_PREFIX"),
+        # rollout_correlation imported these and they stay importable through it.
         **_names("pydantic", "0.8.0", "BaseModel"),
         # Moved, and still imported by rollout_correlation for its own use.
         **_names("nemo_gym.core.episode_context", "0.8.0", "ROLLOUT_ID_PATTERN rollout_context"),
@@ -747,6 +749,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     # Staging's public API serves only staging's own modules, so token capture's public API serves the resolver.
     "nemo_gym.token_id_capture.staging": {
         **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
+    },
+    "nemo_gym._checkpoint.model": {
+        # _checkpoint.model imported this and it stays importable through it.
+        **_names("nemo_gym.config.config_types", "0.8.0", "ROLLOUT_PATH_PREFIX"),
     },
     "nemo_gym._checkpoint.agent": {
         # _checkpoint.agent imported this and it stays importable through it.

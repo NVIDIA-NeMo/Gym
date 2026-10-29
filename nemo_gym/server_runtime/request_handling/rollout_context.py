@@ -17,15 +17,11 @@
 Tracking the current episode lives in `nemo_gym.core.episode_context`.
 """
 
-import re
 from typing import Any
 
 from nemo_gym._moved_paths import moved_names_getattr
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.core.episode_context import (
-    ROLLOUT_ID_PATTERN,
-    rollout_context,
-)
+from nemo_gym.core.correlation import CorrelationPathError, resolve
+from nemo_gym.core.episode_context import rollout_context
 
 
 ROUTED_PATH_STATE_KEY = "nemo_gym.routed_path"
@@ -43,24 +39,22 @@ class RolloutContextMiddleware:
     # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
     skipped_on_direct_mcp_dispatch = True
 
-    # Match the same id characters as ``ROLLOUT_ID_PATTERN``.
-    # Anchor the id between the prefix and the remaining path.
-    _PREFIX = re.compile(
-        rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>{ROLLOUT_ID_PATTERN.pattern.strip('^$')})(?P<rest>/.*)$"
-    )
-
     def __init__(self, app: Any) -> None:
         self._app = app
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        match = self._PREFIX.match(scope.get("path", "")) if scope.get("type") == "http" else None
-        if match is None:
+        try:
+            resolved = resolve(scope) if scope.get("type") == "http" else None
+        except CorrelationPathError:
+            # The outermost middleware answers a malformed prefix; route the path unchanged.
+            resolved = None
+        if resolved is None or resolved[0].capture_key is None:
             await self._app(scope, receive, send)
             return
 
-        path = match.group("rest")
+        context, path = resolved
         scope = scope_with_routed_path(scope, path)
-        with rollout_context(match.group("rollout_id")):
+        with rollout_context(context.capture_key):
             await self._app(scope, receive, send)
 
 
