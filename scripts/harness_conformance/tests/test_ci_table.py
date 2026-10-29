@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 import pytest
-from scripts.harness_conformance import ci_table
+from scripts.harness_conformance import ci_table, rendering
 
 
 COMMIT = "a" * 40
@@ -123,6 +123,34 @@ def test_ci_renderer_does_not_import_probe_runtime_modules():
         ],
         check=True,
     )
+
+
+def test_ci_table_shows_p1_failure_separately_from_p0(ci_evidence):
+    artifacts, _, _, output = ci_evidence
+    path = artifacts / "hermes" / "probes" / "conformance_summary.json"
+    summary = json.loads(path.read_text())
+    row = summary["harnesses"]["hermes"]
+    row["scenarios"][-1]["verdict"] = "not_fulfilled"
+    row["scenarios"][-1]["checks"][0]["status"] = "fail"
+    row["tier_verdicts"] = {"P0": "fulfilled", "P1": "not_fulfilled"}
+    path.write_text(json.dumps(summary))
+    ci_table.render_ci(artifacts=artifacts, commit=COMMIT, output=output, run_url="https://example.com/run")
+    count = len(ci_table.SCENARIOS)
+    assert f"`hermes` | Passed | {count - 1}/{count} | Failed" in output.read_text()
+
+
+@pytest.mark.parametrize("tiers", [{"P1": "invalid"}, None, [], {"P3": "fulfilled"}])
+def test_invalid_tier_metadata_is_isolated_before_rendering(ci_evidence, tiers):
+    artifacts, probes, summary, output = ci_evidence
+    summary["harnesses"]["pi"]["tier_verdicts"] = tiers
+    (probes / "conformance_summary.json").write_text(json.dumps(summary))
+    ci_table.render_ci(artifacts=artifacts, commit=COMMIT, output=output, run_url="https://example.com/run")
+    text = output.read_text()
+    assert "`pi` | Unavailable | — | Not measured" in text
+    count = len(ci_table.SCENARIOS)
+    assert f"`hermes` | Passed | {count}/{count} | Not measured" in text
+    with pytest.raises(ValueError, match="invalid tier verdicts"):
+        rendering.render_table({"gym_commit": COMMIT, "harnesses": summary["harnesses"]})
 
 
 def test_ci_command_downloads_its_own_attempt_and_has_unambiguous_output(tmp_path, monkeypatch):
