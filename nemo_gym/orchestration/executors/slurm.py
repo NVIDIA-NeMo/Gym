@@ -40,13 +40,14 @@ from nemo_gym.orchestration.executors.otel import (
     validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script, planned_log_sources
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
     LOGS_DIRNAME,
     RESOLVED_CONFIG_NAME,
     ROLLOUTS_FILENAME,
     BenchmarkJob,
+    LogSource,
     SubmissionRecord,
     installed_gym_commit,
     new_gym_job_id,
@@ -226,7 +227,16 @@ class SlurmExecutor(BaseExecutor):
                     + token_export
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
-                record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
+                record = self._build_record(
+                    cluster,
+                    compute,
+                    gym_job_id,
+                    now,
+                    remote_run_dir,
+                    benchmark_names,
+                    output,
+                    planned_log_sources(config, compute),
+                )
                 # Inside the connection, because that is the transport persist()
                 # needs and reopening one would cost a second connection per
                 # submit. Ordering and failure handling live in the base class.
@@ -314,6 +324,7 @@ class SlurmExecutor(BaseExecutor):
         remote_run_dir: Path,
         benchmark_names: list[str],
         output: str,
+        log_sources: list[LogSource],
     ) -> SubmissionRecord:
         results = _parse_sbatch_results(output)
         benchmarks = []
@@ -328,6 +339,7 @@ class SlurmExecutor(BaseExecutor):
                     job_dir=str(remote_run_dir / name),
                     job_id=job_id,
                     error=error,
+                    log_sources=log_sources,
                 )
             )
         return SubmissionRecord(
