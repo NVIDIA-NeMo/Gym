@@ -121,10 +121,17 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
         ],
     )
     main()
-    result = SuiteComparisonResult.model_validate_json((output / "suite_compare_report.json").read_bytes())
+    report_bytes = (output / "suite_compare_report.json").read_bytes()
+    result = SuiteComparisonResult.model_validate_json(report_bytes)
     assert result.overall.statistics.delta == pytest.approx(15)
     assert result.overall.statistics.baseline_mean == pytest.approx(50)
     assert result.overall.statistics.candidate_mean == pytest.approx(65)
+    payload = json.loads(report_bytes)
+    for comparison in [*payload["per_model"], payload["overall"], *payload["cells"]]:
+        statistics = comparison["statistics"]
+        assert statistics["delta"] == pytest.approx(statistics["candidate_mean"] - statistics["baseline_mean"])
+        assert "gap" not in statistics
+        assert all(key.isascii() for key in statistics)
     assert result.confidence_level == 0.9
     assert result.overall.weights == [0.5, 0.5]
     assert result.command.startswith("gym eval compare-suite ")
@@ -134,13 +141,17 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     markdown = (output / "suite_compare_report.md").read_text()
     assert markdown.startswith("# gym eval compare-suite\n")
     assert "sk-suite-example" not in markdown
-    assert "| model-a | 2 | 50.0000 | 65.0000 | 15.0000 |" in markdown
-    assert "90% CI for gap" in markdown
-    assert "95% CI for gap" not in markdown
+    assert "| Aggregate | Cells | Candidate | Baseline | Delta | 90% CI for delta |" in markdown
+    assert "| model-a | 2 | 65.0000 | 50.0000 | 15.0000 |" in markdown
+    assert "| Model | Benchmark | Status | Candidate repeats | Baseline repeats | Delta |" in markdown
+    assert "| model-a | first | included | 4 | 3 | 20.0000 |" in markdown
+    assert "Delta = candidate − baseline; positive deltas favor the candidate." in markdown
+    assert "gap" not in markdown.lower()
+    assert "95% CI for delta" not in markdown
     assert "Planned coverage is unverified" in markdown
     assert existing.read_text() == "existing run report"
     stdout = capsys.readouterr().out
-    assert "model-a: baseline=50.0000 candidate=65.0000 delta=15.0000" in stdout
+    assert "model-a: candidate=65.0000 baseline=50.0000 delta=15.0000" in stdout
 
 
 def test_adjustable_confidence_and_json_only_output(suite_path: Path, monkeypatch) -> None:
@@ -165,7 +176,7 @@ def test_adjustable_confidence_and_json_only_output(suite_path: Path, monkeypatc
     result = SuiteComparisonResult.model_validate_json((output / "suite_compare_report.json").read_bytes())
     assert result.confidence_level == 0.955
     assert result.overall.statistics.confidence_level == 0.955
-    assert "95.5% CI for gap" in render_suite_markdown(result)
+    assert "95.5% CI for delta" in render_suite_markdown(result)
     assert "95.5% confidence" in render_suite_summary(result)
     assert not (output / "suite_compare_report.md").exists()
     assert result.overall.statistics.ci_low < result.overall.statistics.delta < result.overall.statistics.ci_high

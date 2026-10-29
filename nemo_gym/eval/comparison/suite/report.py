@@ -39,15 +39,18 @@ def _interval(statistics: SuiteStatistics | None) -> str:
 
 def render_suite_summary(result: SuiteComparisonResult) -> str:
     """Render per-model and overall results for the terminal."""
-    lines = [f"Benchmark suite comparison ({100 * result.confidence_level:g}% confidence; normalized score points)"]
+    lines = [
+        f"Benchmark suite comparison ({100 * result.confidence_level:g}% confidence; normalized score points)",
+        "Delta = candidate - baseline; positive deltas favor the candidate.",
+    ]
     for aggregate in [*result.per_model, result.overall]:
         statistics = aggregate.statistics
         if statistics is None:
             lines.append(f"{aggregate.name}: no eligible benchmark comparisons")
             continue
         lines.append(
-            f"{aggregate.name}: baseline={_number(statistics.baseline_mean)} "
-            f"candidate={_number(statistics.candidate_mean)} delta={_number(statistics.delta)} "
+            f"{aggregate.name}: candidate={_number(statistics.candidate_mean)} "
+            f"baseline={_number(statistics.baseline_mean)} delta={_number(statistics.delta)} "
             f"CI={_interval(statistics)} SE={_number(statistics.standard_error)} "
             f"df={_number(statistics.degrees_of_freedom)}"
         )
@@ -67,11 +70,11 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
         "",
         f"Suite: `{_text(result.suite_fpath)}`",
         "",
-        "Scores use a 0–100 scale; positive candidate-minus-baseline gaps favor the candidate.",
+        "Scores use a 0–100 scale. Delta = candidate − baseline; positive deltas favor the candidate.",
         "",
         "## Aggregate results",
         "",
-        f"| Aggregate | Cells | Baseline | Candidate | Gap | {confidence} CI for gap | SE | Effective df |",
+        f"| Aggregate | Cells | Candidate | Baseline | Delta | {confidence} CI for delta | SE | Effective df |",
         "| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |",
     ]
     for aggregate in [*result.per_model, result.overall]:
@@ -80,8 +83,8 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
             lines.append(f"| {_text(aggregate.name)} | 0 | — | — | — | unavailable | — | — |")
             continue
         lines.append(
-            f"| {_text(aggregate.name)} | {len(aggregate.cell_ids)} | {_number(statistics.baseline_mean)} "
-            f"| {_number(statistics.candidate_mean)} | {_number(statistics.delta)} | {_interval(statistics)} "
+            f"| {_text(aggregate.name)} | {len(aggregate.cell_ids)} | {_number(statistics.candidate_mean)} "
+            f"| {_number(statistics.baseline_mean)} | {_number(statistics.delta)} | {_interval(statistics)} "
             f"| {_number(statistics.standard_error)} | {_number(statistics.degrees_of_freedom)} |"
         )
     lines.extend(
@@ -89,7 +92,7 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
             "",
             "## Requested and effective suite",
             "",
-            f"| Model | Benchmark | Status | Baseline repeats | Candidate repeats | Gap | {confidence} CI for gap | Model weight | Overall weight |",
+            f"| Model | Benchmark | Status | Candidate repeats | Baseline repeats | Delta | {confidence} CI for delta | Model weight | Overall weight |",
             "| --- | --- | --- | ---: | ---: | ---: | --- | ---: | ---: |",
         ]
     )
@@ -97,7 +100,7 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
         status = "included" if cell.eligible else f"excluded: {cell.exclusion_reason}"
         lines.append(
             f"| {_text(cell.model)} | {_text(cell.benchmark)} | {_text(status)} "
-            f"| {cell.baseline.repeat_count} | {cell.candidate.repeat_count} "
+            f"| {cell.candidate.repeat_count} | {cell.baseline.repeat_count} "
             f"| {_number(cell.statistics.delta if cell.statistics else None)} | {_interval(cell.statistics)} "
             f"| {cell.model_weight:.4f} | {cell.overall_weight:.4f} |"
         )
@@ -123,7 +126,7 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
     for cell in result.cells:
         lines.append(f"### {_text(cell.model)} / {_text(cell.benchmark)}")
         lines.append("")
-        for role, run in (("Baseline", cell.baseline), ("Candidate", cell.candidate)):
+        for role, run in (("Candidate", cell.candidate), ("Baseline", cell.baseline)):
             lines.append(f"- {role}: `{_text(run.aggregate_metrics)}`; agent `{_text(run.agent)}`.")
             lines.append(
                 f"  Coverage: {run.coverage.status}; recorded tasks: {run.coverage.recorded_task_count}; "
