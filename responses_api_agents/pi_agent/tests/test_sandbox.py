@@ -2025,7 +2025,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
         from nemo_gym.observability.model_calls import ModelCallRecord
-        from nemo_gym.rollout_observability import join_model_call_observations
+        from nemo_gym.rollout_observability import join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"
@@ -2034,7 +2034,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
             ModelCallRecord(model_call_id=f"attempt-{i}", client_session_id=root.invocation_id, call_index=i)
             for i in range(2)
         ]
-        joined = join_model_call_observations(close.agent_observations, captured)
+        joined = join_agent_model_calls(close.agent_observations, captured)
         assert [ref.model_call_id for ref in joined.records[0].model_calls] == ["attempt-0", "attempt-1"]
         assert all(ref.response_id is None for ref in joined.records[0].model_calls)
         assert "model_call_ownership_unavailable" not in [gap.code for gap in joined.gaps]

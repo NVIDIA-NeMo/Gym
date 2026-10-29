@@ -305,11 +305,16 @@ class TestGroup:
             assert image_check["ran_as"] == "app" and image_check["cwd"] == "/app"
             assert not [r for r in main_sandbox.execs if r["command"] == "test -f ready"]
             # The seed's side, on the group's main: the task workdir is prepared for the agent (made and handed to
-            # app), as in a single sandbox, while main keeps the WORKDIR as its own directory.
-            prepared = await server._prepare_workdir(compose.services["main"], task, task.workdir)
+            # app), as in a single sandbox, while main keeps the WORKDIR as its own directory, and the task
+            # healthcheck runs in the prepared directory, named explicitly, as the image's user.
+            main_service = compose.services["main"]
+            prepared = await server._prepare_workdir(main_service, task, task.workdir)
             assert prepared == "/other" and main_sandbox.dirs["/other"] == "app"
             await compose.services["main"].exec("pwd")
             assert main_sandbox.execs[-1]["cwd"] == "/app"
+            await server._wait_healthy(main_service, task, user="app", workdir=prepared, compose_managed=True)
+            (task_check,) = [r for r in main_sandbox.execs if r["command"] == "test -f ready"]
+            assert task_check["ran_as"] == "app" and task_check["cwd"] == "/other"
         finally:
             await compose.stop()
 

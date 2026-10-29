@@ -1483,6 +1483,9 @@ class TestVerify:
         # After the roots exist as directories (a linked /logs/agent was unlinked and remade just before), and
         # before the wipe of the verifier's folders; nothing else under /logs/agent is deleted.
         assert steps[clear - 1] == "mkdir -p /tests /logs/verifier /logs/agent"
+        # The whole of /logs/verifier goes with /tests before test.sh (round 38 review, P1): keeping everything but
+        # the grader's four names kept an agent-planted test report too. A sidecar's input survives only when the
+        # task declares it (`[verifier].inputs`; `test_prepare_keeps_only_the_declared_sidecar_inputs`).
         assert steps[clear + 1] == "find /tests /logs/verifier -mindepth 1 -delete"
         assert not any("/logs/agent" in step and "delete" in step for step in steps)
         trajectory_upload = next(i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent" in c)
@@ -1496,9 +1499,11 @@ class TestVerify:
         root = tmp_path / "fs"
         agent_logs = root / "logs" / "agent"
         agent_logs.mkdir(parents=True)
-        for folder in ("tests", "logs/verifier"):
-            (root / folder).mkdir(parents=True)
-            (root / folder / "stale").write_text("old")
+        (root / "tests").mkdir(parents=True)
+        (root / "tests" / "stale").write_text("old")
+        (root / "logs" / "verifier").mkdir(parents=True)
+        (root / "logs" / "verifier" / "reward.json").write_text('{"reward": 1}')
+        (root / "logs" / "verifier" / "actions.jsonl").write_text("{}\n")  # an undeclared sidecar input: removed
         (agent_logs / "agent.log").write_text("kept")
         if planted == "dangling_symlink":
             (agent_logs / "trajectory.json").symlink_to(root / "nowhere")
@@ -1511,7 +1516,46 @@ class TestVerify:
         planted_path = agent_logs / "trajectory.json"
         assert not planted_path.exists() and not planted_path.is_symlink()
         assert (agent_logs / "agent.log").read_text() == "kept"
-        assert list((root / "tests").iterdir()) == [] and list((root / "logs" / "verifier").iterdir()) == []
+        assert list((root / "tests").iterdir()) == []
+        assert list((root / "logs" / "verifier").iterdir()) == []
+
+    @pytest.mark.parametrize("planted_as", ["directory", "symlink"])
+    async def test_prepare_keeps_only_the_declared_sidecar_inputs(self, tmp_path, monkeypatch, planted_as):
+        """Round 38 review (P1): the prepare line empties /logs/verifier except the task's declared sidecar inputs
+        (`[verifier].inputs`, from dataset.toml), each kept as a regular file at that name alone, run by a real shell
+        against a temporary root. An agent-planted all-pass results.xml, a reward.json and a subfolder go; a planted
+        directory or link under a declared name goes too."""
+        (tmp_path / "datasets" / "ds").mkdir(parents=True)
+        (tmp_path / "datasets" / "ds" / "dataset.toml").write_text(
+            '[gym.tasks."hello".verifier]\ninputs = ["actions.jsonl", "planner.log"]\n'
+        )
+        _, task, sandbox, response = await self.verified(tmp_path, monkeypatch)
+        assert task.config.verifier.inputs == ["actions.jsonl", "planner.log"] and response.result.reward == 1.0
+        prepare = next(call["command"] for call in sandbox.execs if "-mindepth 1 -delete" in call["command"])
+        assert "find /logs/verifier -mindepth 1 ! \\( \\( -path /logs/verifier/actions.jsonl -o " in prepare
+        assert "-path /logs/verifier/planner.log \\) -type f \\) -delete" in prepare
+        root = tmp_path / "fs"
+        verifier_dir = root / "logs" / "verifier"
+        verifier_dir.mkdir(parents=True)
+        (root / "logs" / "agent").mkdir()
+        (root / "tests").mkdir()
+        (verifier_dir / "actions.jsonl").write_text('{"action": "click"}\n')
+        (verifier_dir / "results.xml").write_text('<testsuite failures="0"/>')
+        (verifier_dir / "reward.json").write_text('{"reward": 1}')
+        (verifier_dir / "sub").mkdir()
+        (verifier_dir / "sub" / "actions.jsonl").write_text("nested, not a top-level input")
+        if planted_as == "directory":
+            (verifier_dir / "planner.log").mkdir()
+            (verifier_dir / "planner.log" / "x").write_text("x")
+        else:
+            (verifier_dir / "planner.log").symlink_to(root / "tests")
+        command = prepare.replace("/tests", str(root / "tests")).replace("/logs", str(root / "logs"))
+
+        subprocess.run(["sh", "-c", command], check=True)
+
+        assert [path.name for path in verifier_dir.iterdir()] == ["actions.jsonl"]
+        assert (verifier_dir / "actions.jsonl").read_text() == '{"action": "click"}\n'
+        assert not (verifier_dir / "planner.log").is_symlink() and (root / "tests").is_dir()
 
     async def test_prepare_runs_as_root_on_a_non_root_image(self, tmp_path, monkeypatch):
         class NonRootSandbox(FakeSandbox):
@@ -1794,7 +1838,15 @@ class TestSeparateVerification:
         # diagnostics and the archives are gone once restored.
         assert agent.archives["/logs/artifacts"] in verifier.uploaded_archives
         assert agent.archives["/app/output"] in verifier.uploaded_archives
-        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01"]
+        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01", "manifest.json"]
+        # The pass is recorded as Harbor's artifact handler records its own: every declared entry, in staging order.
+        manifest = json.loads((artifacts / "manifest.json").read_text())
+        assert [(e["index"], e["source"], e["origin"], e["status"], e["type"]) for e in manifest] == [
+            (0, "/logs/artifacts", "convention", "ok", "directory"),
+            (1, "/app/output/report.json", "task", "ok", "file"),
+            (2, "/var/log/api", "task", "skipped", None),
+        ]
+        assert manifest[1]["destination"] == "artifacts/01/app/output/report.json" and manifest[2]["service"] == "api"
         # A restored directory replaces what the image ships there and is world-writable, as Harbor leaves
         # it, so a verifier that drops privileges can still write scratch files next to the agent's output.
         assert any(
@@ -3882,9 +3934,11 @@ def test_server_config_holds_only_deployment_settings():
         "secrets",
         "enforce_task_timeouts",
         "harness_setup_allowance_s",
+        "step_setup_timeout_s",
         "image_pull_retries",
         "separate_verifier_for_artifacts",
         "task_mcp_grants",
+        "turn_sessions",
         "compose_variables",
         "compose_overlay",
     }

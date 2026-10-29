@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import ClientResponseError
 
 from environment_servers.swe_together import app, evaluation
 from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnvironmentServer, memory_mib
@@ -124,6 +125,29 @@ async def test_simulator_one_call_even_on_noop_text(tmp_path):
     result = await server(tmp_path)._next_user_turn(value, activation())
     assert result.synthetic and result.responses_create_params.input[0].content == "continue"
     assert llm.call.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_simulator_turn_artifact_keeps_upstream_status(tmp_path):
+    value, llm = state(tmp_path, [])
+    upstream = ClientResponseError(
+        SimpleNamespace(real_url="https://model.example/v1/chat/completions"),
+        (),
+        status=408,
+        message="gateway timeout",
+    )
+    upstream.response_content = b"provider request timed out"
+
+    llm.call.side_effect = upstream
+    with pytest.raises(RuntimeError, match="User simulator request failed"):
+        await server(tmp_path)._next_user_turn(value, activation())
+
+    artifact = json.loads((tmp_path / "turn-0-simulator.json").read_text())
+    detail = artifact["error_detail"]
+    assert detail["message"] == "User simulator request failed"
+    assert detail["cause"].startswith("ClientResponseError: 408")
+    assert detail["status_code"] == 408
+    assert detail["body"] == "provider request timed out"
 
 
 @pytest.mark.asyncio
@@ -342,6 +366,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
             "reward": 1,
             "judge_score": 1,
             "task_id": "task",
+            "evaluation_completed": True,
         }
 
     async def post(name, path, *, json, cookies, headers=None, _control=False):
@@ -462,6 +487,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
             "reward": 0,
             "judge_score": 0,
             "task_id": "task",
+            "evaluation_completed": True,
         }
 
     async def post(name, path, *, json, cookies, **kwargs):
@@ -536,3 +562,20 @@ async def test_setup_failures_preserve_retry_classification_and_evidence(tmp_pat
     assert result.failure.dependency_error["message"] == str(error)
     saved = json.loads((tmp_path / "one" / "failure.json").read_text())
     assert saved["failure_reason"].endswith(str(error))
+
+
+async def test_wrapped_simulator_failure_keeps_upstream_status_in_failure(tmp_path, monkeypatch):
+    from aiohttp import ClientResponseError
+
+    url = "http://127.0.0.1:1/ng-rollout/one/v1/chat/completions"
+    request_info = SimpleNamespace(url=url, real_url=url, method="POST", headers={})
+    upstream = ClientResponseError(request_info=request_info, history=(), status=408, message="Request Timeout")
+    upstream.response_content = b'{"error":{"message":"litellm.Timeout: Timeout passed=360.0"}}'
+    error = RuntimeError("User simulator request failed")
+    error.__cause__ = upstream
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", AsyncMock(side_effect=error))
+    result = await server(tmp_path).run_request(request())
+    saved = json.loads((tmp_path / "one" / "failure.json").read_text())["dependency_error"]
+    assert saved == result.failure.dependency_error
+    assert saved["status_code"] == 408 and "Timeout passed=360.0" in saved["body"]
+    assert saved["cause"].startswith("ClientResponseError: 408")

@@ -94,7 +94,9 @@ from nemo_gym.global_config import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
     ROUTED_PATH_STATE_KEY,
+    VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
+    current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
     rollout_context,
     scope_with_routed_path,
@@ -1070,6 +1072,12 @@ class ServerClient(BaseModel):
             and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
+            verifier_invocation_id = current_verifier_invocation_id()
+            if verifier_invocation_id is not None:
+                kwargs["headers"] = {
+                    **(kwargs.get("headers") or {}),
+                    VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
+                }
 
         return await request(
             method=method,
