@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import orjson
 import pytest
-from fastapi import Body, FastAPI, Response
+from fastapi import Body, FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
@@ -968,17 +968,16 @@ def test_capture_records_non_json_response_as_none(tmp_path):
 
 # --- base-agent correlation helpers ---
 def test_leading_rollout_prefix_round_trips_with_server_parser():
-    from nemo_gym.base_responses_api_model import _ROLLOUT_PATH_RE
+    from nemo_gym.correlation import parse_path
 
     assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1"
     assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/"
     assert rollout_path_prefix(None) == ""
 
     client_path = f"{rollout_path_prefix('task-7')}/v1/chat/completions"
-    match = _ROLLOUT_PATH_RE.match(client_path)
-    assert match is not None
-    assert match.group("rollout_id") == "task-7"
-    assert match.group("rest") == "/v1/chat/completions"
+    context, rest = parse_path(client_path)
+    assert context.capture_key == "task-7"
+    assert rest == "/v1/chat/completions"
 
 
 def test_base_agent_resolve_model_base_url(monkeypatch):
@@ -1407,6 +1406,71 @@ def test_rollout_prefix_stripped_when_capture_disabled():
     client = TestClient(app)
     assert client.post("/v1/chat/completions", json={}).status_code == 200
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
+
+
+_TRACEPARENT = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+
+def test_a_named_prefix_with_a_trace_segment_routes_through_both_middlewares():
+    from nemo_gym.rollout_correlation import current_rollout_id
+    from nemo_gym.server_utils import install_trace_context_path
+
+    app = FastAPI()
+    seen = {}
+
+    @app.post("/v1/chat/completions")
+    async def _cc(request: Request) -> dict:
+        seen["rollout_id"] = current_rollout_id()
+        seen["traceparent"] = request.headers.get("traceparent")
+        return {"ok": True}
+
+    install_model_call_capture(app, ModelCallCaptureConfig())
+    install_trace_context_path(app)
+    path = (
+        f"/ng-rollout/3-0/ng-agent-instance/judge.2/training-token-capture/ng-trace/{_TRACEPARENT}/v1/chat/completions"
+    )
+
+    assert TestClient(app).post(path, json={}).status_code == 200
+    assert seen == {"rollout_id": "3-0", "traceparent": _TRACEPARENT}
+
+
+@pytest.mark.parametrize("with_trace_middleware", [False, True])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ng-rollout/3-0/training-token-capture/ng-agent-instance/judge/v1/chat/completions",
+        "/ng-rollout/3-0/ng-agent-instance/Judge/v1/chat/completions",
+    ],
+)
+def test_a_malformed_prefix_is_refused_with_400(path, with_trace_middleware):
+    from nemo_gym.server_utils import install_trace_context_path
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def _cc() -> dict:
+        return {"ok": True}
+
+    install_model_call_capture(app, ModelCallCaptureConfig())
+    if with_trace_middleware:
+        install_trace_context_path(app)
+    response = TestClient(app).post(path, json={})
+
+    assert response.status_code == 400
+    assert path in response.json()["detail"]
+
+
+def test_a_redirect_keeps_a_named_capture_prefix():
+    from nemo_gym.base_responses_api_model import _preserve_capture_prefix_on_redirect
+
+    prefix = "/ng-rollout/3-0/ng-agent-instance/user/training-token-capture"
+    message = {"type": "http.response.start", "status": 307, "headers": [(b"location", b"/v1/responses/")]}
+
+    redirected = _preserve_capture_prefix_on_redirect(
+        message, capture_prefix=prefix, request_headers=[(b"host", b"testserver")]
+    )
+
+    assert dict(redirected["headers"])[b"location"] == f"{prefix}/v1/responses/".encode()
 
 
 def test_capture_store_concurrent_append_no_loss(tmp_path):
