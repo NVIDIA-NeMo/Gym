@@ -11,7 +11,7 @@ import pytest
 
 from nemo_gym.agent_utils import supervisor_client
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession, shell_assignments
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxOOMKilledError
 
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
@@ -286,6 +286,52 @@ async def test_transport_failure_preserves_partial_output_and_original_error(ses
     assert session.artifacts == "transcript"
     await session.close(timeout=1)
     assert session.closed
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_confirmed_oom_during_supervised_execution_releases_dead_sandbox(session, receipt_reader, owned):
+    session.owns_sandbox = owned
+    error = SandboxOOMKilledError("OpenSandbox reason='OOMKilled'; sandbox_id='task-5'")
+    session.sandbox.exec.side_effect = error
+    collector = AsyncMock()
+
+    with pytest.raises(SandboxOOMKilledError) as caught:
+        await execute(session, collect=collector)
+
+    assert caught.value is error
+    assert session.execution_oom is error
+    assert session.cleanup is None
+    assert isinstance(session.capture_error, RuntimeError)
+    receipt_reader.assert_not_awaited()
+    collector.assert_not_awaited()
+    assert session.sandbox.exec.await_count == 1
+
+    await session.close(timeout=1)
+    assert session.closed
+    assert session.sandbox.exec.await_count == 1
+    if owned:
+        session.sandbox.stop.assert_awaited_once()
+        session.sandbox.disconnect.assert_not_awaited()
+    else:
+        session.sandbox.disconnect.assert_awaited_once()
+        session.sandbox.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize("phase", ["stage", "capture"])
+async def test_oom_outside_supervised_execution_is_not_classified_as_agent_oom(session, phase):
+    error = SandboxOOMKilledError("OpenSandbox reason='OOMKilled'; sandbox_id='task-5'")
+    stage_activation = AsyncMock(side_effect=error) if phase == "stage" else None
+    collector = AsyncMock(side_effect=error) if phase == "capture" else None
+
+    with pytest.raises(SandboxOOMKilledError) as caught:
+        await execute(session, stage_activation=stage_activation, collect=collector)
+
+    assert caught.value is error
+    assert session.execution_oom is None
+    await session.close(timeout=1)
+    assert session.closed
+    session.sandbox.disconnect.assert_awaited_once()
+    assert any("mv /session /session.closed" in call.args[0] for call in session.sandbox.exec.await_args_list)
 
 
 async def test_capture_failure_does_not_hide_execution_failure(session):
