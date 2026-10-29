@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -132,6 +133,20 @@ class _DigestWireModel(_WireModel):
     extras_digest_version: Literal[EXTRAS_DIGEST_VERSION] = EXTRAS_DIGEST_VERSION
 
 
+# Frameworks written before ``rollout_id`` became ``capture_key`` still pass and read the old name.
+# Validation accepts either name and serialization writes only ``capture_key``.
+def _capture_key_field() -> Any:
+    return Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
+
+
+class _RolloutIdAlias:
+    """Read access under the name ``capture_key`` replaced."""
+
+    @property
+    def rollout_id(self) -> str:
+        return self.capture_key
+
+
 class ReplayItem(_WireModel):
     """Prompt-content identity before gateway conversion, without media payloads."""
 
@@ -191,7 +206,7 @@ class GenerationCutContinuation(_WireModel):
         return self
 
 
-class CaptureAdmission(_WireModel):
+class CaptureAdmission(_RolloutIdAlias, _WireModel):
     """Gate-to-worker identity and exact-prefix contract for one model call.
 
     A ``token_in`` admission carries its prefix in one of two encodings.
@@ -201,7 +216,7 @@ class CaptureAdmission(_WireModel):
     It passes that list to ``CaptureAdapter.enter_prefix`` and to ``RolloutTokenCapture.begin_call``.
     """
 
-    capture_key: Identifier
+    capture_key: Identifier = _capture_key_field()
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt = 0
@@ -247,7 +262,7 @@ class CaptureAdmission(_WireModel):
         return self
 
 
-class StagedCallBaseSnapshot(_DigestWireModel):
+class StagedCallBaseSnapshot(_RolloutIdAlias, _DigestWireModel):
     """Token columns and metadata for one staged call.
 
     This model excludes the optional ``extras`` payload.
@@ -256,7 +271,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
     A consumer that loads extras must verify them separately with ``compute_extras_digest``.
     """
 
-    capture_key: Identifier
+    capture_key: Identifier = _capture_key_field()
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     mode: CaptureMode
@@ -417,10 +432,10 @@ class StageResult(_WireModel):
         return self
 
 
-class CommitCoords(_DigestWireModel):
+class CommitCoords(_RolloutIdAlias, _DigestWireModel):
     """Metadata returned after an inference worker stages one call."""
 
-    capture_key: Identifier
+    capture_key: Identifier = _capture_key_field()
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt
@@ -503,7 +518,10 @@ class CallRecord(_DigestWireModel):
     # A checkpoint restore continues an episode under its next attempt,
     # and the calls made before the checkpoint stay staged under the earlier attempt's key.
     # ``None`` means the receipt's own capture attempt staged the call.
-    source_capture_key: Identifier | None = None
+    # Rows written before the rename carry this value as ``capture_key``.
+    source_capture_key: Identifier | None = Field(
+        default=None, validation_alias=AliasChoices("source_capture_key", "capture_key")
+    )
     # Why the served response stopped, in the Chat Completions vocabulary (``stop``, ``length``,
     # ``tool_calls``, ``content_filter``), read from the served payload when the row is committed;
     # ``None`` when the payload stated none or the row predates the column. The rebuild reports the
@@ -512,6 +530,11 @@ class CallRecord(_DigestWireModel):
     # version: the manifest route serializes it on every row, and a framework whose Gym predates the
     # column rejects each row (``extra="forbid"``) as ``invalid_manifest_row``, as with ``source_capture_key``.
     finish_reason: StrictStr | None = None
+
+    @property
+    def capture_key(self) -> str | None:
+        """Read access under the name ``source_capture_key`` replaced."""
+        return self.source_capture_key
 
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:
@@ -528,14 +551,14 @@ class CallRecord(_DigestWireModel):
         return self
 
 
-class CaptureLedgerCommit(_WireModel):
+class CaptureLedgerCommit(_RolloutIdAlias, _WireModel):
     """One successfully staged call, as handed to ``CaptureLedger.record``.
 
     ``record`` is the manifest row. The remaining fields feed parent resolution
     and are not part of the manifest.
     """
 
-    capture_key: Identifier
+    capture_key: Identifier = _capture_key_field()
     record: CallRecord
     staging_chain: tuple[Identifier, ...] = ()
     request_items: list[dict]
@@ -549,10 +572,10 @@ class ManifestFailure(_WireModel):
     reason: Identifier
 
 
-class RolloutManifest(_WireModel):
+class RolloutManifest(_RolloutIdAlias, _WireModel):
     """The token-free ledger read returned by the manifest control route."""
 
-    capture_key: Identifier
+    capture_key: Identifier = _capture_key_field()
     records: list[CallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
     attempted_call_ids: list[Identifier] = Field(default_factory=list)
@@ -571,10 +594,10 @@ class RolloutRemoval(_WireModel):
     absent: list[Identifier] = Field(default_factory=list)
 
 
-class RolloutReceipt(_DigestWireModel):
+class RolloutReceipt(_RolloutIdAlias, _DigestWireModel):
     """Token-free immutable manifest the framework assembles at rollout end."""
 
-    capture_key: Identifier
+    capture_key: Identifier = _capture_key_field()
     reward: float | None = None
     terminal_model_call_id: Identifier | None = None
     manifest: list[CallRecord] = Field(default_factory=list)

@@ -150,6 +150,8 @@ def _capture(
 def test_root_stages_exact_full_delta_before_returning_coords() -> None:
     capture, sink = _capture()
     call = capture.begin_call(_root())
+    # Frameworks written before the rename read the capture key as ``rollout_id``.
+    assert call.rollout_id == call.capture_key
 
     coords = capture.complete_call(
         call,

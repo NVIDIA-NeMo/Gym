@@ -62,6 +62,11 @@ class ActiveCall:
         return self.admission.capture_key
 
     @property
+    def rollout_id(self) -> str:
+        """Read access under the name ``capture_key`` replaced."""
+        return self.capture_key
+
+    @property
     def model_call_id(self) -> str:
         return self.admission.model_call_id
 
