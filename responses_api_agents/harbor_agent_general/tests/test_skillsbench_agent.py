@@ -297,7 +297,7 @@ async def test_docker_deadline_discards_detached_processes(tmp_path, completed):
     environment = _make_environment(
         tmp_path,
         sandbox_provider={"docker": {}},
-        task_env_config=EnvironmentConfig(docker_image="ubuntu:24.04", cpus=1, memory_mb=512),
+        task_env_config=EnvironmentConfig(docker_image="mirror.gcr.io/library/ubuntu:24.04", cpus=1, memory_mb=512),
     )
     finished = threading.Event()
     waiting = threading.Event()
