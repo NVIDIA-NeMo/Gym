@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import warnings
 
+from nemo_gym.episode_types import AGENT_INSTANCES_KEY
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.token_id_capture.consumer import trajectories_from_source
 from nemo_gym.token_id_capture.protocols import TokenSource
@@ -167,6 +168,12 @@ async def finalize_rollout_token_capture(
     response = result.get("response") if isinstance(result.get("response"), dict) else {}
     explicit_terminal = result.get(TERMINAL_CALL_KEY)
     declared_terminal = result.get(TERMINAL_RESPONSE_ID_KEY)
+    agent_instances = result.get(AGENT_INSTANCES_KEY) if isinstance(result.get(AGENT_INSTANCES_KEY), dict) else {}
+    agent_instance_terminals = {
+        name: str(entry[TERMINAL_RESPONSE_ID_KEY])
+        for name, entry in agent_instances.items()
+        if isinstance(entry, dict) and entry.get(TERMINAL_RESPONSE_ID_KEY)
+    }
     try:
         # The result's response is what the verifier scored.
         # Terminal attribution joins it to one captured call.
@@ -178,6 +185,7 @@ async def finalize_rollout_token_capture(
             explicit_terminal_call_id=str(explicit_terminal) if explicit_terminal else None,
             mask_incomplete_when_attributed=mask_incomplete_when_attributed,
             declared_response_id=str(declared_terminal) if declared_terminal else None,
+            agent_instance_terminals=agent_instance_terminals,
         )
     except Exception as error:
         # A transport failure may be unrelated to this rollout.
@@ -225,8 +233,34 @@ async def finalize_rollout_token_capture(
             stacklevel=2,
         )
     result[TOKEN_CAPTURE_KEY] = record_metrics
+    _deliver_agent_instances(result, built)
 
     return built
+
+
+def _deliver_agent_instances(result: dict, built: dict) -> None:
+    """Put each named agent instance's rebuilt response, mask and capture metrics into its ``agent_instances`` entry.
+
+    The top-level fields keep referring to the primary agent instance (the unnamed agent, else ``assistant``).
+    Each entry is masked by its own build only, so one agent instance's capture never masks another's.
+    """
+    builds = built.get(AGENT_INSTANCES_KEY)
+    if not builds:
+        return
+    entries = result.get(AGENT_INSTANCES_KEY)
+    if not isinstance(entries, dict):
+        entries = result[AGENT_INSTANCES_KEY] = {}
+    for name, build in builds.items():
+        entry = entries.get(name)
+        if not isinstance(entry, dict):
+            entry = entries[name] = {}
+        if build.get("rebuilt_response") is not None:
+            entry["response"] = build["rebuilt_response"]
+        entry[MASK_SAMPLE_KEY] = bool(build.get(MASK_SAMPLE_KEY))
+        metrics = dict(build.get("metrics") or {})
+        if build.get("error"):
+            metrics["error"] = build["error"]
+        entry[TOKEN_CAPTURE_KEY] = metrics
 
 
 async def retire_rollout_token_capture(

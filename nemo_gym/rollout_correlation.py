@@ -34,6 +34,8 @@ from nemo_gym.global_config import (
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
 _VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifier_invocation_id", default=None)
 _AGENT_INSTANCE: ContextVar[Optional[str]] = ContextVar("nemo_gym_agent_instance", default=None)
+# Within one environment server episode: each named agent instance's last activation response id.
+_AGENT_ACTIVATIONS: ContextVar[Optional[dict[str, str]]] = ContextVar("nemo_gym_agent_activations", default=None)
 
 # A capture id is a path segment in ``/ng-rollout/<id>/...``.
 # Restrict it to characters that survive a path round trip.
@@ -140,6 +142,31 @@ def agent_instance_context(agent_instance: Optional[str]) -> Iterator[None]:
         yield
     finally:
         _AGENT_INSTANCE.reset(token)
+
+
+@contextmanager
+def recording_agent_activations() -> Iterator[dict[str, str]]:
+    """Record, for the block's duration, the response id each named agent instance last answered an activation with.
+
+    An environment server records one episode, and ``ServerClient`` adds every named agent activation it sends.
+    """
+    activations: dict[str, str] = {}
+    token = _AGENT_ACTIVATIONS.set(activations)
+    try:
+        yield activations
+    finally:
+        _AGENT_ACTIVATIONS.reset(token)
+
+
+def record_agent_activation(agent_instance: str, response_id: str) -> None:
+    """Note an agent instance's latest activation response, when an episode is being recorded."""
+    activations = _AGENT_ACTIVATIONS.get()
+    if activations is not None:
+        activations[agent_instance] = response_id
+
+
+def recording_agent_activations_active() -> bool:
+    return _AGENT_ACTIVATIONS.get() is not None
 
 
 def current_verifier_invocation_id() -> Optional[str]:

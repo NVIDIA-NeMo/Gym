@@ -104,6 +104,8 @@ from nemo_gym.rollout_correlation import (
     current_agent_instance,
     current_rollout_id,
     maybe_rollout_id_from_run_body,
+    record_agent_activation,
+    recording_agent_activations_active,
     rollout_context,
     scope_with_routed_path,
 )
@@ -1081,7 +1083,7 @@ class ServerClient(BaseModel):
             # client adds. A caller that builds its own prefix passes ``agent_instance`` to ``rollout_path_prefix``.
             url_path = f"{rollout_path_prefix(rollout_id, agent_instance=current_agent_instance())}{url_path}"
 
-        return await request(
+        response = await request(
             method=method,
             url=f"{base_url}{url_path}",
             _internal=True,
@@ -1096,6 +1098,13 @@ class ServerClient(BaseModel):
             and not (self.checkpoint_enabled() and url_path == "/run"),
             **kwargs,
         )
+        if (
+            recording_agent_activations_active()
+            and server_entry is not None
+            and "responses_api_agents" in server_entry
+        ):
+            await _record_agent_activation(url_path, response)
+        return response
 
     async def get(
         self,
@@ -2285,6 +2294,24 @@ def get_server_url(server_name: str) -> str:
     )
 
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
+
+
+async def _record_agent_activation(url_path: str, response: ClientResponse) -> None:
+    """Note the response id of a named agent activation an environment server sent, for its episode result."""
+    try:
+        resolved = parse_path(url_path.partition("?")[0])
+    except CorrelationPathError:
+        return
+    if resolved is None or resolved[0].agent_instance is None or resolved[1] != "/v1/responses" or not response.ok:
+        return
+    try:
+        # The body is cached, so the caller still reads it.
+        payload = orjson.loads(await response.read())
+    except Exception:
+        return
+    response_id = payload.get("id") if isinstance(payload, dict) else None
+    if isinstance(response_id, str) and response_id:
+        record_agent_activation(resolved[0].agent_instance, response_id)
 
 
 def rollout_path_prefix(

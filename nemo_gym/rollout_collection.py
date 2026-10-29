@@ -59,7 +59,8 @@ from nemo_gym.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
+from nemo_gym.correlation import validate_agent_instance
+from nemo_gym.episode_types import AGENT_INSTANCES_KEY, EpisodeId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
@@ -578,6 +579,12 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     # add judge failure info to the record
     record = dict(result) | judge_failure
     record[NG_TASK_ID_KEY] = task_id
+    agent_instances = response.get(AGENT_INSTANCES_KEY)
+    if agent_instances:
+        # Each agent instance's terminal call and optional reward, next to the episode's top-level reward.
+        record[AGENT_INSTANCES_KEY] = {
+            validate_agent_instance(name): dict(entry) for name, entry in agent_instances.items()
+        }
     return record
 
 
