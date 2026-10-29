@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         verifier_invocation_context,
     )
     from nemo_gym.core.episode_types import (
+        AgentInstanceResult,
         BaseEpisodeRequest,
         BaseEpisodeResponse,
         EpisodeId,
@@ -192,6 +193,7 @@ _PUBLIC_API = {
     "AGENT_ROUTE_FAILED": "failure_kinds",
     "AGENT_RUN_ERROR": "failure_kinds",
     "AGENT_TIMEOUT": "failure_kinds",
+    "AgentInstanceResult": "episode_types",
     "BaseEpisodeRequest": "episode_types",
     "BaseEpisodeResponse": "episode_types",
     "CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS": "responses_api_types",
