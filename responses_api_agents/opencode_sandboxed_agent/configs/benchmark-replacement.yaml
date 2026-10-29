@@ -1,0 +1,6 @@
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/benchmark.yaml
+opencode_benchmark_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      system_prompt_file: /tmp/nemo-gym-environment.txt

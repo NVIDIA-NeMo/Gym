@@ -438,6 +438,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     local_ripgrep_binary_path: FilePath | None = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
+    system_prompt_file: Optional[str] = None
     opencode_max_context_window: int
     concurrency: Optional[int] = Field(default=None)
     preinstalled_opencode: bool = False
@@ -687,6 +688,16 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     base[key] = deepcopy(value)
 
         merge(config, self.config.opencode_config)
+        if self.config.system_prompt_file is not None:
+            prompt = self.config.sandbox_config.get("files", {}).get(self.config.system_prompt_file)
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("system_prompt_file must name a non-empty text entry in sandbox_config.files")
+            build = config.setdefault("agent", {}).setdefault("build", {})
+            if "prompt" in build:
+                raise ValueError("system_prompt_file and opencode_config.agent.build.prompt are mutually exclusive")
+            build["prompt"] = prompt
+            # The replacement is the complete instruction set, not an appendix.
+            config["instructions"] = []
         config.setdefault("plugin", []).extend(f"file:///tmp/nemo-gym-{name}" for name in self._runtime_plugins())
         rollout_mcp = getattr(request.state, "_ng_opencode_mcp", None)
         if isinstance(rollout_mcp, dict):

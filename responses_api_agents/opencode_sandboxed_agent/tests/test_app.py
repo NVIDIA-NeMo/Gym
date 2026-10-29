@@ -1011,6 +1011,30 @@ class TestBenchmarkLifecycle:
         result = await server._create_opencode_config(request)
         assert result["tools"] == {"websearch": True}
 
+    @mark.parametrize("note", ["Internet is disabled. Use Python.", "Use the provided search tools."])
+    async def test_replacement_prompt_uses_environment_note(self, monkeypatch, note):
+        config = self._create_config()
+        config.system_prompt_file = "/tmp/environment.txt"
+        config.sandbox_config["files"] = {config.system_prompt_file: note}
+        config.opencode_config = {"instructions": [config.system_prompt_file], "agent": {"build": {"steps": 400}}}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        monkeypatch.setattr(app_module, "sandbox_server_url", lambda *_args, **_kwargs: "http://model:8000")
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "base_url_for_run", MagicMock(return_value="http://model:8000"))
+        request = MagicMock()
+        request.json = AsyncMock(return_value={})
+        result = await server._create_opencode_config(request)
+        assert result["agent"]["build"] == {"steps": 400, "prompt": note}
+        assert result["instructions"] == []
+        assert config.opencode_config["instructions"] == [config.system_prompt_file]
+        assert "prompt" not in config.opencode_config["agent"]["build"]
+        config.sandbox_config["files"].clear()
+        with raises(ValueError, match="non-empty text"):
+            await server._create_opencode_config(request)
+        config.sandbox_config["files"][config.system_prompt_file] = note
+        config.opencode_config["agent"]["build"]["prompt"] = "ambiguous"
+        with raises(ValueError, match="mutually exclusive"):
+            await server._create_opencode_config(request)
+
     async def test_image_files_and_network_policy(self, monkeypatch):
         sandbox = MagicMock(start=AsyncMock())
         monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})

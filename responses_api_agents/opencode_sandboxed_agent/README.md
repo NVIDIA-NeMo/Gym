@@ -171,3 +171,18 @@ Use an immutable base digest for published deployments. No API credentials, mode
 checkpoints, benchmark questions or reference answers belong in either image.
 Validate real Python and MCP rollouts, network isolation, and sandbox cleanup before
 promoting a new image.
+
+### Environment-only system prompt
+
+Select `configs/benchmark-replacement.yaml` instead of `configs/benchmark.yaml`
+to replace OpenCode's built-in build-agent instructions with the benchmark's
+network and scientific-tool environment note. This is a distinct evaluation
+protocol; record the preset with the result.
+
+The general `system_prompt_file` option names a text entry in
+`sandbox_config.files`. Gym passes its current contents as
+`opencode_config.agent.build.prompt` and clears `opencode_config.instructions`
+to avoid appending the same note twice. Search overlays can update that file's
+contents normally. Missing or empty text, or also setting an explicit build
+prompt, fails before starting a rollout. Omit the option to retain OpenCode's
+default system prompt. Task messages and verifier settings are unaffected.
