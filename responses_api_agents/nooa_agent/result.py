@@ -56,6 +56,18 @@ def finalize_run_result(run_result: NOOARunResult) -> tuple[NeMoGymResponse, Age
     verify_response, verify_gaps = ensure_verifier_final_message(
         run_result.episode.response, run_result.return_value, terminal_response_id=terminal_response_id
     )
+    if run_result.termination_reason is NOOATerminationReason.INVALID_POLICY_OUTPUT:
+        # Policy exhaustion has no entrypoint return to synthesize. Bind its
+        # partial response to the last served root call, never a child's output
+        # or an earlier call when the final call lacks a response identity.
+        # NOOA may also report completed invocations with no inference. They
+        # carry no served response and do not compete for capture ownership.
+        if len(roots) == 1:
+            policy_terminal = roots[0].model_calls[-1].response_id
+            if policy_terminal:
+                verify_response = verify_response.model_copy(
+                    update={"metadata": {**(verify_response.metadata or {}), "terminal_response_id": policy_terminal}}
+                )
     observations = finalize_observation_gaps(
         run_result.episode.observations,
         extra_gaps=verify_gaps,

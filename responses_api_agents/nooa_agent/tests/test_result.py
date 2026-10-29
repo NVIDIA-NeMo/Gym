@@ -6,7 +6,7 @@ import json
 import pytest
 
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
+from nemo_gym.rollout_observability import AgentEpisode, AgentInvocation, AgentObservationBundle, ModelCallRef
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import NOOARunResult
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
@@ -101,3 +101,41 @@ def test_cancellation_clears_response_error_and_preserves_partial_output_and_dia
 def test_termination_reason_rejects_aliases_and_collector_routing_classes(reason: str) -> None:
     with pytest.raises(ValueError):
         NOOATerminationReason(reason)
+
+
+@pytest.mark.parametrize("root_count", [0, 1, 2])
+@pytest.mark.parametrize("last_response", [None, "root-last"])
+def test_invalid_policy_terminal_requires_unique_root_and_its_last_response(
+    root_count: int, last_response: str | None
+) -> None:
+    calls = [
+        ModelCallRef(model_call_id="first-call", response_id="root-first"),
+        ModelCallRef(model_call_id="last-call", response_id=last_response),
+    ]
+    records = [AgentInvocation(invocation_id=f"root-{i}", model_calls=calls) for i in range(root_count)]
+    records.append(AgentInvocation(invocation_id="empty-completed", status="completed"))
+    records.append(
+        AgentInvocation(
+            invocation_id="child",
+            parent_invocation_id="root-0",
+            model_calls=[ModelCallRef(model_call_id="child-call", response_id="child-last")],
+        )
+    )
+    episode = AgentEpisode(
+        response=NeMoGymResponse.model_validate({**model_response(), "metadata": {"preserved": "value"}}),
+        observations=AgentObservationBundle(source="nooa", records=records),
+    )
+    result = NOOARunResult(
+        episode=episode,
+        return_value=None,
+        model_cookies={},
+        resource_cookies={},
+        termination_reason=NOOATerminationReason.INVALID_POLICY_OUTPUT,
+    )
+    response, _ = finalize_run_result(result)
+    assert response.output == episode.response.output
+    assert response.metadata["preserved"] == "value"
+    assert (response.metadata or {}).get("terminal_response_id") == (
+        "root-last" if root_count == 1 and last_response else None
+    )
+    assert "terminal_response_id" not in (episode.response.metadata or {})

@@ -30,8 +30,9 @@ from nooa.errors import GenerationError
 from nooa.runtime.hooks import hooks_scope
 from nooa.strategies.codeact import CodeActSession, CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
+from nooa.unifiedllm import LLMResponse
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
@@ -133,6 +134,37 @@ def _is_codeact_iteration_exhaustion(error: BaseException) -> bool:
         and session.iteration >= session.max_iterations
         and session.error_count < session.max_retries
         and str(error) == str(session.build_failure_error())
+    )
+
+
+def _is_codeact_text_only_exhaustion(error: BaseException) -> bool:
+    """Recognize the pinned policy-output limit without reclassifying API errors."""
+    frame = _generation_error_frame(error)
+    if frame is None or frame.f_code is not CodeActStrategy._run_generation.__code__:
+        return False
+    session = frame.f_locals.get("session")
+    strategy = frame.f_locals.get("self")
+    response = frame.f_locals.get("response")
+    limit = frame.f_locals.get("max_text_only")
+    if not (
+        isinstance(session, CodeActSession)
+        and isinstance(strategy, CodeActStrategy)
+        and isinstance(response, LLMResponse)
+        and isinstance(limit, int)
+        and limit > 0
+        and limit == strategy.config.max_consecutive_text_only
+        and session.consecutive_text_only >= limit
+        and session.error_count < session.max_retries
+        and response.finish_reason == "stop"
+        and not response.tool_calls
+    ):
+        return False
+    upstream = response.raw_response
+    return (
+        isinstance(upstream, NeMoGymResponse)
+        and upstream.status == "completed"
+        and upstream.incomplete_details is None
+        and upstream.error is None
     )
 
 
@@ -245,6 +277,10 @@ class InProcessNOOARunner:
                         if isinstance(cause, PolicyCallBudgetExceeded)
                         else NOOATerminationReason.INVALID_POLICY_OUTPUT
                     )
+                    termination_error = str(cause)
+                    break
+                if _is_codeact_text_only_exhaustion(cause):
+                    termination_reason = NOOATerminationReason.INVALID_POLICY_OUTPUT
                     termination_error = str(cause)
                     break
                 if _is_codeact_iteration_exhaustion(cause):
