@@ -221,6 +221,22 @@ sandbox:
 - Traffic that bypasses the provider would find the sandbox paused, so opening an `endpoint()` or
   calling `serialize()` keeps that sandbox running from then on.
 
+With `create.idle_policy: suspend`, the provider instead snapshots an idle sandbox to the backend's
+durable storage (E2B's `create_snapshot`) and kills it. The next request creates a sandbox from the
+snapshot and deletes the snapshot. Memory, files and running processes come back as far as the
+backend's snapshots keep them.
+
+- The restored sandbox runs wherever the backend places a new sandbox, so it need not be the node
+  that ran it before. With a gateway that schedules creates across nodes, such as AgentENV's, the
+  sandbox's state moves between nodes.
+- The Gym handle keeps its ID, while the E2B sandbox behind it changes on every restore.
+- Each idle period costs a snapshot, a kill and a create, so suspend suits idle periods that are long
+  compared with those operations. The backend must support snapshots.
+- If a restore fails, for example because the backend has no capacity, `exec` returns `return_code`
+  125 with `error_type="sandbox"`, the snapshot is kept, and the next request tries again.
+- Closing a suspended sandbox deletes its snapshot, and so does closing the provider. A process that
+  dies while a sandbox is suspended leaves its snapshot in the backend's storage.
+
 The default, `never`, leaves sandboxes running until they are closed.
 
 ## Security and Isolation

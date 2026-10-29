@@ -73,8 +73,11 @@ sandbox:
       strict_resources: false
       # Park sandboxes while their agents wait on the model. `pause` pauses a
       # sandbox that no request has touched for idle_timeout_s seconds and
-      # resumes it before the next request, on the node that paused it. `never`
-      # leaves sandboxes running until they are closed.
+      # resumes it before the next request, on the node that paused it.
+      # `suspend` snapshots it to the backend's durable storage and kills it;
+      # the next request creates a sandbox from the snapshot on whichever node
+      # the backend picks. `never` leaves sandboxes running until they are
+      # closed.
       idle_policy: never
       idle_timeout_s: 1.0
 
