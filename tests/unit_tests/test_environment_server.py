@@ -22,14 +22,8 @@ from nemo_gym.base_environment_server import (
     is_retryable_dependency_status,
 )
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.episode_types import (
-    BaseEpisodeRequest,
-    BaseEpisodeResponse,
-    EpisodeFailure,
-    EpisodeId,
-    MaterializedTask,
-    TaskId,
-)
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure, MaterializedTask
 from nemo_gym.server_utils import ServerClient
 
 

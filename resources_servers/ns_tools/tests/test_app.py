@@ -27,7 +27,7 @@ from nemo_skills.mcp.tool_manager import ToolManager
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.config import ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 

@@ -20,7 +20,7 @@ from nemo_gym._checkpoint.control import (
     next_attempt,
 )
 from nemo_gym._checkpoint.coordination import CoordinationError
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 
 

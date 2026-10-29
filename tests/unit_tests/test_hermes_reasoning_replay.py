@@ -3,7 +3,7 @@
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 
 
 @pytest.mark.parametrize("reasoning", [None, "I should inspect the repository first."])

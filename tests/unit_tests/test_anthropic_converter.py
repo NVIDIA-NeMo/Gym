@@ -25,7 +25,7 @@ import json
 from anthropic.types import Message
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 PNG_DATA_URL = "data:image/png;base64,aGVsbG8="  # "hello"

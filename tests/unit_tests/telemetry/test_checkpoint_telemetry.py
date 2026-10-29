@@ -254,7 +254,7 @@ async def test_a_lease_expiry_is_counted_once_and_each_reopen_attempt_with_its_o
     tmp_path: Path, monkeypatch, metrics
 ) -> None:
     import nemo_gym._checkpoint.control as control_module
-    from nemo_gym.episode_types import EpisodeId
+    from nemo_gym.core import EpisodeId
     from tests.unit_tests.test_checkpoint_control import _past_deadline, _until
 
     monkeypatch.setattr(control_module, "_LEASE_REOPEN_WAIT_SECONDS", 0.05)
@@ -301,7 +301,7 @@ async def test_a_lease_expiry_is_counted_once_and_each_reopen_attempt_with_its_o
 async def test_a_commit_retried_after_its_cleanup_ran_out_of_time_counts_its_records_once(
     tmp_path: Path, metrics
 ) -> None:
-    from nemo_gym.episode_types import EpisodeId
+    from nemo_gym.core import EpisodeId
     from tests.unit_tests.test_checkpoint_control import _past_deadline
 
     release = asyncio.Event()

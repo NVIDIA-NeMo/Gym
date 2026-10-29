@@ -37,7 +37,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 from tests.unit_tests.test_checkpoint_resources import SEED
 
@@ -1264,7 +1264,7 @@ class _EpisodeClient(ServerClient):
     tool_calls: int = 0
 
     async def post(self, server_name: str, url_path: str, **kwargs: Any) -> Any:
-        from nemo_gym.rollout_correlation import current_rollout_id
+        from nemo_gym.core import current_rollout_id
 
         body = kwargs.get("json") or {}
         rollout = current_rollout_id()
@@ -1340,7 +1340,8 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
     from nemo_gym._checkpoint.control import install_participant
     from nemo_gym._checkpoint.environment import EnvironmentParticipant
     from nemo_gym.config import AgentServerRef, ResourcesServerRef
-    from nemo_gym.episode_types import MaterializedTask, TaskId
+    from nemo_gym.core import TaskId
+    from nemo_gym.episode_types import MaterializedTask
     from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
     from tests.unit_tests.test_checkpoint_coordination import InProcessClient, Recorder
     from tests.unit_tests.test_checkpoint_resources import RestartOnlyServer, make_server, until

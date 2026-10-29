@@ -67,6 +67,7 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.failure_kinds": MovedPath(new="nemo_gym.core.failure_kinds", since="0.8.0"),
     "nemo_gym.config_types": MovedPath(new="nemo_gym.config.config_types", since="0.8.0"),
     "nemo_gym.global_config": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
     "nemo_gym.secret_utils": MovedPath(new="nemo_gym.config.secret_utils", since="0.8.0"),
@@ -78,24 +79,169 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.cli._venv_setup": MovedPath(new="nemo_gym.utils.venv_setup", since="0.8.0"),
 }
 
+
+def _names(new: str, since: str, names: str) -> dict[str, MovedPath]:
+    """Entries for `MOVED_NAMES`: each whitespace-separated name in `names` moved to the module `new`."""
+    return {name: MovedPath(new=new, since=since) for name in names.split()}
+
+
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
 MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.server_utils": {
+        **_names(
+            "nemo_gym.utils.server_process",
+            "0.8.0",
+            """
+            IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+            NEMO_GYM_FASTAPI_NUM_WORKERS _has_injected_global_config_env
+            get_nemo_gym_fastapi_num_workers is_nemo_gym_fastapi_entrypoint is_nemo_gym_fastapi_worker
+            set_is_nemo_gym_fastapi_entrypoint set_is_nemo_gym_fastapi_worker
+            set_nemo_gym_fastapi_num_workers
+            """,
+        ),
         # server_utils imported this before the split and no longer uses it.
-        "NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
-        "IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "NEMO_GYM_FASTAPI_NUM_WORKERS": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "_has_injected_global_config_env": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "get_nemo_gym_fastapi_num_workers": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "is_nemo_gym_fastapi_entrypoint": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "is_nemo_gym_fastapi_worker": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "set_is_nemo_gym_fastapi_entrypoint": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "set_is_nemo_gym_fastapi_worker": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
-        "set_nemo_gym_fastapi_num_workers": MovedPath(new="nemo_gym.utils.server_process", since="0.8.0"),
+        **_names("nemo_gym.config.global_config", "0.8.0", "NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME"),
     },
-    "nemo_gym.cli.utils": {
-        "did_you_mean": MovedPath(new="nemo_gym.utils.text", since="0.8.0"),
+    "nemo_gym.cli.utils": _names("nemo_gym.utils.text", "0.8.0", "did_you_mean"),
+    "nemo_gym.openai_utils": {
+        **_names(
+            "nemo_gym.core.responses_api_types",
+            "0.8.0",
+            """
+            CHAT_REQUEST_IGNORED_CLIENT_FIELDS CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
+            ChatCompletionModeration NeMoGymAdditionalTools NeMoGymChatCompletion
+            NeMoGymChatCompletionAllowedToolChoiceParam NeMoGymChatCompletionAllowedToolsParam
+            NeMoGymChatCompletionAssistantMessageForTrainingParam
+            NeMoGymChatCompletionAssistantMessageParam NeMoGymChatCompletionContentPartFileParam
+            NeMoGymChatCompletionContentPartImageParam NeMoGymChatCompletionContentPartInputAudioParam
+            NeMoGymChatCompletionContentPartParam NeMoGymChatCompletionContentPartTextParam
+            NeMoGymChatCompletionContentPartVideoUrlParam NeMoGymChatCompletionCreateParamsNonStreaming
+            NeMoGymChatCompletionCustomToolParam NeMoGymChatCompletionDeveloperMessageParam
+            NeMoGymChatCompletionMessage NeMoGymChatCompletionMessageCustomToolCall
+            NeMoGymChatCompletionMessageCustomToolCallParam NeMoGymChatCompletionMessageForTraining
+            NeMoGymChatCompletionMessageParam NeMoGymChatCompletionMessageToolCall
+            NeMoGymChatCompletionMessageToolCallFunctionParam NeMoGymChatCompletionMessageToolCallParam
+            NeMoGymChatCompletionMessageToolCallUnion NeMoGymChatCompletionMessageToolCallUnionParam
+            NeMoGymChatCompletionMessageToolCallsParam NeMoGymChatCompletionOutputMessage
+            NeMoGymChatCompletionPredictionContentParam NeMoGymChatCompletionSystemMessageParam
+            NeMoGymChatCompletionToolChoiceOptionParam NeMoGymChatCompletionToolMessageParam
+            NeMoGymChatCompletionToolParam NeMoGymChatCompletionToolUnionParam
+            NeMoGymChatCompletionUserMessageParam NeMoGymChoice
+            NeMoGymCodeInterpreterContainerAutoParam NeMoGymCodeInterpreterToolParam
+            NeMoGymCompactionTrigger NeMoGymCompoundFilter NeMoGymComputerCallOutput
+            NeMoGymContainerAutoParam NeMoGymContainerNetworkPolicyAllowlistParam
+            NeMoGymContainerNetworkPolicyParam NeMoGymContent NeMoGymEasyInputMessage
+            NeMoGymEasyInputMessageForTraining NeMoGymFileSearchToolParam NeMoGymFunction
+            NeMoGymFunctionCallOutput NeMoGymFunctionDefinition NeMoGymFunctionShellToolParam
+            NeMoGymFunctionToolParam NeMoGymImageGenerationCall NeMoGymInputAudio NeMoGymInputVideoPart
+            NeMoGymLocalEnvironmentParam NeMoGymLocalShellCall NeMoGymLocalShellCallOutput
+            NeMoGymLogprob NeMoGymLogprobTopLogprob NeMoGymMcpApprovalResponse NeMoGymMessage
+            NeMoGymMessageForTraining NeMoGymNamespaceToolParam NeMoGymResponse
+            NeMoGymResponseAdditionalTools NeMoGymResponseApplyPatchToolCall
+            NeMoGymResponseApplyPatchToolCallOutput NeMoGymResponseCodeInterpreterToolCall
+            NeMoGymResponseCompactionItem NeMoGymResponseComputerCallOutput
+            NeMoGymResponseComputerToolCall NeMoGymResponseCreateParamsNonStreaming
+            NeMoGymResponseCustomToolCall NeMoGymResponseCustomToolCallForTraining
+            NeMoGymResponseCustomToolCallOutput NeMoGymResponseCustomToolCallOutputItem
+            NeMoGymResponseFileSearchToolCall NeMoGymResponseFunctionCallOutput
+            NeMoGymResponseFunctionShellToolCall NeMoGymResponseFunctionShellToolCallOutput
+            NeMoGymResponseFunctionToolCall NeMoGymResponseFunctionToolCallForTraining
+            NeMoGymResponseFunctionWebSearch NeMoGymResponseInput NeMoGymResponseInputContentList
+            NeMoGymResponseInputContentPart NeMoGymResponseInputItem NeMoGymResponseInputText
+            NeMoGymResponseInputTokensDetails NeMoGymResponseLocalShellCallOutput
+            NeMoGymResponseMcpApprovalRequest NeMoGymResponseMcpApprovalResponse NeMoGymResponseMcpCall
+            NeMoGymResponseMcpListTools NeMoGymResponseOutputItem NeMoGymResponseOutputMessage
+            NeMoGymResponseOutputMessageForTraining NeMoGymResponseOutputRefusal
+            NeMoGymResponseOutputText NeMoGymResponseOutputTokensDetails NeMoGymResponseReasoningItem
+            NeMoGymResponseReasoningItemForTraining NeMoGymResponseToolSearchCall
+            NeMoGymResponseToolSearchOutputItem NeMoGymResponseUsage NeMoGymSummary NeMoGymToolChoice
+            NeMoGymToolChoiceAllowedParam NeMoGymToolParam REQUIRED_TOKEN_METADATA_FIELDS
+            RESPONSES_TO_TRAIN RoutedExperts TOKEN_METADATA_FIELDS TokenIDLogProbMixin
+            TokenIDLogProbTypedDictMixin _ITEM_STATUSES _MESSAGE_ROLES _OUTPUT_CONTENT_PART_TYPES
+            _RESPONSE_INPUT_ITEM_TAG_BY_CLASS _RESPONSE_OUTPUT_ITEM_TAG_BY_CLASS _SIMPLE_MESSAGE_ROLES
+            _TRAINABLE_ITEM_TAGS _TRAINING_TAG_SUFFIX _add_optional_token_counts
+            _discriminate_message_item _discriminate_response_input_item
+            _discriminate_response_output_item _discriminate_untyped_input_item
+            _first_content_part_type _normalize_output_item_for_replay _normalize_tool_for_replay
+            _register_item_tags _require_response_output_item_type _strip_outer_tool_call_names
+            _tag_for_item_instance _training_variant_tag _validate_atomic_token_metadata
+            _validate_input_video_part accumulate_response_usage training_variant_of
+            """,
+        ),
+        # openai_utils imported these and they stay importable through it.
+        **_names(
+            "nemo_gym.core.responses_api_types",
+            "0.8.0",
+            """
+            ActionFind ActionOpenPage ActionSearch Annotation ApplyPatchToolParam BeforeValidator
+            ChatCompletion ChatCompletionAllowedToolChoiceParam ChatCompletionAllowedToolsParam
+            ChatCompletionAssistantMessageParam ChatCompletionAudioParam
+            ChatCompletionContentPartFileParam ChatCompletionContentPartImageParam
+            ChatCompletionContentPartTextParam ChatCompletionCustomToolParam
+            ChatCompletionDeveloperMessageParam ChatCompletionMessage
+            ChatCompletionMessageCustomToolCall ChatCompletionMessageCustomToolCallParam
+            ChatCompletionMessageToolCall ChatCompletionMessageToolCallParam
+            ChatCompletionNamedToolChoiceCustomParam ChatCompletionNamedToolChoiceParam
+            ChatCompletionPredictionContentParam ChatCompletionStreamOptionsParam
+            ChatCompletionSystemMessageParam ChatCompletionToolMessageParam ChatCompletionToolParam
+            ChatCompletionUserMessageParam ChatModel Choice CodeInterpreter
+            CodeInterpreterContainerCodeInterpreterToolAuto CompactionTrigger ComparisonFilter
+            CompoundFilter ComputerCallOutput ComputerToolParam ComputerUsePreviewToolParam ConfigDict
+            ContainerAutoParam ContainerNetworkPolicyAllowlistParam ContainerNetworkPolicyDisabledParam
+            ContainerNetworkPolicyDomainSecretParam ContainerReferenceParam ContentArrayOfContentPart
+            ContextManagement CustomToolParam Discriminator FileSearchToolParam FunctionDefinition
+            FunctionShellToolParam FunctionToolParam ImageGeneration ImageGenerationCall
+            InlineSkillParam InputAdditionalTools JsonValue LocalEnvironmentParam LocalShell
+            LocalShellCall LocalShellCallOutput LocalSkillParam Mcp McpApprovalRequest
+            McpApprovalResponse McpCall McpListTools Metadata Moderation NamespaceToolParam
+            NamespaceToolParamTool OutputAdditionalTools OutputLocalShellCallOutput
+            OutputMcpApprovalResponse Reasoning ReasoningContent ReasoningEffort Response
+            ResponseApplyPatchToolCall ResponseApplyPatchToolCallOutput ResponseCodeInterpreterToolCall
+            ResponseCompactionItem ResponseComputerToolCall ResponseComputerToolCallOutputItem
+            ResponseConversationParamParam ResponseCustomToolCall ResponseCustomToolCallOutput
+            ResponseCustomToolCallOutputItem ResponseFileSearchToolCall ResponseFormat
+            ResponseFunctionCallOutputItemListParam ResponseFunctionShellToolCall
+            ResponseFunctionShellToolCallOutput ResponseFunctionToolCallOutputItem
+            ResponseFunctionWebSearch ResponseIncludable ResponseInputContentParam
+            ResponseInputTextParam ResponseInputTokensDetails ResponseOutputTokensDetails
+            ResponsePromptParam ResponseTextConfigParam ResponseToolSearchCall
+            ResponseToolSearchOutputItem ResponseUsage ResponsesModel SkillReferenceParam StreamOptions
+            Summary Tag ToolChoiceAllowedParam ToolChoiceApplyPatchParam ToolChoiceCustomParam
+            ToolChoiceFunctionParam ToolChoiceMcpParam ToolChoiceOptions ToolChoiceShellParam
+            ToolChoiceTypesParam ToolSearchToolParam WebSearchOptions WebSearchPreviewToolParam
+            WebSearchToolParam field_serializer model_serializer
+            """,
+        ),
+    },
+    "nemo_gym.rollout_correlation": {
+        **_names(
+            "nemo_gym.core.episode",
+            "0.8.0",
+            """
+            VERIFIER_INVOCATION_HEADER _ROLLOUT_ID _VERIFIER_INVOCATION_ID current_episode_id
+            current_rollout_id current_verifier_invocation_id maybe_rollout_id_from_run_body
+            verifier_invocation_context
+            """,
+        ),
+        # rollout_correlation imported these and they stay importable through it.
+        **_names(
+            "nemo_gym.config.global_config",
+            "0.8.0",
+            """
+            ATTEMPT_INDEX_KEY_NAME ROLLOUT_ID_KEY_NAME ROLLOUT_INDEX_KEY_NAME TASK_INDEX_KEY_NAME
+            """,
+        ),
+        # rollout_correlation imported these and they stay importable through it.
+        **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId"),
+        # rollout_correlation imported these and they stay importable through it.
+        **_names("nemo_gym.core.responses_api_types", "0.8.0", "BaseModel"),
+        # Moved, and still imported by rollout_correlation for its own use.
+        **_names("nemo_gym.core.episode", "0.8.0", "ROLLOUT_ID_PATTERN rollout_context"),
+    },
+    "nemo_gym.episode_types": {
+        **_names("nemo_gym.core.episode", "0.8.0", "_CAPTURE_KEY_ATTEMPT"),
+        # Moved, and still imported by episode_types for its own use.
+        **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId TaskId"),
     },
 }
 

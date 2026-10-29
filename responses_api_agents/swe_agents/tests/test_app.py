@@ -27,11 +27,7 @@ import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
 from nemo_gym.config import CACHE_DIR_KEY_NAME, ModelServerRef, OmegaConf
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,

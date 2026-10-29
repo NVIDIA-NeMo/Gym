@@ -48,7 +48,7 @@ from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, Stal
 from nemo_gym._checkpoint.model import PolicyModelParticipant
 from nemo_gym._checkpoint.resources import ResourcesParticipant
 from nemo_gym._checkpoint.store import participant_dir, read_participant_state
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 from nemo_gym.server_utils import BaseServerConfig
 from tests.unit_tests.test_checkpoint_coordination import InProcessClient
 from tests.unit_tests.test_checkpoint_sequences import GatedWrites

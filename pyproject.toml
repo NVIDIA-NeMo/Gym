@@ -88,7 +88,7 @@ dependencies = [
     # Gym subclasses the SDK's pydantic models and mirrors its Responses item union by hand.
     # Each version needs its own audit, so a range would claim support for versions nobody tested.
     # 2.45.0 makes InputTokensDetails.cache_write_tokens required, which NeMoGymResponseInputTokensDetails cannot satisfy.
-    # Moving this pin means re-running tests/unit_tests/test_openai_utils.py, which names each item type Gym cannot represent.
+    # Moving this pin means re-running tests/unit_tests/core/test_responses_api_types.py, which names each item type Gym cannot represent.
     # Updated Tue Aug 11, 2026 with openai==2.44.0
     # License: Apache 2.0 https://github.com/openai/openai-python/blob/v2.44.0/LICENSE
     "openai==2.44.0",
@@ -878,7 +878,7 @@ layers = [
     # models/
     "nemo_gym._checkpoint.model : nemo_gym._checkpoint.model_workers : nemo_gym.anthropic_converter : nemo_gym.anthropic_utils : nemo_gym.base_responses_api_model : nemo_gym.chat_streaming : nemo_gym.openai_utils : nemo_gym.responses_converter : nemo_gym.responses_streaming : nemo_gym.token_id_capture",
     # server_runtime/
-    "nemo_gym._checkpoint.agent : nemo_gym._checkpoint.control : nemo_gym._checkpoint.coordination : nemo_gym._checkpoint.environment : nemo_gym._checkpoint.errors : nemo_gym._checkpoint.generation_cut : nemo_gym._checkpoint.participant_workers : nemo_gym._checkpoint.resources : nemo_gym._checkpoint.settings : nemo_gym._checkpoint.steps : nemo_gym._checkpoint.store : nemo_gym._checkpoint.telemetry : nemo_gym._checkpoint.workers : nemo_gym.base_environment_server : nemo_gym.base_resources_server : nemo_gym.episode_types : nemo_gym.mcp_auto_exposure : nemo_gym.observability.verifiers : nemo_gym.runtime_dir : nemo_gym.server_status : nemo_gym.server_utils : nemo_gym.session_routing : nemo_gym.single_agent_turn_types : nemo_gym.tool_access",
+    "nemo_gym._checkpoint.agent : nemo_gym._checkpoint.control : nemo_gym._checkpoint.coordination : nemo_gym._checkpoint.environment : nemo_gym._checkpoint.errors : nemo_gym._checkpoint.generation_cut : nemo_gym._checkpoint.participant_workers : nemo_gym._checkpoint.resources : nemo_gym._checkpoint.settings : nemo_gym._checkpoint.steps : nemo_gym._checkpoint.store : nemo_gym._checkpoint.telemetry : nemo_gym._checkpoint.workers : nemo_gym.base_environment_server : nemo_gym.base_resources_server : nemo_gym.episode_types : nemo_gym.mcp_auto_exposure : nemo_gym.observability.verifiers : nemo_gym.rollout_correlation : nemo_gym.runtime_dir : nemo_gym.server_status : nemo_gym.server_utils : nemo_gym.session_routing : nemo_gym.single_agent_turn_types : nemo_gym.tool_access",
     # artifacts/
     "nemo_gym.exporters : nemo_gym.resolved_config : nemo_gym.run_artifacts : nemo_gym.run_exporter_registry",
     # metrics/
@@ -892,7 +892,7 @@ layers = [
     # telemetry/
     "nemo_gym.profiling : nemo_gym.telemetry",
     # core/
-    "nemo_gym.failure_kinds : nemo_gym.rollout_correlation",
+    "nemo_gym.core",
     # utils/
     "nemo_gym.utils",
     # config/
@@ -901,9 +901,6 @@ layers = [
 # Imports that point up the order today.
 # Each one goes away with the split or move that resolves it, and this list may only shrink.
 ignore_imports = [
-    "nemo_gym.atif_export -> nemo_gym.openai_utils",
-    "nemo_gym.atif_reverification -> nemo_gym.openai_utils",
-    "nemo_gym.base_resources_server -> nemo_gym.openai_utils",
     "nemo_gym.exporters.base -> nemo_gym.batch_status",
     "nemo_gym.exporters.base -> nemo_gym.rollout_collection",
     "nemo_gym.exporters.mlflow -> nemo_gym.rollout_collection",
@@ -913,14 +910,11 @@ ignore_imports = [
     "nemo_gym.config.global_config -> nemo_gym.sandbox.providers.registry",
     "nemo_gym.config.global_config -> nemo_gym.telemetry.setup",
     "nemo_gym.judge -> nemo_gym.server_utils",
-    "nemo_gym.rollout_correlation -> nemo_gym.episode_types",
     "nemo_gym.rollout_observability -> nemo_gym.observability.model_calls",
-    "nemo_gym.rollout_observability -> nemo_gym.openai_utils",
     "nemo_gym.sandbox.adapters.docker_compose -> nemo_gym.tasks.harbor.digest",
     "nemo_gym.sandbox.compose_config -> nemo_gym.tasks.harbor.digest",
     "nemo_gym.sandbox.providers._http_transport -> nemo_gym.server_utils",
     "nemo_gym.sandbox.providers.e2b._sdk -> nemo_gym.server_utils",
-    "nemo_gym.single_agent_turn_types -> nemo_gym.openai_utils",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.main",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.cli.utils",
     "nemo_gym.tasks.harbor.cli -> nemo_gym.rollout_collection",

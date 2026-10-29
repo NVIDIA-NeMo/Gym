@@ -29,12 +29,7 @@ from app import (
 from util import EmptyPolicyResponseError, JudgeCallError, JudgeOutputError
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionMessage,
-    NeMoGymChoice,
-    NeMoGymResponse,
-)
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionMessage, NeMoGymChoice, NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

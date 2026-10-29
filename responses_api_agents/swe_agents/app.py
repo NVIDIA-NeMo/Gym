@@ -64,12 +64,8 @@ from nemo_gym.config import (
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,

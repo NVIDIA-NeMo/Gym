@@ -34,7 +34,7 @@ from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_ID_CAPTURE_BLOCK
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import ApptainerProvider, DockerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.server_utils import ServerClient

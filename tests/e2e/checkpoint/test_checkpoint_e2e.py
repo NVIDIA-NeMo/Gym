@@ -45,7 +45,7 @@ from checkpoint_deployment import (
 
 import nemo_gym.server_utils as server_utils
 from nemo_gym._checkpoint import coordination
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 
 
 # The policy model server runs in one process, or as a coordinator plus uvicorn workers.

@@ -19,7 +19,7 @@ import pytest
 from pytest import approx, fixture
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionMessage,
     NeMoGymChoice,

@@ -18,7 +18,7 @@ import pytest
 
 from nemo_gym._checkpoint.control import StaleAttemptError
 from nemo_gym._checkpoint.store import read_participant_state, write_participant_state
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 from tests.unit_tests.test_checkpoint_control import (
     FakeParticipant,
     _gated_write,

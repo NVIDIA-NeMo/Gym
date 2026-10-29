@@ -648,7 +648,7 @@ before returning a failed response; inheritance alone does not attach metadata.
 Keep text parsing in the classifier and document the tested runtime version.
 Pi, Codex, OpenCode and Hermes override it in their agent-session paths.
 
-`AgentOutcome.failure_kind` accepts names registered in `nemo_gym/failure_kinds.py`
+`AgentOutcome.failure_kind` accepts names registered in `nemo_gym/core/failure_kinds.py`
 or `unknown`; unregistered names are rejected. The shared names describe causes,
 not retry or grading policy.
 

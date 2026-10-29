@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from nemo_gym.base_resources_server import BaseSeedSessionResponse, BaseVerifyResponse
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
 
 

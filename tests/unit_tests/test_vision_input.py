@@ -15,7 +15,7 @@
 
 from pytest import mark
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.prompt import PromptConfig
 from nemo_gym.vision_input import build_image_input
 

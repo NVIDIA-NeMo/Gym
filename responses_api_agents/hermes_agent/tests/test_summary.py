@@ -9,7 +9,7 @@ from run_agent import AIAgent
 from tools.delegate_tool import _build_child_agent
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from responses_api_agents.hermes_agent.model_kwargs import install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver
 from responses_api_agents.hermes_agent.sandbox_observer import SandboxHermesObserver

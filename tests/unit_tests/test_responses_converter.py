@@ -22,32 +22,34 @@ from types import SimpleNamespace
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
-from nemo_gym.observability.model_calls import _cache_signal
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
-    NeMoGymChatCompletionMessageToolCall,
     NeMoGymChoice,
     NeMoGymEasyInputMessage,
-    NeMoGymFunction,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseFunctionWebSearch,
-    NeMoGymResponseInputText,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+)
+from nemo_gym.core.responses_api_types import (
+    NeMoGymChatCompletionMessageToolCall,
+    NeMoGymFunction,
+    NeMoGymResponseFunctionWebSearch,
+    NeMoGymResponseInputText,
+    NeMoGymResponseOutputRefusal,
     training_variant_of,
 )
+from nemo_gym.observability.model_calls import _cache_signal
 from nemo_gym.responses_converter import (
     ResponsesConverter,
     ResponsesConverterState,
@@ -208,7 +210,7 @@ def test_flush_assistant_emits_plain_message():
 def test_flush_assistant_emits_training_message_when_token_info_present():
     state = ResponsesConverterState(return_token_id_information=True)
     state.content_buffer = "hello"
-    from nemo_gym.openai_utils import TokenIDLogProbMixin
+    from nemo_gym.core.responses_api_types import TokenIDLogProbMixin
 
     state.token_information = TokenIDLogProbMixin(
         prompt_token_ids=[1, 2],

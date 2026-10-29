@@ -12,7 +12,7 @@ from fastapi import Request
 from pytest import mark, raises
 
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxEndpoint
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.harness_exa_search.agent_runner import start_model_relay

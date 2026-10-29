@@ -29,7 +29,8 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 
-from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
+from nemo_gym.core import current_rollout_id
+from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import (
     _TRACEPARENT_PATTERN,
     TraceContextPathMiddleware,

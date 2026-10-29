@@ -8,7 +8,7 @@ import pytest
 
 from benchmarks.indic.milu_1_5.prepare import SOURCE_REVISION
 from benchmarks.indic.milu_1_5.rescore import rescore_shard
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 
 
 @pytest.fixture(params=["gym", "lm_eval"])

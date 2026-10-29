@@ -914,7 +914,7 @@ async def test_retirement_fences_admission_and_closure_until_delete(store):
 @pytest.mark.asyncio
 async def test_checkpoint_restores_delivered_calls_without_dead_attempt_intents(tmp_path):
     from nemo_gym._checkpoint.model import export_model_records, import_model_records
-    from nemo_gym.episode_types import EpisodeId
+    from nemo_gym.core import EpisodeId
 
     store = FileLineageStore(tmp_path / "source")
     await store.begin_call("r1", "c1")

@@ -713,8 +713,8 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
         return
     # Lazy: the capture store pulls in the model-server stack, which health workers do not need.
     from nemo_gym.base_responses_api_model import _PENDING_SUFFIX, CaptureStore
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
     from nemo_gym.observability.model_calls import read_available_model_call_records
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     listings = []
     for directory in capture_dirs:

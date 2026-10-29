@@ -27,12 +27,10 @@ import logging
 import pytest
 from pydantic import TypeAdapter
 
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymResponseCreateParamsNonStreaming,
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputItem
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCustomToolCall,
     NeMoGymResponseCustomToolCallForTraining,
-    NeMoGymResponseOutputItem,
     training_variant_of,
 )
 from nemo_gym.responses_converter import _CUSTOM_TOOL_BRIDGE_PARAMETER, ResponsesConverter

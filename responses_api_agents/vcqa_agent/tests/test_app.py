@@ -508,7 +508,7 @@ class TestJudgeGrade:
 
 class TestResponseExtractionHelpers:
     def test_extract_final_assistant_text(self) -> None:
-        from nemo_gym.openai_utils import (
+        from nemo_gym.core import (
             NeMoGymResponse,
             NeMoGymResponseFunctionToolCall,
             NeMoGymResponseOutputMessage,
@@ -538,7 +538,7 @@ class TestResponseExtractionHelpers:
         assert _extract_final_assistant_text(resp) == "The answer is 42."
 
     def test_extract_problem_statement_string_input(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         params = NeMoGymResponseCreateParamsNonStreaming(input="hello world")
         assert _extract_problem_statement(params) == "hello world"
@@ -562,7 +562,7 @@ class TestRunEndToEnd:
     async def test_run_against_local_fixture(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from fastapi import Request
 
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
         from responses_api_agents.vcqa_agent.app import VcqaAgentRunRequest
 
         fixture = tmp_path / "fixture_repo"
@@ -656,7 +656,7 @@ class TestRunFailureIsolation:
     async def test_run_returns_zero_on_materialize_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from fastapi import Request
 
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
         from responses_api_agents.vcqa_agent.app import VcqaAgentRunRequest
 
         async def boom(**kwargs):  # type: ignore[no-untyped-def]
@@ -1028,7 +1028,7 @@ async def test_tool_loop_sums_usage_and_details_across_turns(second_usage: dict,
     )
     agent = VcqaAgent(config=_make_config(inject_tools=False), server_client=server_client)
 
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
     result, steps = await agent._tool_loop(
         request=MagicMock(cookies={}),

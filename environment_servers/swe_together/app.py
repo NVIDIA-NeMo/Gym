@@ -63,9 +63,8 @@ from nemo_gym.config import (
     ModelServerRef,
     get_first_server_config_dict,
 )
+from nemo_gym.core import JUDGE_FAILED, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.episode_types import EpisodeFailure
-from nemo_gym.failure_kinds import JUDGE_FAILED
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.sandbox import (
     AsyncSandbox,

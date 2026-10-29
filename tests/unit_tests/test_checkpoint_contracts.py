@@ -24,8 +24,7 @@ from pydantic import ValidationError
 from nemo_gym._checkpoint.control import CheckpointRecord, JsonPayload
 from nemo_gym._checkpoint.errors import CheckpointStateError
 from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.core import EpisodeId, maybe_rollout_id_from_run_body
 from tests.unit_tests.test_checkpoint_control import FakeParticipant, body, make_client
 
 

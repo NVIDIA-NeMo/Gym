@@ -38,13 +38,9 @@ from nemo_gym.base_responses_api_model import (
 )
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
 from nemo_gym.observability.model_calls import read_model_call_records
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER
 from nemo_gym.server_utils import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.token_id_capture.replay import replay_context
 
@@ -116,7 +112,7 @@ class TestBaseResponsesAPIModel:
         ("ModelCallRecord", "nemo_gym.observability.model_calls"),
         ("read_model_call_records", "nemo_gym.observability.model_calls"),
         ("aggregate_model_call_metrics", "nemo_gym.observability.model_calls"),
-        ("maybe_rollout_id_from_run_body", "nemo_gym.rollout_correlation"),
+        ("maybe_rollout_id_from_run_body", "nemo_gym.core.episode"),
     ],
 )
 def test_model_call_legacy_import_resolves_with_deprecation(name, module):
@@ -739,7 +735,7 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     from pydantic import BaseModel, ConfigDict
 
     from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.core import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
     assert maybe_rollout_id_from_run_body(mapping) == "3-1"
@@ -1342,7 +1338,7 @@ def test_reconstruct_streamed_response_best_effort_none():
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.core import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
@@ -1355,7 +1351,7 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
 
 
 def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.core import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     # Restarted index numbering derives the same id twice.
@@ -1370,7 +1366,7 @@ def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
 
 @pytest.mark.parametrize("bad", [".hidden", "has/slash", "has space", "", 7, None])
 def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.core import maybe_rollout_id_from_run_body
 
     body = {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_rollout_id": bad}
     if bad is None:
@@ -1384,7 +1380,8 @@ def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
 
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware, maybe_rollout_id_from_run_body
+    from nemo_gym.core import maybe_rollout_id_from_run_body
+    from nemo_gym.rollout_correlation import RolloutContextMiddleware
 
     # The id becomes a path segment.
     # Middleware must return every accepted id unchanged.

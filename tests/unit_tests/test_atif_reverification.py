@@ -38,10 +38,7 @@ from nemo_gym.atif_reverification import (
 from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import ServerClient
 from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest

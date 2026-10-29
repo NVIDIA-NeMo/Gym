@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.core import rollout_context
 from nemo_gym.telemetry import GymSpanGroup
 from nemo_gym.telemetry import metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup

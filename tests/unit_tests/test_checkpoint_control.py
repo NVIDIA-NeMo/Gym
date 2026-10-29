@@ -29,7 +29,7 @@ from nemo_gym._checkpoint.control import (
 from nemo_gym._checkpoint.errors import CheckpointStateError
 from nemo_gym._checkpoint.steps import EpisodeSteps
 from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 
 
 TOKEN = "secret"

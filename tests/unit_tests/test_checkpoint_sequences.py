@@ -57,7 +57,7 @@ from nemo_gym._checkpoint.errors import CheckpointStateError, ControlError, Stal
 from nemo_gym._checkpoint.participant_workers import CoordinatedServerParticipant, ParticipantWorkerLink
 from nemo_gym._checkpoint.store import participant_dir, read_participant_state
 from nemo_gym._checkpoint.workers import WorkerCoordinator
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 
 
 SEEDS = int(os.environ.get("NEMO_GYM_CHECKPOINT_SEQUENCE_SEEDS", "150"))

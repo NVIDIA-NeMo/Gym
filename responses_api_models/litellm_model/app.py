@@ -35,10 +35,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 
 from nemo_gym.base_responses_api_model import Body
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.responses_converter import VLLMConverter, _usage_detail
 from nemo_gym.server_utils import request
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig

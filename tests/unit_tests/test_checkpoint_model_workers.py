@@ -27,7 +27,7 @@ from nemo_gym._checkpoint.control import (
 from nemo_gym._checkpoint.errors import ControlError, ExportFailedError, StaleAttemptError
 from nemo_gym._checkpoint.model import GenerationCutRecord, ModelRecord, PolicyGate, _Ticket
 from nemo_gym._checkpoint.model_workers import PolicyCoordinator, PolicyWorkerLink
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.sink import CaptureContext
 from nemo_gym.token_id_capture.staging.records import GenerationCutContinuation

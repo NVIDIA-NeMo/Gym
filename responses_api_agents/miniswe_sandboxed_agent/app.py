@@ -28,8 +28,13 @@ from nemo_gym.base_responses_api_agent import (
     assert_model_url_reachable_from_sandbox,
 )
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef, ResourcesServerRef, get_global_config_dict
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    current_rollout_id,
+    rollout_context,
+)
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import (
     AsyncSandbox,

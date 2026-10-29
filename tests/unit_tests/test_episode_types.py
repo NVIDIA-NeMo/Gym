@@ -4,13 +4,12 @@
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     EpisodeFailure,
-    EpisodeId,
     MaterializedTask,
-    TaskId,
     is_materialized_task_row,
 )
 
@@ -48,23 +47,6 @@ def test_episode_response_requires_exactly_one_outcome() -> None:
             result="result",
             failure=EpisodeFailure(failure_reason="failure", terminal=True),
         )
-
-
-def test_capture_key_qualifies_retries() -> None:
-    assert EpisodeId(rollout_id="r").capture_key == "r"
-    assert EpisodeId(rollout_id="r", attempt=2).capture_key == "r-a2"
-    with pytest.raises(ValidationError, match="reserved attempt suffix"):
-        EpisodeId(rollout_id="r-a2")
-
-
-def test_task_id_contains_only_logical_identity() -> None:
-    task_id = TaskId(taskset="swebench_pro:test", task_id="instance-1")
-    assert task_id.model_dump() == {
-        "taskset": "swebench_pro:test",
-        "task_id": "instance-1",
-    }
-    with pytest.raises(ValidationError, match="revision"):
-        TaskId(taskset="swebench_pro:test", task_id="instance-1", revision="v1")
 
 
 def test_failure_reason_round_trips_with_optional_metadata() -> None:

@@ -34,7 +34,7 @@ from pydantic import Field
 
 from nemo_gym.base_responses_api_agent import Body, SimpleResponsesAPIAgent
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, SandboxObservation, ToolCallObservation
 from nemo_gym.sandbox import (
     AsyncSandbox,

@@ -39,9 +39,15 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    EpisodeId,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    TaskId,
+)
 from nemo_gym.reward_profile import select_measured
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.session_routing import ResourcesSessionLifetimes
@@ -211,7 +217,7 @@ class TestFailureKindOnTheContract:
         """Dropping the response would replace a wrong label with a lost failure."""
         import logging
 
-        from nemo_gym import failure_kinds
+        from nemo_gym.core import failure_kinds
 
         failure_kinds._WARNED_UNKNOWN.discard("invented_kind")
         with caplog.at_level(logging.WARNING):
@@ -521,7 +527,7 @@ class TestRefusalsAndLostSessions:
     def test_a_lost_session_tool_call_warns_on_an_unregistered_failure_kind(self, caplog) -> None:
         import logging
 
-        from nemo_gym import failure_kinds
+        from nemo_gym.core import failure_kinds
 
         failure_kinds._WARNED_UNKNOWN.discard("invented_lost_kind")
         with caplog.at_level(logging.WARNING):

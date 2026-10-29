@@ -23,7 +23,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.config import GlobalConfigDictParser, ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

@@ -41,13 +41,13 @@ from nemo_gym.chat_streaming import (
     sanitize_streaming_chat_body,
     synthesize_chat_completion_sse,
 )
-from nemo_gym.openai_utils import (
-    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.core.responses_api_types import CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS
 from nemo_gym.server_utils import ServerClient
 
 

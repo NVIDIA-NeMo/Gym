@@ -29,8 +29,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.failure_kinds import JUDGE_UNPARSEABLE
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import JUDGE_UNPARSEABLE, NeMoGymResponse
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from resources_servers.voicebench.legacy import replay_rule_rows
 from resources_servers.voicebench.metrics import MetricValue, compute_voicebench_metrics

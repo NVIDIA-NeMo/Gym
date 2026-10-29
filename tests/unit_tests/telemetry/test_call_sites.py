@@ -137,7 +137,7 @@ async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(
     """The same correlation key the endpoint spans carry, so a rollout's sandbox time is filterable
     by attribute and not only through the parent chain. The sandbox API learns it through the
     provider Gym's telemetry setup registers, not by importing rollout correlation."""
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start()
@@ -188,7 +188,7 @@ async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(
     """Correlation is attached before the awaited work, so a failed start or exec is still filterable."""
     from opentelemetry.trace import StatusCode
 
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core import rollout_context
     from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 
     sandbox = AsyncSandbox(_FailingProvider(fail), SandboxSpec(image="ubuntu"))
@@ -492,7 +492,7 @@ def test_lens_imports_are_function_local_outside_the_fallback_resolver():
 
 async def test_sandbox_spans_have_no_extra_attributes_without_a_provider(recorded_spans, started_sandbox):
     """The sandbox package on its own knows nothing about rollouts."""
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start()
@@ -505,7 +505,7 @@ async def test_sandbox_spans_have_no_extra_attributes_without_a_provider(recorde
 async def test_explicit_span_attributes_win_over_the_provider(
     recorded_spans, started_sandbox, rollout_attributes_registered
 ):
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start(span_attributes={"nemo.gym.rollout.id": "explicit", "extra": "x"})

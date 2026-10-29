@@ -15,7 +15,7 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 
 
 TASK = {"task_id": "t"}

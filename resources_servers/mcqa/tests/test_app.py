@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import yaml
 from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

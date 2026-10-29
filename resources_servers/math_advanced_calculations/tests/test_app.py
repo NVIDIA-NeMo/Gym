@@ -17,10 +17,7 @@ from unittest.mock import MagicMock
 
 from pytest import approx, fixture
 
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.math_advanced_calculations.app import (
     MultiVerseMathHardRequest,

@@ -27,7 +27,7 @@ from checkpoint_deployment import COUNTER_SCRIPT, Deployment, GymHTTP, counter_r
 from test_checkpoint_e2e import gym_http_client, lift_connection_limit, reward_of, wait_until  # noqa: F401
 
 from nemo_gym._checkpoint import coordination
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 
 
 ROLLOUTS = os.environ.get("NEMO_GYM_CHECKPOINT_MULTIWORKER_STRESS")

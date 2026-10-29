@@ -18,7 +18,7 @@ from minisweagent.models.utils.actions_toolcall_response import BASH_TOOL_RESPON
 from pydantic import BaseModel, Field, TypeAdapter
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

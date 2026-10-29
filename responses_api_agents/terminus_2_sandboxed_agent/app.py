@@ -36,9 +36,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
-from nemo_gym.episode_types import TaskId
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -50,7 +48,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    TaskId,
 )
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,

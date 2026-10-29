@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.rna_design_agent import prepare
 from responses_api_agents.rna_design_agent.app import (

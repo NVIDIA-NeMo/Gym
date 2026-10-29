@@ -15,7 +15,7 @@ from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnviro
 from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest, UserTurn, episode_response
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage
 from nemo_gym.rollout_collection import _episode_record
 
 

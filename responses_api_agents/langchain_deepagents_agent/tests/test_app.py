@@ -23,7 +23,7 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent
 from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent import (

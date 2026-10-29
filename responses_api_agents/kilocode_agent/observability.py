@@ -7,11 +7,7 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from nemo_gym.openai_utils import (
-    NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseUsage,
-)
+from nemo_gym.core import NeMoGymResponseInputTokensDetails, NeMoGymResponseOutputTokensDetails, NeMoGymResponseUsage
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
 
 # opencode_agent's parser also maps bash outcomes from exit codes; opencode_sandboxed_agent is being retired.

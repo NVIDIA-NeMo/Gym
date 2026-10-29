@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult, SandboxHandle, SandboxSpec
 from nemo_gym.verifier_utils.sandbox_verification import (
     SandboxVerificationConfig,
