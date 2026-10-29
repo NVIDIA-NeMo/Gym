@@ -27,8 +27,13 @@ nemo_fabric_deepagents_reasoning_gym_agent:
       cwd: null
       harness_settings: {}
       fabric_config: {}
+      # reasoning_gym's verifier extracts the answer from <answer></answer> tags (last match), so DeepAgents'
+      # planning narration and inline reasoning stay out of the score. Without the tags the whole reply is
+      # scored and a correct final answer still scores 0 (NVBug 6900506), as
+      # resources_servers/reasoning_gym/configs/reasoning_gym_langchain_deepagents_agent_model_server.yaml notes.
       system_prompt: |
-        Solve the problem carefully and return only the answer in the exact format requested.
+        Solve the problem carefully and give the answer in the exact format requested. Put only your final
+        answer inside <answer></answer> tags. Do not mention the tags elsewhere in your response.
       datasets:
         - name: example
           type: example
