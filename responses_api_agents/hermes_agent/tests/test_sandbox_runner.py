@@ -591,3 +591,17 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
     assert output["observations"]["invocations"][0]["status"] == "incomplete"
     with pytest.raises(ProcessLookupError):
         os.kill(output["runtime"]["pid"], 0)
+
+
+def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_process_globals):
+    import yaml
+    from agent.auxiliary_client import call_llm
+
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        _run(_payload(server.base_url, max_turns=4), tmp_path)
+        response = call_llm(task="compression", messages=[{"role": "user", "content": "Summarize"}])
+    assert response.choices[0].message.content == "done"
+    assert server.requests[-1]["messages"] == [{"role": "user", "content": "Summarize"}]
+    config = yaml.safe_load((tmp_path / "hermes-home/config.yaml").read_text())
+    assert config["auxiliary"]["compression"]["base_url"] == server.base_url
+    assert config["auxiliary"]["compression"]["model"] == "policy_model"
