@@ -340,10 +340,15 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             await agent_cleanup.close()
             stage = "verification"
             verification = await self._verify(state, initial, activations)
-            await judge_cleanup.close()
-            await candidate_cleanup.close()
-            await runtime_cleanup.close()
-            await dependency_cleanup.close()
+            try:
+                await judge_cleanup.close()
+                await candidate_cleanup.close()
+                await runtime_cleanup.close()
+                await dependency_cleanup.close()
+            except Exception as error:
+                # The verdict is final. Final cleanup retries the open owners, and their expiry bounds any leak.
+                LOGGER.exception("SWE-Together cleanup failed after verification")
+                state.cleanup_receipts["post_verification_error"] = f"{type(error).__name__}: {error}"[:2000]
             response = SWETResponse(
                 episode_id=request.episode_id,
                 task_id=request.task.task_id,
