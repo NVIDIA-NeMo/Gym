@@ -139,7 +139,8 @@ async def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
         summary = result(tmp_path, process)
         assert summary["cleanup_confirmed"] is True
         assert summary["timed_out"] is (ending == "timeout")
-        assert set(summary) == {"return_code", "timed_out", "cleanup_confirmed", "error"}
+        assert set(summary) == {"return_code", "timed_out", "cleanup_confirmed", "error", "stopped"}
+        assert summary["stopped"] is (ending == "cancel")
         pid = int((tmp_path / "child.pid").read_text())
         assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
     finally:
