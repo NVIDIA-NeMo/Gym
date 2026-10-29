@@ -4,12 +4,16 @@
 
 import json
 import os
+import runpy
 import shutil
 import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -223,3 +227,100 @@ def test_snapshot_retains_native_session_before_cleanup(tmp_path):
         timeout=10,
     )
     assert (tmp_path / "native_session.jsonl").read_text().splitlines() == records.splitlines() * 2
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("ending", ["success", "failure", "spawn_error"])
+def test_history_transport_wiring_and_cleanup(tmp_path, monkeypatch, enabled, ending):
+    gym_url = "http://gym/ng-rollout/test/v1"
+    helper_url = "http://127.0.0.1:19001/v1"
+    observation_url = "http://127.0.0.1:19002/v1"
+    lifecycle = []
+
+    @contextmanager
+    def history_transport(base_url, *, timeout):
+        lifecycle.append(("history_enter", base_url, timeout))
+        try:
+            yield helper_url
+        finally:
+            lifecycle.append(("history_exit",))
+
+    @contextmanager
+    def observation_proxy(base_url, invocation_id, output, *, timeout):
+        lifecycle.append(("observation_enter", base_url, invocation_id, output, timeout))
+        try:
+            yield observation_url
+        finally:
+            lifecycle.append(("observation_exit",))
+
+    def load_runner_file(path):
+        name = Path(path).name
+        if name == "model_history_transport.py":
+            return {"HistoryTransport": history_transport}
+        assert name == "sandbox_transport.py"
+        return {"rate_limit_proxy": observation_proxy}
+
+    load = Mock(side_effect=load_runner_file)
+    monkeypatch.setattr(runpy, "run_path", load)
+    monkeypatch.setattr(sandbox_runner.signal, "signal", Mock())
+    command = ["node", "codex.js", "exec", "--json", "--", "-"]
+    params = {
+        "directory": str(tmp_path),
+        "command": command.copy(),
+        "model_base_url": gym_url,
+        "invocation_id": "invocation",
+        "timeout": 5,
+        "prompt": "task input",
+        "cwd": str(tmp_path),
+        "env": {"TASK_SETTING": "preserved"},
+    }
+    if enabled:
+        params["history_transport"] = {"base_url": gym_url, "timeout": 5}
+    return_code = 0 if ending == "success" else 1
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b'{"type":"test"}\n')
+    os.close(write_fd)
+    with os.fdopen(read_fd, "rb") as stdout:
+        child = SimpleNamespace(stdout=stdout, poll=lambda: return_code, wait=lambda: return_code)
+        spawn = Mock(return_value=child)
+        if ending == "spawn_error":
+            spawn.side_effect = OSError("cannot start CLI")
+        monkeypatch.setattr(sandbox_runner.subprocess, "Popen", spawn)
+        if ending == "spawn_error":
+            with pytest.raises(OSError, match="cannot start CLI"):
+                sandbox_runner.run(params)
+        else:
+            assert sandbox_runner.run(params) == return_code
+            _, event = json.loads((tmp_path / "events.jsonl").read_text())
+            assert event == {"type": "test"}
+
+    expected = []
+    if enabled:
+        expected.append(("history_enter", gym_url, 5))
+    expected.extend(
+        [
+            (
+                "observation_enter",
+                helper_url if enabled else gym_url,
+                "invocation",
+                tmp_path / "model_attempts.jsonl",
+                5,
+            ),
+            ("observation_exit",),
+        ]
+    )
+    if enabled:
+        expected.append(("history_exit",))
+    assert lifecycle == expected
+    assert [Path(call.args[0]).name for call in load.call_args_list] == (
+        ["model_history_transport.py", "sandbox_transport.py"] if enabled else ["sandbox_transport.py"]
+    )
+    assert spawn.call_args.args[0] == [
+        *command[:2],
+        "-c",
+        "model_providers.gym.base_url=" + json.dumps(observation_url),
+        *command[2:],
+    ]
+    assert spawn.call_args.kwargs["env"]["TASK_SETTING"] == "preserved"
+    assert spawn.call_args.kwargs["cwd"] == str(tmp_path)
+    assert params["command"] == command
