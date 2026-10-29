@@ -41,7 +41,7 @@ from nemo_gym.reward_profile import (
     highest_k_metrics,
 )
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, SandboxVerificationError
+from nemo_gym.verification import SandboxVerificationConfig, SandboxVerificationError
 
 
 LOG = logging.getLogger(__name__)

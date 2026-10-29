@@ -31,8 +31,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import judge_failsafe
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification import exercise_verifier_fixture, judge_failsafe
 from resources_servers.equivalence_llm_judge.app import (
     VERIFIER_FIXTURE,
     LLMJudgeResourcesServer,

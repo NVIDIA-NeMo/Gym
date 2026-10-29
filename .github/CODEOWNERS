@@ -59,7 +59,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/hf_utils.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/prompt.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/reward_profile.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/judge.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/verification/judge.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/skills.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/rollout_reverification.py @nvidia-nemo/gym_env_benchmarks
 

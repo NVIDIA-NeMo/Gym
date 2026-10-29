@@ -41,8 +41,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.verification import JudgeError
 
 
 # Per-request collector for judge failures. A ContextVar is shared by reference

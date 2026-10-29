@@ -77,7 +77,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.verification import JudgeError, call_judge
 
 
 LOG = logging.getLogger(__name__)

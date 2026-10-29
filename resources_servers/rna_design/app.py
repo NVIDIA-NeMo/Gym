@@ -49,7 +49,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import failure_kinds
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 from resources_servers.rna_design.verifier_fixture import create_server, invoke
 
 
