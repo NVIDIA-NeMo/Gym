@@ -548,7 +548,7 @@ class TestServerUtils:
             global_config_dict=DictConfig(
                 {
                     "my_server": {
-                        "a": {
+                        "resources_servers": {
                             "b": {
                                 "host": "xyz",
                                 "port": 54321,
@@ -743,7 +743,7 @@ class TestServerUtils:
         monkeypatch.setenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, "my_server")
 
         global_config_dict = DictConfig(
-            {"my_server": {"a": {"b": {"host": "", "port": 0, "entrypoint": "my entrypoint"}}}}
+            {"my_server": {"resources_servers": {"b": {"host": "", "port": 0, "entrypoint": "my entrypoint"}}}}
         )
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = global_config_dict
@@ -817,7 +817,7 @@ class TestServerUtils:
         """Resolve each server's base URL once."""
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="head", port=11000),
-            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+            global_config_dict=DictConfig({"my_server": {"resources_servers": {"b": {"host": "xyz", "port": 54321}}}}),
         )
 
         httpx_client_mock = MagicMock()
@@ -845,7 +845,7 @@ class TestServerUtils:
         """A request body that replays assistant output with logprobs is sent as JSON with the logprobs intact."""
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="head", port=11000),
-            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+            global_config_dict=DictConfig({"my_server": {"resources_servers": {"b": {"host": "xyz", "port": 54321}}}}),
         )
         aiohttp_client_mock = MagicMock()
         aiohttp_client_request_mock = AsyncMock(return_value="ok")
@@ -2434,7 +2434,9 @@ class TestRunWebserverProxyKwargs:
     ) -> dict:
         from fastapi import FastAPI
 
-        global_config = DictConfig({DRY_RUN_KEY_NAME: False, "my_server": {"a": {"b": {}}}, **config_dict})
+        global_config = DictConfig(
+            {DRY_RUN_KEY_NAME: False, "my_server": {"resources_servers": {"b": {}}}, **config_dict}
+        )
         ray_mock = MagicMock()
         ray_mock.is_initialized.return_value = True
         self.ray_loader_mock = MagicMock(return_value=ray_mock)
@@ -2509,6 +2511,13 @@ class TestRunWebserverProxyKwargs:
         assert 4 == kwargs["workers"]
         assert kwargs["proxy_headers"] is False
         assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_multi_worker_import_string_finds_server_type_key_after_other_keys(self, monkeypatch: MonkeyPatch) -> None:
+        config_dict = {"my_server": {"note": "extra key placed first", "resources_servers": {"b": {}}}}
+
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, config_dict, num_workers=2)
+
+        assert kwargs["app"] == "resources_servers.b.app:app"
 
     def test_server_with_a_reason_refuses_several_workers_before_uvicorn_starts(
         self, monkeypatch: MonkeyPatch

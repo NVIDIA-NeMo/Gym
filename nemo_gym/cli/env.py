@@ -71,6 +71,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_global_config_dict,
+    server_type_key,
 )
 from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.registry import (
@@ -380,7 +381,9 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
         if not isinstance(server_config_dict, DictConfig):
             continue
 
-        first_key = list(server_config_dict)[0]
+        first_key = server_type_key(server_config_dict)
+        if first_key is None:
+            continue
         server_config_dict = server_config_dict[first_key]
         if not isinstance(server_config_dict, DictConfig):
             continue
@@ -1041,27 +1044,8 @@ def prefetch(
     global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
     GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
 
-    top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
-
     seen_dirs: set = set()
-    for top_level_path in top_level_paths:
-        server_config_dict = global_config_dict[top_level_path]
-        if not isinstance(server_config_dict, DictConfig):
-            continue
-
-        first_key = list(server_config_dict)[0]
-        server_config_dict = server_config_dict[first_key]
-        if not isinstance(server_config_dict, DictConfig):
-            continue
-        second_key = list(server_config_dict)[0]
-        server_config_dict = server_config_dict[second_key]
-        if not isinstance(server_config_dict, DictConfig):
-            continue
-
-        if "entrypoint" not in server_config_dict:
-            continue
-
-        dir_path = _resolve_server_dir(Path(first_key, second_key))
+    for top_level_path, *_, dir_path in _configured_servers(global_config_dict):
         if dir_path in seen_dirs:
             print(f"Skipping duplicate: {dir_path}")
             continue

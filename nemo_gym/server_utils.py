@@ -90,6 +90,7 @@ from nemo_gym.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
     maybe_get_global_config_dict,
+    server_type_key,
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
@@ -2133,7 +2134,7 @@ repr(e): {repr(e)}"""
         if server.config.num_workers and server.config.num_workers > 1:
             # TODO this is very dirty. We need a cleaner way to populate this information in the configs data structures.
             server_instance_config_dict = global_config_dict[server.config.name]
-            first_level_key = list(server_instance_config_dict.keys())[0]
+            first_level_key = server_type_key(server_instance_config_dict)
             second_level_key = list(server_instance_config_dict[first_level_key].keys())[0]
             relative_fpath = f"{first_level_key}/{second_level_key}/{server.config.entrypoint}"
             module_import_str = relative_fpath.replace(".py", "").replace("/", ".")
