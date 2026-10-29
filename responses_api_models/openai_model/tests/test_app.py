@@ -33,6 +33,8 @@ from nemo_gym.openai_utils import (
     PermanentEndpointError,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.telemetry import concurrency
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -717,6 +719,7 @@ class TestApp:
             operation_called = True
             return "completed"
 
+        timeouts_before = sum(concurrency._ADMISSION_TIMEOUTS.values())
         try:
             with pytest.raises(TimeoutError, match="acquiring an upstream provider slot"):
                 await server._call_upstream(operation)
@@ -724,6 +727,34 @@ class TestApp:
             server._semaphore.release()
 
         assert operation_called is False
+        assert sum(concurrency._ADMISSION_TIMEOUTS.values()) - timeouts_before == 1, "the slot limit counts it once"
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            pytest.param({}, None, id="no limit reports no limit"),
+            pytest.param({"max_concurrent_requests": 4}, (4, None), id="limit without a pool timeout"),
+            pytest.param(
+                {"max_concurrent_requests": 4, "upstream_pool_timeout_seconds": 30.0},
+                (4, 30.0),
+                id="limit with a pool timeout",
+            ),
+        ],
+    )
+    def test_the_upstream_limit_reports_under_the_server_name(
+        self, config: dict, expected: tuple[int, float | None] | None
+    ) -> None:
+        server = self._setup_server(**config)
+
+        if expected is None:
+            assert not isinstance(server._semaphore, MeteredSemaphore)
+            return
+        assert (server._semaphore.limit, server._semaphore.admission_timeout_s) == expected
+        assert server._semaphore.attributes == {
+            "nemo.gym.concurrency.component": "model_server",
+            "nemo.gym.concurrency.limit_name": "upstream_requests",
+            "nemo.gym.server.name": "test_model_server",
+        }
 
     @pytest.mark.asyncio
     async def test_retry_backoff_releases_concurrency_slot(

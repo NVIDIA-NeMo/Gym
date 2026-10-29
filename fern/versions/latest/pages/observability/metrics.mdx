@@ -181,6 +181,39 @@ async with resources_operation(self._semaphore, operation="verify", executor="su
 
 Every metric carries `nemo.gym.resources.operation` (`verify`, `tool`, `judge`, or `other`) and `nemo.gym.resources.executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
 
+### Concurrency Limit Metrics
+
+A wait duration shows that work waited, not why. These metrics show the state of each configured concurrency limit, so a dashboard can show "limit 100, active 100, queued 75" and make clear that the limit is full and work is piling up behind it.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.concurrency.limit` | Up/down counter | slots | The configured number of slots. |
+| `gym.concurrency.active` | Up/down counter | slots | Slots held right now. |
+| `gym.concurrency.available` | Up/down counter | slots | Slots free right now, `limit - active`. |
+| `gym.concurrency.queue_depth` | Up/down counter | count | Callers waiting for a slot right now. |
+| `gym.concurrency.admission_timeouts_total` | Counter | count | Waits that ran out of the limit's admission timeout. Reported only for limits that have one. |
+| `gym.concurrency.admission_cancelled_total` | Counter | count | Waits cancelled before a slot was free, for example because the caller's request was cancelled. |
+
+Every point carries `nemo.gym.concurrency.component`, `nemo.gym.concurrency.limit_name`, and, for a limit that belongs to a server, `nemo.gym.server.name`. Limits with the same attributes in one process are summed, and separate processes, such as the Uvicorn workers of one server, export their own points. These limits report today:
+
+| Component | `limit_name` | Configured by | Admission timeout |
+| --- | --- | --- | --- |
+| `rollout_driver` | `rollouts` | `num_samples_in_parallel` | None |
+| `model_server` (`openai_model` and servers built on it) | `upstream_requests` | `max_concurrent_requests` | `upstream_pool_timeout_seconds` |
+| `environment_server` | `episodes` | `max_concurrent_episodes` | `queue_timeout_seconds` |
+| `resources_server` (`math_with_judge`) | `library_verifier` | `library_verifier_max_concurrency` | None |
+
+A component without a configured limit reports no series at all, not a limit of zero. Agent servers, the other model and resources servers, and sandbox providers keep their own limits, which these metrics do not report yet. No Gym limit rejects work when it is full, so there is no rejection count.
+
+How to read them:
+
+- `active` equal to `limit` with a growing `queue_depth` means the limit is the bottleneck. Raising it helps only if the work behind it, such as the model endpoint, has capacity to spare.
+- `active` below `limit` with slow requests means the time goes elsewhere. Compare `gym.event_loop.lag_ms` and the HTTP connection-pool metrics.
+- A rising `admission_timeouts_total` means callers gave up waiting. For a model server, these are the requests that fail with "Timed out acquiring an upstream provider slot"; for an environment server, the episodes that fail at the `admission` stage.
+- For the rollout driver, `gym.driver.admission_duration_ms` gives the wait per rollout, and `gym.concurrency.queue_depth` the number waiting right now.
+
+A slot costs a few integer updates and no OpenTelemetry call. The exporter's background thread reads the totals, and they are reported whenever metrics are exported.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.

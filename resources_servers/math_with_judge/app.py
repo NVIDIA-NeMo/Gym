@@ -45,6 +45,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 from nemo_gym.telemetry.resources_operations import resources_operation
 
 
@@ -411,7 +412,12 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
         # The async path no longer blocks the event loop while SymPy runs, so
         # cap child-process fanout explicitly.
-        self._library_verifier_semaphore = asyncio.Semaphore(value=self.config.library_verifier_max_concurrency)
+        self._library_verifier_semaphore = MeteredSemaphore(
+            self.config.library_verifier_max_concurrency,
+            component="resources_server",
+            limit_name="library_verifier",
+            server_name=self.config.name,
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()

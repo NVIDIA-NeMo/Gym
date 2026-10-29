@@ -33,6 +33,7 @@ These metrics make that pressure visible without inspecting private asyncio inte
 * ``gym.http.client.requests.in_flight``: outbound calls through ``server_utils.request`` still waiting for their response headers.
 * ``gym.driver.rollouts.offered_total``, ``gym.driver.rollouts.resident``, and ``gym.driver.rollouts.active``, plus the ``gym.driver.admission_duration_ms``, ``gym.driver.output_write_duration_ms``, ``gym.driver.output_write_bytes``, and ``gym.driver.materialize_duration_ms`` histograms, from the rollout driver.
 * ``gym.driver.rollout.input_items``, ``gym.driver.rollout.output_items``, ``gym.driver.rollout.turns``, and ``gym.driver.rollout.tool_calls``: the size of each completed rollout, recorded once per rollout by the driver.
+* ``gym.concurrency.*``: the limit, slots in use, and waiters of every :class:`~nemo_gym.telemetry.concurrency.MeteredSemaphore` in the process.
 
 Each kind of work runs where it costs the least:
 
@@ -57,6 +58,8 @@ import time
 import weakref
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Optional
+
+from nemo_gym.telemetry.concurrency import register_concurrency_instruments
 
 
 logger = logging.getLogger(__name__)
@@ -423,6 +426,7 @@ class _Instruments:
             unit="{file_descriptor}",
             description="Open file descriptors in this process.",
         )
+        register_concurrency_instruments(meter)
 
 
 #: Instruments per meter, so a meter that is garbage collected takes its instruments with it.
