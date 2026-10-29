@@ -23,7 +23,7 @@ from nemo_gym.comparison.statistics.unpaired_welch_fixed_suite import (
     MetricScale,
     SampleSummary,
     aggregate_welch,
-    composite_repeat_scores,
+    normalize_and_average_metrics_per_repeat,
     normalize_score,
     summarize_sample,
 )
@@ -102,12 +102,14 @@ def test_normalization_uses_theoretical_bounds_and_reverses_lower_is_better() ->
     assert normalize_score(0, MetricScale(-20, 80, higher_is_better=False)) == 80
     assert normalize_score(-20, MetricScale(-20, 80)) == 0
     assert normalize_score(80, MetricScale(-20, 80)) == 100
-    assert composite_repeat_scores([[0, 100], [50, 50]], [MetricScale(0, 100), MetricScale(0, 100)]) == (50, 50)
+    assert normalize_and_average_metrics_per_repeat(
+        [[0, 100], [50, 50]], [MetricScale(0, 100), MetricScale(0, 100)]
+    ) == (50, 50)
 
 
 def test_identical_metrics_preserve_repeat_variance_instead_of_halving_it() -> None:
-    single = composite_repeat_scores([[0], [0.5], [1]], [MetricScale(0, 1)])
-    duplicated = composite_repeat_scores([[0, 0], [0.5, 0.5], [1, 1]], [MetricScale(0, 1)] * 2)
+    single = normalize_and_average_metrics_per_repeat([[0], [0.5], [1]], [MetricScale(0, 1)])
+    duplicated = normalize_and_average_metrics_per_repeat([[0, 0], [0.5, 0.5], [1, 1]], [MetricScale(0, 1)] * 2)
 
     assert duplicated == single == (0, 50, 100)
     assert summarize_sample(duplicated).sample_variance == 2500
@@ -115,17 +117,21 @@ def test_identical_metrics_preserve_repeat_variance_instead_of_halving_it() -> N
 
 
 def test_anticorrelated_metrics_cancel_variance_within_repeats() -> None:
-    composites = composite_repeat_scores([[0, 1], [0.5, 0.5], [1, 0]], [MetricScale(0, 1)] * 2)
+    composites = normalize_and_average_metrics_per_repeat([[0, 1], [0.5, 0.5], [1, 0]], [MetricScale(0, 1)] * 2)
 
     assert composites == (50, 50, 50)
     assert summarize_sample(composites) == SampleSummary(count=3, mean=50, sample_variance=0)
 
 
 def test_benchmarks_keep_equal_weight_when_metric_counts_differ() -> None:
-    baseline_a = composite_repeat_scores([[0], [0.2], [0.4]], [MetricScale(0, 1)])
-    candidate_a = composite_repeat_scores([[0.2], [0.4], [0.6]], [MetricScale(0, 1)])
-    baseline_b = composite_repeat_scores([[0, 0, 0], [0.2, 0.2, 0.2], [0.4, 0.4, 0.4]], [MetricScale(0, 1)] * 3)
-    candidate_b = composite_repeat_scores([[0.4, 0.4, 0.4], [0.6, 0.6, 0.6], [0.8, 0.8, 0.8]], [MetricScale(0, 1)] * 3)
+    baseline_a = normalize_and_average_metrics_per_repeat([[0], [0.2], [0.4]], [MetricScale(0, 1)])
+    candidate_a = normalize_and_average_metrics_per_repeat([[0.2], [0.4], [0.6]], [MetricScale(0, 1)])
+    baseline_b = normalize_and_average_metrics_per_repeat(
+        [[0, 0, 0], [0.2, 0.2, 0.2], [0.4, 0.4, 0.4]], [MetricScale(0, 1)] * 3
+    )
+    candidate_b = normalize_and_average_metrics_per_repeat(
+        [[0.4, 0.4, 0.4], [0.6, 0.6, 0.6], [0.8, 0.8, 0.8]], [MetricScale(0, 1)] * 3
+    )
 
     result = aggregate_welch(
         [
@@ -232,7 +238,7 @@ def test_insufficient_repeats_are_rejected(values: list[float]) -> None:
 @pytest.mark.parametrize("values,scales", [([], [MetricScale(0, 1)]), ([[1]], []), ([[1, 2]], [MetricScale(0, 1)])])
 def test_composites_require_nonempty_aligned_repeat_rows(values: list[list[float]], scales: list[MetricScale]) -> None:
     with pytest.raises(ValueError):
-        composite_repeat_scores(values, scales)
+        normalize_and_average_metrics_per_repeat(values, scales)
 
 
 @pytest.mark.parametrize("confidence_level", [0, 1, -0.1, 1.1, math.nan, math.inf, True])
