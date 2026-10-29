@@ -204,7 +204,7 @@ partner_if_prime:
           resource_requests: {cpu: 1, memory_mib: 4096, disk_gib: 20}
         metadata: {environment: partner-if-prime}
       repository_url: https://github.com/django/django.git
-      repository_commit: 93e892bb645b16ebaf287beb5fe7f3ffe8d10408
+      repository_commit: 93e892bb645b16ebaf287beb5fe7f3ffe8d10408  # pragma: allowlist secret - public Django commit
       workdir: /workspace/django
       capture_directory: /tmp/partner-if-prime-capture
       judge_model_server: {type: responses_api_models, name: partner_if_judge}

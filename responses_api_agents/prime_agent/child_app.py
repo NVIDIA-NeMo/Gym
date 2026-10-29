@@ -51,10 +51,10 @@ LOG = logging.getLogger(__name__)
 HERE = Path(__file__).parent
 # Release assets for https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.7.0.
 ARCHIVES = {
-    "prime-agent": "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b",
-    "prime-agent-ai": "7cdbb3e835f48dd103325f7a351ce540b27af4d161aeb9c7b9bdcc12fe7909af",
-    "prime-agent-core": "0313373089831d9a2ce06e874fab8b9c05762c0094ff9fc202908cf7db7f99cd",
-    "prime-agent-tui": "3225f7f92e87db80fe2c9005d1f7770735ae625c32935ef2283688fc9bd33951",
+    "prime-agent": "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b",  # pragma: allowlist secret - public release SHA-256
+    "prime-agent-ai": "7cdbb3e835f48dd103325f7a351ce540b27af4d161aeb9c7b9bdcc12fe7909af",  # pragma: allowlist secret - public release SHA-256
+    "prime-agent-core": "0313373089831d9a2ce06e874fab8b9c05762c0094ff9fc202908cf7db7f99cd",  # pragma: allowlist secret - public release SHA-256
+    "prime-agent-tui": "3225f7f92e87db80fe2c9005d1f7770735ae625c32935ef2283688fc9bd33951",  # pragma: allowlist secret - public release SHA-256
 }
 
 
