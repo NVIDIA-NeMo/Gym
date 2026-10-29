@@ -3083,6 +3083,36 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
         assert (tmp_path / "output.jsonl").read_bytes().startswith(on_disk)
         assert [orjson.loads(line) for line in on_disk.splitlines()] == cached
 
+    async def test_append_recovers_cached_identity_from_the_failures_sidecar(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cached = self._fixture(tmp_path, source_stamp=self._STAMP, cached_tasks=[0, 1])
+        cached[1]["verdict"] = "cached-correct"
+        self._write(tmp_path / "output.jsonl", cached)
+        producing = [orjson.loads(line) for line in (tmp_path / "rollouts.jsonl").read_bytes().splitlines()]
+        self._write(tmp_path / "rollouts.jsonl", producing[:1])
+        self._write(
+            tmp_path / "rollouts_failures.jsonl",
+            [row | {NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS} for row in producing[1:]],
+        )
+        source_bytes = {name: (tmp_path / name).read_bytes() for name in ("rollouts.jsonl", "rollouts_failures.jsonl")}
+        on_disk = (tmp_path / "output.jsonl").read_bytes()
+        dispatched, posted = [], []
+        self._patch(monkeypatch, dispatched, posted)
+
+        returned = await RolloutReverificationHelper().run_from_config(
+            self._config(tmp_path, resume=True, judge_failed_only=True, append=True)
+        )
+
+        assert dispatched == [2, 3]
+        assert posted == [[0, 1, 2, 3]]
+        assert returned[:2] == [row | self._STAMP for row in cached]
+        assert {(r["_ng_environment_server"], r["_ng_result_type"]) for r in returned} == {("env_a", "legacy_agent")}
+        assert [r["reward"] for r in returned] == [1.0, 1.0, 0.5, 0.5]
+        assert (tmp_path / "output.jsonl").read_bytes().startswith(on_disk)
+        assert [orjson.loads(line) for line in on_disk.splitlines()] == cached
+        assert {name: (tmp_path / name).read_bytes() for name in source_bytes} == source_bytes
+
     async def test_a_fresh_reverification_groups_the_same_way(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
