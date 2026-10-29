@@ -30,7 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import SimpleServer
+from nemo_gym.server_runtime.server_utils import SimpleServer
 from nemo_gym.verification import JudgeError, exercise_verifier_fixture
 from resources_servers.proof_jury_judge.app import (
     VERIFIER_FIXTURE,

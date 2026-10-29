@@ -18,7 +18,8 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest
 from nemo_gym.server_runtime.mcp_auto_exposure import harvest_tools
-from nemo_gym.server_utils import SimpleServer, entrypoint_ray_enabled
+from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
+from nemo_gym.server_runtime.server_utils import SimpleServer
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from nemo_gym.verification import exercise_verifier_fixture
 from nemo_gym.verification.verifier_fixture import load_verifier_fixture

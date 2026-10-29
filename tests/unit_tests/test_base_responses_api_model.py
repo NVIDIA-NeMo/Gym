@@ -1087,7 +1087,7 @@ def test_base_agent_url_path_for_request_propagates_inbound_prefix():
 
 
 def test_base_agent_registers_prefixed_self_call_route():
-    from nemo_gym.server_utils import ROLLOUT_PATH_PREFIX
+    from nemo_gym.config import ROLLOUT_PATH_PREFIX
 
     routes = {route.path for route in _make_base_agent({}).setup_webserver().routes}
     assert f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses" in routes

@@ -42,7 +42,7 @@ def _policy_server_that_sets_a_session_cookie(seen_cookie_headers: list) -> http
     """Stand-in for Gym's vllm_model server.
 
     Like the real one (SessionMiddleware + add_session_id in
-    nemo_gym/server_utils.py) it puts a session cookie on EVERY response, and
+    nemo_gym/server_runtime/server_utils.py) it puts a session cookie on EVERY response, and
     it records the Cookie header each request arrived with so a test can see
     whether the client replayed it.
     """

@@ -44,7 +44,7 @@ from checkpoint_deployment import (
 )
 
 import nemo_gym.client.http_client
-import nemo_gym.server_utils as server_utils
+import nemo_gym.server_runtime.server_utils as server_utils
 from nemo_gym.core import EpisodeId
 from nemo_gym.server_runtime._checkpoint import coordination
 

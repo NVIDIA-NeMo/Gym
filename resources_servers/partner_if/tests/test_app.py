@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse, is_namespaced
-from nemo_gym.server_utils import SimpleServer
+from nemo_gym.server_runtime.server_utils import SimpleServer
 from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from nemo_gym.verification import JudgeError
 from resources_servers.partner_if import grading_contract as kinds

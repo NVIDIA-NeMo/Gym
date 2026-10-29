@@ -20,8 +20,8 @@ import requests
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
+from nemo_gym.server_runtime.registry_server import ServerInstanceDisplayConfig
 from nemo_gym.server_runtime.server_status import StatusCommand
-from nemo_gym.server_utils import ServerInstanceDisplayConfig
 
 
 class TestServerStatus:

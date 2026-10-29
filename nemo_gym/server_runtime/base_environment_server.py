@@ -28,7 +28,7 @@ from nemo_gym.server_runtime._checkpoint.participant_workers import install_serv
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
 from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
-from nemo_gym.server_utils import SimpleServer
+from nemo_gym.server_runtime.server_utils import SimpleServer
 
 
 LOGGER = logging.getLogger(__name__)

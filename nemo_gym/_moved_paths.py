@@ -67,6 +67,7 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.server_utils": MovedPath(new="nemo_gym.server_runtime.server_utils", since="0.8.0"),
     "nemo_gym._checkpoint.model": MovedPath(new="nemo_gym.models._checkpoint", since="0.8.0"),
     "nemo_gym._checkpoint.model_workers": MovedPath(new="nemo_gym.models._checkpoint_workers", since="0.8.0"),
     "nemo_gym._checkpoint": MovedPath(new="nemo_gym.server_runtime._checkpoint", since="0.8.0"),
@@ -210,6 +211,90 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         ),
         # server_utils imported this before the split and no longer uses it.
         **_names("nemo_gym.config.global_config", "0.8.0", "NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME"),
+        # Split out of server_utils when it moved to nemo_gym/server_runtime.
+        **_names("nemo_gym.server_runtime.entrypoint_flags", "0.8.0", "_declared_class_flag entrypoint_class_flag"),
+        **_names(
+            "nemo_gym.server_runtime.ray_support",
+            "0.8.0",
+            """
+            _NEMO_GYM_STARTED_RAY_CLUSTER _declared_ray_enabled _get_ray entrypoint_ray_enabled initialize_ray
+            ray_is_installed
+            """,
+        ),
+        **_names(
+            "nemo_gym.server_runtime.registry_server",
+            "0.8.0",
+            """
+            DEFAULT_HEAD_SERVER_PORT HeadServer ServerInstanceDisplayConfig
+            """,
+        ),
+        **_names("nemo_gym.server_runtime.request_handling.disconnect", "0.8.0", "_cancelled_request_route"),
+        **_names(
+            "nemo_gym.server_runtime.request_handling.errors",
+            "0.8.0",
+            """
+            _VALIDATION_ERROR_LOG_BODY_CHARS _VALIDATION_ERROR_LOG_ERRORS_CHARS
+            _VALIDATION_ERROR_LOG_FIELD_CHARS _VALIDATION_ERROR_LOG_LOC_ITEMS _VALIDATION_ERROR_LOG_MAX_ERRORS
+            _bounded_validation_error_value _escaped_log_prefix _escaped_log_text _log_validation_exception
+            _validation_error_summaries _validation_errors_log_text
+            """,
+        ),
+        **_names(
+            "nemo_gym.server_runtime.request_handling.request_context",
+            "0.8.0",
+            """
+            RequestContextIsolationMiddleware
+            """,
+        ),
+        **_names(
+            "nemo_gym.server_runtime.request_handling.trace_context",
+            "0.8.0",
+            """
+            TraceContextPathMiddleware _ROLLOUT_PREFIX_PATTERN _ROLLOUT_PREFIX_RE _TRACE_CONTEXT_PATH_RE
+            _restore_trace_segment_on_redirect
+            """,
+        ),
+        # Moved, and still imported by server_utils for its own use.
+        **_names("nemo_gym.server_runtime.ray_support", "0.8.0", "_connect_server_to_ray maybe_ray_cluster_exit"),
+        **_names(
+            "nemo_gym.server_runtime.request_handling.disconnect",
+            "0.8.0",
+            """
+            ClientDisconnectCancellationMiddleware
+            """,
+        ),
+        **_names("nemo_gym.server_runtime.request_handling.errors", "0.8.0", "_validation_exception_handler"),
+        **_names(
+            "nemo_gym.server_runtime.request_handling.request_context",
+            "0.8.0",
+            """
+            install_request_context_isolation
+            """,
+        ),
+        **_names("nemo_gym.server_runtime.request_handling.trace_context", "0.8.0", "install_trace_context_path"),
+        # server_utils imported these for code that moved out of it.
+        **_names(
+            "nemo_gym.config.config_types",
+            "0.8.0",
+            """
+            BaseServerConfig ROLLOUT_PATH_PREFIX TOKEN_CAPTURE_PATH_SEGMENT TRACE_CONTEXT_PATH_SEGMENT
+            """,
+        ),
+        **_names("nemo_gym.config.global_config", "0.8.0", "RAY_HEAD_NODE_ADDRESS_KEY_NAME"),
+        **_names("nemo_gym.core.episode", "0.8.0", "rollout_context"),
+        **_names("nemo_gym.server_runtime.ray_support", "0.8.0", "DictConfig open_dict"),
+        **_names("nemo_gym.server_runtime.registry_server", "0.8.0", "PrivateAttr"),
+        **_names("nemo_gym.server_runtime.request_handling.disconnect", "0.8.0", "Match Message create_task_group"),
+        **_names("nemo_gym.server_runtime.request_handling.errors", "0.8.0", "request_validation_exception_handler"),
+        **_names("nemo_gym.server_runtime.request_handling.request_context", "0.8.0", "ASGIApp Receive Scope Send"),
+        **_names(
+            "nemo_gym.server_runtime.request_handling.rollout_context",
+            "0.8.0",
+            """
+            ROUTED_PATH_STATE_KEY scope_with_routed_path
+            """,
+        ),
+        **_names("nemo_gym.telemetry.observer", "0.8.0", "request_counts"),
     },
     "nemo_gym.cli.utils": _names("nemo_gym.utils.text", "0.8.0", "did_you_mean"),
     "nemo_gym.openai_utils": {

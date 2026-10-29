@@ -10,7 +10,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.server_utils import entrypoint_ray_enabled
+from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
 from resources_servers.mimo_music.app import MimoMusicResourcesServer
 from resources_servers.mimo_music.tests.test_app import ABC, request, server
 

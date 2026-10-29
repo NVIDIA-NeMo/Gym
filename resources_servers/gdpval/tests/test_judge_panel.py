@@ -24,7 +24,7 @@ from openai import OpenAI
 
 import nemo_gym.client.http_client
 import nemo_gym.client.server_client
-from nemo_gym import server_utils
+from nemo_gym.server_runtime import server_utils
 from resources_servers.gdpval import app as gdpval_app
 from resources_servers.gdpval import setup_libreoffice
 from resources_servers.gdpval.comparison import (

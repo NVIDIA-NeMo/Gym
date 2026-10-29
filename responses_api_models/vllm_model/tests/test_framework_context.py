@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 import nemo_gym.base_responses_api_model
 import nemo_gym.client.server_client
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.server_utils
 from nemo_gym.base_responses_api_model import _CaptureMiddleware, _reconstruct_streamed_response
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.client import ServerClient
@@ -1229,7 +1229,7 @@ def test_capture_transport_retries_only_before_connection(monkeypatch, tmp_path,
 
     monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", real_generate)
     monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: MagicMock(request=send))
-    monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(nemo_gym.server_runtime.server_utils.asyncio, "sleep", AsyncMock())
     response = harness.post("attempt", HISTORY)
     if failure == "connect":
         assert_clean(response)

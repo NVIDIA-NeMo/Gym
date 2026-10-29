@@ -34,25 +34,27 @@ from yarl import URL
 import nemo_gym.client.http_client
 import nemo_gym.client.server_client
 import nemo_gym.config.global_config
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.ray_support
+import nemo_gym.server_runtime.registry_server
+import nemo_gym.server_runtime.request_handling.disconnect
+import nemo_gym.server_runtime.request_handling.errors
+import nemo_gym.server_runtime.server_utils
 from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig
 from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
-from nemo_gym.server_utils import (
+from nemo_gym.server_runtime.ray_support import DictConfig, initialize_ray
+from nemo_gym.server_runtime.registry_server import HeadServer
+from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
+from nemo_gym.server_runtime.request_handling.errors import _log_validation_exception, _validation_exception_handler
+from nemo_gym.server_runtime.server_utils import (
     BaseServer,
-    BaseServerConfig,
-    ClientDisconnectCancellationMiddleware,
-    DictConfig,
-    HeadServer,
     KeepaliveHttpToolsProtocol,
     SimpleServer,
     UvicornProxyHeadersConfig,
-    _log_validation_exception,
-    _validation_exception_handler,
-    initialize_ray,
 )
 from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 
@@ -76,7 +78,9 @@ class TestServerUtils:
         )
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = global_config_dict
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.server_utils, "get_global_config_dict", get_global_config_dict_mock
+        )
 
         actual_config = BaseServer.load_config_from_global_config()
         assert "" == actual_config.host
@@ -114,7 +118,9 @@ class TestServerUtils:
         global_config_dict = DictConfig({"a": 2})
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = global_config_dict
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server, "get_global_config_dict", get_global_config_dict_mock
+        )
 
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
         resp = await head_server.global_config_dict_yaml()
@@ -125,10 +131,12 @@ class TestServerUtils:
         """Serialize the global config once until the cache is cleared."""
         global_config_dict = DictConfig({"a": 2})
         get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server, "get_global_config_dict", get_global_config_dict_mock
+        )
 
         to_yaml_mock = MagicMock(wraps=OmegaConf.to_yaml)
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "to_yaml", to_yaml_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.registry_server.OmegaConf, "to_yaml", to_yaml_mock)
 
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
         first = await head_server.global_config_dict_yaml()
@@ -145,17 +153,17 @@ class TestServerUtils:
     def _mock_ray_return_value(self, monkeypatch: MonkeyPatch, return_value: bool) -> MagicMock:
         ray_mock = MagicMock()
         ray_mock.is_initialized.return_value = return_value
-        monkeypatch.setattr(nemo_gym.server_utils, "_get_ray", MagicMock(return_value=ray_mock))
+        monkeypatch.setattr(nemo_gym.server_runtime.ray_support, "_get_ray", MagicMock(return_value=ray_mock))
         return ray_mock.is_initialized
 
     def _mock_ray_init(self) -> MagicMock:
-        return nemo_gym.server_utils._get_ray().init
+        return nemo_gym.server_runtime.ray_support._get_ray().init
 
     def test_initialize_ray_already_initialized(self, monkeypatch: MonkeyPatch) -> None:
         ray_is_initialized_mock = self._mock_ray_return_value(monkeypatch, True)
 
         get_global_config_dict_mock = MagicMock()
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.ray_support, "get_global_config_dict", get_global_config_dict_mock)
 
         initialize_ray()
 
@@ -171,7 +179,7 @@ class TestServerUtils:
         global_config_dict = DictConfig({"ray_head_node_address": "ray://test-address:10001"})
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = global_config_dict
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.ray_support, "get_global_config_dict", get_global_config_dict_mock)
 
         initialize_ray()
 
@@ -186,14 +194,14 @@ class TestServerUtils:
 
         ray_runtime_context_mock = MagicMock()
         ray_runtime_context_mock.gcs_address = "ray://mock-address:10001"
-        ray_get_runtime_context_mock = nemo_gym.server_utils._get_ray().get_runtime_context
+        ray_get_runtime_context_mock = nemo_gym.server_runtime.ray_support._get_ray().get_runtime_context
         ray_get_runtime_context_mock.return_value = ray_runtime_context_mock
 
         # Mock global config dict without ray_head_node_address
         global_config_dict = DictConfig({"k": "v"})
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = global_config_dict
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.ray_support, "get_global_config_dict", get_global_config_dict_mock)
 
         initialize_ray()
 
@@ -229,10 +237,12 @@ class TestServerUtils:
         self._mock_ray_return_value(monkeypatch, True)
 
         get_global_config_dict_mock = MagicMock()
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.server_utils, "get_global_config_dict", get_global_config_dict_mock
+        )
 
         ServerClient_mock = MagicMock(spec=ServerClient)
-        monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", ServerClient_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.server_utils, "ServerClient", ServerClient_mock)
 
         class TestSimpleServer(SimpleServer):
             def __init__(self, *args, **kwargs):
@@ -250,8 +260,8 @@ class TestServerUtils:
 
     def test_dry_run_reports_unsupported_num_workers(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_ray_return_value(monkeypatch, True)
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock())
-        monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", MagicMock(spec=ServerClient))
+        monkeypatch.setattr(nemo_gym.server_runtime.server_utils, "get_global_config_dict", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_runtime.server_utils, "ServerClient", MagicMock(spec=ServerClient))
 
         class RefusingServer(SimpleServer):
             def __init__(self, *args, **kwargs):
@@ -512,7 +522,9 @@ class TestServerUtils:
 
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", True)
         clock = iter([10.0, 12.5])
-        monkeypatch.setattr(nemo_gym.server_utils, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.request_handling.disconnect, "time", SimpleNamespace(monotonic=lambda: next(clock))
+        )
         handler_waiting = asyncio.Event()
 
         async def inner_app(scope, receive, send) -> None:
@@ -585,24 +597,31 @@ class TestServerUtils:
         ]
         exc = RequestValidationError(errors, body={"original": "body"})
         rendered_body_sizes = []
-        escaped_log_prefix = nemo_gym.server_utils._escaped_log_prefix
+        escaped_log_prefix = nemo_gym.server_runtime.request_handling.errors._escaped_log_prefix
 
         def tracking_escaped_log_prefix(value: str, max_chars: int):
             rendered_body_sizes.append(len(value))
             return escaped_log_prefix(value, max_chars)
 
-        monkeypatch.setattr(nemo_gym.server_utils, "_escaped_log_prefix", tracking_escaped_log_prefix)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.request_handling.errors, "_escaped_log_prefix", tracking_escaped_log_prefix
+        )
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, exc)
 
         record = caplog.records[-1]
         assert record.request_body_size_bytes == len(body)
         assert len(rendered_body_sizes) == 1
-        assert rendered_body_sizes[0] <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
-        assert len(record.request_body_prefix) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_BODY_CHARS
+        assert (
+            rendered_body_sizes[0] <= nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_BODY_CHARS
+        )
+        assert (
+            len(record.request_body_prefix)
+            <= nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_BODY_CHARS
+        )
         assert record.request_body_truncated is expected_truncated
-        decoded_prefix = nemo_gym.server_utils.json.loads(record.request_body_prefix)
+        decoded_prefix = nemo_gym.server_runtime.request_handling.errors.json.loads(record.request_body_prefix)
         assert decoded_prefix.endswith("...[truncated]") is expected_truncated
         assert ("...[truncated]" in record.getMessage()) is expected_truncated
         if not expected_truncated:
@@ -640,15 +659,18 @@ class TestServerUtils:
                 "msg": "Field required",
                 "input": None,
             }
-            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS + 5)
+            for index in range(nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_MAX_ERRORS + 5)
         ]
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, RequestValidationError(errors))
 
         record = caplog.records[-1]
         assert record.validation_error_count == len(errors)
-        assert len(record.validation_errors) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS
+        assert (
+            len(record.validation_errors)
+            == nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_MAX_ERRORS
+        )
         assert record.validation_errors_truncated is True
         assert record.getMessage().endswith("...[truncated]")
 
@@ -658,16 +680,25 @@ class TestServerUtils:
         errors = [
             {
                 "type": "missing",
-                "loc": ("body", *("field" for _ in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS))),
+                "loc": (
+                    "body",
+                    *(
+                        "field"
+                        for _ in range(nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_LOC_ITEMS)
+                    ),
+                ),
                 "msg": "Field required",
             }
         ]
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, RequestValidationError(errors))
 
         record = caplog.records[-1]
-        assert len(record.validation_errors[0]["loc"]) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS
+        assert (
+            len(record.validation_errors[0]["loc"])
+            == nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_LOC_ITEMS
+        )
         assert record.validation_errors_truncated is True
         assert record.getMessage().endswith("...[truncated]")
 
@@ -679,18 +710,21 @@ class TestServerUtils:
         request.body = AsyncMock(return_value=body)
         errors = [
             {"type": "missing", "loc": ("query", f"field_{index}"), "msg": "Field required", "input": None}
-            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS + 1)
+            for index in range(nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_MAX_ERRORS + 1)
         ]
         errors.append({"type": "missing", "loc": ("body", "required"), "msg": "Field required", "input": None})
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, RequestValidationError(errors))
 
         request.body.assert_awaited_once()
         record = caplog.records[-1]
         assert record.request_body_size_bytes == len(body)
         assert record.request_body_prefix == '"{\\"required\\":null}"'
-        assert len(record.validation_errors) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS
+        assert (
+            len(record.validation_errors)
+            == nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_MAX_ERRORS
+        )
         assert record.validation_errors_truncated is True
 
     async def test_validation_exception_log_bounds_error_fields(self, caplog: LogCaptureFixture) -> None:
@@ -700,24 +734,33 @@ class TestServerUtils:
         errors = [
             {
                 "type": large_value,
-                "loc": ("body", *([large_value] * (nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS + 1))),
+                "loc": (
+                    "body",
+                    *(
+                        [large_value]
+                        * (nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_LOC_ITEMS + 1)
+                    ),
+                ),
                 "msg": large_value,
                 "input": None,
             }
         ]
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, RequestValidationError(errors))
 
         record = caplog.records[-1]
         summary = record.validation_errors[0]
-        assert len(summary["type"]) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
-        assert len(summary["msg"]) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        assert (
+            len(summary["type"]) <= nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_FIELD_CHARS
+        )
+        assert len(summary["msg"]) <= nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_FIELD_CHARS
         assert summary["type"].endswith("...[truncated]")
         assert summary["msg"].endswith("...[truncated]")
-        assert len(summary["loc"]) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_LOC_ITEMS
+        assert len(summary["loc"]) == nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_LOC_ITEMS
         assert all(
-            not isinstance(value, str) or len(value) <= nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+            not isinstance(value, str)
+            or len(value) <= nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_FIELD_CHARS
             for value in summary["loc"]
         )
         assert "\n" not in str(summary)
@@ -746,7 +789,7 @@ class TestServerUtils:
             }
         ]
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, RequestValidationError(errors))
 
         message = caplog.records[-1].getMessage()
@@ -754,7 +797,7 @@ class TestServerUtils:
         if location == "body":
             expected["msg"] = "Extra inputs are not permitted"
         rendered = message.split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
-        assert nemo_gym.server_utils.json.loads(rendered) == [expected]
+        assert nemo_gym.server_runtime.request_handling.errors.json.loads(rendered) == [expected]
         assert "must-not-be-logged" not in message
         assert message.endswith("validation_errors_truncated=False")
 
@@ -766,18 +809,18 @@ class TestServerUtils:
         request.body = AsyncMock(return_value=b"{}")
         if body_unavailable:
             request.body.side_effect = RuntimeError("body unavailable")
-        long_msg = "m" * nemo_gym.server_utils._VALIDATION_ERROR_LOG_FIELD_CHARS
+        long_msg = "m" * nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_FIELD_CHARS
         errors = [
             {"type": "value_error", "loc": ("body", f"field_{index}"), "msg": long_msg, "input": None}
-            for index in range(nemo_gym.server_utils._VALIDATION_ERROR_LOG_MAX_ERRORS)
+            for index in range(nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_MAX_ERRORS)
         ]
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, RequestValidationError(errors))
 
         record = caplog.records[-1]
         rendered = record.getMessage().split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
-        assert len(rendered) == nemo_gym.server_utils._VALIDATION_ERROR_LOG_ERRORS_CHARS
+        assert len(rendered) == nemo_gym.server_runtime.request_handling.errors._VALIDATION_ERROR_LOG_ERRORS_CHARS
         assert rendered.endswith("...[truncated]")
         assert record.validation_errors_truncated is False
         assert record.validation_errors == [
@@ -809,7 +852,10 @@ class TestServerUtils:
         ) -> dict:
             return {"count": count}
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"), TestClient(app) as client:
+        with (
+            caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"),
+            TestClient(app) as client,
+        ):
             response = client.post(
                 "/validate",
                 json={"count": "invalid" if invalid_body else 1},
@@ -818,13 +864,17 @@ class TestServerUtils:
             )
 
         assert response.status_code == 422
-        record = next(record for record in reversed(caplog.records) if record.name == "nemo_gym.server_utils")
+        record = next(
+            record
+            for record in reversed(caplog.records)
+            if record.name == "nemo_gym.server_runtime.request_handling.errors"
+        )
         message = record.getMessage()
         assert "sk-sensitive-header" not in message
         assert "sk-sensitive-query" not in message
         assert "invalid api key" not in message
         rendered = message.split("validation_errors=", 1)[1].split(" validation_errors_truncated=", 1)[0]
-        summaries = nemo_gym.server_utils.json.loads(rendered)
+        summaries = nemo_gym.server_runtime.request_handling.errors.json.loads(rendered)
         assert {tuple(summary["loc"]) for summary in summaries} == {
             tuple(error["loc"]) for error in response.json()["detail"]
         }
@@ -846,7 +896,7 @@ class TestServerUtils:
         request.body = AsyncMock(return_value=b"must-not-be-read")
         errors = [{"type": "value_error", "loc": location, "msg": "invalid api key sk-sensitive-value"}]
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, RequestValidationError(errors))
 
         request.body.assert_not_awaited()
@@ -860,7 +910,7 @@ class TestServerUtils:
         request.body = AsyncMock(return_value=b"password=must-not-be-logged")
         errors = [{"type": "missing", "loc": ("query", "required"), "msg": "Field required", "input": None}]
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, RequestValidationError(errors, body=None))
 
         request.body.assert_not_awaited()
@@ -880,11 +930,18 @@ class TestServerUtils:
         async def query(required: str) -> dict:
             return {"required": required}
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"), TestClient(app) as client:
+        with (
+            caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"),
+            TestClient(app) as client,
+        ):
             response = client.post("/query", content=b"password=must-not-be-logged")
 
         assert response.status_code == 422
-        record = next(record for record in reversed(caplog.records) if record.name == "nemo_gym.server_utils")
+        record = next(
+            record
+            for record in reversed(caplog.records)
+            if record.name == "nemo_gym.server_runtime.request_handling.errors"
+        )
         assert not hasattr(record, "request_body_prefix")
         assert "must-not-be-logged" not in record.getMessage()
         assert "must-not-be-logged" not in str(record.validation_errors)
@@ -895,7 +952,7 @@ class TestServerUtils:
         errors = [{"type": "missing", "loc": ("body", "field"), "msg": "Field required", "input": {}}]
         exc = RequestValidationError(errors, body={"field": None})
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             await _log_validation_exception(request, exc)
 
         record = caplog.records[-1]
@@ -912,7 +969,9 @@ class TestServerUtils:
         )
         expected = await request_validation_exception_handler(request, exc)
         monkeypatch.setattr(
-            nemo_gym.server_utils.logger, "warning", MagicMock(side_effect=RuntimeError("sink failed"))
+            nemo_gym.server_runtime.request_handling.errors.logger,
+            "warning",
+            MagicMock(side_effect=RuntimeError("sink failed")),
         )
 
         actual = await _validation_exception_handler(request, exc)
@@ -929,7 +988,7 @@ class TestServerUtils:
         )
         expected = await request_validation_exception_handler(request, exc)
 
-        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_utils"):
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.server_runtime.request_handling.errors"):
             actual = await _validation_exception_handler(request, exc)
 
         assert actual.status_code == expected.status_code == 422
@@ -1160,23 +1219,27 @@ class TestRunWebserverProxyKwargs:
         ray_mock = MagicMock()
         ray_mock.is_initialized.return_value = True
         self.ray_loader_mock = MagicMock(return_value=ray_mock)
-        monkeypatch.setattr(nemo_gym.server_utils, "_get_ray", self.ray_loader_mock)
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=global_config))
+        monkeypatch.setattr(nemo_gym.server_runtime.ray_support, "_get_ray", self.ray_loader_mock)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.server_utils, "get_global_config_dict", MagicMock(return_value=global_config)
+        )
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
         )
         server_client_mock = MagicMock(return_value=server_client)
         server_client_mock.load_head_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
-        monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", server_client_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.server_utils, "ServerClient", server_client_mock)
         monkeypatch.setattr(
-            nemo_gym.server_utils,
+            nemo_gym.server_runtime.server_utils,
             "is_nemo_gym_fastapi_worker",
             MagicMock(return_value=is_worker),
         )
 
         captured: dict = {}
         self.uvicorn_kwargs = captured
-        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs)
+        )
 
         server_config = BaseRunServerInstanceConfig(
             name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=num_workers
@@ -1359,7 +1422,7 @@ class TestRunWebserverProxyKwargs:
         self, monkeypatch: MonkeyPatch, is_worker: bool, num_workers: int | None
     ) -> None:
         report = MagicMock()
-        monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
+        monkeypatch.setattr(nemo_gym.server_runtime.server_utils, "report_connection_pool_capacity", report)
 
         self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=num_workers, is_worker=is_worker)
 
@@ -1375,7 +1438,7 @@ class TestRunWebserverProxyKwargs:
         self, monkeypatch: MonkeyPatch, is_worker: bool
     ) -> None:
         report = MagicMock()
-        monkeypatch.setattr(nemo_gym.server_utils, "report_connection_pool_capacity", report)
+        monkeypatch.setattr(nemo_gym.server_runtime.server_utils, "report_connection_pool_capacity", report)
 
         with raises(ValueError, match="must remain at least 1"):
             self._capture_uvicorn_kwargs(
@@ -1398,7 +1461,7 @@ class TestRunWebserverProxyKwargs:
 
     def test_a_workers_private_socket_gets_the_listen_backlog(self, monkeypatch: MonkeyPatch) -> None:
         install = MagicMock()
-        monkeypatch.setattr(nemo_gym.server_utils, "install_session_routing", install)
+        monkeypatch.setattr(nemo_gym.server_runtime.server_utils, "install_session_routing", install)
 
         self._capture_uvicorn_kwargs(
             monkeypatch, {"uvicorn_backlog": 4096}, num_workers=4, is_worker=True, routes_sessions=True
@@ -1424,7 +1487,7 @@ class TestHeadServerProxyKwargs:
             MagicMock(return_value=BaseServerConfig(host="127.0.0.1", port=11000)),
         )
         monkeypatch.setattr(
-            nemo_gym.server_utils,
+            nemo_gym.server_runtime.registry_server,
             "get_global_config_dict",
             MagicMock(return_value=DictConfig(config_dict)),
         )
@@ -1435,9 +1498,11 @@ class TestHeadServerProxyKwargs:
             captured.update(kwargs)
             return MagicMock()
 
-        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "Config", capture_config)
-        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "Server", MagicMock(return_value=MagicMock()))
-        monkeypatch.setattr(nemo_gym.server_utils, "Thread", MagicMock(return_value=MagicMock()))
+        monkeypatch.setattr(nemo_gym.server_runtime.registry_server.uvicorn, "Config", capture_config)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server.uvicorn, "Server", MagicMock(return_value=MagicMock())
+        )
+        monkeypatch.setattr(nemo_gym.server_runtime.registry_server, "Thread", MagicMock(return_value=MagicMock()))
 
         HeadServer.run_webserver()
         return captured

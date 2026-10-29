@@ -155,7 +155,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     from scripts.harness_conformance import episode
 
     import nemo_gym.config.global_config
-    import nemo_gym.server_utils
+    import nemo_gym.server_runtime.server_utils
     from nemo_gym.base_responses_api_agent import (
         AgentCloseSessionResponse,
         AgentSessionState,

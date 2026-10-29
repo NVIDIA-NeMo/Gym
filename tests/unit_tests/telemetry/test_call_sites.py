@@ -243,7 +243,7 @@ def test_server_type_is_derived_from_the_class_hierarchy():
     from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
     from nemo_gym.base_responses_api_model import SimpleResponsesAPIModel
     from nemo_gym.server_runtime import SimpleResourcesServer
-    from nemo_gym.server_utils import _telemetry_server_type
+    from nemo_gym.server_runtime.server_utils import _telemetry_server_type
 
     assert _telemetry_server_type(SimpleResourcesServer) == "resources_servers"
     assert _telemetry_server_type(SimpleResponsesAPIAgent) == "responses_api_agents"
@@ -253,7 +253,7 @@ def test_server_type_is_derived_from_the_class_hierarchy():
 def test_server_type_survives_subclassing():
     """Every real Gym server is a subclass, so the lookup has to walk the MRO."""
     from nemo_gym.server_runtime import SimpleResourcesServer
-    from nemo_gym.server_utils import _telemetry_server_type
+    from nemo_gym.server_runtime.server_utils import _telemetry_server_type
 
     class MyWeatherServer(SimpleResourcesServer):
         pass
@@ -262,7 +262,7 @@ def test_server_type_survives_subclassing():
 
 
 def test_server_type_is_none_for_an_unrelated_class():
-    from nemo_gym.server_utils import _telemetry_server_type
+    from nemo_gym.server_runtime.server_utils import _telemetry_server_type
 
     assert _telemetry_server_type(dict) is None
 

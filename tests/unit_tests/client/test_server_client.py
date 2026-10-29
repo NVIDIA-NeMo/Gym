@@ -39,7 +39,7 @@ from requests.exceptions import ProxyError
 import nemo_gym.client.http_client
 import nemo_gym.client.server_client
 import nemo_gym.config.global_config
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.server_utils
 from nemo_gym.client import ServerClient
 from nemo_gym.client.server_client import (
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,

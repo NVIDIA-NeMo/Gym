@@ -379,7 +379,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         The vllm_model server picks a vLLM engine per session
         (``sha256(session_id) % len(base_urls)`` in
         responses_api_models/vllm_model/app.py ``_resolve_client``) and mints the
-        session id per cookie jar (nemo_gym/server_utils.py
+        session id per cookie jar (nemo_gym/server_runtime/server_utils.py
         ``setup_session_middleware``). openai's AsyncOpenAI sits on an httpx client
         that persists cookies, so a plain shared client is one session and
         therefore one engine: on CMH job 3670120 (2026-09-10) 512 concurrent

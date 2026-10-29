@@ -28,7 +28,7 @@ from pytest import MonkeyPatch
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.client.server_client
 import nemo_gym.config.global_config
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.server_utils
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
 from nemo_gym.cli.main import main

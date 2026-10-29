@@ -31,7 +31,7 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from pytest import MonkeyPatch, mark, raises
 from yarl import URL
 
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.server_utils
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.core import (
@@ -5755,7 +5755,9 @@ class TestCompletionsBackendEndToEnd:
         return fake_client, captured
 
     def test_chat_completions_call_routes_to_create_completion(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.server_utils, "get_global_config_dict", MagicMock(return_value=dict())
+        )
 
         model = _make_completions_backend_model()
         _, captured = self._install_fake_client(
@@ -5791,7 +5793,9 @@ class TestCompletionsBackendEndToEnd:
 
     def test_request_chat_template_kwargs_dropped_with_warning(self, monkeypatch: MonkeyPatch, caplog) -> None:
         """The completions path never forwards a request's top-level chat_template_kwargs."""
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.server_utils, "get_global_config_dict", MagicMock(return_value=dict())
+        )
         model = _make_completions_backend_model()
         _, captured = self._install_fake_client(
             model,
@@ -5815,7 +5819,9 @@ class TestCompletionsBackendEndToEnd:
         assert "use_completions_api is true" in caplog.text
 
     def test_responses_with_string_input_routes_to_completions(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.server_utils, "get_global_config_dict", MagicMock(return_value=dict())
+        )
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 

@@ -47,7 +47,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -70,7 +70,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, ObservationGap
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,

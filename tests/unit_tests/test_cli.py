@@ -766,7 +766,7 @@ class TestRunHelperServerReadiness:
         from fastapi.testclient import TestClient
 
         from nemo_gym.config import BaseServerConfig
-        from nemo_gym.server_utils import HeadServer
+        from nemo_gym.server_runtime.registry_server import HeadServer
 
         runner = RunHelper()
         runner._head_server_instance = HeadServer(config=BaseServerConfig(host="", port=0))

@@ -212,7 +212,7 @@ class TestRequestCounters:
     @staticmethod
     def _serve(app, receive, collected=None):
         """Run one request through the outermost middleware and return the totals, read before the observer stops."""
-        from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware
+        from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 
         async def send(_message):
             pass
@@ -309,9 +309,8 @@ class TestRequestCounters:
 def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(collected, monkeypatch, prefix_middleware):
     from fastapi import FastAPI, Response
 
-    from nemo_gym import server_utils
     from nemo_gym.base_responses_api_model import _CaptureMiddleware
-    from nemo_gym.server_runtime import RolloutContextMiddleware
+    from nemo_gym.server_runtime import RolloutContextMiddleware, server_utils
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
@@ -408,9 +407,8 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 ):
     from fastapi import FastAPI, Response
 
-    from nemo_gym import server_utils
     from nemo_gym.base_responses_api_model import _CaptureMiddleware
-    from nemo_gym.server_runtime import RolloutContextMiddleware
+    from nemo_gym.server_runtime import RolloutContextMiddleware, server_utils
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
@@ -477,7 +475,7 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 
 
 def test_cancellation_before_routing_uses_one_unmatched_bucket(collected, monkeypatch):
-    from nemo_gym import server_utils
+    from nemo_gym.server_runtime import server_utils
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
@@ -558,7 +556,7 @@ def test_responses_are_counted_by_status_code_and_unhandled_errors_separately(co
     from fastapi import FastAPI, HTTPException
     from fastapi.testclient import TestClient
 
-    from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware
+    from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 
     app = FastAPI()
 

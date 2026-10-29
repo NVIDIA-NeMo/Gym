@@ -24,7 +24,7 @@ from omegaconf import OmegaConf
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.config.global_config import environment_server_agent_refs, legacy_environment_server_name
 from nemo_gym.rollout_collection import _environment_servers_by_agent
-from nemo_gym.server_utils import DictConfig
+from nemo_gym.server_runtime.ray_support import DictConfig
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "add_legacy_agent_environment_servers.py"

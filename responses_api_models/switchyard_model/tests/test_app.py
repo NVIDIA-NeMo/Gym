@@ -33,7 +33,7 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 import nemo_gym.client.http_client
-import nemo_gym.server_utils as server_utils
+import nemo_gym.server_runtime.server_utils as server_utils
 import responses_api_models.switchyard_model.app as app_module
 from nemo_gym.client import ServerClient
 from responses_api_models.switchyard_model.app import (

@@ -7,12 +7,12 @@ from aiohttp import ClientConnectorError, ClientOSError, ServerDisconnectedError
 from omegaconf import DictConfig
 from pydantic import ValidationError
 
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.server_utils
 from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig
 from nemo_gym.core import EpisodeId, rollout_context
 from nemo_gym.core.episode import current_episode_id
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
-from nemo_gym.server_utils import BaseServerConfig
 
 
 @pytest.mark.parametrize(
@@ -93,7 +93,7 @@ def test_a_bad_checkpoint_block_fails_when_the_client_is_built_not_on_every_requ
     from omegaconf import OmegaConf
 
     from nemo_gym.client import ServerClient
-    from nemo_gym.server_utils import BaseServerConfig
+    from nemo_gym.config import BaseServerConfig
 
     with pytest.raises(ValueError, match="control_auth_token is required"):
         ServerClient(
@@ -125,7 +125,7 @@ async def test_a_run_whose_connection_dropped_is_not_sent_again_with_checkpointi
     # The server may have started the attempt, so a second send would run it twice and strand the first run's sessions.
     client, request_mock = _client(monkeypatch, _CHECKPOINTING)
     request_mock.side_effect = [dropped, "response"]
-    monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(nemo_gym.server_runtime.server_utils.asyncio, "sleep", AsyncMock())
 
     with pytest.raises(type(dropped)):
         await client.post(server_name="env", url_path="/run", json={})
@@ -139,7 +139,7 @@ async def test_a_run_whose_connection_was_never_made_is_retried_with_checkpointi
     client, request_mock = _client(monkeypatch, _CHECKPOINTING)
     refused = ClientConnectorError(MagicMock(), OSError(111, "Connection refused"))
     request_mock.side_effect = [refused, "response"]
-    monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(nemo_gym.server_runtime.server_utils.asyncio, "sleep", AsyncMock())
 
     assert await client.post(server_name="env", url_path="/run", json={}) == "response"
     assert request_mock.await_count == 2
@@ -151,7 +151,7 @@ async def test_other_calls_are_still_sent_again_after_a_dropped_connection(
 ) -> None:
     client, request_mock = _client(monkeypatch, extra)
     request_mock.side_effect = [ServerDisconnectedError(), "response"]
-    monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(nemo_gym.server_runtime.server_utils.asyncio, "sleep", AsyncMock())
 
     assert await client.post(server_name="env", url_path=url_path, json={}) == "response"
     assert request_mock.await_count == 2

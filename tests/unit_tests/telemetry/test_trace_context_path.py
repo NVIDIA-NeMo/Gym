@@ -33,9 +33,9 @@ from nemo_gym.client import apply_rollout_prefix, trace_context_path_segment
 from nemo_gym.client.server_client import _TRACEPARENT_PATTERN
 from nemo_gym.core import current_rollout_id
 from nemo_gym.server_runtime import RolloutContextMiddleware
-from nemo_gym.server_utils import (
+from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
+from nemo_gym.server_runtime.request_handling.trace_context import (
     TraceContextPathMiddleware,
-    install_request_context_isolation,
     install_trace_context_path,
 )
 from tests.unit_tests.telemetry.conftest import requires_lens
@@ -147,7 +147,7 @@ class TestRedirectLocation:
     HOST = [(b"host", b"m:8000")]
 
     def _restored(self, location, status=307):
-        from nemo_gym.server_utils import _restore_trace_segment_on_redirect
+        from nemo_gym.server_runtime.request_handling.trace_context import _restore_trace_segment_on_redirect
 
         message = {"type": "http.response.start", "status": status, "headers": [(b"location", location.encode())]}
         return dict(

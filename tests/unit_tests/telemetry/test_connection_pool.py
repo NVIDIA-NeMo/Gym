@@ -11,8 +11,8 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
 from omegaconf import DictConfig, OmegaConf
 
 import nemo_gym.client.http_client
-from nemo_gym import server_utils
-from nemo_gym.config import global_config
+from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig, global_config
 from nemo_gym.telemetry import connection_pool, gym_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 
@@ -198,8 +198,8 @@ async def test_server_client_labels_samples_with_the_destination_server(collecte
         return web.json_response({"ok": True})
 
     async with _lazy_client(monkeypatch, aggregate_limit=1), _serve(blocked) as url:
-        server_client = server_utils.ServerClient(
-            head_server_config=server_utils.BaseServerConfig(host="127.0.0.1", port=1),
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="127.0.0.1", port=1),
             global_config_dict=DictConfig(
                 {"my_judge": {"resources_servers": {"test": {"host": "127.0.0.1", "port": urlsplit(url).port}}}}
             ),

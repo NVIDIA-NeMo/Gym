@@ -48,7 +48,7 @@ from yarl import URL
 import nemo_gym.client.http_client
 import nemo_gym.client.server_client
 import nemo_gym.config.global_config
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.server_utils
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, format_exception_with_response_body, raise_for_status
 from nemo_gym.client.http_client import _format_upstream_error_log, _make_keepalive_socket_factory, _set_tcp_keepalive
 from nemo_gym.config.global_config import (

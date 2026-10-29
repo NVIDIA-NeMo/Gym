@@ -13,8 +13,8 @@ from pydantic import ConfigDict
 
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AgentServerRef
-from nemo_gym.server_utils import BaseServerConfig, SimpleServer
+from nemo_gym.config import AgentServerRef, BaseServerConfig
+from nemo_gym.server_runtime.server_utils import SimpleServer
 
 
 class _Upstream:

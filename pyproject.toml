@@ -878,7 +878,7 @@ layers = [
     # models/
     "nemo_gym.models._checkpoint : nemo_gym.models._checkpoint_workers : nemo_gym.anthropic_converter : nemo_gym.anthropic_utils : nemo_gym.base_responses_api_model : nemo_gym.chat_streaming : nemo_gym.openai_utils : nemo_gym.responses_converter : nemo_gym.responses_streaming : nemo_gym.token_id_capture",
     # server_runtime/
-    "nemo_gym.server_runtime : nemo_gym.server_utils",
+    "nemo_gym.server_runtime",
     # artifacts/
     "nemo_gym.artifacts",
     # metrics/

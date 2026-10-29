@@ -1069,7 +1069,7 @@ def runs_in_sandbox(impl_name: str, impl_config: Any) -> bool:
     The harness says so itself: ``calls_model_from_sandbox = True`` on the agent class its entrypoint runs, read
     from the entrypoint source (no agent module is imported here), or ``sandbox_model_base_url`` in its config.
     """
-    from nemo_gym.server_utils import entrypoint_class_flag
+    from nemo_gym.server_runtime.entrypoint_flags import entrypoint_class_flag
 
     config = impl_config if isinstance(impl_config, dict) else {}
     if SANDBOX_MODEL_BASE_URL_KEY in config:

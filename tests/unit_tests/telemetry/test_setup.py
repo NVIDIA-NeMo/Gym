@@ -532,7 +532,7 @@ def test_the_fastapi_instrumentor_is_installed_only_while_traces_export(monkeypa
 
     from fastapi import FastAPI
 
-    from nemo_gym import server_utils
+    from nemo_gym.server_runtime import server_utils
     from nemo_gym.telemetry import contrib
 
     instrumented = []

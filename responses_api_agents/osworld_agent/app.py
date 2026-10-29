@@ -41,7 +41,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -51,9 +51,6 @@ from nemo_gym.core import (
 from nemo_gym.responses_converter import chat_completion_usage_to_response_usage
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.server_utils import (
-    get_first_server_config_dict,
-)
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
     assert_train_eval_parity,

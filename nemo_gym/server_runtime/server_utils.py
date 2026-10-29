@@ -12,45 +12,32 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import ast
 import asyncio
 import atexit
-import json
 import logging
-import re
 import resource
 import socket
 import sys
-import time
-import warnings
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
 from functools import partial
-from importlib.util import find_spec
 from ipaddress import ip_network
 from os import environ, getenv
-from pathlib import Path
-from threading import Thread
 from traceback import format_exc, print_exc
 from typing import Any, ClassVar, List, Optional, TextIO, Tuple, Type
-from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import uvicorn
 from aiohttp import (
     ClientResponseError,
 )
-from anyio import create_task_group
 from fastapi import FastAPI, Request, Response
-from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, PositiveInt, PrivateAttr, model_validator
+from omegaconf import OmegaConf
+from pydantic import BaseModel, PositiveInt, model_validator
 from starlette.middleware.sessions import SessionMiddleware
-from starlette.routing import Match
-from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
@@ -61,32 +48,35 @@ from nemo_gym.client.http_client import (
     _format_upstream_error_log,
     _set_tcp_keepalive,
     global_aiohttp_client_exit,
-    is_global_aiohttp_client_request_debug_enabled,
 )
 from nemo_gym.client.server_client import (
-    _TRACEPARENT_PATTERN,
     SESSION_ID_KEY,
     ServerClient,
-    ServerStatus,
 )
 from nemo_gym.config.config_types import (
     DEFAULT_UVICORN_BACKLOG,
-    ROLLOUT_PATH_PREFIX,
-    TOKEN_CAPTURE_PATH_SEGMENT,
-    TRACE_CONTEXT_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
-    BaseServerConfig,
 )
 from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     UVICORN_TIMEOUT_WORKER_HEALTHCHECK,
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.core.episode import rollout_context
-from nemo_gym.server_runtime.request_handling.rollout_context import ROUTED_PATH_STATE_KEY, scope_with_routed_path
+from nemo_gym.server_runtime.ray_support import (
+    _connect_server_to_ray,
+    maybe_ray_cluster_exit,
+)
+from nemo_gym.server_runtime.request_handling.disconnect import (
+    ClientDisconnectCancellationMiddleware,
+)
+from nemo_gym.server_runtime.request_handling.errors import (
+    _validation_exception_handler,
+)
+from nemo_gym.server_runtime.request_handling.request_context import (
+    install_request_context_isolation,
+)
 from nemo_gym.server_runtime.request_handling.session_routing import (
     SESSION_CLAIM_SCOPE_KEY,
     SESSION_ID_SCOPE_KEY,
@@ -94,12 +84,15 @@ from nemo_gym.server_runtime.request_handling.session_routing import (
     create_session_socket_dir,
     install_session_routing,
 )
+from nemo_gym.server_runtime.request_handling.trace_context import (
+    install_trace_context_path,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.connection_pool import (
     connection_pool_capacity,
     report_connection_pool_capacity,
 )
-from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
+from nemo_gym.telemetry.observer import observe_app_event_loop
 from nemo_gym.telemetry.profiling import (
     Profiler,
     ProfilingMiddlewareConfig,
@@ -108,7 +101,6 @@ from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
 from nemo_gym.utils.server_process import (
-    _has_injected_global_config_env,
     is_nemo_gym_fastapi_worker,
     set_is_nemo_gym_fastapi_entrypoint,
     set_is_nemo_gym_fastapi_worker,
@@ -116,174 +108,7 @@ from nemo_gym.utils.server_process import (
 )
 
 
-try:
-    from opentelemetry import context as _otel_context
-except ImportError:  # the telemetry extra is optional; without the SDK there is no span context to isolate
-    _otel_context = None
-
-
 logger = logging.getLogger(__name__)
-
-# Bound both the raw request prefix and its escaped representation to 4 KiB.
-_VALIDATION_ERROR_LOG_BODY_CHARS = 4096
-_VALIDATION_ERROR_LOG_MAX_ERRORS = 20
-_VALIDATION_ERROR_LOG_FIELD_CHARS = 256
-_VALIDATION_ERROR_LOG_LOC_ITEMS = 8
-# Bound the rendered error summaries in the log message to 4 KiB.
-_VALIDATION_ERROR_LOG_ERRORS_CHARS = 4096
-
-
-def _escaped_log_text(value: str, max_chars: int) -> tuple[str, bool]:
-    """Return bounded, control-safe text with a visible marker when truncated."""
-    raw_prefix = value[:max_chars]
-    rendered = json.dumps(raw_prefix, ensure_ascii=True)[1:-1]
-    truncated = len(value) > len(raw_prefix) or len(rendered) > max_chars
-    suffix = "...[truncated]" if truncated else ""
-    # The marker shares the existing budget; preserve complete JSON escapes.
-    content_limit = max_chars - len(suffix)
-    safe_end = 0
-    index = 0
-    while index < len(rendered) and index < content_limit:
-        escape_chars = 1
-        if rendered[index] == "\\":
-            escape_chars = 6 if index + 1 < len(rendered) and rendered[index + 1] == "u" else 2
-        if index + escape_chars > content_limit:
-            break
-        index += escape_chars
-        safe_end = index
-
-    return rendered[:safe_end] + suffix, truncated
-
-
-def _escaped_log_prefix(value: str, max_chars: int) -> tuple[str, bool]:
-    """Return a quoted, control-safe prefix bounded by ``max_chars``."""
-    escaped, truncated = _escaped_log_text(value, max_chars - 2)
-    return f'"{escaped}"', truncated
-
-
-def _bounded_validation_error_value(value: Any) -> tuple[Any, bool]:
-    if isinstance(value, str):
-        return _escaped_log_text(value, _VALIDATION_ERROR_LOG_FIELD_CHARS)
-    if value is None or isinstance(value, (bool, int, float)):
-        return value, False
-    return f"<{type(value).__name__}>", True
-
-
-def _validation_error_summaries(errors: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
-    summaries = []
-    truncated = len(errors) > _VALIDATION_ERROR_LOG_MAX_ERRORS
-    for error in errors[:_VALIDATION_ERROR_LOG_MAX_ERRORS]:
-        error_type, type_truncated = _bounded_validation_error_value(error.get("type"))
-        message, message_truncated = _bounded_validation_error_value(error.get("msg"))
-        location = error.get("loc")
-        if isinstance(location, (list, tuple)):
-            location_items = []
-            location_truncated = len(location) > _VALIDATION_ERROR_LOG_LOC_ITEMS
-            for item in location[:_VALIDATION_ERROR_LOG_LOC_ITEMS]:
-                bounded_item, item_truncated = _bounded_validation_error_value(item)
-                location_items.append(bounded_item)
-                location_truncated = location_truncated or item_truncated
-        else:
-            bounded_location, location_truncated = _bounded_validation_error_value(location)
-            location_items = [bounded_location]
-
-        summaries.append({"type": error_type, "loc": location_items, "msg": message})
-        truncated = truncated or type_truncated or location_truncated or message_truncated
-
-    return summaries, truncated
-
-
-def _validation_errors_log_text(error_summaries: list[dict[str, Any]]) -> tuple[str, bool]:
-    """Render the error summaries for the log message, bounded by ``_VALIDATION_ERROR_LOG_ERRORS_CHARS``."""
-    # Custom validator messages can echo credentials from headers, queries, paths, or cookies.
-    # Keep their type and location visible without copying their messages into the default log.
-    message_summaries = [
-        summary if summary["loc"] and summary["loc"][0] == "body" else {key: summary[key] for key in ("type", "loc")}
-        for summary in error_summaries
-    ]
-    rendered = json.dumps(message_summaries, ensure_ascii=True, separators=(",", ":"))
-    if len(rendered) <= _VALIDATION_ERROR_LOG_ERRORS_CHARS:
-        return rendered, False
-    suffix = "...[truncated]"
-    return rendered[: _VALIDATION_ERROR_LOG_ERRORS_CHARS - len(suffix)] + suffix, True
-
-
-async def _log_validation_exception(request: Request, exc: RequestValidationError) -> None:
-    errors = exc.errors()
-    error_summaries, errors_truncated = _validation_error_summaries(errors)
-    # The summaries are also attached as ``extra``, but the default formatter drops extras,
-    # so render them into the message too: a 422 log line should say which field failed.
-    errors_text, errors_text_truncated = _validation_errors_log_text(error_summaries)
-    errors_log_truncated = errors_truncated or errors_text_truncated
-    errors_suffix = " ...[truncated]" if errors_log_truncated else ""
-    extra = {
-        "validation_error_count": len(errors),
-        "validation_errors": error_summaries,
-        "validation_errors_truncated": errors_truncated,
-    }
-
-    has_body_error = any(
-        isinstance(error.get("loc"), (list, tuple)) and error["loc"] and error["loc"][0] == "body" for error in errors
-    )
-    if not has_body_error:
-        logger.warning(
-            "Request validation failed; validation_error_count=%d validation_errors=%s "
-            "validation_errors_truncated=%s%s",
-            len(errors),
-            errors_text,
-            errors_log_truncated,
-            errors_suffix,
-            extra=extra,
-        )
-        return
-
-    try:
-        body = await request.body()
-    except Exception:
-        logger.warning(
-            "Request validation failed; request body unavailable; "
-            "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
-            len(errors),
-            errors_text,
-            errors_log_truncated,
-            errors_suffix,
-            extra=extra,
-        )
-        return
-
-    raw_prefix = body[:_VALIDATION_ERROR_LOG_BODY_CHARS]
-    escaped_prefix, prefix_truncated = _escaped_log_prefix(
-        raw_prefix.decode("utf-8", errors="replace"), _VALIDATION_ERROR_LOG_BODY_CHARS
-    )
-    body_truncated = len(body) > len(raw_prefix) or prefix_truncated
-    extra.update(
-        {
-            "request_body_size_bytes": len(body),
-            "request_body_prefix": escaped_prefix,
-            "request_body_truncated": body_truncated,
-        }
-    )
-    logger.warning(
-        "Request validation failed; request_body_size_bytes=%d request_body_truncated=%s request_body_prefix=%s "
-        "validation_error_count=%d validation_errors=%s validation_errors_truncated=%s%s",
-        len(body),
-        body_truncated,
-        escaped_prefix,
-        len(errors),
-        errors_text,
-        errors_log_truncated,
-        errors_suffix,
-        extra=extra,
-    )
-
-
-async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
-    try:
-        await _log_validation_exception(request, exc)
-    except Exception:
-        # Diagnostics must not alter FastAPI's response contract.
-        pass
-    return await request_validation_exception_handler(request, exc)
 
 
 class KeepaliveHttpToolsProtocol(HttpToolsProtocol):
@@ -318,9 +143,6 @@ async def close_global_aiohttp_client() -> None:
 
 
 atexit.register(global_aiohttp_client_exit)
-
-
-DEFAULT_HEAD_SERVER_PORT = 11000
 
 
 class BaseServer(BaseModel):
@@ -407,73 +229,6 @@ class UvicornProxyHeadersConfig(BaseModel):
         return self
 
 
-_NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
-
-
-def ray_is_installed() -> bool:
-    """Whether Ray can be imported in this process, checked without importing it."""
-    return find_spec("ray") is not None
-
-
-def _get_ray():
-    """Import Ray only for processes configured to use it."""
-    try:
-        import ray
-    except ImportError as e:
-        raise ImportError(
-            "This process needs Ray, but Ray isn't installed in its environment. Install the `nemo-gym[ray]` extra."
-        ) from e
-
-    return ray
-
-
-def initialize_ray() -> None:
-    """
-    Initialize ray cluster in a process.
-    We store the Ray address in the global config dict so that child processes can connect to it.
-    This avoids the need to start a new Ray cluster in each child process.
-    Note: This function will modify the global config dict - update `ray_head_node_address`
-    """
-
-    ray = _get_ray()
-    if ray.is_initialized():
-        print("Ray already initialized")
-        return
-
-    global_config_dict = get_global_config_dict()
-    ray_head_node_address = global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME)
-    ray_init_kwargs = dict(ignore_reinit_error=True)
-
-    if ray_head_node_address:
-        print(f"Connecting to Ray cluster at specified address: {ray_head_node_address}")
-        ray_init_kwargs["address"] = ray_head_node_address
-    else:
-        print("NeMo Gym is starting a new Ray cluster...")
-
-    ray.init(**ray_init_kwargs)
-
-    if not ray_head_node_address:
-        global _NEMO_GYM_STARTED_RAY_CLUSTER
-        _NEMO_GYM_STARTED_RAY_CLUSTER = True
-        with open_dict(global_config_dict):
-            global_config_dict["ray_head_node_address"] = ray.get_runtime_context().gcs_address
-        print(f"Started Ray cluster at {global_config_dict['ray_head_node_address']}")
-
-
-def maybe_ray_cluster_exit():  # pragma: no cover
-    global _NEMO_GYM_STARTED_RAY_CLUSTER
-
-    if not _NEMO_GYM_STARTED_RAY_CLUSTER:
-        return
-
-    print("Shutting down Ray cluster spun up by NeMo Gym...")
-    ray = sys.modules.get("ray")
-    if ray is not None:
-        ray.shutdown()
-
-    _NEMO_GYM_STARTED_RAY_CLUSTER = False
-
-
 atexit.register(maybe_ray_cluster_exit)
 
 #: Base class name -> the Gym server-type directory it lives in. Matched against the MRO
@@ -493,356 +248,6 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
         if server_type is not None:
             return server_type
     return None
-
-
-def _cancelled_request_route(scope: Scope) -> str:
-    """Return a registered route template, never a path containing request or rollout IDs."""
-    route = scope.get("route")
-    if route is not None:
-        return getattr(route, "path_format", "<unmatched>")
-
-    # Prefix middleware copies the scope, but shares its actual routed path in state.
-    # Respect each server's prefix rules and resolve only registered templates.
-    path = scope.get("state", {}).get(ROUTED_PATH_STATE_KEY, scope["path"])
-    routed_scope = {**scope, "path": path}
-    for candidate in getattr(scope.get("app"), "routes", ()):
-        match, _ = candidate.matches(routed_scope)
-        if match == Match.FULL:
-            return getattr(candidate, "path_format", "<unmatched>")
-    return "<unmatched>"
-
-
-class RequestContextIsolationMiddleware:
-    """Start every request from a clean context, whatever task uvicorn started it from.
-
-    uvicorn starts a *pipelined* request's task from inside the previous request's task
-    (``on_response_complete`` → ``loop.create_task``), so that task inherits the previous
-    request's contextvars. The OTel ASGI instrumentation, which runs outermost, has the previous
-    request's server span current at that point; for the new request it sees a current span,
-    skips ``traceparent`` extraction, and files the request as an INTERNAL child of the previous
-    one, under the previous rollout's trace. Pipelining happens whenever a client reuses a
-    kept-alive connection before this server has sent the terminating body message, which
-    Starlette's ``BaseHTTPMiddleware`` sends late.
-
-    Installed outside the instrumentor (see ``install_request_context_isolation``), this resets
-    the OTel context for the request's duration, so the instrumentor extracts the inbound
-    ``traceparent``. It also clears the rollout id. Today that is a guard only: Gym's
-    ``BaseHTTPMiddleware`` layers run the rollout middleware, ``/run`` and the handlers in a
-    child task, so a rollout id set there does not reach the task uvicorn copies; the guard
-    keeps that true if those layers are ever replaced by plain ASGI middleware.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        otel_token = _otel_context.attach(_otel_context.Context()) if _otel_context is not None else None
-        try:
-            with rollout_context(None):
-                await self.app(scope, receive, send)
-        finally:
-            if otel_token is not None:
-                _otel_context.detach(otel_token)
-
-
-def install_request_context_isolation(app: FastAPI) -> None:
-    """Wrap the complete middleware stack, instrumentation included, in context isolation.
-
-    `add_middleware` is not enough: the FastAPI instrumentor installs its middleware by
-    overriding `build_middleware_stack`, so it always ends up outside anything added that way.
-    Wrapping the build the same way, after instrumentation, puts isolation outside the
-    instrumentor, which is the only place it works: the instrumentor must see an empty context
-    so it extracts `traceparent`, and the handlers must still see the server span the
-    instrumentor then makes current. Call it after `instrument_app_for_telemetry`.
-    """
-    if getattr(app.state, "nemo_gym_request_context_isolation_installed", False):
-        return
-    app.state.nemo_gym_request_context_isolation_installed = True
-    build_inner = app.build_middleware_stack
-
-    def build_middleware_stack() -> ASGIApp:
-        return RequestContextIsolationMiddleware(build_inner())
-
-    app.build_middleware_stack = build_middleware_stack  # type: ignore[method-assign]
-    app.middleware_stack = None
-
-
-_ROLLOUT_PREFIX_PATTERN = rf"/{re.escape(ROLLOUT_PATH_PREFIX)}/[^/]+(?:/{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)})?"
-_ROLLOUT_PREFIX_RE = re.compile(rf"^{_ROLLOUT_PREFIX_PATTERN}(?=/|$)")
-_TRACE_CONTEXT_PATH_RE = re.compile(
-    rf"^(?P<head>(?:{_ROLLOUT_PREFIX_PATTERN})?)"
-    rf"/{re.escape(TRACE_CONTEXT_PATH_SEGMENT)}/(?P<traceparent>{_TRACEPARENT_PATTERN})(?P<rest>/.*)$"
-)
-
-
-class TraceContextPathMiddleware:
-    """Strip ``/ng-trace/<traceparent>`` from the path and supply it as the inbound ``traceparent``.
-
-    The segment comes from ``apply_rollout_prefix``: a model URL an agent hands to a client that
-    sends no ``traceparent`` header, such as a harness inside a sandbox. A header the client did
-    send wins. The segment is stripped whether or not traces are on, so such a URL always routes.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        path = scope.get("path", "") if scope["type"] == "http" else ""
-        # Substring test first: this runs on every request of every server, almost none of which carry the segment.
-        match = _TRACE_CONTEXT_PATH_RE.match(path) if f"/{TRACE_CONTEXT_PATH_SEGMENT}/" in path else None
-        if match is None:
-            await self.app(scope, receive, send)
-            return
-        headers = list(scope.get("headers") or [])
-        if not any(name.lower() == b"traceparent" for name, _ in headers):
-            headers.append((b"traceparent", match.group("traceparent").encode("ascii")))
-        scope = scope_with_routed_path(scope, match.group("head") + match.group("rest"))
-        scope["headers"] = headers
-        segment = f"/{TRACE_CONTEXT_PATH_SEGMENT}/{match.group('traceparent')}"
-
-        async def send_with_segment_on_redirect(message: Message) -> None:
-            # The client only ever had the URL, so a redirect it follows must carry the segment again.
-            if message["type"] == "http.response.start":
-                message = _restore_trace_segment_on_redirect(message, segment=segment, request_headers=headers)
-            await send(message)
-
-        await self.app(scope, receive, send_with_segment_on_redirect)
-
-
-def _restore_trace_segment_on_redirect(
-    message: Message, *, segment: str, request_headers: list[tuple[bytes, bytes]]
-) -> Message:
-    """Put ``/ng-trace/<traceparent>`` back into root-relative and same-origin redirect targets.
-
-    Inserted after a rollout or token-capture prefix (which the capture middleware has already restored)
-    or at the root; cross-origin targets and targets that already carry a segment are left alone.
-    """
-    status = int(message.get("status") or 0)
-    if not 300 <= status < 400:
-        return message
-    request_host = next((value.decode("latin-1") for key, value in request_headers if key.lower() == b"host"), "")
-    headers = list(message.get("headers") or [])
-    changed = False
-    for index, (key, value) in enumerate(headers):
-        if key.lower() != b"location":
-            continue
-        parts = urlsplit(value.decode("latin-1"))
-        if (parts.netloc and parts.netloc != request_host) or not parts.path.startswith("/"):
-            continue
-        if f"/{TRACE_CONTEXT_PATH_SEGMENT}/" in parts.path:
-            continue
-        prefix = _ROLLOUT_PREFIX_RE.match(parts.path)
-        head = prefix.group(0) if prefix else ""
-        path = f"{head}{segment}{parts.path[len(head) :]}"
-        headers[index] = (key, urlunsplit(parts._replace(path=path)).encode("latin-1"))
-        changed = True
-    return {**message, "headers": headers} if changed else message
-
-
-def install_trace_context_path(app: FastAPI) -> None:
-    """Install ``TraceContextPathMiddleware`` outside the instrumentor, which reads headers and path when it
-    opens the server span. Same mechanism as ``install_request_context_isolation``; call it after
-    ``instrument_app_for_telemetry`` and before ``install_request_context_isolation``, which stays outermost.
-    """
-    if getattr(app.state, "nemo_gym_trace_context_path_installed", False):
-        return
-    app.state.nemo_gym_trace_context_path_installed = True
-    build_inner = app.build_middleware_stack
-
-    def build_middleware_stack() -> ASGIApp:
-        return TraceContextPathMiddleware(build_inner())
-
-    app.build_middleware_stack = build_middleware_stack  # type: ignore[method-assign]
-    app.middleware_stack = None
-
-
-class ClientDisconnectCancellationMiddleware:
-    """Cancel an in-flight HTTP request when its client disconnects."""
-
-    # Direct MCP dispatch has no client connection to monitor.
-    skipped_on_direct_mcp_dispatch = True
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-        self.num_cancelled = 0
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        counts = request_counts()
-        if counts is None:
-            await self._handle(scope, receive, send, None)
-            return
-        counts.in_flight += 1
-        try:
-            await self._handle(scope, receive, send, counts)
-        except Exception:
-            # A handled error, such as an HTTPException, became a response inside and is not counted here.
-            counts.unhandled_exceptions += 1
-            raise
-        finally:
-            counts.in_flight -= 1
-
-    async def _handle(self, scope: Scope, receive: Receive, send: Send, counts: Any) -> None:
-        received_messages: asyncio.Queue[Message] = asyncio.Queue()
-        client_disconnected = asyncio.Event()
-        response_complete = asyncio.Event()
-        debug = is_global_aiohttp_client_request_debug_enabled()
-        started_at = time.monotonic() if debug else None
-        response_started = False
-
-        async def receive_message() -> Message:
-            return await received_messages.get()
-
-        async def send_message(message: Message) -> None:
-            nonlocal response_started
-            if client_disconnected.is_set():
-                return
-
-            if counts is not None and message["type"] == "http.response.start":
-                counts.count_response(message["status"])
-            await send(message)
-            if message["type"] == "http.response.start":
-                response_started = True
-            if message["type"] == "http.response.body" and not message.get("more_body", False):
-                response_complete.set()
-
-        # The listener is the sole reader of the original ASGI receive channel.
-        # Forwarding request messages keeps the body available to the app while
-        # also allowing disconnects to cancel handlers that no longer call receive.
-        async with create_task_group() as task_group:
-
-            async def run_app() -> None:
-                try:
-                    await self.app(scope, receive_message, send_message)
-                finally:
-                    task_group.cancel_scope.cancel()
-
-            async def listen_for_disconnect() -> None:
-                while True:
-                    message = await receive()
-                    if message["type"] != "http.disconnect":
-                        await received_messages.put(message)
-                        continue
-
-                    # Uvicorn returns http.disconnect from receive() once the response is complete,
-                    # even if the peer did not disconnect early. Only cancel requests whose response
-                    # has not finished being sent.
-                    if response_complete.is_set():
-                        return
-
-                    await received_messages.put(message)
-                    client_disconnected.set()
-                    self.num_cancelled += 1
-                    if counts is not None:
-                        counts.count_cancellation(_cancelled_request_route(scope), response_started=response_started)
-                    if debug or self.num_cancelled % 100 == 0:
-                        client = scope.get("client")
-                        client_address = f"{client[0]}:{client[1]}" if client else "-:-"
-                        detail = ""
-                        if started_at is not None:
-                            elapsed_s = time.monotonic() - started_at
-                            phase = "response_started" if response_started else "before_response_start"
-                            detail = f" after {elapsed_s:.1f}s {phase}"
-                        print(
-                            f'{client_address} - "{scope["method"]} {scope["path"]}" '
-                            f"499 CLIENT DISCONNECTED{detail} ({self.num_cancelled} total for this server worker)"
-                        )
-                    task_group.cancel_scope.cancel()
-                    return
-
-            task_group.start_soon(run_app)
-            task_group.start_soon(listen_for_disconnect)
-
-
-def _connect_server_to_ray(server_class: type, global_config_dict: DictConfig) -> None:
-    """Join the run's Ray cluster if this server declares that it uses Ray."""
-    if not server_class.ray_enabled:
-        return
-    if _has_injected_global_config_env() and not global_config_dict.get(RAY_HEAD_NODE_ADDRESS_KEY_NAME):
-        # Gym only launches servers without a cluster address when it decided no server needs Ray. Fail instead
-        # of letting initialize_ray start a private cluster in this process and in each of its workers.
-        raise RuntimeError(
-            f"{server_class.__module__}.{server_class.__name__} uses Ray, but this run has no Ray cluster. "
-            f"Declare `ray_enabled = True` on {server_class.__name__} itself so `gym` starts Ray for it, and "
-            "install the `nemo-gym[ray]` extra where `gym` runs."
-        )
-    initialize_ray()
-
-
-def _declared_class_flag(class_node: ast.ClassDef, name: str) -> bool | None:
-    """The literal boolean assigned to `name` in a class body, annotated or not, or None when there is none."""
-    for item in class_node.body:
-        if isinstance(item, ast.Assign):
-            targets = item.targets
-        elif isinstance(item, ast.AnnAssign):
-            targets = [item.target]
-        else:
-            continue
-        if not any(isinstance(target, ast.Name) and target.id == name for target in targets):
-            continue
-        if isinstance(item.value, ast.Constant) and isinstance(item.value.value, bool):
-            return item.value.value
-    return None
-
-
-def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
-    """The literal `ray_enabled` assigned in a class body, or None when there is none."""
-    return _declared_class_flag(class_node, "ray_enabled")
-
-
-def entrypoint_class_flag(entrypoint_fpath: Path, name: str) -> bool | None:
-    """The boolean class attribute `name` declared by the server an entrypoint starts, read from source.
-
-    Gym settles some things before any server exists, and each server runs in its own venv, so this reads the
-    source instead of importing it. It finds the classes the entrypoint calls `run_webserver()` on and checks
-    their literal `name` declarations (`name = True` or `name: ClassVar[bool] = True` in the class body).
-
-    Returns True when any of them declares True, False when all of them declare False, and None when that can't
-    be settled from the source alone, such as an inherited declaration, a class imported from another module, or
-    an unreadable entrypoint.
-    """
-    try:
-        source = entrypoint_fpath.read_text()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", SyntaxWarning)
-            tree = ast.parse(source)
-    except (OSError, SyntaxError, UnicodeDecodeError):
-        return None
-
-    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
-    invoked_class_names = {
-        node.func.value.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "run_webserver"
-        and isinstance(node.func.value, ast.Name)
-    }
-    if not invoked_class_names:
-        return None
-    declarations = [
-        _declared_class_flag(classes[class_name], name) if class_name in classes else None
-        for class_name in invoked_class_names
-    ]
-    if True in declarations:
-        return True
-    if all(declaration is False for declaration in declarations):
-        return False
-    return None
-
-
-def entrypoint_ray_enabled(entrypoint_fpath: Path) -> bool | None:
-    """The `ray_enabled` declaration of the server an entrypoint starts, read from source.
-
-    The supervisor must decide whether to start Ray before any server exists; see `entrypoint_class_flag` for
-    what the source alone can settle.
-    """
-    return entrypoint_class_flag(entrypoint_fpath, "ray_enabled")
 
 
 def refuse_unsupported_num_workers(server: "SimpleServer") -> None:
@@ -1287,96 +692,6 @@ repr(e): {repr(e)}"""
                 shutdown_telemetry()
 
         return app
-
-
-class HeadServer(BaseServer):
-    config: BaseServerConfig
-    _server_instances: List[dict] = []
-    _ready: bool = PrivateAttr(default=False)
-    # Serialized global config returned to clients.
-    _cached_yaml: Optional[str] = None
-
-    def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
-
-        @app.get("/livez", include_in_schema=False)
-        @app.get("/", include_in_schema=False)
-        async def _liveness():
-            return {"status": "ok"}
-
-        @app.get("/readyz", include_in_schema=False)
-        @app.get("/healthz", include_in_schema=False)
-        @app.get("/health", include_in_schema=False)
-        async def _readiness(response: Response):
-            if not self._ready:
-                response.status_code = 503
-                return {"status": "starting"}
-            return {"status": "ok"}
-
-        app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
-        app.get("/server_instances")(self.get_server_instances)
-
-        return app
-
-    def mark_ready(self) -> None:
-        self._ready = True
-
-    def get_server_instances(self) -> List[dict]:
-        return self._server_instances
-
-    def set_server_instances(self, instances: List) -> None:
-        self._server_instances = instances
-
-    def invalidate_global_config_dict_yaml_cache(self) -> None:
-        """Clear the serialized global config cache."""
-        self._cached_yaml = None
-
-    @classmethod
-    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:
-        config = ServerClient.load_head_server_config()
-        server = cls(config=config)
-        global_config_dict = get_global_config_dict()
-        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
-
-        app = server.setup_webserver()
-        # The head server runs on its own thread and event loop inside the supervisor process.
-        observe_app_event_loop(app, "head_server")
-
-        config = uvicorn.Config(
-            app,
-            host=server.config.host,
-            port=server.config.port,
-            proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
-            forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
-            backlog=UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog,
-        )
-        uvicorn_server = uvicorn.Server(config=config)
-
-        thread = Thread(target=uvicorn_server.run, daemon=True)
-        thread.start()
-
-        return uvicorn_server, thread, server
-
-    async def global_config_dict_yaml(self) -> str:
-        if self._cached_yaml is None:
-            self._cached_yaml = OmegaConf.to_yaml(get_global_config_dict())
-        return self._cached_yaml
-
-
-class ServerInstanceDisplayConfig(BaseModel):
-    config_path: Optional[str] = None
-    dir_path: Optional[Path] = None
-    entrypoint: Optional[str] = None
-    host: Optional[str] = None
-    name: Optional[str] = None
-    pid: Optional[int] = None
-    port: Optional[int] = None
-    process_name: Optional[str] = None
-    server_type: Optional[str] = None
-    start_time: Optional[float] = None
-    status: Optional[ServerStatus] = None
-    uptime_seconds: Optional[float] = None
-    url: Optional[str] = None
 
 
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.

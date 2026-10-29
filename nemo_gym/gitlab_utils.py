@@ -24,7 +24,7 @@ from nemo_gym.config.config_types import (
     MLFlowConfig,
     UploadJsonlDatasetGitlabConfig,
 )
-from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.server_runtime.server_utils import get_global_config_dict
 
 
 if TYPE_CHECKING:
