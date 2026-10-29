@@ -2288,10 +2288,19 @@ def rollout_prefix_hook(base_urls: Sequence[str]) -> Callable[[RewritableRequest
 
     def hook(request: RewritableRequest) -> None:
         # A request object sent again (under another rollout, or none) is rewritten from the URL it was built with,
-        # so an earlier send's prefix is never mistaken for an explicit one.
+        # so an earlier send's prefix is never mistaken for an explicit one. Any other URL, such as a redirect
+        # target (httpx copies extensions onto it), starts afresh.
+        current = str(request.url)
         extensions = getattr(request, "extensions", None)
-        original = extensions.setdefault(_ORIGINAL_URL_EXTENSION, str(request.url)) if extensions is not None else None
-        request.url = type(request.url)(with_rollout_prefix(original or str(request.url), base_urls))
+        if extensions is None:
+            request.url = type(request.url)(with_rollout_prefix(current, base_urls))
+            return
+        original, last_written = extensions.get(_ORIGINAL_URL_EXTENSION, (current, None))
+        if current != last_written:
+            original = current
+        rewritten = with_rollout_prefix(original, base_urls)
+        extensions[_ORIGINAL_URL_EXTENSION] = (original, rewritten)
+        request.url = type(request.url)(rewritten)
 
     return hook
 

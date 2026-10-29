@@ -204,3 +204,50 @@ async def test_a_request_sent_again_is_rewritten_for_the_current_rollout(asynchr
 
         seen = [(await send(rollout_id))["rollout_id"] for rollout_id in ("first", "second", None)]
     assert seen == ["first", "second", None]
+
+
+@pytest.mark.parametrize(
+    ("location", "expected_urls"),
+    [
+        pytest.param(
+            "done",
+            ["http://gym-model/ng-rollout/r/start", "http://gym-model/ng-rollout/r/done"],
+            id="relative to the prefixed path, which already carries the prefix",
+        ),
+        pytest.param(
+            "/done",
+            ["http://gym-model/ng-rollout/r/start", "http://gym-model/ng-rollout/r/done"],
+            id="absolute path under the base",
+        ),
+        pytest.param(
+            "http://gym-model/done",
+            ["http://gym-model/ng-rollout/r/start", "http://gym-model/ng-rollout/r/done"],
+            id="same origin, absolute",
+        ),
+        pytest.param(
+            "http://elsewhere/done",
+            ["http://gym-model/ng-rollout/r/start", "http://elsewhere/done"],
+            id="cross origin",
+        ),
+    ],
+)
+async def test_a_redirect_is_followed_and_rewritten_on_its_own_terms(location: str, expected_urls: list[str]) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        if request.url.path.endswith("/start"):
+            return httpx.Response(307, headers={"Location": location})
+        return httpx.Response(200, json={"ok": True})
+
+    base_url = "http://gym-model"
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url=base_url,
+        follow_redirects=True,
+        event_hooks={"request": [async_rollout_prefix_hook([base_url])]},
+    ) as client:
+        with rollout_context("r"):
+            response = await client.post("/start")
+    assert response.status_code == 200
+    assert seen == expected_urls
