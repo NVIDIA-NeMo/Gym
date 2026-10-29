@@ -100,6 +100,7 @@ class TestSanity:
     def test_config_defaults(self) -> None:
         cfg = _config()
         assert cfg.concurrency == 32
+        assert cfg.history_delta_enabled is False
         assert cfg.timeout == 600
         assert cfg.model is None
         assert cfg.model_context_window is None
