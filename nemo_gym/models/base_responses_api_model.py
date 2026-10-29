@@ -60,6 +60,7 @@ from nemo_gym.models._checkpoint_workers import (
 from nemo_gym.models.anthropic_converter import AnthropicConverter
 from nemo_gym.models.chat_completions_converter import CustomToolStrategy
 from nemo_gym.models.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.models.history_delta import HistoryTransportProtocol
 from nemo_gym.models.model_call_capture import (
     _SSE_KEEPALIVE,
     ModelCallCaptureConfig,
@@ -350,6 +351,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """
         return False
 
+    def history_transport_protocol(self) -> HistoryTransportProtocol | None:
+        """Override to select a native continuation protocol; None uses the shim header."""
+        return None
+
     def setup_webserver(self) -> FastAPI:
         if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
             raise ValueError(
@@ -379,6 +384,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
+            history_transport_protocol=self.history_transport_protocol(),
             # Embedding vectors never contain policy-generated text, so an embeddings call under a
             # rollout's token-capture prefix must not mark that rollout incomplete.
             non_generating_requests=self.non_generating_model_routes

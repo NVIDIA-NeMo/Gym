@@ -17,9 +17,11 @@ from uuid import uuid4
 
 
 try:
+    from .history_delta import install_history_delta
     from .model_kwargs import _model_api_kwargs, install_summary_compat
     from .sandbox_observer import SandboxHermesObserver
 except ImportError:
+    from history_delta import install_history_delta
     from model_kwargs import _model_api_kwargs, install_summary_compat
     from sandbox_observer import SandboxHermesObserver
 
@@ -109,6 +111,8 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
 
     agent._build_api_kwargs = build_api_kwargs
     install_summary_compat(agent, preserve_reasoning_history=payload["chat_template_kwargs_enabled"])
+    if payload.get("history_delta_enabled", False):
+        install_history_delta(agent)
     result = None
     error = None
     stop_reason = None
