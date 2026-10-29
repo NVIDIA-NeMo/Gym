@@ -12413,6 +12413,16 @@ class TestCompletionCountsFinalZeros:
 
         if completed == 3:
             config.check_completion(expected=3, results=results, final_zero_rows=final_zero_rows * 2)
+            # Each distinct identity completes once: a repeated final zero, a final zero for a rollout that also
+            # scored, and a repeated scored row add no sample.
+            also_scored = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, **_FINAL_ZERO}]
+            for rows, zeros in (
+                (results, final_zero_rows * 2),
+                (results, final_zero_rows + also_scored),
+                (results + results[:1], final_zero_rows),
+            ):
+                with pytest.raises(RuntimeError, match="EVAL FAILED: 3/4 samples completed"):
+                    config.check_completion(expected=4, results=rows, final_zero_rows=zeros)
         else:
             with pytest.raises(RuntimeError, match=f"EVAL FAILED: {completed}/3 samples completed"):
                 config.check_completion(expected=3, results=results, final_zero_rows=final_zero_rows)
