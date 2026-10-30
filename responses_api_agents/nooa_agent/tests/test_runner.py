@@ -24,8 +24,8 @@ from nooa import Agent, strategy
 from nooa.errors import GenerationError
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
 from responses_api_agents.nooa_agent import resource_tools
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import (

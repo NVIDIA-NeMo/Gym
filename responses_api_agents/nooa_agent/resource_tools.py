@@ -24,12 +24,12 @@ from typing import TYPE_CHECKING, Any
 from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
-from nemo_gym.server_utils import raise_for_status, request
+from nemo_gym.client import raise_for_status, request
 from nemo_gym.tool_access import DirectHTTPToolAccess
 
 
 if TYPE_CHECKING:
-    from nemo_gym.rollout_observability import TrajectoryToolCall
+    from nemo_gym.trajectory import TrajectoryToolCall
     from responses_api_agents.nooa_agent.observability import GymTraceHooks
 
 

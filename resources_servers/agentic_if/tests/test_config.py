@@ -10,9 +10,9 @@ import yaml
 from aiohttp import ClientConnectionError
 from omegaconf import OmegaConf
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.environment.validation import _resolve_manifest_composition
-from nemo_gym.server_utils import ServerClient
 from resources_servers.agentic_if import opencode_bundle
 from resources_servers.agentic_if.app import AgenticIFResourcesServerConfig
 from resources_servers.agentic_if.if_grading.configuration import load_config

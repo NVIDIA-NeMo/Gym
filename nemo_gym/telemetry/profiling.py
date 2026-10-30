@@ -107,3 +107,12 @@ Please install dot using:
 
         with open(log_path, "w") as f:
             f.write(res)
+
+
+class ProfilingMiddlewareInputConfig(BaseModel):
+    # Relative to the Gym root dir.
+    profiling_results_dirpath: Optional[str] = None
+
+
+class ProfilingMiddlewareConfig(ProfilingMiddlewareInputConfig):
+    profiling_enabled: bool = False

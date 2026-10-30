@@ -12,8 +12,8 @@ from fastapi import Request
 from omegaconf import OmegaConf
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.swe_atlas_qa import app as module
 
 

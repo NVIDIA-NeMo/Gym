@@ -10,9 +10,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse, is_namespaced
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient, SimpleServer
+from nemo_gym.server_utils import SimpleServer
 from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from resources_servers.partner_if import grading_contract as kinds
 from resources_servers.partner_if.app import PartnerIFResourcesServer, PartnerIFResourcesServerConfig, VerifyRequest

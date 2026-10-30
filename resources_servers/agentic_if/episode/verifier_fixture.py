@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 from pydantic import BaseModel
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "tests" / "verifier_fixture"

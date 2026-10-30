@@ -98,22 +98,6 @@ from nemo_gym.observability.model_calls import (
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.rollout_observability import (
-    NG_AGENT_OBSERVATIONS_KEY,
-    NG_TRAJECTORY_KEY,
-    NG_VERIFIER_INVOCATIONS_KEY,
-    AgentInvocation,
-    AgentObservationBundle,
-    ModelCallRef,
-    ObservationGap,
-    ToolCallObservation,
-    TrajectoryModelCall,
-    TrajectoryRecord,
-    TrajectoryTokenStats,
-    TrajectoryToolCall,
-    TrajectoryTurn,
-    VerifierInvocation,
-)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
@@ -129,6 +113,22 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.trajectory.trajectory_record import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    ObservationGap,
+    ToolCallObservation,
+    TrajectoryModelCall,
+    TrajectoryRecord,
+    TrajectoryTokenStats,
+    TrajectoryToolCall,
+    TrajectoryTurn,
+    VerifierInvocation,
+)
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -143,17 +143,17 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
-from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
-from nemo_gym.server_utils import (
-    ServerClient,
+from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
-from nemo_gym.server_utils import (
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
+from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 from nemo_gym.skills import SkillsConfig, load_skill_directory
 from nemo_gym.task_materialization import TASK_ID_FIELDS
 from nemo_gym.token_id_capture import (

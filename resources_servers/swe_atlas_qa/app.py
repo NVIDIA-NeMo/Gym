@@ -28,6 +28,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.sandbox import (
     ConnectableProvider,
@@ -37,7 +38,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validate_source
 
 
