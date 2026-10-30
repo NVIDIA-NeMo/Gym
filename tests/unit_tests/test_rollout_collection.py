@@ -10718,7 +10718,8 @@ class TestEnvironmentServerRouting:
 
         assert result == payload
         assert post.await_args.kwargs["server_name"] == "environment"
-        assert AGENT_REF_KEY_NAME not in rows[0]
+        # run_examples names the bound agent on the row for its caller; the episode request below stays without it.
+        assert rows[0][AGENT_REF_KEY_NAME] == {"name": "hermes"}
         assert post.await_args.kwargs["json"] == {
             "episode_id": {"rollout_id": "0-0", "attempt": 0},
             "task": {
@@ -12495,3 +12496,105 @@ def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(with_
     # Do not repair conflicting ownership silently: the checker must still see both claims.
     assert [ref.model_call_id for ref in trajectory.invocations[0].model_calls] == call_ids
     assert trajectory.verifier_invocations[0].model_calls[0].model_dump(exclude_none=True) == judge_ref
+
+
+class TestRunExamplesMaterializedTasks:
+    """``run_examples`` is the interface NeMo RL drives: its materialized rows arrive straight from the dataset."""
+
+    @staticmethod
+    def _global_config() -> DictConfig:
+        return OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment": {"environment_servers": {"harbor": {"agent_server": {"name": "my_agent"}}}},
+                "other_environment": {"environment_servers": {"harbor": {"agent_server": {"name": "my_agent"}}}},
+                "environment_server_routes": {"my_taskset": "my_environment"},
+            }
+        )
+
+    @staticmethod
+    def _materialized_row(taskset: str = "my_taskset") -> dict:
+        return {
+            "task_id": {"taskset": taskset, "task_id": "task-1"},
+            "task_input": {
+                "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
+                "task_data": {NG_DIGEST_KEY: "sha256:task"},
+            },
+            TASK_SOURCE_KEY_NAME: taskset,
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+
+    @staticmethod
+    def _reply(**outcome: object) -> dict:
+        return {
+            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "task_id": {"taskset": "my_taskset", "task_id": "task-1"},
+        } | outcome
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch, reply: dict) -> AsyncMock:
+        post = AsyncMock(return_value=FakeResponse(200, reply))
+        install_fake_server_client(monkeypatch, post).global_config_dict = self._global_config()
+        return post
+
+    async def test_a_materialized_row_routes_by_taskset_and_names_the_bound_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reply = self._reply(result={"reward": 1.0})
+        post = self._install(monkeypatch, reply)
+
+        row, result = await next(RolloutCollectionHelper().run_examples([self._materialized_row()]))
+
+        assert post.await_args.kwargs["server_name"] == "my_environment"
+        body = post.await_args.kwargs["json"]
+        assert body["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
+        assert body["task"]["task_id"] == {"taskset": "my_taskset", "task_id": "task-1"}
+        assert row[NG_ENVIRONMENT_SERVER_KEY] == "my_environment"
+        assert row[AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+        # The reply is returned exactly as the Environment Server sent it.
+        assert result == reply
+
+    async def test_a_row_carrying_its_bound_agent_is_routed_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A trainer keeps the agent_ref it was handed and sends the row again on a retry.
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+        row = self._materialized_row() | {AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+
+        await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert post.await_args.kwargs["server_name"] == "my_environment"
+        assert row[AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+
+    async def test_a_taskset_without_a_route_fails_before_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+
+        with pytest.raises(ValueError, match="environment_server_routes.other_taskset"):
+            RolloutCollectionHelper().run_examples([self._materialized_row(), self._materialized_row("other_taskset")])
+
+        post.assert_not_awaited()
+
+    @pytest.mark.parametrize("named_by", ["caller", "row"])
+    async def test_an_environment_server_already_named_wins_over_the_taskset_route(
+        self, monkeypatch: pytest.MonkeyPatch, named_by: str
+    ) -> None:
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+        row = self._materialized_row()
+        if named_by == "row":
+            row[NG_ENVIRONMENT_SERVER_KEY] = "other_environment"
+        kwargs = {"environment_server_name": "other_environment"} if named_by == "caller" else {}
+
+        dispatched, _ = await next(RolloutCollectionHelper().run_examples([row], **kwargs))
+
+        assert dispatched[NG_ENVIRONMENT_SERVER_KEY] == "other_environment"
+        assert post.await_args.kwargs["server_name"] == "other_environment"
+
+    async def test_gyms_own_dispatch_leaves_materialized_rows_unattributed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `gym eval run` dispatches through the shared internal path; the records it stores for these rows keep no agent.
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+
+        completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([self._materialized_row()]))
+
+        assert post.await_args.kwargs["server_name"] == "my_environment"
+        assert completed.row[NG_ENVIRONMENT_SERVER_KEY] == "my_environment"
+        assert AGENT_REF_KEY_NAME not in completed.row

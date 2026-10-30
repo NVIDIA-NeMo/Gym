@@ -82,6 +82,7 @@ from nemo_gym.config.global_config import (
     label_runs,
     pairing_override_enabled,
     resolve_dataset_agent,
+    taskset_environment_server_name,
 )
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
@@ -4535,23 +4536,52 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         environment_group = global_config_dict[environment_server_name]["environment_servers"]
         return environment_server_attributed_agent(next(iter(environment_group.values())))
 
+    @staticmethod
+    def _stamp_taskset_environment_servers(examples: list[dict[str, Any]], global_config_dict: DictConfig) -> None:
+        """Stamp each unstamped materialized row with the Environment Server its taskset routes to.
+
+        ``gym eval run`` stamps these rows while preprocessing (``_environment_server_for_config_row``); a direct
+        ``run_examples`` caller such as a trainer hands rows straight from the dataset. Without the stamp they would
+        reach ``resolve_task_sources``, which knows only agent and resources-server instances. A row already stamped,
+        by an explicit ``environment_server_name`` or by preprocessing, keeps its server. A taskset without a route
+        fails before any dispatch.
+        """
+        for row in examples:
+            if NG_ENVIRONMENT_SERVER_KEY in row:
+                continue
+            taskset = _materialized_taskset(row)
+            if taskset is None:
+                continue
+            environment_server = taskset_environment_server_name(global_config_dict, taskset)
+            if environment_server is None:
+                raise ValueError(
+                    f"No environment server route is configured for taskset {taskset!r}; "
+                    f"set environment_server_routes.{taskset}"
+                )
+            row[NG_ENVIRONMENT_SERVER_KEY] = environment_server
+
     @classmethod
     def _stamp_environment_server_agent_refs(
         cls,
         examples: list[dict[str, Any]],
         global_config_dict: DictConfig,
+        *,
+        include_materialized: bool = False,
     ) -> None:
-        """Stamp compatibility-routed rows with the bound agent.
+        """Stamp environment-server-routed rows with the bound agent.
 
-        These rows never reach ``resolve_task_sources``, so without this they carry no
+        Compatibility-routed rows never reach ``resolve_task_sources``, so without this they carry no
         ``agent_ref`` and results, aggregate metrics and reward profiling lose the agent
         they ran on. A row that already names an agent is left alone; the name is validated
         against the environment server by ``_validate_environment_servers``. Materialized tasks are
-        skipped: they carry no agent by design, and their result projection is not the
-        legacy shape this key belongs to.
+        skipped unless ``include_materialized``: they carry no agent by design, and the records ``gym eval run``
+        stores for them are not the legacy shape this key belongs to. ``run_examples`` includes them, so a direct
+        caller reads the agent its row ran on, as it does for a row routed by ``task_source``.
         """
         for row in examples:
-            if NG_ENVIRONMENT_SERVER_KEY not in row or _materialized_taskset(row) is not None:
+            if NG_ENVIRONMENT_SERVER_KEY not in row:
+                continue
+            if _materialized_taskset(row) is not None and not include_materialized:
                 continue
             if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is not None:
                 continue
@@ -4691,6 +4721,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
         run_timing: Optional[RunTimingReport] = None,
+        stamp_materialized_agent_refs: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -4710,13 +4741,19 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         ``interleave_by_agent`` is enabled by the full evaluation path. Lower-level callers retain
         the order they supplied.
+
+        ``stamp_materialized_agent_refs`` also names the bound agent on materialized rows; only ``run_examples``
+        sets it, so the records Gym stores for those rows stay unattributed.
         """
         server_client = self.setup_server_client(head_server_config)
         if environment_server_name is not None:
             for row in examples:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
+        self._stamp_taskset_environment_servers(examples, server_client.global_config_dict)
         self._validate_environment_servers(examples, server_client.global_config_dict)
-        self._stamp_environment_server_agent_refs(examples, server_client.global_config_dict)
+        self._stamp_environment_server_agent_refs(
+            examples, server_client.global_config_dict, include_materialized=stamp_materialized_agent_refs
+        )
         direct_agent_examples = [row for row in examples if NG_ENVIRONMENT_SERVER_KEY not in row]
         self.resolve_task_sources(direct_agent_examples, server_client.global_config_dict)
         self._validate_agent_names(direct_agent_examples, server_client.global_config_dict)
@@ -4882,6 +4919,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
 
+        A materialized task row (``task_id.taskset`` plus ``task_input``) is routed by its taskset through
+        ``environment_server_routes``, as ``gym eval run`` routes it, unless ``environment_server_name`` or the row
+        already names an Environment Server; a taskset without a route raises before any row is dispatched. The row
+        is also stamped with the ``agent_ref`` of the agent that Environment Server binds, so it names the agent it
+        ran on (``gym eval run`` leaves the records it stores for these rows unattributed). Its ``/run`` reply is the
+        Environment Server's ``BaseEpisodeResponse``.
+
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
@@ -4949,6 +4993,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 dispatch_budget_s=dispatch_budget_s,
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
+                stamp_materialized_agent_refs=True,
                 **({"retry_requests": False} if not retry_requests else {}),
             )
         )
