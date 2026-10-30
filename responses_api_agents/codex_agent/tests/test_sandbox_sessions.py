@@ -2155,8 +2155,10 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     """Exercise the checked-in recipe through collector, real environment, and real Codex lifecycle.
 
     A failed Codex run bypasses verification unless verify_after_agent_error grades it."""
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+    from environment_servers.single_agent_turn_legacy.app import (
+        SingleAgentTurnLegacyEnvironmentServer,
+        SingleAgentTurnLegacyEnvironmentServerConfig,
+    )
     from nemo_gym.config import GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.server_utils import BaseServerConfig
@@ -2197,7 +2199,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
     agent.server_client = transport
     environment = SingleAgentTurnLegacyEnvironmentServer(
-        config=SingleAgentTurnEnvironmentServerConfig(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(
             name=environment_name,
             host="localhost",
             port=8002,

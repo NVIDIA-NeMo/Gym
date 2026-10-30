@@ -1552,8 +1552,10 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
     import orjson
 
     import nemo_gym.rollout_collection as collection
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+    from environment_servers.single_agent_turn_legacy.app import (
+        SingleAgentTurnLegacyEnvironmentServer,
+        SingleAgentTurnLegacyEnvironmentServerConfig,
+    )
     from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     agent, sandbox = setup
@@ -1604,7 +1606,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
     agent.server_client.global_config_dict = global_config
     agent.server_client._resolve_base_url.return_value = "http://resources.example:8000"
     environment = SingleAgentTurnLegacyEnvironmentServer(
-        config=SingleAgentTurnEnvironmentServerConfig(name=env_name, **OmegaConf.to_container(env_config)),
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(name=env_name, **OmegaConf.to_container(env_config)),
         server_client=agent.server_client,
     )
     calls = []
