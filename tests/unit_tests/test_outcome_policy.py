@@ -13,7 +13,7 @@ from nemo_gym.agent_outcome import (
     failure_outcome_policy,
 )
 from nemo_gym.core.failure_kinds import AGENT_INVALID_OUTPUT, MODEL_POLICY_RESPONSE_TIMEOUT, MODEL_TRANSPORT_ERROR
-from nemo_gym.episode_types import FailureBoundary
+from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.typed_exceptions import NgFailureEvent
 
 

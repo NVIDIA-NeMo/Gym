@@ -189,7 +189,7 @@ from typing import ClassVar
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -197,7 +197,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 
 
 class MyWeatherToolResourcesServerConfig(BaseResourcesServerConfig):
@@ -371,8 +371,8 @@ Next, update `resources_servers/my_weather_tool/tests/test_app.py`. Keep the gen
 import asyncio
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.client import ServerClient
+from nemo_gym.verification import exercise_verifier_fixture
 
 from ..app import (
     VERIFIER_FIXTURE,
@@ -595,7 +595,7 @@ For a catalog of common scoring approaches and when to use each, see [Verificati
 For tasks requiring multiple tool calls, define a custom verify request model to carry ground-truth data, then parse the final output to compute accuracy:
 
 ```python
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse
 
 class MultiStepVerifyRequest(BaseVerifyRequest):
     """Custom request model that carries ground-truth data for verification."""

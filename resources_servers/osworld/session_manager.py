@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, Optional
 
 import requests
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.osworld.config import (
     OSWorldResourcesServerConfig,
     RemoteDockerWorkerConfig,

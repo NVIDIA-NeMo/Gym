@@ -24,7 +24,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.episode_types import FailureReport
+from nemo_gym.server_runtime.episode_types import FailureReport
 from nemo_gym.typed_exceptions import failure_report_for
 
 

@@ -24,20 +24,21 @@ from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import JUDGE_FAILURES, call_judge, is_judge_failure
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.verification import call_judge
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.terminus_judge.schemas import TERMINUS_1_SCHEMA, TERMINUS_2_SCHEMA
 
 

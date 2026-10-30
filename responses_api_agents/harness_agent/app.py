@@ -30,12 +30,12 @@ from fastapi import Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -49,7 +49,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 
 
 LOG = logging.getLogger(__name__)

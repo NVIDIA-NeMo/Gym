@@ -12,11 +12,11 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-import nemo_gym.server_utils as server_utils
+import nemo_gym.client.http_client as http_client
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.episode_types import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON, NeMoGymAsyncOpenAI, PermanentEndpointError
+from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.typed_exceptions import failure_report_for
 
 
@@ -25,9 +25,9 @@ async def test_a_recovered_transport_attempt_is_observed_without_an_episode_fail
     success = SimpleNamespace(status=200, headers={})
     error = error_type("sensitive connection text")
     wire = SimpleNamespace(request=AsyncMock(side_effect=[error, success]))
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
-    monkeypatch.setattr(server_utils.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client.asyncio, "sleep", AsyncMock())
     model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test", max_connection_retries=3)
 
     with RequestFailureLog.capture() as log:
@@ -50,8 +50,8 @@ async def test_a_terminal_transport_attempt_is_observed_without_an_extra_retry(m
     error = error_type("selected transport message")
     error.request_payload = "private request"
     wire = SimpleNamespace(request=AsyncMock(side_effect=error))
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test", max_num_tries=1)
 
     with RequestFailureLog.capture() as log:
@@ -68,8 +68,8 @@ async def test_a_terminal_transport_attempt_is_observed_without_an_extra_retry(m
 
 async def test_model_cancellation_is_neither_retried_nor_observed(monkeypatch):
     wire = SimpleNamespace(request=AsyncMock(side_effect=asyncio.CancelledError()))
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
     with RequestFailureLog.capture() as log:
         with pytest.raises(asyncio.CancelledError):
@@ -90,13 +90,13 @@ async def test_an_oversized_report_through_the_gym_http_client_keeps_body_status
     app = web.Application()
     app.router.add_get("/failure", endpoint)
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
-        monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
-        response = await server_utils.request(method="GET", url=str(server.make_url("/failure")), _max_num_tries=3)
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        response = await http_client.request(method="GET", url=str(server.make_url("/failure")), _max_num_tries=3)
         assert response.status == 503
         assert FailureHeader.decode(response.headers) == FailureReport(omitted=True)
         with pytest.raises(aiohttp.ClientResponseError) as caught:
-            await server_utils.raise_for_status(response)
+            await http_client.raise_for_status(response)
     assert caught.value.status == 503 and caught.value.response_content == b"original reply"
     assert hits == 1
 
@@ -104,9 +104,9 @@ async def test_an_oversized_report_through_the_gym_http_client_keeps_body_status
 async def test_the_raised_transport_error_names_the_attempt_it_ended_on(monkeypatch):
     recovered, final = aiohttp.ClientOSError("first"), TimeoutError()
     wire = SimpleNamespace(request=AsyncMock(side_effect=[recovered, TimeoutError(), final]))
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
-    monkeypatch.setattr(server_utils.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client.asyncio, "sleep", AsyncMock())
     model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test", max_connection_retries=2)
 
     with RequestFailureLog.capture() as log:
@@ -166,8 +166,8 @@ async def test_only_a_timeout_after_the_request_was_sent_is_a_response_timeout(
     session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit_per_host=1))
     held = asyncio.create_task(session.post(url, data=b"x")) if phase == "pool" else None
     await asyncio.sleep(0.1)
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(
         api_key="test",
         base_url=f"http://127.0.0.1:{port}/v1",
@@ -210,8 +210,8 @@ def _reply(status: int, *, headers: dict | None = None, body: bytes = b"") -> Si
 async def test_a_final_non_retryable_status_is_the_calls_observed_attempt(monkeypatch, status):
     reply = _reply(status, body=b'{"error": {"code": "budget_exceeded"}}')
     wire = SimpleNamespace(request=AsyncMock(return_value=reply))
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
 
     with RequestFailureLog.capture() as log:
@@ -233,8 +233,8 @@ async def test_a_failure_a_gym_server_forwarded_is_not_recorded_twice(monkeypatc
     forwarded = FailureEvent(failure_kind="test:failure", boundary=FailureBoundary.MODEL, failure_reason="upstream")
     report = FailureReport(failure_id=forwarded.event_id, events={forwarded.event_id: forwarded})
     wire = SimpleNamespace(request=AsyncMock(return_value=_reply(422, headers=FailureHeader.encode(report))))
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
 
     with RequestFailureLog.capture() as log:
@@ -245,8 +245,8 @@ async def test_a_failure_a_gym_server_forwarded_is_not_recorded_twice(monkeypatc
 
 async def test_a_successful_call_records_nothing(monkeypatch):
     wire = SimpleNamespace(request=AsyncMock(return_value=_reply(200)))
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: wire)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: wire)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(api_key="test", base_url="http://model.test")
 
     with RequestFailureLog.capture() as log:
@@ -268,9 +268,9 @@ async def _scripted_model(monkeypatch, replies: list[tuple[int, bytes, dict]]):
     server = TestServer(app)
     await server.start_server()
     session = aiohttp.ClientSession()
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
-    monkeypatch.setattr(server_utils.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(http_client.asyncio, "sleep", AsyncMock())
     model = NeMoGymAsyncOpenAI(api_key="test", base_url=str(server.make_url("/v1")), max_rate_limit_wait_seconds=0)
     return model, script, server, session
 
@@ -391,8 +391,8 @@ async def test_a_recovered_response_timeout_keeps_its_confirmed_upload_observati
     app = web.Application()
     app.router.add_post("/responses", endpoint)
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
-        monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
         model = NeMoGymAsyncOpenAI(
             api_key="test", base_url=str(server.make_url("/")), max_connection_retries=2, request_timeout_seconds=0.04
         )
@@ -423,8 +423,8 @@ async def test_failed_body_upload_never_reports_a_response_wait_timeout(monkeypa
     app = web.Application()
     app.router.add_post("/responses", endpoint)
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
-        monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
         model = NeMoGymAsyncOpenAI(
             api_key="test", base_url=str(server.make_url("/")), max_num_tries=1, request_timeout_seconds=0.2
         )

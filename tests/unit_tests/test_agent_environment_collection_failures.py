@@ -11,16 +11,18 @@ from aiohttp.test_utils import TestServer
 from fastapi import Body
 from omegaconf import OmegaConf
 
+import nemo_gym.client.http_client
 import nemo_gym.openai_utils as openai_utils_module
 import nemo_gym.server_utils
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
+from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig
 from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, RolloutCollectionHelper
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.rollout_collection import RolloutCollectionHelper
 
 
 MODEL_REPLY = {
@@ -76,7 +78,7 @@ async def _collect(monkeypatch, statuses: list[int]):
     app.router.add_route("POST", "/{tail:.*}", model)
     servers = []
     async with TestServer(app) as model_server, ClientSession() as session:
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+        monkeypatch.setattr(nemo_gym.client.http_client, "_GLOBAL_AIOHTTP_CLIENT", session)
         agent = _ModelAgent(
             config=BaseResponsesAPIAgentConfig(host="127.0.0.1", port=0, entrypoint="", name="my_agent"),
             server_client=MagicMock(spec=ServerClient),

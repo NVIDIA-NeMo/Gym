@@ -49,7 +49,7 @@ def test_failed_capture_does_not_call_a_retried_header_a_recovery():
 
 
 def test_failure_payload_preserves_only_valid_typed_slots():
-    from nemo_gym.rollout_observability import failure_observations
+    from nemo_gym.trajectory.trajectory_record import failure_observations
 
     assert (
         failure_observations({"response": {"id": "not-a-result"}, "reward": 1, "ng_trajectory": {"bad": True}}) == {}
@@ -86,7 +86,7 @@ def test_runtime_and_cost_observations_reject_coercion_and_nonfinite_values():
     from pydantic import ValidationError
 
     from nemo_gym.failure_transport import ModelOperationObservation
-    from nemo_gym.rollout_observability import AgentInvocation
+    from nemo_gym.trajectory.trajectory_record import AgentInvocation
 
     with pytest.raises(ValidationError):
         AgentInvocation(invocation_id="a", in_session=1)

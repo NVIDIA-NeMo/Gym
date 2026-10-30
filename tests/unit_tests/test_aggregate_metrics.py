@@ -17,20 +17,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseResourcesServerConfig,
-    SimpleResourcesServer,
-)
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.metrics_config import ACROSS_REPEATS_MARKER
-from nemo_gym.reward_profile import (
+from nemo_gym.metrics.metrics_config import ACROSS_REPEATS_MARKER
+from nemo_gym.metrics.reward_profile import (
     RewardProfiler,
     add_avg_sample_std_dev,
     compute_aggregate_metrics,
@@ -40,7 +35,12 @@ from nemo_gym.reward_profile import (
     highest_k_metrics,
     is_repeat_aggregatable_metric,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime.base_resources_server import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    BaseResourcesServerConfig,
+    SimpleResourcesServer,
+)
 
 
 class _TestResourcesServer(SimpleResourcesServer):

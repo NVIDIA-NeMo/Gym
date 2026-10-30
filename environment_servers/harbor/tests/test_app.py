@@ -70,12 +70,12 @@ from environment_servers.harbor.verifier import (
     verifier_command,
 )
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
-from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
+from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import failure_kinds
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, cpu_cap_env
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime import BaseEnvironmentServerConfig
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
@@ -4368,7 +4368,7 @@ class TestGeneralization:
         assert "sk-from-the-process" not in str(sandbox.execs)
 
     async def test_failed_trajectory_export_masks_the_turn_before_test_sh(self, tmp_path, monkeypatch):
-        from nemo_gym.atif_export import AtifExportError
+        from nemo_gym.trajectory import AtifExportError
 
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
 

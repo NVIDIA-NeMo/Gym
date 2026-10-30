@@ -33,9 +33,7 @@ from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
-from nemo_gym._checkpoint.control import CheckpointRequest
-from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
-from nemo_gym._checkpoint.model import PolicyModelParticipant, generation_cut_requester
+from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -70,9 +68,17 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymFunctionToolParam,
     NeMoGymResponseInputText,
 )
+from nemo_gym.failure_transport import FailureHeader
+from nemo_gym.models._checkpoint import PolicyModelParticipant, generation_cut_requester
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
+from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
+from nemo_gym.server_runtime._checkpoint.generation_cut import (
+    GenerationCutInventory,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
+from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
@@ -84,6 +90,7 @@ from nemo_gym.token_id_capture import (
 )
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
@@ -854,7 +861,7 @@ class TestApp:
 
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = dict()
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
 
         global_config = {}
         if external_staging_backend is not None:
@@ -955,6 +962,14 @@ class TestApp:
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
         error.response_content = error_content
+        model = NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason="HTTP 400 from the model",
+            operation="model_request",
+            http_status=400,
+        )
+        error.__cause__ = model
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=error)
         mock_client.create_completion = AsyncMock(side_effect=error)
@@ -982,8 +997,12 @@ class TestApp:
                     "code": expected_code,
                 }
             }
+            # The refusal ends the request: the reply names the model failure that caused it.
+            report = FailureHeader.decode(response.headers)
+            assert report is not None and report.failure_id == model.event_id
         else:
             assert response.status_code == 200
+            assert FailureHeader.decode(response.headers) is None
             if responses_api:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
                 assert response.json()["usage"]["input_tokens"] == 0
@@ -4998,6 +5017,9 @@ class TestAudioDataSplice:
 
 import base64 as _b64  # noqa: E402  (kept local to the audio_path tests)
 
+import nemo_gym.client.http_client
+import nemo_gym.client.server_client
+
 
 _AUDIO_BYTES = b"RIFF" + b"\x00" * 8 + b"WAVEfmt "  # not a valid WAV — splice doesn't decode
 
@@ -5272,7 +5294,8 @@ async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
 ) -> None:
     """No prompt fits a budget larger than the whole window the engine names, so the budget is at fault. The budget
     is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens."""
-    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
     model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
     model.config.propagate_context_overflow_errors = propagate
     error = ClientResponseError(MagicMock(), (), status=400, message="backend request failed")
@@ -5362,7 +5385,8 @@ async def test_backend_context_overflow_handling(
     error_content: str,
     expect_length: bool,
 ) -> None:
-    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
     model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
     model.config.propagate_context_overflow_errors = propagate
     error = ClientResponseError(MagicMock(), (), status=status, message="backend request failed")
@@ -7091,9 +7115,9 @@ async def test_generation_cut_reaches_each_owning_backend(
     async def fake_get_response_json(response: SimpleNamespace) -> dict[str, Any]:
         return response.payload
 
-    monkeypatch.setattr("nemo_gym.server_utils.request", fake_request)
-    monkeypatch.setattr("nemo_gym.server_utils.raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr("nemo_gym.server_utils.get_response_json", fake_get_response_json)
+    monkeypatch.setattr("nemo_gym.client.http_client.request", fake_request)
+    monkeypatch.setattr("nemo_gym.client.http_client.raise_for_status", fake_raise_for_status)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_response_json", fake_get_response_json)
 
     await participant.close_admission(CheckpointRequest(checkpoint_id="checkpoint-1", deadline_ts=time.time() + 5))
 
@@ -7124,7 +7148,7 @@ class TestPrefixSupply:
             supply_prefix_token_ids=enabled,
         )
         get_global_config_dict_mock = MagicMock(return_value={})
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     @staticmethod

@@ -48,6 +48,7 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
+from nemo_gym.client import request
 from nemo_gym.config import (
     DISALLOWED_PORTS_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -63,7 +64,6 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import request
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -77,7 +77,7 @@ _ROLLOUT_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "switchyard_model_rollout_id", default=None
 )
 
-# Charset kept in step with nemo_gym.rollout_correlation.RolloutContextMiddleware and the
+# Charset kept in step with nemo_gym.server_runtime.request_handling.rollout_context.RolloutContextMiddleware and the
 # _validate_rollout_id check on the capture path. It matters more here than it does there: this id
 # leaves the process as an HTTP header value, so anything outside the contract's alphabet is
 # dropped rather than forwarded.

@@ -28,7 +28,7 @@ import pytest
 
 # Stub out nemo_gym so we can import app.py without the full dependency
 _nemo_stub = types.ModuleType("nemo_gym")
-_nemo_base = types.ModuleType("nemo_gym.base_resources_server")
+_nemo_base = types.ModuleType("nemo_gym.server_runtime.base_resources_server")
 for cls_name in (
     "BaseResourcesServerConfig",
     "BaseRunRequest",
@@ -39,7 +39,7 @@ for cls_name in (
     setattr(_nemo_base, cls_name, type(cls_name, (), {}))
 _nemo_stub.base_resources_server = _nemo_base
 sys.modules["nemo_gym"] = _nemo_stub
-sys.modules["nemo_gym.base_resources_server"] = _nemo_base
+sys.modules["nemo_gym.server_runtime.base_resources_server"] = _nemo_base
 
 # Now we can import app.py
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

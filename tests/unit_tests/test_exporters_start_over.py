@@ -29,10 +29,10 @@ from mlflow.exceptions import MlflowException
 from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
-import nemo_gym.exporters.wandb as wandb_module
+import nemo_gym.artifacts.exporters.wandb as wandb_module
 import nemo_gym.rollout_collection as collection_module
 import nemo_gym.rollout_reverification as reverification_module
-from nemo_gym.exporters import export_rollouts, get_exporters, setup_exporters, teardown_exporters
+from nemo_gym.artifacts.exporters import export_rollouts, get_exporters, setup_exporters, teardown_exporters
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_reverification import OutputPaths
 
@@ -326,7 +326,7 @@ class TestReverificationThroughTheHelper:
         def no_outbound_request(*_args, **_kwargs):
             raise AssertionError("reverification must not send any request here")
 
-        monkeypatch.setattr("nemo_gym.server_utils.request", no_outbound_request)
+        monkeypatch.setattr("nemo_gym.client.server_client.request", no_outbound_request)
         monkeypatch.setattr(
             reverification_module, "_run_verification_payloads", lambda payloads, **_kw: [verify(p) for p in payloads]
         )

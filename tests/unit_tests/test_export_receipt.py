@@ -26,9 +26,9 @@ import orjson
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.exporters.base import BaseExporter, ExportState
+from nemo_gym.artifacts.exporters.base import BaseExporter, ExportState
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.orchestration.recovery import COLLECT_SCRIPT, CollectedEvidence, mlflow_errors
-from nemo_gym.run_artifacts import RunArtifacts
 
 
 ARTIFACT_NAMES = (

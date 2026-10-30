@@ -41,20 +41,20 @@ from pydantic import (
 )
 
 from nemo_gym._moved_paths import moved_names_getattr
-from nemo_gym.core.episode import current_rollout_id
-from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.episode_types import FailureBoundary, SdkErrorDetails
-from nemo_gym.failure_transport import FailureHeader, observe_failure, observe_model_operation
-from nemo_gym.server_utils import (
+from nemo_gym.client.http_client import (
     MAX_NUM_TRIES,
     ClientResponse,
-    ClientResponseError,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.core.episode import current_rollout_id
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.failure_transport import FailureHeader, observe_failure, observe_model_operation
+from nemo_gym.server_runtime.episode_types import FailureBoundary, SdkErrorDetails
+from nemo_gym.server_utils import ClientResponseError
+from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
 
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors
@@ -416,7 +416,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # A Gym server's reply already forwards its own record; it is not recorded twice.
             forwarded = FailureHeader.decode(getattr(response, "headers", None))
             if forwarded is not None and forwarded.failure_id is not None:
-                return None
+                return rebuild_failure(forwarded)
             failure = _model_attempt_failure(
                 f"HTTP {response.status} from the model server",
                 operation_id=operation_id,

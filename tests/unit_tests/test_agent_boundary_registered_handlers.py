@@ -5,10 +5,10 @@
 import pytest
 from fastapi import Body
 
-from nemo_gym._checkpoint.control import install_control_error_handler
-from nemo_gym._checkpoint.errors import AdmissionClosedError, StaleAttemptError
 from nemo_gym.failure_transport import FailureHeader
-from tests.unit_tests import test_session_routing
+from nemo_gym.server_runtime._checkpoint.control import install_control_error_handler
+from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, StaleAttemptError
+from tests.unit_tests.server_runtime import test_session_routing
 from tests.unit_tests.test_agent_seed_failure_boundary import _served
 
 

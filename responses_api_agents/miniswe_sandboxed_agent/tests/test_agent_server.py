@@ -13,8 +13,8 @@ from fastapi import FastAPI, HTTPException, Request
 from httpx import ASGITransport, AsyncClient
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.server_runtime import RolloutContextMiddleware
 from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome

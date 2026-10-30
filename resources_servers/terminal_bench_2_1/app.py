@@ -21,18 +21,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox import (
@@ -45,7 +34,18 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ReverifyMode,
+    SimpleResourcesServer,
+)
 
 
 LOG = logging.getLogger(__name__)

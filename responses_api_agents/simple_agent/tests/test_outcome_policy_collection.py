@@ -13,12 +13,14 @@ from aiohttp import ClientResponseError
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
+import nemo_gym.client.http_client
 import nemo_gym.rollout_collection
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     NG_FAILURE_COUNTS_AS_ZERO_KEY,
     NG_TERMINAL_KEY,
@@ -26,7 +28,6 @@ from nemo_gym.rollout_collection import (
     RolloutCollectionHelper,
     _failures_path_for,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_agent.app import SimpleAgentConfig, SimpleAgentOutcomePolicyConfig
 
 
@@ -144,9 +145,9 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
 
     from nemo_gym.agent_outcome import OutcomeAction
     from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-    from nemo_gym.episode_types import FailureBoundary
     from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
     from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
     from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
 
@@ -163,7 +164,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
     listener = await asyncio.start_server(never_answer, "127.0.0.1", 0)
     port = listener.sockets[0].getsockname()[1]
     session = aiohttp.ClientSession()
-    monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
     monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(
         api_key="test",
@@ -248,7 +249,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
     wire_server = TestServer(app)
     await wire_server.start_server()
     wire_session = aiohttp.ClientSession()
-    monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: wire_session)
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: wire_session)
     # Use the actual SimpleServer HTTP middleware: its request capture retains recovered remote attempts.
     run_app = FastAPI()
     agent.setup_exception_middleware(run_app)
@@ -266,7 +267,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
                 payload = kwargs.get("json")
                 if isinstance(payload, NeMoGymResponseCreateParamsNonStreaming):
                     payload = payload.model_dump(mode="json")
-                return await nemo_gym.server_utils.request(
+                return await nemo_gym.client.http_client.request(
                     method="POST",
                     url=str(wire_server.make_url(url_path)),
                     json=payload,

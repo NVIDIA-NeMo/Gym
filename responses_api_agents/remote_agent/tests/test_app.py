@@ -24,11 +24,11 @@ from fastapi import Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
-from nemo_gym import server_utils
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.telemetry import connection_pool
 from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,
@@ -186,8 +186,8 @@ class FakeServerClientResponse:
 def mock_remote(monkeypatch: pytest.MonkeyPatch, request_mock: AsyncMock) -> MagicMock:
     client = MagicMock()
     client.request = request_mock
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: client)
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: client)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(remote_agent_app, "_REMOTE_RETRY_SLEEP_SECS", 0)
     return client
 
@@ -348,7 +348,7 @@ class TestRunHappyPath:
             return await service(*args, **kwargs)
 
         agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=labelled))
-        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
 
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
 
@@ -1018,7 +1018,7 @@ class TestReviewFindingPins:
         server_client.post = AsyncMock(side_effect=_post)
         agent = make_agent(server_client=server_client)
 
-        from nemo_gym.base_resources_server import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
         assert result.key_metrics == {"mean/reward": 1.0}
@@ -1037,6 +1037,6 @@ class TestReviewFindingPins:
         with pytest.raises(asyncio.TimeoutError):
             await agent.aggregate_metrics(
                 __import__(
-                    "nemo_gym.base_resources_server", fromlist=["AggregateMetricsRequest"]
+                    "nemo_gym.server_runtime.base_resources_server", fromlist=["AggregateMetricsRequest"]
                 ).AggregateMetricsRequest(verify_responses=[])
             )

@@ -41,12 +41,6 @@ from environment_servers.swe_together.task import SOURCE_REVISION, TaskData, loa
 from nemo_gym.agent_activation_types import (
     AgentContinuationRequirements,
 )
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    handled_episode_failure,
-)
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
@@ -54,6 +48,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     TOKEN_CAPTURE_PATH_SEGMENT,
     TOKEN_ID_CAPTURE_BLOCK,
@@ -69,8 +64,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     verifier_invocation_context,
 )
-from nemo_gym.episode_types import FailureBoundary
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -79,7 +73,13 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     resolve_provider_config,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+)
+from nemo_gym.server_runtime.base_environment_server import handled_episode_failure
+from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 

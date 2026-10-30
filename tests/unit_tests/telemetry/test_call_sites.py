@@ -242,9 +242,9 @@ def test_server_type_is_derived_from_the_class_hierarchy():
     Matched against the MRO by name rather than by import, because the base server
     modules import `server_utils` and importing them back would be circular.
     """
-    from nemo_gym.base_resources_server import SimpleResourcesServer
     from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
     from nemo_gym.base_responses_api_model import SimpleResponsesAPIModel
+    from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer
     from nemo_gym.server_utils import _telemetry_server_type
 
     assert _telemetry_server_type(SimpleResourcesServer) == "resources_servers"
@@ -254,7 +254,7 @@ def test_server_type_is_derived_from_the_class_hierarchy():
 
 def test_server_type_survives_subclassing():
     """Every real Gym server is a subclass, so the lookup has to walk the MRO."""
-    from nemo_gym.base_resources_server import SimpleResourcesServer
+    from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer
     from nemo_gym.server_utils import _telemetry_server_type
 
     class MyWeatherServer(SimpleResourcesServer):
@@ -271,7 +271,7 @@ def test_server_type_is_none_for_an_unrelated_class():
 
 def test_url_query_string_is_stripped_before_it_becomes_an_attribute():
     """Gym URLs carry API keys, and rollout-prefixed routes carry task identity."""
-    from nemo_gym.server_utils import _redacted_url
+    from nemo_gym.client.http_client import _redacted_url
 
     assert _redacted_url("http://h:1/v1/responses?api_key=sk-abc") == "http://h:1/v1/responses"
     assert _redacted_url("http://h:1/v1/responses") == "http://h:1/v1/responses"

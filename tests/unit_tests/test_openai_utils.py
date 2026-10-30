@@ -51,10 +51,8 @@ class TestOpenAIUtils:
     async def test_failed_response_logs_request_only_when_request_debug_is_enabled(
         self, monkeypatch, capsys, debug_enabled: bool
     ) -> None:
-        import nemo_gym.server_utils
-
         # set_global_aiohttp_client sets the flag on server_utils at startup, after openai_utils was imported.
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
         monkeypatch.setattr(openai_utils_module, "raise_for_status", AsyncMock())
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
         request_kwargs = {"url": "https://example.com/v1/chat/completions", "json": {"model": "m"}}
@@ -650,7 +648,7 @@ class TestExhaustedAttemptCause:
 
     async def test_the_last_attempt_becomes_the_explicit_cause(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from nemo_gym import openai_utils
-        from nemo_gym.episode_types import FailureBoundary
+        from nemo_gym.server_runtime.episode_types import FailureBoundary
         from nemo_gym.typed_exceptions import NgFailureEvent
 
         error = self._http_error()
@@ -694,3 +692,73 @@ def test_an_error_body_without_an_error_object_has_no_codes(body: bytes) -> None
 
     # No code means no quota or auth classification: the caller keeps its ordinary retry handling.
     assert _parsed_error_codes(body) == []
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        pytest.param(401, b'{"error":{"code":"invalid_api_key"}}', id="permanent-auth"),
+        pytest.param(429, b'{"error":{"code":"insufficient_quota"}}', id="permanent-quota"),
+    ],
+)
+async def test_a_forwarded_permanent_failure_is_the_cause_of_only_the_call_it_ended(
+    status: int, body: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over real HTTP: a Gym model server's forwarded failure causes the call it ended; later tripped calls send
+    nothing and carry no cause."""
+    import socket
+
+    from aiohttp import web
+
+    from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    remote = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason=f"HTTP {status} from the model server",
+        operation="model_request",
+        http_status=status,
+    )
+    headers = FailureHeader.encode(failure_report_for(remote))
+    hits = 0
+
+    async def handler(request: web.Request) -> web.Response:
+        nonlocal hits
+        hits += 1
+        await request.read()
+        return web.Response(status=status, body=body, headers=headers, content_type="application/json")
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    import aiohttp
+
+    import nemo_gym.client.http_client
+
+    session = aiohttp.ClientSession()  # a real HTTP client owned by this test's event loop
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
+    try:
+        client = NeMoGymAsyncOpenAI(base_url=f"http://127.0.0.1:{port}/v1", api_key="k", max_rate_limit_wait_seconds=0)
+        call = dict(model="m", messages=[{"role": "user", "content": "hi"}])
+        with pytest.raises(PermanentEndpointError) as first:
+            await client.create_chat_completion(**call)
+        assert hits == 1
+        cause = first.value.__cause__
+        assert isinstance(cause, NgFailureEvent) and cause.event_id == remote.event_id
+        assert failure_report_for(first.value).failure_id == remote.event_id
+        assert first.value.status == status and first.value.response_content == body
+
+        with pytest.raises(PermanentEndpointError) as later:
+            await client.create_chat_completion(**call)
+        assert hits == 1 and later.value.__cause__ is None
+    finally:
+        await session.close()
+        await runner.cleanup()

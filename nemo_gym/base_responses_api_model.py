@@ -49,24 +49,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym._checkpoint.control import install_control_routes, install_participant
-from nemo_gym._checkpoint.model import (
-    CheckpointableLedger,
-    PolicyAdmissionMiddleware,
-    PolicyModelParticipant,
-    attach_capture_context,
-    generation_cut_requester,
-    ledger_removal_refusal,
-    reject_ungated_ledger_writers,
-    worker_control_root,
-)
-from nemo_gym._checkpoint.model_workers import (
-    COORDINATOR_SOCKET_ENV,
-    PolicyCoordinator,
-    PolicyWorkerLink,
-    coordinator_socket_path,
-)
-from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
@@ -77,7 +59,23 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.failure_transport import RequestFailureLog
+from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.models._checkpoint import (
+    CheckpointableLedger,
+    PolicyAdmissionMiddleware,
+    PolicyModelParticipant,
+    attach_capture_context,
+    generation_cut_requester,
+    ledger_removal_refusal,
+    reject_ungated_ledger_writers,
+    worker_control_root,
+)
+from nemo_gym.models._checkpoint_workers import (
+    COORDINATOR_SOCKET_ENV,
+    PolicyCoordinator,
+    PolicyWorkerLink,
+    coordinator_socket_path,
+)
 from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
@@ -89,7 +87,9 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import scope_with_routed_path
+from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -119,6 +119,7 @@ from nemo_gym.token_id_capture.protocols import (
 )
 from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.typed_exceptions import failure_report_for
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
@@ -146,7 +147,7 @@ def context_overflow_error_fields(error: BaseException) -> tuple[str, str | None
     """Return ``(message, code, param)`` for a marked engine refusal.
 
     The engine's error body travels on the exception as ``response_content`` (attached by
-    ``nemo_gym.server_utils.raise_for_status``). vLLM 0.10.1 and later format it as
+    ``nemo_gym.client.http_client.raise_for_status``). vLLM 0.10.1 and later format it as
     ``{"error": {"message": ..., "type": ..., "param": ..., "code": 400}}``; older engines used a
     flat object with a top-level ``message``. The message is the engine's own sentence from
     either shape, verbatim; any other body is returned as raw text so no information is lost.
@@ -415,6 +416,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 content=getattr(error, "response_content", error.message),
                 status_code=error.status,
                 media_type=(error.headers or {}).get("Content-Type", "application/json"),
+                # The handled error ends the request: its own failure chain is the reply's final failure.
+                headers=FailureHeader.encode(failure_report_for(error)),
             )
 
         self.setup_session_middleware(app)

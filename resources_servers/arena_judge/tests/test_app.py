@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pytest import approx, fixture
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -25,9 +26,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import is_judge_failure
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.arena_judge.app import (
     ArenaJudgeConfig,
     ArenaJudgeServer,

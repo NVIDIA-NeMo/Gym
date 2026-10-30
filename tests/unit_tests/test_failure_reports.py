@@ -13,7 +13,6 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
 from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.episode_types import BaseEpisodeResponse, EpisodeFailure, FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.failure_transport import (
     FailureHeader,
     FailureReportRow,
@@ -22,15 +21,22 @@ from nemo_gym.failure_transport import (
     observe_reply,
     reply_failure_report,
 )
-from nemo_gym.judge import judge_call_failed
 from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.sandbox.providers.base import sandbox_credentials_rejected
+from nemo_gym.server_runtime.episode_types import (
+    BaseEpisodeResponse,
+    EpisodeFailure,
+    FailureBoundary,
+    FailureEvent,
+    FailureReport,
+)
 from nemo_gym.typed_exceptions import (
     NgFailureEvent,
     failure_report_for,
     rebuild_failure,
     sdk_error_details,
 )
+from nemo_gym.verification.judge import judge_call_failed
 
 
 def _model(reason: str = "HTTP 503 from the model server", **fields) -> NgFailureEvent:
@@ -371,9 +377,9 @@ async def test_selected_judge_details_and_http_error_identity_survive_observatio
 
     from aiohttp.test_utils import TestServer
 
-    from nemo_gym.judge import _judge_error
-    from nemo_gym.server_utils import raise_for_status
+    from nemo_gym.client.http_client import raise_for_status
     from nemo_gym.typed_exceptions import agent_route_failure
+    from nemo_gym.verification.judge import _judge_error
 
     sdk = aiohttp.ClientResponseError(
         SimpleNamespace(real_url="http://provider.invalid/judge"), (), status=status, message="authentication failed"

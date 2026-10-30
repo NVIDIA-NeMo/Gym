@@ -21,7 +21,7 @@ Detailed patterns, schemas, and code examples for adding benchmarks to NeMo-Gym.
 ### Minimal verify-only server (e.g. `example_single_tool_call`)
 
 ```python
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime.base_resources_server import (
     SimpleResourcesServer, BaseResourcesServerConfig,
     BaseVerifyRequest, BaseVerifyResponse,
 )
@@ -53,7 +53,7 @@ from asyncio import Semaphore, get_running_loop
 from time import time
 from typing import Any, Dict, List, Optional
 import ray
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime.base_resources_server import (
     SimpleResourcesServer, BaseResourcesServerConfig,
     BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse,
 )
@@ -313,7 +313,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import raise_for_status
+from nemo_gym.client import raise_for_status
 
 class MyAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
@@ -454,7 +454,7 @@ def run_tests_remote(code, test_cases, timeout=30):
 import shutil
 import pytest
 from unittest.mock import MagicMock
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.my_benchmark.app import MyServer, MyConfig
 
 SKIP_REASON = "tool-name not installed"
@@ -647,12 +647,12 @@ Reproduction requirement: run the original repo first, reproduce published numbe
 
 ### Replacing httpx with aiohttp in external libraries
 
-Many external libraries use `httpx.AsyncClient` internally. NeMo Gym requires all async HTTP to go through its global aiohttp client (`nemo_gym.server_utils.request()`) because httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency. See `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx`.
+Many external libraries use `httpx.AsyncClient` internally. NeMo Gym requires all async HTTP to go through its global aiohttp client (`nemo_gym.client.http_client.request()`) because httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency. See `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx`.
 
 When wrapping such a library, create an adapter class that mimics the library's expected HTTP interface but routes calls through aiohttp. The `tavily_search` resources server demonstrates this pattern:
 
 ```python
-from nemo_gym.server_utils import request
+from nemo_gym.client import request
 
 class AIOHTTPAdapter(BaseModel):
     headers: Dict[str, str]

@@ -14,13 +14,20 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from fastapi.testclient import TestClient
 
+import nemo_gym.client.http_client as http_client
 import nemo_gym.server_utils as server_utils
-from nemo_gym.base_environment_server import handled_episode_failure, is_retryable_dependency_error
-from nemo_gym.episode_types import BaseEpisodeResponse, EpisodeFailure, FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog, report_for_current_request
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_retryable_dependency_error
+from nemo_gym.server_runtime.episode_types import (
+    BaseEpisodeResponse,
+    EpisodeFailure,
+    FailureBoundary,
+    FailureEvent,
+    FailureReport,
+)
 from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
-from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+from tests.unit_tests.server_runtime.test_environment_server import _environment_server, _EnvironmentServer, _request
 
 
 class _EvidenceFailure(EpisodeFailure):
@@ -109,10 +116,10 @@ async def test_the_typed_http_path_raises_the_remote_failure_and_keeps_http_deta
     app = web.Application()
     app.router.add_get("/verify", endpoint)
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
         for typed in [False, True]:
-            response = await server_utils.request("GET", str(server.make_url("/verify")), _max_num_tries=1)
-            raises = server_utils.raise_boundary_failure if typed else server_utils.raise_for_status
+            response = await http_client.request("GET", str(server.make_url("/verify")), _max_num_tries=1)
+            raises = http_client.raise_boundary_failure if typed else http_client.raise_for_status
             if typed and header_kind == "failure":
                 with pytest.raises(NgFailureEvent) as caught:
                     await raises(response)
@@ -172,7 +179,7 @@ async def test_only_a_valid_failed_reply_reference_can_replace_the_current_model
     app = web.Application()
     app.router.add_post("/responses", endpoint)
     async with TestServer(app) as server, aiohttp.ClientSession() as session:
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
         monkeypatch.setattr(server_utils.asyncio, "sleep", AsyncMock())
         client = NeMoGymAsyncOpenAI(
             api_key="test", base_url=str(server.make_url("/")), max_http_attempts=2, max_rate_limit_wait_seconds=0

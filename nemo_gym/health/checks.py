@@ -20,7 +20,7 @@ from nemo_gym.health.types import (
     _AgentStep,
     _CallBindings,
 )
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
 
 
 CHECK_REGISTRY: tuple[CheckSpec, ...] = (

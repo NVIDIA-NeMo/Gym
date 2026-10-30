@@ -80,7 +80,7 @@ MOVED_SYMBOLS = [
 
 @pytest.mark.parametrize("old_module, old_name, new_module, new_name", MOVED_SYMBOLS)
 def test_deprecated_import_still_resolves_and_warns(old_module, old_name, new_module, new_name) -> None:
-    old_mod = importlib.import_module(old_module)
+    # Importing an old module path that moved warns too, so it happens inside the block.
     with pytest.warns(DeprecationWarning):
-        resolved = getattr(old_mod, old_name)
+        resolved = getattr(importlib.import_module(old_module), old_name)
     assert resolved is getattr(importlib.import_module(new_module), new_name)

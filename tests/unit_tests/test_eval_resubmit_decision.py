@@ -1090,10 +1090,10 @@ def test_malformed_health_facts_are_unknown_never_clean(field, value) -> None:
 
 
 def test_the_receipt_fixture_matches_the_content_bound_producer(tmp_path) -> None:
-    base = pytest.importorskip("nemo_gym.exporters.base")
+    base = pytest.importorskip("nemo_gym.artifacts.exporters.base")
     if not hasattr(base, "_artifact_version"):
         pytest.skip("this producer writes a run-id-only post-run marker")
-    from nemo_gym.run_artifacts import RunArtifacts
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
 
     job = complete_job(tmp_path)
     artifacts = RunArtifacts(rollouts_jsonl_fpath=job / "artifacts" / "rollouts.jsonl")

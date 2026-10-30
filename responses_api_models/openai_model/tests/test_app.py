@@ -27,8 +27,8 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from nemo_gym import server_utils
 from nemo_gym.base_responses_api_model import CaptureStore, _CaptureMiddleware
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -36,7 +36,6 @@ from nemo_gym.core import (
 )
 from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
 from nemo_gym.openai_utils import PermanentEndpointError
-from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -1281,7 +1280,7 @@ class TestRefusedProviderConnection:
             return await send(method, url, **kwargs)
 
         session.request = request
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: session)
         yield attempts
         await session.close()
 

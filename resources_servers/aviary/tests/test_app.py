@@ -23,8 +23,8 @@ from datasets import Dataset
 from fastapi import Request
 from starlette.testclient import TestClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseFunctionToolCall
-from nemo_gym.server_utils import ServerClient
 from resources_servers.aviary.app import AviaryResourcesServerConfig, obs_msg_to_nemo_gym
 from resources_servers.aviary.client_app import AviaryClientResourcesServer, AviaryClientResourcesServerConfig
 from resources_servers.aviary.gsm8k_app import GSM8kResourcesServer

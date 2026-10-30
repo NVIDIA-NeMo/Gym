@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
@@ -28,8 +27,9 @@ from nemo_gym.base_responses_api_agent import (
     assert_model_url_reachable_from_sandbox,
     is_loopback_host,
 )
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime.base_resources_server import AggregateMetricsRequest
 
 
 class TestBaseResponsesAPIAgent:
