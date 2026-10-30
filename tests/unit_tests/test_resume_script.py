@@ -178,6 +178,7 @@ def test_max_retries_allows_exactly_that_many_retries(tmp_path):
     result = _run_prologue(tmp_path, resume, "FAILED")
     assert result.returncode == 1
     assert "REACHED_WORK" not in result.stdout
+    assert "Infra retry limit" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")

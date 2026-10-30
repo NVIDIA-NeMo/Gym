@@ -103,8 +103,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         _retries=$((_retries + 1))
         echo $_retries > "$_retry_file"
         if [[ $_retries -gt {max_retries} ]]; then
-            echo "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
-            exit 1
+            _gym_stop_incomplete "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
         fi
         echo "Previous job $_prev_slurm_job_id: $_prev_state. Infra retry $_retries/{max_retries}..."
     fi

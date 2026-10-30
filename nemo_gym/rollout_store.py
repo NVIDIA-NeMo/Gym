@@ -255,7 +255,11 @@ class RolloutStore:
     def read(
         cls, output: Path, *, import_legacy: bool = True, retry_terminal_timeouts: bool = False
     ) -> "RolloutStore | None":
-        """Read selected outcomes without modifying files or acquiring a writer lock."""
+        """Read selected outcomes without modifying files or acquiring a writer lock.
+
+        Managed runs use their saved timeout policy. ``retry_terminal_timeouts``
+        applies only to legacy artifacts without a manifest.
+        """
         output = resolve_rollout_path(output, read_only=True)
         path = manifest_path_for(output)
         if journal_path_for(output).exists():
@@ -284,7 +288,8 @@ class RolloutStore:
         state = RolloutRecords.load(
             output, manifest, import_legacy=manifest.legacy_import, outcome_limits=outcome_limits
         )
-        state.retry_terminal_timeouts = retry_terminal_timeouts
+        if not path.exists():
+            state.retry_terminal_timeouts = retry_terminal_timeouts
         return cls(output, state, read_only=True)
 
     def __enter__(self) -> "RolloutStore":
@@ -419,16 +424,26 @@ class RolloutStore:
         self,
         max_attempts: int | None = None,
         *,
-        retry_terminal_timeouts: bool = False,
+        retry_terminal_timeouts: bool | None = None,
         dispatch_longest_first: bool = False,
     ) -> list[dict]:
+        """Select unfinished work, retaining the saved timeout policy unless explicitly changed.
+
+        The controller holds the writer lock while updating a run's policy. A
+        read-only store can preview an explicit override without changing files.
+        """
         # The saved manifest owns the budget; an explicit argument is retained
         # for older callers but must agree with the run's persisted cap.
         saved_cap = self.manifest.max_rollout_attempts
         if max_attempts is not None and saved_cap is not None and max_attempts != saved_cap:
             raise ConfigError(f"This run's saved retry cap is {saved_cap}, not {max_attempts}.")
         max_attempts = saved_cap or max_attempts or _get_max_rollout_attempts()
-        self._state.retry_terminal_timeouts = retry_terminal_timeouts
+        if retry_terminal_timeouts is not None:
+            if not self._read_only and retry_terminal_timeouts != self.manifest.retry_terminal_timeouts:
+                manifest = self.manifest.model_copy(update={"retry_terminal_timeouts": retry_terminal_timeouts})
+                manifest.write(manifest_path_for(self.output))
+                self.manifest = self._state.manifest = manifest
+            self._state.retry_terminal_timeouts = retry_terminal_timeouts
         exhausted = self._state.exhausted_count(max_attempts)
         if exhausted:
             print(

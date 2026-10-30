@@ -5453,6 +5453,7 @@ class TestRolloutCollection:
             ignored_checks=[],
             limits=RunHealthLimits(),
             run_coverage=[nemo_gym.rollout_collection.RolloutStore.read(output_fpath).coverage()],
+            selected_projection=None,
             model_call_capture_dirs=[],
         )
         format_health_report.assert_called_once_with(health_result)
@@ -9161,6 +9162,61 @@ class TestRolloutAggregationHelper:
 
         artifacts = orjson.loads((tmp_path / "quality_summary.json").read_bytes())["run"]["artifacts"]
         assert (artifacts["expected"], artifacts["failed"]["total"], artifacts["healthy"]) == (2, 1, True)
+
+    @pytest.mark.parametrize(("superseded", "legacy_import"), [(False, False), (True, False), (True, True)])
+    @pytest.mark.parametrize("retry_timeouts", [False, True])
+    async def test_managed_merged_health_keeps_run_identity_and_selected_timeouts(
+        self, tmp_path, monkeypatch, empty_global_config, superseded, legacy_import, retry_timeouts
+    ):
+        from nemo_gym.rollout_recovery import RunManifest, manifest_path_for
+        from nemo_gym.rollout_store import RolloutStore
+
+        shards = []
+        for name, agent, tasks in (("run_a", "agent_a", [0]), ("run_b", "agent_b", [0, 1])):
+            output = tmp_path / name / "rollouts.jsonl"
+            source = output.parent / "source.jsonl"
+            inputs = [self._rollout(task, agent) for task in tasks]
+            self._write_rows(source, *inputs)
+            manifest = RunManifest.create(source, inputs, {}, {agent: {"responses_api_agents": {"impl": {}}}})
+            with RolloutStore.start_or_resume(output, lambda: (inputs, manifest), resume=False) as store:
+                for row in store.pending(retry_terminal_timeouts=retry_timeouts):
+                    store.record_dispatch(row)
+                    if row[TASK_INDEX_KEY_NAME] == 1:
+                        store.record_outcome(
+                            row | {NG_FAILURE_CLASS_KEY: "timeout_exceeded", "_ng_failure_terminal": True}
+                        )
+                    else:
+                        store.record_outcome(row | {"reward": 1.0, "response": {}})
+                        if superseded and name == "run_a":
+                            latest = row | {"_ng_attempt_index": 1}
+                            store.record_dispatch(latest)
+                            store.record_outcome(latest | {"reward": 0.0, "response": {}})
+            if legacy_import:
+                # Imported results can predate run tags; the manifest owns their identity.
+                rows = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+                for row in rows:
+                    row.pop("_ng_run_id")
+                self._write_rows(output, *rows)
+                store.manifest.model_copy(update={"legacy_import": True}).write(manifest_path_for(output))
+            shards.append(output)
+        before = {p: p.read_bytes() for shard in shards for p in shard.parent.iterdir() if p.is_file()}
+        merged_dir = tmp_path / "merged"
+        aggregated = orjson.loads((await self._merge(monkeypatch, merged_dir, *shards)).read_bytes())["run"]
+        rechecked = health_check_run_dir(merged_dir, workers=1).summary["run"]
+        assert self._accounting(aggregated) == self._accounting(rechecked)
+        for run in (aggregated, rechecked):
+            assert run["issues"]["rollout_duplicate_identity"] == 0
+            assert run["artifacts"]["healthy"] is True
+            assert run["artifacts"]["expected"] == 3
+            assert run["artifacts"]["failed"]["final"] == int(not retry_timeouts)
+            assert run["artifacts"]["failed"]["total"] == 1
+            assert run["artifacts"]["failed"]["by_class"] == {"timeout_exceeded": 1}
+            assert run["stats"]["timeouts"]["timed_out"] == 1
+            assert sum(run["verdicts"].values()) == 2
+        coverage = orjson.loads((merged_dir / "rollouts_coverage.json").read_bytes())
+        assert coverage["retry_terminal_timeouts"] is retry_timeouts
+        assert coverage["failed_final"] == int(not retry_timeouts)
+        assert all(p.read_bytes() == data for p, data in before.items())
 
     def _landed_and_failed_runs(self, root: Path, *, same_indices: bool) -> tuple[Path, Path]:
         """run_a landed its rollout after a failed attempt; run_b landed nothing after two failed attempts."""

@@ -2142,7 +2142,8 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "`_ng_failure_terminal`, up to NEMO_GYM_MAX_ROLLOUT_ATTEMPTS. For sidecars "
             "whose per-attempt timeouts were stamped terminal but should be retried. Off (default): a sidecar row "
             "is terminal iff it is stamped `_ng_failure_terminal`, so an agent that marks its timeouts terminal "
-            "on purpose keeps them gated."
+            "on purpose keeps them gated. Managed runs save this policy; omitting the option on resume "
+            "retains the saved value."
         ),
     )
 
@@ -3498,7 +3499,11 @@ class RolloutCollectionHelper(BaseModel):
             return (
                 store.pending(
                     _get_max_rollout_attempts(),
-                    retry_terminal_timeouts=config.retry_terminal_timeouts,
+                    retry_terminal_timeouts=(
+                        config.retry_terminal_timeouts
+                        if "retry_terminal_timeouts" in config.model_fields_set
+                        else None
+                    ),
                     dispatch_longest_first=config.dispatch_longest_first,
                 ),
                 rows,
@@ -3749,7 +3754,9 @@ class RolloutCollectionHelper(BaseModel):
             )
         )
         input_rows = store.pending(
-            retry_terminal_timeouts=config.retry_terminal_timeouts,
+            retry_terminal_timeouts=(
+                config.retry_terminal_timeouts if "retry_terminal_timeouts" in config.model_fields_set else None
+            ),
             dispatch_longest_first=config.dispatch_longest_first,
         )
         results = store.selected("success") if config.retain_results_in_memory else []
@@ -5341,7 +5348,7 @@ class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
 
     retry_terminal_timeouts: bool = Field(
         default=False,
-        description="Apply the collection timeout-retry policy when reporting exhausted attempts; scores are unchanged.",
+        description="Accepted for compatibility. Managed runs use their saved policy; legacy coverage is unknown.",
     )
     input_glob: str = Field(
         description=(
@@ -5569,7 +5576,11 @@ class RolloutAggregationHelper(BaseModel):
                     raise ConfigError("The same run was supplied through multiple shard paths.")
                 run_ids.add(history.manifest.run_id)
                 histories.append(history)
-                selected = history_results[history.manifest.run_id] = history.selected("success")
+                # Imported legacy rows can lack a run tag. The merged projection
+                # must still retain the source run's identity for health checks.
+                selected = history_results[history.manifest.run_id] = [
+                    row | {RUN_ID_KEY: history.manifest.run_id} for row in history.selected("success")
+                ]
                 results.extend(selected)
                 with open(shard_path, "rb") as f:
                     sha256 = hashlib.file_digest(f, "sha256").hexdigest()
@@ -5790,7 +5801,9 @@ class RolloutAggregationHelper(BaseModel):
             "max_rollout_attempts": components[0]["max_rollout_attempts"]
             if components and len({c["max_rollout_attempts"] for c in components}) == 1
             else None,
-            "retry_terminal_timeouts": config.retry_terminal_timeouts,
+            "retry_terminal_timeouts": components[0]["retry_terminal_timeouts"]
+            if inventory_known and components and len({c["retry_terminal_timeouts"] for c in components}) == 1
+            else None,
             "complete": inventory_known and all(c["complete"] for c in components),
             "coverage_known": inventory_known,
             "scored": scored_rollouts,
@@ -5859,12 +5872,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             try:
                 health_result = await asyncio.to_thread(
                     run_health_checks,
-                    # A managed merged projection has no superseded trajectories.
-                    # Its accounting still comes from the original selected histories.
-                    [output_fpath]
-                    if config.merge_shards and inventory_known
-                    else [Path(path) for path in input_paths],
-                    run_coverage=[completion] if config.merge_shards and inventory_known else None,
+                    # Keep each shard's identity, failure history and saved retry policy.
+                    [Path(path) for path in input_paths],
+                    selected_projection=output_fpath if config.merge_shards and inventory_known else None,
+                    run_coverage=components if inventory_known else None,
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,

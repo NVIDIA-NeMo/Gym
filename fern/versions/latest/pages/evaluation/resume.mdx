@@ -116,9 +116,11 @@ also apply to manifest-backed runs. Incomplete final writes are repaired after h
 conflicting or foreign payloads still fail validation. Core collection retries unfinished tasks from their inputs.
 GDPVal manages its own cached-deliverable reuse; core invalid-judge migration options are no longer supported.
 
-Offline aggregation accepts the same `+retry_terminal_timeouts=true` option. Coverage records the active
-`retry_terminal_timeouts` policy and the saved `max_rollout_attempts` alongside `failure_budget_exhausted`; use the same timeout override as
-collection to compare that diagnostic count. These settings do not change selected scores.
+Managed runs save `retry_terminal_timeouts` in the run manifest. Resume keeps that policy unless the option
+is explicitly set; changing it updates the manifest before dispatch. Offline aggregation and health checks read
+the saved policy, so they agree with collection without repeating the option. Older manifests without this field
+default to `false`; resume with an explicit override to update them. Coverage records the policy and saved
+`max_rollout_attempts` alongside `failure_budget_exhausted`. These settings do not change selected scores.
 
 Reported `kill_shaped` failures are persisted in the failure sidecar, even when the legacy producer
 also sets `_ng_no_persist`. Nonterminal `kill_shaped` failures consume no failure budget and do not count as progress for automatic restarts. Older collectors discarded these failures; retaining them preserves diagnostic evidence.

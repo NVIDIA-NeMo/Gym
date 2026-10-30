@@ -637,7 +637,7 @@ def test_offline_coverage_declares_and_applies_timeout_retry_policy(prepared_run
         store.record_dispatch(row)
         store.record_outcome(row | {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True})
         online = store.coverage()
-    offline = RolloutStore.read(output, retry_terminal_timeouts=retry_timeouts).coverage()
+    offline = RolloutStore.read(output).coverage()
     assert offline == online
     assert offline["retry_terminal_timeouts"] is retry_timeouts
     assert offline["failure_budget_exhausted"] == int(retry_timeouts)
@@ -1082,3 +1082,44 @@ def test_older_manifest_records_retry_cap_on_first_validated_resume(prepared_run
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
     assert RolloutStore.read(output).coverage()["max_rollout_attempts"] == 5
     assert RolloutStore.start_or_resume(output, prepare, resume=True).coverage()["max_rollout_attempts"] == 5
+
+
+@pytest.mark.parametrize("retry_timeouts", [False, True])
+def test_health_recheck_keeps_the_saved_timeout_retry_policy(prepared_run, retry_timeouts):
+    from nemo_gym.health.types import RunHealthLimits
+    from nemo_gym.rollout_health import health_check_run_dir, run_health_checks
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        success, timeout = store.pending(retry_terminal_timeouts=retry_timeouts)
+        for row in (success, timeout):
+            store.record_dispatch(row)
+        store.record_outcome(success | {"reward": 1.0, "response": {}})
+        store.record_outcome(timeout | {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True})
+        coverage = store.coverage()
+    limits = RunHealthLimits(max_final_failure_fraction=0.3)
+    online = run_health_checks(output, workers=1, limits=limits, run_coverage=[coverage]).summary["run"]["artifacts"]
+    offline = health_check_run_dir(output.parent, workers=1).summary["run"]["artifacts"]
+    assert online["failed"] == offline["failed"]
+    assert offline["failed"]["final"] == int(not retry_timeouts)
+    assert offline["healthy"] == online["healthy"] == retry_timeouts
+    assert RolloutStore.read(output).coverage() == coverage
+
+
+def test_older_manifest_defaults_to_no_timeout_override_until_resumed(prepared_run):
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending()[0]
+        store.record_dispatch(row)
+        store.record_outcome(row | {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True})
+    path = manifest_path_for(output)
+    legacy = orjson.loads(path.read_bytes())
+    legacy.pop("retry_terminal_timeouts")
+    path.write_bytes(orjson.dumps(legacy))
+    before = snapshot(output)
+    assert RolloutStore.read(output).coverage()["failed_final"] == 1
+    assert snapshot(output) == before
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+        assert len(store.pending(retry_terminal_timeouts=True)) == 2
+    assert RolloutStore.read(output).coverage()["failed_not_final"] == 1
+    assert orjson.loads(path.read_bytes())["retry_terminal_timeouts"] is True

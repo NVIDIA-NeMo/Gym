@@ -269,7 +269,7 @@ class RolloutRecords:
         }
         self.payloads: dict[tuple[str, int], _Outcome] = {}
         self.omitted: set[tuple[str, int]] = set()
-        self.retry_terminal_timeouts = False
+        self.retry_terminal_timeouts = manifest.retry_terminal_timeouts
 
     def _key(self, row: dict) -> tuple[str, int]:
         identity = logical_rollout_id(row)

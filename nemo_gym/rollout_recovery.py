@@ -385,6 +385,7 @@ class RunManifest(BaseModel):
     # Controller-owned execution numbers. Reserving a number is not a failure.
     next_attempt: dict[str, Annotated[int, Field(ge=1, strict=True)]] = Field(default_factory=dict)
     max_rollout_attempts: Annotated[int, Field(ge=1, strict=True)] | None = None
+    retry_terminal_timeouts: bool = False
     run_id: str
     source_digest: str
     materialized_digest: str
@@ -397,6 +398,7 @@ class RunManifest(BaseModel):
         return cls(
             max_rollout_attempts=_get_max_rollout_attempts(),
             run_id=uuid4().hex,
+            retry_terminal_timeouts=config.get("retry_terminal_timeouts", False),
             source_digest=_file_digest(source),
             materialized_digest=_digest(rows),
             config_digest=_digest(_configuration_identity(config, global_config, rows)),

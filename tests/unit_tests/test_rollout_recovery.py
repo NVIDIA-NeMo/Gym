@@ -2030,3 +2030,36 @@ async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(run
         assert _is_judge_failure(failure)
         assert _rollout_response(failure) == answer
         assert "reward" not in failure
+
+
+async def test_timeout_retry_policy_survives_resume_until_explicitly_changed(runner_config, monkeypatch):
+    from nemo_gym.rollout_store import RolloutStore
+
+    async def post(**kwargs):
+        if kwargs["json"]["task"] == 0:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(200, {"_ng_failure_class": "timeout_exceeded", "_ng_failure_terminal": True})
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    runner_config.retry_terminal_timeouts = True
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    assert RolloutStore.read(output).manifest.retry_terminal_timeouts is True
+
+    # A new CLI invocation omits the switch instead of implicitly resetting it.
+    resume = RolloutCollectionConfig.model_validate(
+        runner_config.model_dump(exclude={"retry_terminal_timeouts"}) | {"resume_from_cache": True}
+    )
+    client.post.reset_mock()
+    await RolloutCollectionHelper().run_from_config(resume)
+    assert client.post.call_count == 2
+    assert RolloutStore.read(output).coverage()["failed_not_final"] == 2
+
+    # An explicit false is a deliberate policy change, saved for future readers.
+    resume.retry_terminal_timeouts = False
+    client.post.reset_mock()
+    await RolloutCollectionHelper().run_from_config(resume)
+    assert not client.post.called
+    offline = RolloutStore.read(output).coverage()
+    assert offline["retry_terminal_timeouts"] is False
+    assert offline["failed_final"] == 2

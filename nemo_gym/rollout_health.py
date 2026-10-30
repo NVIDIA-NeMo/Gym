@@ -75,7 +75,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.rollout_records import resolve_rollout_path
+from nemo_gym.rollout_records import RUN_ID_KEY, resolve_rollout_path
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
 from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
@@ -295,7 +295,7 @@ def evaluate_record(
     )
 
 
-def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
+def _index_jsonl(paths: Sequence[Path], *, source_indices: Mapping[str, int] | None = None) -> list[_LineSlice]:
     slices: list[_LineSlice] = []
     ordinal = 0
     for source_index, path in enumerate(paths):
@@ -309,6 +309,14 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
                 line_number += 1
                 if not line.strip():
                     continue
+                if source_indices is not None:
+                    try:
+                        record = orjson.loads(line)
+                        source_index = source_indices[record[RUN_ID_KEY]]
+                    except (ValueError, KeyError, TypeError) as error:
+                        raise ConfigError(
+                            f"Selected projection {path}:{line_number} must identify one of its source runs."
+                        ) from error
                 slices.append(
                     _LineSlice(
                         path=str(path),
@@ -819,30 +827,44 @@ def run_health_checks(
     limits: RunHealthLimits = RunHealthLimits(),
     limits_source: LimitsSource | Mapping[str, LimitsSource] = "config",
     run_coverage: Sequence[Mapping[str, Any] | None] | None = None,
+    selected_projection: Path | None = None,
     model_call_capture_dirs: Sequence[Path] = (),
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports.
 
     ``model_call_capture_dirs`` are the run's model-call capture directories. A failed rollout's row carries no
     capture, so its timing in ``run.stats.timeouts`` is read from these instead.
+    ``selected_projection`` is the merged output of these managed runs, used when
+    their raw files contain superseded outcomes. Source histories still own failure
+    accounting; each projected row's run ID retains its source identity.
     """
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
     paths = list([rollout_paths] if isinstance(rollout_paths, Path) else rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
+    needs_projection = any(not raw_outcomes_are_selected(path, artifacts=(path,)) for path in paths)
+    if needs_projection and selected_projection is None:
+        raise JournalHealthUnavailable(
+            "Health reports for histories with superseded outcomes are a follow-up to evaluation resume. "
+            "Run health checks on a merged selected-result projection from `gym eval aggregate`."
+        )
     for path in paths:
-        if not raw_outcomes_are_selected(path, artifacts=(path,)):
-            raise JournalHealthUnavailable(
-                "Health reports for histories with superseded outcomes are a follow-up to evaluation resume. "
-                "Run health checks on a merged selected-result projection from `gym eval aggregate`."
-            )
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
     # A legacy run reached through a link keeps the link's name when its companions sit beside the link, as the
     # aggregation that read it did; otherwise its companions are the ones beside the file the link resolves to.
     paths = [resolve_rollout_path(path, read_only=True) for path in paths]
-    lines = _index_jsonl(paths)
+    if needs_projection:
+        source_indices = {}
+        for index, path in enumerate(paths):
+            history = RolloutStore.read(path, import_legacy=False)
+            if history is None or history.manifest.run_id in source_indices:
+                raise JournalHealthUnavailable("A selected projection requires distinct manifest-backed source runs.")
+            source_indices[history.manifest.run_id] = index
+        lines = _index_jsonl([selected_projection], source_indices=source_indices)
+    else:
+        lines = _index_jsonl(paths)
     worker_inputs = [
         _WorkerInput(
             line=line,
@@ -1115,6 +1137,7 @@ def health_check_run_dir(
     limits_source = {name: "override" if name in overrides else "persisted" for name in RunHealthLimits.model_fields}
     result = run_health_checks(
         rollout_paths,
+        selected_projection=path / "rollouts.jsonl" if shards is not None else None,
         output_dir=path,
         workers=workers,
         ignored_checks=ignored_checks,
@@ -1191,6 +1214,7 @@ def _health_check_collected_rollouts(
         shards = _aggregated_shards(output_fpath.parent, rollout_name=output_fpath.name)
         health_result = run_health_checks(
             shards if shards is not None else output_fpath,
+            selected_projection=output_fpath if shards is not None else None,
             output_dir=output_fpath.parent,
             workers=config.health_check_workers,
             ignored_checks=config.health_check_ignored_checks,
