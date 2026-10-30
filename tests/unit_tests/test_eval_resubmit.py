@@ -824,3 +824,71 @@ def test_recover_refuses_a_job_sh_that_would_reset_the_budget(tmp_path: Path, sl
 
     assert not (slurm_bin / "env").exists()
     assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+
+
+def _provider_failures(task: int, attempts: int, cap: int) -> str:
+    rows = [
+        {
+            "_ng_task_index": task,
+            "_ng_rollout_index": 0,
+            "_ng_attempt_index": attempt,
+            "failure_kind": "provider_unavailable",
+            "_ng_failure_class": "provider_unavailable",
+            "_ng_failure_terminal": False,
+            "_ng_failure_max_attempts": cap,
+            "_ng_failure_id": f"f{task}-{attempt}",
+        }
+        for attempt in range(attempts)
+    ]
+    return "".join(json.dumps(row) + "\n" for row in rows)
+
+
+def _core_pending(job_dir: Path, monkeypatch: pytest.MonkeyPatch, cap: int) -> list[tuple[int, int]]:
+    """The inputs rollout collection's resume would run (`_load_from_cache`), as a resume without resubmit loads it."""
+    from types import SimpleNamespace
+
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", str(cap))
+    artifacts = job_dir / "artifacts"
+    config = SimpleNamespace(
+        materialized_jsonl_fpath=artifacts / "rollouts_materialized_inputs.jsonl",
+        output_jsonl_fpath=artifacts / "rollouts.jsonl",
+        retry_terminal_timeouts=False,
+        dispatch_longest_first=False,
+    )
+    rows = RolloutCollectionHelper._load_from_cache(None, config, retain_results_in_memory=False)[0]
+    return [(row["_ng_task_index"], row["_ng_rollout_index"]) for row in rows]
+
+
+def test_recover_queues_nothing_when_every_unscored_identity_used_its_attempts(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (job_dir / "artifacts" / "rollouts_failures.jsonl").write_text(_provider_failures(1, attempts=2, cap=2))
+
+    out = recover(*_handle(job_dir))
+
+    assert out.decision.action == "stop" and out.decision.identities["exhausted"] == [(1, 0)]
+    assert out.dispatched is None and not (slurm_bin / "env").exists()
+    assert _core_pending(job_dir, monkeypatch, cap=2) == []
+
+
+def test_recover_queues_a_mixed_run_and_the_resume_runs_only_the_eligible_identity(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    artifacts = job_dir / "artifacts"
+    rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(3)]
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (artifacts / "rollouts_failures.jsonl").write_text(_provider_failures(1, attempts=2, cap=2))
+
+    out = recover(*_handle(job_dir))
+
+    assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+    assert out.decision.identities["missing"] == [(2, 0)] and out.decision.identities["exhausted"] == [(1, 0)]
+    assert _core_pending(job_dir, monkeypatch, cap=2) == [(2, 0)]

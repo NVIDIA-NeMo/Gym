@@ -124,10 +124,13 @@ def test_judge_only_failures_reverify() -> None:
     assert d.identities["judge_recoverable"] == [(1, 0), (2, 0)]
 
 
-def test_exhausted_attempts_need_a_resubmit_within_the_original_budget() -> None:
+def test_exhausted_attempts_alone_stop_because_a_resume_would_run_nothing() -> None:
     rows = [infra_failure(0, attempt=a) for a in range(3)]
     d = decide_recovery(materialized=inventory(1), results=[], failures=rows, budget=OK_BUDGET)
-    assert d.identities["exhausted"] == [(0, 0)] and d.action == RecoveryAction.RESUBMIT
+    assert d.identities["exhausted"] == [(0, 0)] and d.action == RecoveryAction.STOP
+    assert "used every attempt" in d.reason
+    mixed = decide_recovery(materialized=inventory(2), results=[], failures=rows, budget=OK_BUDGET)
+    assert mixed.action == RecoveryAction.RESUBMIT and mixed.identities["missing"] == [(1, 0)]
     spent = RecoveryBudget(max_infra_retries=3, infra_retries_used=3, walltime_used_s=0.0, live_job=False)
     assert decide_recovery(materialized=inventory(1), results=[], failures=rows, budget=spent).action == "stop"
     late = RecoveryBudget(

@@ -315,9 +315,9 @@ def decide_recovery(
     if budget.live_job:
         live = decision(RecoveryAction.STOP, "a job of this run is still pending or running; it is not queued twice")
         return live.model_copy(update={"scheduler_live": True})
-    needs_policy = sum(
-        counts.get(s, 0) for s in (IdentityState.MISSING, IdentityState.RETRYABLE, IdentityState.EXHAUSTED)
-    )
+    # Only what rollout collection would run again: a resume keeps the per-rollout attempts, so it gates an
+    # exhausted identity (`_load_from_cache` maxed_out) and queueing for it alone runs nothing.
+    needs_policy = sum(counts.get(s, 0) for s in (IdentityState.MISSING, IdentityState.RETRYABLE))
     if not needs_policy:
         if counts.get(IdentityState.JUDGE_RECOVERABLE):
             return decision(
@@ -330,6 +330,12 @@ def decide_recovery(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.TERMINAL]} terminal unscored failure(s) need an "
                 "owner decision; the run is not complete",
+            )
+        if counts.get(IdentityState.EXHAUSTED):
+            return decision(
+                RecoveryAction.STOP,
+                f"{counts[IdentityState.EXHAUSTED]} identity(ies) used every attempt since the last resubmit, so a "
+                "resume would run nothing; the run is not complete",
             )
         return decision(RecoveryAction.NOOP, "every identity is scored or a final model failure")
     if budget.live_job is None or budget.max_infra_retries is None or budget.infra_retries_used is None:
