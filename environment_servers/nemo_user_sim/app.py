@@ -22,7 +22,7 @@ from environment_servers.nemo_user_sim.episode_contracts import (
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
 )
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,

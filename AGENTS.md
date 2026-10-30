@@ -130,7 +130,7 @@ Servers and agent harnesses run tasks in remote sandboxes through `nemo_gym.sand
 
 - **Keep the `nemo_gym.sandbox` public API minimal and lifecycle-only**: create/start, exec, upload/download, stop
   (and provider capabilities such as pause/resume or endpoints). Put utilities and helpers built on top of it outside
-  `nemo_gym.sandbox`, for example in `nemo_gym/agent_utils/` or the server that uses them.
+  `nemo_gym.sandbox`, for example in `nemo_gym/agents/utils/` or the server that uses them.
 - **Resolve providers from config** with `resolve_provider_config(sandbox_provider, global_config_dict)` and merge
   `resolve_provider_metadata(...)` into `SandboxSpec.metadata`. Do not hard-code a provider or parse provider blocks by
   hand. Merge metadata as provider defaults, then `sandbox_config.metadata`, then per-task labels, and keep label

@@ -6,7 +6,7 @@ from copy import deepcopy
 import pytest
 
 from environment_servers.swe_together.schemas import SWETRequest
-from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
+from nemo_gym.agents import AgentCloseSessionResponse
 from nemo_gym.config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,

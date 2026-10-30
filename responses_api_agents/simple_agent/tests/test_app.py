@@ -31,13 +31,14 @@ from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 from yarl import URL
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
-    AGENT_SESSION_COOKIE_KEY,
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
+    AgentOutcome,
     AgentSeedSessionRequest,
 )
+from nemo_gym.agents.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
@@ -2732,7 +2733,7 @@ async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_rec
 
     # Long after the receipt would have expired, an unrelated seed sweeps the expired receipts.
     later = time.monotonic() + 3600
-    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: later)
+    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: later)
     other = AgentSeedSessionRequest(
         agent_session_id="other-session",
         episode_id=EpisodeId(rollout_id="other"),

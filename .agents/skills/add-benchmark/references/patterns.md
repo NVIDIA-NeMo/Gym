@@ -308,7 +308,7 @@ For single-turn benchmarks (model generates once, verify). Just reference `simpl
 For benchmarks where the model gets error feedback and retries:
 
 ```python
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef

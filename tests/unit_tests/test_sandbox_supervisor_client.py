@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agent_utils.supervisor_client import (
+from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_PHASE_COUNT,
     CLEANUP_RECEIPT_FILE,
     LAUNCH_CLAIM_FILE,

@@ -151,6 +151,7 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
+from nemo_gym.agents.skills import SkillsConfig, load_skill_directory
 from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
@@ -177,7 +178,6 @@ from nemo_gym.models.token_capture.delivery import (
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
-from nemo_gym.skills import SkillsConfig, load_skill_directory
 from nemo_gym.task_materialization import TASK_ID_FIELDS
 
 

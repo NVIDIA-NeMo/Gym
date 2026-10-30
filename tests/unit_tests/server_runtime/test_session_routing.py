@@ -42,7 +42,7 @@ from fastapi.testclient import TestClient
 from httpx import Response
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents.base_responses_api_agent import (
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionResponse,
     AgentSessionSetupError,

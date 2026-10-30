@@ -37,7 +37,7 @@ from typing import Any, List, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,

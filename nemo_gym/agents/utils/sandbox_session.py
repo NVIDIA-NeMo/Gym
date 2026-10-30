@@ -12,7 +12,7 @@ from shlex import quote
 from time import monotonic
 from typing import cast
 
-from nemo_gym.agent_utils.supervisor_client import (
+from nemo_gym.agents.utils.supervisor_client import (
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
