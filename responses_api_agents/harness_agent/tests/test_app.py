@@ -25,7 +25,13 @@ import pytest
 
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import ConnectableProvider, SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox import (
+    ConnectableProvider,
+    SandboxBackendUnreachableError,
+    SandboxCreateError,
+    SandboxExecResult,
+    SandboxSpec,
+)
 from nemo_gym.sandbox.providers.local import LocalProvider
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.harness_agent.app import (
@@ -33,8 +39,8 @@ from responses_api_agents.harness_agent.app import (
     HarnessAgent,
     HarnessAgentConfig,
     HarnessAgentRunRequest,
-    RunnerTerminatedError,
     resolve_agent,
+    sandbox_infra_failure_kind,
     stage_and_run_eval,
 )
 
@@ -717,15 +723,21 @@ def _sdk_exception(message: str) -> Exception:
             "provider_oom_killed",
         ),
         (_sdk_exception('HTTP 410: {"code":"SANDBOX::ENDED","message":"pod evicted"}'), "provider_unavailable"),
-        (RuntimeError("runner failed (137): Killed"), "provider_oom_killed"),
+        (SandboxBackendUnreachableError("exec submission returned 502 three times"), "provider_unavailable"),
+        (
+            SandboxBackendUnreachableError("Sandbox was OOM-killed. OpenSandbox status: message='out of memory'"),
+            "provider_oom_killed",
+        ),
+        (SandboxCreateError("pod never scheduled"), "provider_unavailable"),
         (TimeoutError(), "provider_unavailable"),
-        (RuntimeError("runner failed (1): Traceback ..."), None),
+        # Runner output and exit codes never decide it: the agent's own commands can produce either.
+        (RuntimeError('runner failed (1): Traceback ... {"code":"SANDBOX::ENDED"}'), None),
+        (RuntimeError("runner failed (137): Killed"), None),
+        (RuntimeError("runner failed (-1): signal: terminated"), None),
         (ValueError("bad config"), None),
     ],
 )
 def test_sandbox_infra_failure_kind(exc, expected):
-    from responses_api_agents.harness_agent.app import sandbox_infra_failure_kind
-
     assert sandbox_infra_failure_kind(exc) == expected
 
 
@@ -781,36 +793,41 @@ async def test_non_infra_errors_still_fail_the_run():
         await agent.run(MagicMock(cookies={}), body)
 
 
-@pytest.mark.parametrize(
-    "exc,expected",
-    [
-        (RuntimeError("runner failed (-1): signal: terminated"), None),
-        (RunnerTerminatedError("runner terminated after 812s: signal: terminated"), "provider_unavailable"),
-        (RunnerTerminatedError("runner terminated after 90s: signal: killed"), "provider_oom_killed"),
-    ],
-)
-def test_runner_killed_before_its_deadline_is_infrastructure(exc, expected):
-    from responses_api_agents.harness_agent.app import sandbox_infra_failure_kind
+async def test_backend_loss_masks_the_rollout():
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={})])
+    agent._provider.connect = AsyncMock(side_effect=TimeoutError())
+    body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
-    assert sandbox_infra_failure_kind(exc) == expected
+    async def responses(_, __, ___):
+        raise SandboxBackendUnreachableError("Sandbox was OOM-killed. OpenSandbox status: message='out of memory'")
+
+    with (
+        patch.object(HarnessAgent, "responses", new=responses),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(return_value={"sandbox_handle": "box-1"}),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.mask_sample is True and result.evaluation_completed is False and result.reward == 0.0
+    assert result.failure_kind == "provider_oom_killed"
 
 
-@pytest.mark.parametrize(("elapsed", "terminated"), [(120.0, True), (2390.0, False)])
-async def test_runner_signal_before_the_deadline_is_a_termination(elapsed, terminated):
+async def test_runner_killed_by_a_signal_is_still_a_runner_failure():
     agent = _make_agent(agent="opencode")
     agent._provision_box = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
     agent._provider.exec = AsyncMock(
         side_effect=[SandboxExecResult("", "signal: terminated", -1), SandboxExecResult("", "", 0)]
     )
     agent._provider.close = AsyncMock()
-    clock = iter([1000.0, 1000.0 + elapsed])
     with (
         patch.object(agent, "_sandbox_model_url", return_value="https://model.example"),
-        patch("responses_api_agents.harness_agent.app.time.monotonic", side_effect=lambda: next(clock)),
-        pytest.raises(RuntimeError) as raised,
+        pytest.raises(RuntimeError, match=r"runner failed \(-1\)") as raised,
     ):
         await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
-    assert isinstance(raised.value, RunnerTerminatedError) is terminated
+    assert sandbox_infra_failure_kind(raised.value) is None
 
 
 _SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"

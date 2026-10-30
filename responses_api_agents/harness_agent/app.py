@@ -19,7 +19,6 @@ import shlex
 import socket
 import subprocess
 import tempfile
-import time
 from asyncio import Semaphore
 from contextvars import ContextVar
 from pathlib import Path
@@ -45,6 +44,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.sandbox import (
     ConnectableProvider,
+    SandboxBackendUnreachableError,
     SandboxCreateError,
     SandboxSpec,
     create_provider,
@@ -95,33 +95,28 @@ _WORKDIR_KEYS = {
 }
 
 
-_OOM_MARKERS = ("exited with code 137", "OOMKilled", "runner failed (137)", "signal: killed")
-
-
-class RunnerTerminatedError(RuntimeError):
-    """The runner died from a signal well before its own deadline: the sandbox runtime ended it, not the agent."""
+# Markers in a provider failure's own message that name an OOM kill (OpenSandbox's 410 status and its typed backend loss).
+_OOM_MARKERS = ("exited with code 137", "OOMKilled", "Sandbox was OOM-killed")
 
 
 def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     """The failure_kind when ``exc`` is the sandbox runtime failing rather than the harness or model, else None.
 
-    A sandbox that ends mid-episode (OpenSandbox ``SANDBOX::ENDED``, e.g. its container OOM-killed with exit 137), a
-    sandbox that cannot be created, a runner killed before its deadline, and timeouts or dropped connections while the
-    episode runs (to the sandbox or to the resources server) are infrastructure: the rollout is not a measurement of
-    the policy. Exit 137 is reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
+    Only a failure the provider reports counts: the OpenSandbox SDK's exceptions (e.g. ``SANDBOX::ENDED`` when the
+    container was OOM-killed or evicted), Gym's ``SandboxCreateError`` and ``SandboxBackendUnreachableError``, and a
+    timeout or dropped connection while the episode runs (to the sandbox or to the resources server). Runner output
+    never decides it, and a runner that exits on a signal stays a runner failure: the agent's own commands can send it.
+    Messages naming an OOM kill are reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
     """
-    text = str(exc)
     names = {cls.__name__ for cls in type(exc).__mro__}
     infra = (
         "SandboxApiException" in names
         or type(exc).__module__.startswith("opensandbox.")
-        or isinstance(exc, (SandboxCreateError, TimeoutError, ConnectionError, RunnerTerminatedError))
-        or "SANDBOX::ENDED" in text
-        or (isinstance(exc, RuntimeError) and text.startswith("runner failed (137)"))
+        or isinstance(exc, (SandboxCreateError, SandboxBackendUnreachableError, TimeoutError, ConnectionError))
     )
     if not infra:
         return None
-    if any(marker in text for marker in _OOM_MARKERS):
+    if any(marker in str(exc) for marker in _OOM_MARKERS):
         return failure_kinds.PROVIDER_OOM_KILLED
     return failure_kinds.PROVIDER_UNAVAILABLE
 
@@ -558,26 +553,17 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                             "/work/runner_config.json": json.dumps(runner_config),
                         },
                     )
-            started = time.monotonic()
             r = await self._provider.exec(
                 handle,
                 f"{runner_cmd} > runner.out 2>&1",
                 cwd=work_dir,
                 timeout_s=self.config.rollout_timeout,
             )
-            elapsed = time.monotonic() - started
             logs = await self._provider.exec(handle, "tail -c 6000 runner.out", cwd=work_dir, timeout_s=30)
             if r.return_code != 0 or "RUNNER_DONE" not in (logs.stdout or ""):
-                detail = (logs.stdout or logs.stderr or r.stderr or "")[-6000:]
-                # A signal before the deadline (e.g. the pod evicted or recycled under load) is the runtime, not the
-                # agent; at the deadline it is the agent running out of time.
-                if (
-                    r.return_code == -1
-                    and "signal:" in (r.stderr or detail)
-                    and elapsed < 0.95 * self.config.rollout_timeout
-                ):
-                    raise RunnerTerminatedError(f"runner terminated after {elapsed:.0f}s: {detail}")
-                raise RuntimeError(f"runner failed ({r.return_code}): {detail}")
+                raise RuntimeError(
+                    f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}"
+                )
 
             resp = NeMoGymResponse.model_validate(
                 await self._download_json(handle, self._box_path(handle, "/work/response.json"))
