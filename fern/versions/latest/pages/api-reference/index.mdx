@@ -1,15 +1,33 @@
 ---
 title: "API Reference"
-description: "Auto-generated Python API reference for the nemo_gym library, and how the library's packages are laid out."
+description: "Auto-generated Python API reference for the nemo_gym library, and how the repository is laid out."
 ---
 
 Auto-generated reference documentation for the `nemo_gym` Python package.
 
 This reference is built from docstrings in the [source code](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_gym). Browse the sidebar to explore modules, classes, and functions.
 
-## Package Layout
+## Repository Layout
 
-`nemo_gym` is split into packages, each with one job. The packages form layers: a package imports only packages below it. The `import-linter` contract in `pyproject.toml` defines the order, and a pre-commit hook enforces it.
+| Directory | What it holds |
+|-----------|---------------|
+| `nemo_gym/` | The library: everything servers, benchmarks, and the `gym` command line share. See [The nemo_gym Package](#the-nemo_gym-package). |
+| `resources_servers/` | Resources servers: one directory per server, with its tools, verifier, configs, and tests. |
+| `responses_api_agents/` | Agent servers: built-in agent harnesses and integrations with external ones. |
+| `responses_api_models/` | Model servers for inference providers and local models, such as vLLM. |
+| `environment_servers/` | Environment servers, such as `single_agent_turn` and `legacy_agent`, that run each episode. |
+| `environments/` | Environment configs that wire a resources server, an agent, and a dataset together. |
+| `benchmarks/` | Benchmark definitions: config, manifest, and data preparation for each benchmark. |
+| `nemotron_recipes/` | Recipe configs for Nemotron models. |
+| `examples/` | Example configs, such as Slurm and Kubernetes launches. |
+| `scripts/` | Repository maintenance and CI scripts. |
+| `tests/` | Unit, functional, and end-to-end tests for the library. Each server keeps its own tests in its directory. |
+| `docker/` | The container image build. |
+| `fern/` | This documentation site. |
+
+## The nemo_gym Package
+
+`nemo_gym` is split into packages, each with one job. The packages form layers: a package builds only on packages below it, so lower packages never depend on higher ones.
 
 ```mermaid
 flowchart TB
@@ -40,64 +58,34 @@ flowchart TB
     entry --> runs --> servers --> records --> infra --> base
 ```
 
-Read the diagram top to bottom, and left to right within a group: each package may import any package after it, and none before it.
+Read the diagram top to bottom, and left to right within a group: each package may use any package after it, and none before it.
 
-| Package | What it holds |
-|---------|---------------|
-| `nemo_gym.cli` | The `gym` command line and its command groups. |
-| `nemo_gym.environment` | Environment authoring contracts and tooling: the `manifest.yaml` contract and its validation, the registries of resources servers, agents, models, environments, and benchmarks, scaffolding, and publication checks. |
-| `nemo_gym.eval` | Evaluation on top of collected rollouts: evaluation plans, reverifying saved rollouts, and comparing runs. |
-| `nemo_gym.orchestration` | Starting and running Gym: the server supervisor behind `gym env start`, per-server virtual environments, the Ray Serve gateway, and job submission to Slurm and Kubernetes. |
-| `nemo_gym.rollouts` | Collecting rollouts and interpreting the saved evidence: rollout collection, rollout health, outcomes, performance, and harness capability checks. |
-| `nemo_gym.data` | Task data: datasets and their preparation, prompts, task rows and their materialization, and task formats such as Harbor. |
-| `nemo_gym.agents` | What agent servers share: the agent server base (`SimpleResponsesAPIAgent`), agent outcomes and activations, sandbox sessions and tools, and skills. |
-| `nemo_gym.models` | Model servers and what they share: the model server base (`SimpleResponsesAPIModel`), provider clients, converters, and model call capture. |
-| `nemo_gym.server_runtime` | What runs inside every Gym server: the server bases (`BaseServer`, `SimpleServer`), the resources server base (`SimpleResourcesServer`), the environment server base, request handling, sessions, and partial-rollout checkpoints. |
-| `nemo_gym.artifacts` | What a run writes and exports: run artifacts, the resolved config, rollout rows, and the exporters that publish them. |
-| `nemo_gym.metrics` | Rollout metrics: reward profiles, pass@k and majority statistics, and the metric definitions they share. |
-| `nemo_gym.verification` | Helpers that resources servers share for verifying submissions: LLM judge calls, verifier contract tests, and grading in a single-use sandbox. |
-| `nemo_gym.trajectory` | The trajectory data model: the records of what happened in a rollout, and their ATIF export and import. |
-| `nemo_gym.sandbox` | The provider-neutral sandbox API for isolated command execution and file transfer, and its providers. See [Sandbox](/main/infrastructure/sandbox). |
-| `nemo_gym.client` | Calling HTTP endpoints and Gym servers: the shared aiohttp client with retries (`request`) and `ServerClient`. |
-| `nemo_gym.telemetry` | Optional OpenTelemetry instrumentation through nemo-lens; every instrumentation site is a no-op when it is off. |
-| `nemo_gym.core` | The definitions every package and every environment shares: the Responses API and Chat Completions types, episode identity, and failure kinds. |
-| `nemo_gym.utils` | General helpers: paths, decorators, text, process information, and import compatibility. |
-| `nemo_gym.config` | Loading and accessing the run config, and the server config types. |
+| Package | What it handles |
+|---------|-----------------|
+| `cli` | The `gym` command line. |
+| `environment` | Authoring environments and benchmarks: manifests, registries, scaffolding, and validation. |
+| `eval` | Evaluation on top of collected rollouts. |
+| `orchestration` | Starting servers and submitting jobs to clusters. |
+| `rollouts` | Collecting rollouts and checking the results. |
+| `data` | Datasets and task data. |
+| `agents` | The shared base for agent servers. |
+| `models` | The shared base for model servers, and provider clients. |
+| `server_runtime` | What runs inside every server, including the resources server and environment server bases. |
+| `artifacts` | The files a run writes and exports. |
+| `metrics` | Rollout metrics, such as reward profiles and pass@k. |
+| `verification` | Helpers resources servers share for verification, such as LLM judges. |
+| `trajectory` | Records of what happened in a rollout. |
+| `sandbox` | Isolated command execution and its providers. See [Sandbox](/main/infrastructure/sandbox). |
+| `client` | HTTP calls between servers. |
+| `telemetry` | Optional OpenTelemetry instrumentation. |
+| `core` | Types every package shares, such as the Responses API types. |
+| `utils` | General helpers. |
+| `config` | Loading the run config. |
 
-`nemo_gym.verifiers` sits outside the layers. It holds helpers for a Harbor task's Python verifier, which runs inside the task's verifier sandbox with nothing installed, so it uses only the standard library and imports nothing else from `nemo_gym`.
+`nemo_gym.verifiers` sits outside the layers. It runs inside a Harbor task's verifier sandbox, so it uses only the standard library.
 
-A few imports still point up the order, such as `nemo_gym.config.global_config` reading settings from packages above it. The contract lists each one under `ignore_imports`, and each goes away with the split or move that resolves it. New code belongs in a package that sits above everything it imports, not in a new `ignore_imports` entry.
-
-### Server Base Classes
-
-| Module | Classes |
-|--------|---------|
-| `nemo_gym.server_runtime.base_server` | `BaseServer`, `SimpleServer`: FastAPI app setup and the middleware stack every server shares |
-| `nemo_gym.server_runtime.base_resources_server` | `SimpleResourcesServer`, `BaseVerifyRequest`, `BaseVerifyResponse`, `BaseMultiRewardVerifyResponse` |
-| `nemo_gym.agents.base_responses_api_agent` | `SimpleResponsesAPIAgent` |
-| `nemo_gym.models.base_responses_api_model` | `SimpleResponsesAPIModel` |
-
-## Importing from `nemo_gym`
-
-Each package lists the names it offers to code outside the library in `_PUBLIC_API` in its `__init__.py`. Names load on first use, so importing a package imports none of its modules.
-
-- **Code outside `nemo_gym/`**, such as resources servers, agents, model servers, benchmarks, scripts, and their tests, imports from the package:
-
-  ```python
-  from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, SimpleResourcesServer
-  ```
-
-  If you need a name the package does not export, add it to the package's `_PUBLIC_API` rather than importing the module that defines it.
-- **Code inside `nemo_gym/` and its tests** imports from the module that defines each name, such as `from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer`. This keeps every dependency between packages visible to the `import-linter` contract.
+Servers, benchmarks, and other code outside `nemo_gym/` import from the package, such as `from nemo_gym.server_runtime import ...`, rather than from the modules inside it.
 
 ### Old Import Paths
 
-Modules that moved in the reorganization keep their old import paths until release 0.10.0. Each use of an old path, such as `nemo_gym.server_utils` or `nemo_gym.openai_utils`, emits a `DeprecationWarning` that names the new path. `nemo_gym/_moved_paths.py` records every move and the release that removes it.
-
-To update your own code, run the migration script from a Gym checkout. It rewrites old imports, `mock.patch` targets, and file paths:
-
-```bash
-python scripts/migrate_imports.py path/to/your/code
-```
-
-Then run `ruff check --fix` and `ruff format` on the changed files to sort the rewritten imports.
+Modules that moved when `nemo_gym` was split into packages keep their old import paths, such as `nemo_gym.server_utils`, until release 0.10.0. Each use of an old path emits a `DeprecationWarning` that names the new one. To update your code, run `python scripts/migrate_imports.py <path>` from a Gym checkout.
