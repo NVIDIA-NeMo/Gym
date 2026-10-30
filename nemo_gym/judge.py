@@ -68,7 +68,7 @@ def normalize_math_judge_verdict(text: str) -> str:
 
 
 class JudgeError(Exception):
-    """A judge call failed; judge_failsafe routes the row to the failures sidecar."""
+    """A parser-declared judge failure; judge_failsafe routes the row to the failures sidecar."""
 
 
 def judge_call_failed(message: str, *, operation: str, sdk_error: SdkErrorDetails | None = None) -> NgFailureEvent:
@@ -112,7 +112,11 @@ def _judge_error(error: Exception) -> JudgeError | NgFailureEvent:
 
 
 async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
-    """Await a judge call; re-raise any exception as JudgeError (recorded verbatim)."""
+    """Await a judge call; preserve judge failures and wrap other errors as ``judge_failed`` events.
+
+    Custom handlers catch ``JUDGE_FAILURES`` and select with ``is_judge_failure``;
+    an ``except JudgeError`` handler alone catches only standalone parser failures.
+    """
     try:
         return await coro
     except Exception as e:
@@ -129,7 +133,7 @@ async def call_judge(
     json: Any,
     response_model: Type[ResponseT],
 ) -> ResponseT:
-    """POST to a judge model server and parse the reply; raise JudgeError on failure.
+    """POST to a judge model server and parse the reply; report failure as a ``judge_failed`` event.
 
     ``url_path`` is the judge's API surface (``/v1/responses`` or
     ``/v1/chat/completions``), paired with the matching ``response_model``. The
@@ -154,7 +158,7 @@ async def call_judge(
 
 
 def judge_failsafe(verify_fn: Callable) -> Callable:
-    """Wrap verify() so a JudgeError returns a sidecar-routed row (reward 0.0, the
+    """Wrap verify() so a judge failure returns a sidecar-routed row (reward 0.0, the
     routing keys, the request's ``response`` carried) instead of propagating.
     functools.wraps keeps verify's signature so FastAPI injects the same params
     (``body``, and ``request`` for servers that take it); ``*args, **kwargs`` pass
