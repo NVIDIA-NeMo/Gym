@@ -18,6 +18,8 @@ These cover the parts that decide whether a task counts as resolved. The sandbox
 itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -579,3 +581,14 @@ class TestMavenMirror:
 
         merged = JVM_MIRROR_ENV | {"GRADLE_USER_HOME": "/custom"}
         assert merged["GRADLE_USER_HOME"] == "/custom"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order() -> None:
+    """E2B returns a command's stdout and stderr apart: the graded region between the markers must hold both."""
+    header = build_eval_script(_inputs()).split("\ncd ", 1)[0]
+    result = subprocess.run(
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"], capture_output=True, text=True
+    )
+    assert result.stdout.splitlines() == ["first", "second", "third"]
+    assert result.stderr == ""

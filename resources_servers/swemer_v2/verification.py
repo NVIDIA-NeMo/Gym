@@ -203,6 +203,9 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     result_file_cmd = _result_file_read_command(result_file) if result_file else "true"
 
     return f"""#!/bin/bash
+# Test runners report on stderr as often as on stdout. One ordered stream keeps the graded region between the
+# markers whole on every provider: E2B returns a command's stdout and stderr apart.
+exec 2>&1
 cd {shlex.quote(inputs.workdir)} || exit 97
 set +e
 mkdir -p /workspace/test-results 2>/dev/null
