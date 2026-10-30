@@ -23,7 +23,7 @@ from hydra.errors import ConfigCompositionException
 from pytest import MonkeyPatch
 
 import nemo_gym.orchestration.submit as submit_module
-from nemo_gym.cli.main import _eval_submit, main
+from nemo_gym.cli.main import _eval_submit, build_parser, main
 from nemo_gym.config_types import ConfigError
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
@@ -485,6 +485,52 @@ class TestEvalSubmitOutput:
         out = capsys.readouterr().out
         assert "gsm8k" in out and "12345" in out
         assert "/jobs/gym-job-20260909T100203Z-abc123" in out
+
+    def test_human_output_ends_with_the_id_and_the_command_to_look_at_it(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, _record())
+
+        _eval_submit(_args(_config_file(tmp_path)), overrides=[])
+
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[-3:] == [
+            "Submission: gym-job-20260909T100203Z-abc123",
+            "Check on it: gym job status gym-job-20260909T100203Z-abc123",
+            "All job commands: gym job --help",
+        ]
+
+    def test_the_commands_the_hint_names_exist(self, capsys):
+        parser = build_parser()
+
+        args = parser.parse_args(["job", "status", "gym-job-20260909T100203Z-abc123"])
+        assert args.gym_job_ids == ["gym-job-20260909T100203Z-abc123"]
+        with pytest.raises(SystemExit) as exit_info:
+            parser.parse_args(["job", "--help"])
+        assert exit_info.value.code == 0
+        assert "usage: gym job" in capsys.readouterr().out
+
+    def test_the_hint_is_not_part_of_json_output(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, _record())
+
+        _eval_submit(_args(_config_file(tmp_path), json_output=True), overrides=[])
+
+        out = capsys.readouterr().out
+        assert "gym job" not in out
+        json.loads(out)
+
+    def test_nothing_is_suggested_when_nothing_was_submitted(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, _record(failed=True))
+
+        with pytest.raises(SystemExit):
+            _eval_submit(_args(_config_file(tmp_path)), overrides=[])
+
+        assert "gym job" not in capsys.readouterr().out
+
+    def test_nothing_is_suggested_for_an_executor_the_job_commands_cannot_look_at(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, _record().model_copy(update={"executor": "kubernetes"}))
+
+        _eval_submit(_args(_config_file(tmp_path)), overrides=[])
+
+        assert "gym job" not in capsys.readouterr().out
 
     def test_json_output_is_the_record_and_nothing_else(self, tmp_path, monkeypatch, capsys):
         record = _record()
