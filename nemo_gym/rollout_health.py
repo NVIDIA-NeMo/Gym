@@ -11,6 +11,7 @@ and writes reports.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import warnings
 from collections import Counter, defaultdict
@@ -76,6 +77,9 @@ from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for,
 from nemo_gym.rollout_records import resolve_rollout_path
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
+
+
+logger = logging.getLogger(__name__)
 
 
 class JournalHealthUnavailable(ConfigError):
@@ -1132,3 +1136,72 @@ def health_check_run_dir(
     else:
         print(format_health_report(result))
     return result
+
+
+def _remove_health_reports(output_fpath: Path) -> None:
+    # A fresh run or a resume reports its own health; a report left by an earlier job must not stand for it.
+    for report in (QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME):
+        (output_fpath.parent / report).unlink(missing_ok=True)
+
+
+def _health_check_collected_rollouts(
+    output_fpath: Path,
+    config: Any,
+    landed_keys: set | None = None,
+    *,
+    coverage: dict | None = None,
+    terminated: bool = False,
+    model_call_capture_dirs: Sequence[Path] = (),
+) -> None:
+    """Write the quality summary for whatever a run collected; a run that never started collection has none.
+
+    After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
+    minutes on a large run. So a stopped run with ``landed_keys`` gets the provisional summary: the run
+    accounting only, without reading the rollouts.
+    """
+    if not output_fpath.exists():
+        return
+    from nemo_gym.health.timeouts import export_run_health_timeouts
+
+    if terminated and landed_keys is not None:
+        if aggregation_sources_path_for(output_fpath).is_file():
+            # A run drops the shard list with the first row it writes, so this run added none: the summary the
+            # aggregation wrote from its shards still holds, and the run accounting alone would replace it wrongly.
+            print("Shard-backed health was not recomputed after stopping; run `gym eval health-check` to check it.")
+            return
+        try:
+            summary_path = write_provisional_summary(
+                output_fpath,
+                landed_keys,
+                limits=config.run_health_limits,
+                ignored_checks=config.health_check_ignored_checks,
+                run_coverage=coverage,
+            )
+        except JournalHealthUnavailable as error:
+            print(f"Rollout health checks skipped: {error}")
+        except Exception:
+            logger.exception("Writing the provisional quality summary failed; rollout artifacts are still available.")
+        else:
+            print(f"Provisional quality summary (run accounting only): {summary_path}")
+        return
+    try:
+        # An output `gym eval aggregate` merged shards into is checked from those shards, as the collector and a
+        # recheck check it: its own rows have none of their failures or inventories.
+        shards = _aggregated_shards(output_fpath.parent, rollout_name=output_fpath.name)
+        health_result = run_health_checks(
+            shards if shards is not None else output_fpath,
+            output_dir=output_fpath.parent,
+            workers=config.health_check_workers,
+            ignored_checks=config.health_check_ignored_checks,
+            limits=config.run_health_limits,
+            # This run's coverage describes its own rows; listed shards are checked with their own histories.
+            run_coverage=None if shards is not None else [coverage],
+            model_call_capture_dirs=model_call_capture_dirs,
+        )
+    except JournalHealthUnavailable as error:
+        print(f"Rollout health checks skipped: {error}")
+    except Exception:
+        logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
+    else:
+        print(format_health_report(health_result))
+        export_run_health_timeouts(health_result)

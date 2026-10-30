@@ -3602,7 +3602,15 @@ class TestCompletionContract:
     }
     LOST = {NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True}
 
-    async def _run(self, out_dir: Path, monkeypatch: pytest.MonkeyPatch, result_for, *, resume: bool = False):
+    async def _run(
+        self,
+        out_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        result_for,
+        *,
+        resume: bool = False,
+        final_min_success_fraction: float = 0.95,
+    ):
         """Run stages ``[10 @ 90%, 20 tasks x 2 refs @ 95%]``; ``result_for(row, position)`` answers each row."""
         dispatched: List[Dict[str, Any]] = []
         scored = _fake_run_rollouts_factory()
@@ -3642,7 +3650,11 @@ class TestCompletionContract:
         )
         stages = [
             {"num_tasks": 10, "partial_completion": {"min_success_fraction": 0.9, **self.POLICY}},
-            {"num_tasks": 20, "num_models": 2, "partial_completion": {"min_success_fraction": 0.95, **self.POLICY}},
+            {
+                "num_tasks": 20,
+                "num_models": 2,
+                "partial_completion": {"min_success_fraction": final_min_success_fraction, **self.POLICY},
+            },
         ]
         global_config = {
             "multistage": {"enabled": True, "stages": stages, "seed": 0, "reuse_cached_deliverables": False},
@@ -3754,6 +3766,38 @@ class TestCompletionContract:
         }
         assert stage0 == saved
         assert [sum(row["stage_index"] == index for row in rows) for index in (0, 1)] == [9, 20]
+
+    async def test_accepted_omissions_do_not_hide_another_stages_missing_rollout(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+        # Stage 0 accepts 9/10. Stage 1 requires 20/20 and loses one worker: its gap must still count.
+        def first_run(row, position):
+            if position != 0:
+                return "success"
+            if row["stage_index"] == 0:
+                return {NG_FAILURE_CLASS_KEY: "skipped", NG_TERMINAL_KEY: True}
+            return self.LOST
+
+        with pytest.raises(IncompleteEvaluationError, match="28/29 samples completed") as fresh:
+            await self._run(tmp_path, monkeypatch, first_run, final_min_success_fraction=1.0)
+        assert fresh.value.exit_code == 75
+        _, outcomes, _ = read_journal(journal_path_for(tmp_path / "rollouts.jsonl"))
+        assert outcomes[0]["status"] == "partial_complete" and 1 not in outcomes
+        saved = (tmp_path / "rollouts.jsonl").read_bytes()
+
+        retried = []
+
+        def still_lost(row, position):
+            retried.append(row)
+            return self.LOST
+
+        with pytest.raises(IncompleteEvaluationError, match="28/29 samples completed") as resumed:
+            await self._run(tmp_path, monkeypatch, still_lost, resume=True, final_min_success_fraction=1.0)
+        assert resumed.value.exit_code == 1  # The missing worker still produced no outcome this invocation.
+        assert len(retried) == 1 and retried[0]["stage_index"] == 1
+        assert (tmp_path / "rollouts.jsonl").read_bytes() == saved
 
 
 class TestIntegrationWiring:
@@ -4912,7 +4956,7 @@ def test_single_pass_history_is_quarantined_before_switching_to_multistage(tmp_p
 
 
 @pytest.mark.parametrize("kind", ["terminal", "exhausted", "retryable", "drained", "omitted", "agent_crash"])
-async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, monkeypatch, caplog, kind):
+async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, monkeypatch, capsys, kind):
     from nemo_gym.rollout_recovery import IncompleteEvaluationError
 
     dispatches = []
@@ -4976,7 +5020,7 @@ async def test_multistage_driver_completion_and_resume_are_bounded(tmp_path, mon
             }
         ]
         await run_e2e_multistage(config, global_config)
-        assert "1/2 samples completed, 1 intentionally omitted" in caplog.text
+        assert "accepted partial calibration: success coverage 50.0%, omitted 1 rollout(s)" in capsys.readouterr().err
         initial_dispatches = len(dispatches)
         config.resume_from_cache = True
         await run_e2e_multistage(config, global_config)

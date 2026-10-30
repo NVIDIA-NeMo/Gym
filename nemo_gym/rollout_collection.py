@@ -3187,6 +3187,8 @@ class RolloutCollectionHelper(BaseModel):
     # (task index, rollout index) of every record persisted to the rollouts jsonl, kept current as rows land,
     # so a run stopped by SIGTERM can be accounted for without re-reading that file.
     _landed_keys: set = PrivateAttr(default_factory=set)
+    # The CLI supplies its signal state; library callers need no CLI import or signal handler.
+    _termination_requested: Callable[[], bool] | None = PrivateAttr(default=None)
     _collection_started: bool = PrivateAttr(default=False)
     _store: RolloutStore | None = PrivateAttr(default=None)
 
@@ -3678,17 +3680,20 @@ class RolloutCollectionHelper(BaseModel):
                 return await self._run_locked_from_config(config)
             finally:
                 if self._collection_started and not config.disable_aggregation and not config.disable_health_check:
-                    from nemo_gym.cli import eval as cli_eval
+                    from nemo_gym.rollout_health import _health_check_collected_rollouts
+
+                    terminated = self._termination_requested() if self._termination_requested is not None else False
 
                     report = functools.partial(
-                        cli_eval._health_check_collected_rollouts,
+                        _health_check_collected_rollouts,
                         Path(config.output_jsonl_fpath),
                         config,
                         self._landed_keys,
                         coverage=self._store.coverage() if self._store is not None else None,
                         model_call_capture_dirs=self._health_capture_dirs,
+                        terminated=terminated,
                     )
-                    if cli_eval._terminated:
+                    if terminated:
                         report()  # The small provisional summary must finish within Slurm's KillWait.
                     else:
                         await asyncio.to_thread(report)
@@ -3760,7 +3765,7 @@ class RolloutCollectionHelper(BaseModel):
             # The exporters reopened the run recorded next to this output, which starts anew: so does that run.
             for exporter in get_exporters():
                 exporter.start_over()
-        from nemo_gym.cli.eval import _remove_health_reports
+        from nemo_gym.rollout_health import _remove_health_reports
 
         _remove_health_reports(output_fpath)
         self._store = store

@@ -76,7 +76,8 @@ from nemo_gym.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
-from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
+from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME as QUALITY_SUMMARY_FILENAME
+from nemo_gym.health.types import ROLLOUT_VERDICTS_FILENAME as ROLLOUT_VERDICTS_FILENAME
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
 
@@ -602,6 +603,7 @@ def e2e_rollout_collection():  # pragma: no cover
     rh.start(None)
 
     rch = RolloutCollectionHelper()
+    rch._termination_requested = lambda: _terminated
 
     # A benchmark can plug in a custom rollout-collection procedure via the
     # ``rollout_collection_driver`` config field (a ``module.path:function``).
@@ -703,9 +705,9 @@ def _exit_if_terminated() -> None:
 
 
 def _remove_health_reports(output_fpath: Path) -> None:
-    # A fresh run or a resume reports its own health; a report left by an earlier job must not stand for it.
-    for report in (QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME):
-        (output_fpath.parent / report).unlink(missing_ok=True)
+    from nemo_gym.rollout_health import _remove_health_reports as remove_reports
+
+    remove_reports(output_fpath)
 
 
 def _health_check_collected_rollouts(
@@ -716,68 +718,17 @@ def _health_check_collected_rollouts(
     coverage: dict | None = None,
     model_call_capture_dirs: Sequence[Path] = (),
 ) -> None:
-    """Write the quality summary for whatever a run collected; a run that never started collection has none.
+    """Report collected health using the CLI's shutdown state."""
+    from nemo_gym.rollout_health import _health_check_collected_rollouts as report
 
-    After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
-    minutes on a large run. So a stopped run with ``landed_keys`` gets the provisional summary: the run
-    accounting only, without reading the rollouts.
-    """
-    if not output_fpath.exists():
-        return
-    from nemo_gym.health.timeouts import export_run_health_timeouts
-    from nemo_gym.rollout_health import (
-        JournalHealthUnavailable,
-        format_health_report,
-        run_health_checks,
-        write_provisional_summary,
+    report(
+        output_fpath,
+        config,
+        landed_keys,
+        coverage=coverage,
+        model_call_capture_dirs=model_call_capture_dirs,
+        terminated=_terminated,
     )
-
-    if _terminated and landed_keys is not None:
-        from nemo_gym.path_utils import aggregation_sources_path_for
-
-        if aggregation_sources_path_for(output_fpath).is_file():
-            # A run drops the shard list with the first row it writes, so this run added none: the summary the
-            # aggregation wrote from its shards still holds, and the run accounting alone would replace it wrongly.
-            print("Shard-backed health was not recomputed after stopping; run `gym eval health-check` to check it.")
-            return
-        try:
-            summary_path = write_provisional_summary(
-                output_fpath,
-                landed_keys,
-                limits=config.run_health_limits,
-                ignored_checks=config.health_check_ignored_checks,
-                run_coverage=coverage,
-            )
-        except JournalHealthUnavailable as error:
-            print(f"Rollout health checks skipped: {error}")
-        except Exception:
-            logger.exception("Writing the provisional quality summary failed; rollout artifacts are still available.")
-        else:
-            print(f"Provisional quality summary (run accounting only): {summary_path}")
-        return
-    try:
-        from nemo_gym.rollout_health import _aggregated_shards
-
-        # An output `gym eval aggregate` merged shards into is checked from those shards, as the collector and a
-        # recheck check it: its own rows have none of their failures or inventories.
-        shards = _aggregated_shards(output_fpath.parent, rollout_name=output_fpath.name)
-        health_result = run_health_checks(
-            shards if shards is not None else output_fpath,
-            output_dir=output_fpath.parent,
-            workers=config.health_check_workers,
-            ignored_checks=config.health_check_ignored_checks,
-            limits=config.run_health_limits,
-            # This run's coverage describes its own rows; listed shards are checked with their own histories.
-            run_coverage=None if shards is not None else [coverage],
-            model_call_capture_dirs=model_call_capture_dirs,
-        )
-    except JournalHealthUnavailable as error:
-        print(f"Rollout health checks skipped: {error}")
-    except Exception:
-        logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
-    else:
-        print(format_health_report(health_result))
-        export_run_health_timeouts(health_result)
 
 
 def _check_collection_completion(
@@ -837,6 +788,7 @@ def collect_rollouts():  # pragma: no cover
     config = RolloutCollectionConfig.model_validate(global_config_dict)
     write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
     rch = RolloutCollectionHelper()
+    rch._termination_requested = lambda: _terminated
 
     # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
     configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))

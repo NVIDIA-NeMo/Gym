@@ -1964,7 +1964,7 @@ def test_e2e_completion_policy_respects_opt_in_and_interrupts(
 
 
 async def test_health_reports_are_cleared_after_validation_and_written_under_run_lock(runner_config, monkeypatch):
-    import nemo_gym.cli.eval as cli_eval
+    import nemo_gym.rollout_health as rollout_health
     from nemo_gym.rollout_recovery import run_lock
 
     output = Path(runner_config.output_jsonl_fpath)
@@ -1989,7 +1989,7 @@ async def test_health_reports_are_cleared_after_validation_and_written_under_run
 
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
-    monkeypatch.setattr(cli_eval, "_health_check_collected_rollouts", health)
+    monkeypatch.setattr(rollout_health, "_health_check_collected_rollouts", health)
     runner_config.disable_aggregation = runner_config.disable_health_check = False
     await RolloutCollectionHelper().run_from_config(runner_config)
     assert checked == [output]
