@@ -474,6 +474,26 @@ part in partial-rollout checkpoints (`checkpoint_mode = "exported"`):
   added. Otherwise OpenCode starts the task afresh from its original prompt in a fresh data directory, and the reason is
   logged.
 
+On a sandbox whose snapshots keep its processes (an AgentENV memory snapshot, `snapshot_keeps_processes`), nothing is
+relaunched when it need not be:
+
+- **At a checkpoint** OpenCode keeps running: the supervisor holds the pause without signalling anything, and OpenCode's
+  model calls wait. OpenCode reaches the model through a relay in the sandbox (`nemo_gym/agents/utils/model_relay.py`, on
+  `127.0.0.1:sandbox_model_relay_port`), which holds new calls while a pause is open.
+- **After a crash** the restored sandbox is still running the launch. The re-bind checks, in one command, that its
+  supervisor, its held pause and its relay survived. If so, the activation points the relay at the replacement
+  attempt's model URL, continues the pause and waits for the launch to finish: the relay re-sends the call the
+  checkpoint cut, byte for byte, and OpenCode sees only a slow call. A launch that had already ended is collected the
+  same way. Otherwise the launch is killed, nothing of it continuing, and relaunched as above.
+- **Without Python 3.6 or later in the task image** there is no relay: OpenCode calls the model server directly, and a
+  restore relaunches it.
+- **The wall clock** is the provider's to keep: OpenCode orders a conversation by message IDs it makes from the clock,
+  so a clock that jumps while OpenCode runs can put a message out of order. On AgentENV set the provider's
+  `snapshots.keep_guest_clock`, and a restored sandbox continues from the clock its snapshot was taken at.
+
+The agent logs `OpenCode resumed in place:`, `OpenCode cannot resume in place:` and `OpenCode abandoned a restored
+launch:` at WARNING.
+
 Sessions the agent cannot capture restart after a crash instead: a sandbox the agent owns, and multi-turn continuation
 sessions.
 
@@ -483,6 +503,7 @@ Settings:
 | --- | --- | --- |
 | `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on the sandbox's snapshotted disk; the saved conversation lives here. |
 | `checkpoint_pause_allowance_seconds` | `3600` | Time a launch may spend paused in all. It extends the provider's command deadline; a longer pause fails the launch. Cover the longest commit. |
+| `sandbox_model_relay_port` | `18431` | Sandbox port of the model relay, on providers whose snapshots keep processes. |
 
 The controller's `control_timeout` must cover the pause: a prepare waits until every running OpenCode is paused (up to
 about 45 s for the supervisor to confirm).

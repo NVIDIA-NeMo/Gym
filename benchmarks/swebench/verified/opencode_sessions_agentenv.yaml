@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# SWE-bench Verified with OpenCode sessions (opencode_sessions.yaml) on AgentENV, whose snapshots keep the sandbox's
+# processes. With partial-rollout checkpointing, OpenCode keeps running through a checkpoint, and after a crash the
+# restored sandbox's OpenCode continues in place against the replacement attempt's model URL; see the OpenCode README.
+#
+#   gym env start --config benchmarks/swebench/verified/opencode_sessions_agentenv.yaml
+#
+# Needs E2B_API_KEY, E2B_API_URL, E2B_SANDBOX_URL (and SSL_CERT_FILE for a cell certificate the system does not trust),
+# and an AgentENV template per task image in `sandbox.e2b.create.template_map`. The SWE-bench server's OpenSandbox
+# `provider_options.resource_requests` is reported and ignored on AgentENV.
+
+config_paths:
+  - benchmarks/swebench/verified/opencode_sessions.yaml
+  - nemo_gym/sandbox/providers/e2b/configs/agentenv.yaml
+
+swebench_verified_opencode_sessions_resources_server:
+  resources_servers:
+    swebench:
+      # AgentENV snapshots are synchronous, a few seconds each: bound how many run at once.
+      sandbox_checkpoint:
+        parallelism: 64
