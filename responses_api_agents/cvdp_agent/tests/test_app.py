@@ -555,3 +555,252 @@ class TestAgenticSandboxSpec:
             "safety_identifier": None,
         }
         assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
+
+
+class TestSimpleRunAttemptEvidence:
+    """/run owns the model calls of every attempt and accounts their usage, without changing what it dispatches."""
+
+    @staticmethod
+    def _reply(response_id: str, text: str | None, usage: tuple[int, int] | None) -> dict:
+        output = []
+        if text is not None:
+            output.append(
+                {
+                    "id": f"msg_{response_id}",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                }
+            )
+        body = {
+            "id": response_id,
+            "created_at": 1.0,
+            "model": "synthetic-model",
+            "object": "response",
+            "output": output,
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        if usage is not None:
+            body["usage"] = {
+                "input_tokens": usage[0],
+                "output_tokens": usage[1],
+                "total_tokens": sum(usage),
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            }
+        return body
+
+    def _run(
+        self, model_replies: list, parse_failed: list[bool], *, capture: bool = True, max_steps: int | None = None
+    ):
+        """Run /run in process: model and resources servers are scripted, the self-call reaches this agent's app."""
+        config = CVDPAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="cvdp_agent",
+            simple_agent=True,
+            max_steps=max_steps,
+            resources_server=ResourcesServerRef(type="resources_servers", name="cvdp"),
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {"observability_enabled": capture}
+        agent = CVDPAgent(config=config, server_client=server_client)
+        client = TestClient(agent.setup_webserver())
+        model_requests, verify_payloads, self_replies = [], [], []
+        model_replies, parse_failed = list(model_replies), list(parse_failed)
+
+        def reply(status: int, payload: dict) -> MagicMock:
+            response = MagicMock()
+            response.ok = status < 400
+            response.status = status
+            response.cookies = {}
+            response.read = AsyncMock(return_value=json.dumps(payload).encode())
+            response.raise_for_status.side_effect = None if status < 400 else RuntimeError(f"HTTP {status}")
+            return response
+
+        async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+            payload = json.model_dump(mode="json", exclude_unset=True) if hasattr(json, "model_dump") else json
+            if server_name == "cvdp_agent":
+                result = client.post(url_path, json=payload)
+                self_replies.append(result.json())
+                return reply(result.status_code, result.json())
+            if server_name == "policy_model":
+                model_requests.append(payload)
+                body = model_replies.pop(0)
+                return reply(500, {"error": "synthetic"}) if body is None else reply(200, body)
+            if url_path == "/seed_session":
+                return reply(200, {})
+            verify_payloads.append(payload)
+            return reply(200, payload | {"reward": 0.0, "parse_failed": parse_failed.pop(0)})
+
+        server_client.post.side_effect = post
+        row = {
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 1,
+            "responses_create_params": {"input": [{"role": "user", "content": "write module a"}], "temperature": 0.6},
+            "verifier_metadata": {"task_id": "synthetic_0001"},
+        }
+        result = client.post("/run", json=row)
+        assert result.status_code == 200, result.text
+        return result.json(), model_requests, verify_payloads, self_replies
+
+    def test_parse_retry_owns_both_calls_and_reports_the_episode_usage(self) -> None:
+        first, last = self._reply("resp_a", "no code", (10, 7)), self._reply("resp_b", "module a; endmodule", (10, 9))
+        result, model_requests, verify_payloads, self_replies = self._run([first, last], [True, False])
+
+        assert len(model_requests) == 2 and model_requests[0] == model_requests[1]
+        assert [p["response"]["id"] for p in verify_payloads] == ["resp_a", "resp_b"]
+        assert all("_ng_trajectory" not in p["response"] for p in verify_payloads)
+        assert [p["response"]["usage"]["output_tokens"] for p in verify_payloads] == [7, 9]
+        assert all("_ng_trajectory" in r for r in self_replies)
+        assert result["response"]["id"] == "resp_b"
+        assert result["response"]["output"][0]["content"][0]["text"] == "module a; endmodule"
+        assert (result["response"]["usage"]["input_tokens"], result["response"]["usage"]["output_tokens"]) == (20, 16)
+        trajectory = result["ng_trajectory"]
+        assert (trajectory["task_id"], trajectory["rollout_id"]) == ("3", "3-1")
+        assert [ref["response_id"] for ref in trajectory["invocations"][0]["model_calls"]] == ["resp_a", "resp_b"]
+        assert [(t["turn_no"], [r["response_id"] for r in t["model_calls"]]) for t in trajectory["turns"]] == [
+            (1, ["resp_a"]),
+            (2, ["resp_b"]),
+        ]
+        assert trajectory["gaps"] == []
+
+    def test_single_call_keeps_its_usage_and_owns_its_call(self) -> None:
+        result, model_requests, verify_payloads, _ = self._run(
+            [self._reply("resp_a", "module a; endmodule", (10, 5))], [False]
+        )
+
+        assert len(model_requests) == 1 and len(verify_payloads) == 1
+        assert result["response"]["usage"] == verify_payloads[0]["response"]["usage"]
+        assert [ref["response_id"] for ref in result["ng_trajectory"]["invocations"][0]["model_calls"]] == ["resp_a"]
+
+    def test_attempt_without_a_reply_is_a_missing_reference_not_an_invented_one(self) -> None:
+        result, model_requests, verify_payloads, _ = self._run(
+            [None, self._reply("resp_b", "module a; endmodule", (10, 6))], [False]
+        )
+
+        assert len(model_requests) == 2 and len(verify_payloads) == 1
+        assert (result["response"]["usage"]["input_tokens"], result["response"]["usage"]["output_tokens"]) == (10, 6)
+        trajectory = result["ng_trajectory"]
+        assert [ref["response_id"] for ref in trajectory["invocations"][0]["model_calls"]] == ["resp_b"]
+        assert [(g["code"], g["detail"]) for g in trajectory["gaps"]] == [
+            ("model_call_reference_unavailable", "attempt:1")
+        ]
+
+    def test_missing_attempt_usage_makes_the_episode_usage_unknown(self) -> None:
+        result, *_ = self._run(
+            [self._reply("resp_a", "no code", None), self._reply("resp_b", "module a; endmodule", (10, 9))],
+            [True, False],
+        )
+
+        assert result["response"]["usage"] is None
+
+    def test_without_capture_the_reply_and_result_carry_no_trajectory(self) -> None:
+        result, _, verify_payloads, self_replies = self._run(
+            [self._reply("resp_a", "no code", (10, 7)), self._reply("resp_b", "module a; endmodule", (10, 9))],
+            [True, False],
+            capture=False,
+        )
+
+        assert "ng_trajectory" not in result
+        assert all("_ng_trajectory" not in r for r in self_replies)
+        assert all("_ng_trajectory" not in p["response"] for p in verify_payloads)
+        assert (result["response"]["usage"]["input_tokens"], result["response"]["usage"]["output_tokens"]) == (20, 16)
+
+    def test_multi_step_call_without_usage_keeps_the_verify_payload_and_reports_unknown_usage(self) -> None:
+        # One attempt, two model calls: the first returns no message and no usage, so the loop continues.
+        result, model_requests, verify_payloads, _ = self._run(
+            [self._reply("resp_a", None, None), self._reply("resp_b", "module a; endmodule", (10, 9))], [False]
+        )
+
+        assert len(model_requests) == 2 and len(verify_payloads) == 1
+        # /verify receives the same partial sum it received before this agent reported evidence.
+        assert (
+            verify_payloads[0]["response"]["usage"]["input_tokens"],
+            verify_payloads[0]["response"]["usage"]["output_tokens"],
+        ) == (10, 9)
+        assert set(verify_payloads[0]["response"]) & {"_ng_trajectory", "_ng_usage_complete"} == set()
+        # After verification the episode usage is unknown, not the partial sum.
+        assert result["response"]["usage"] is None
+        assert [ref["response_id"] for ref in result["ng_trajectory"]["invocations"][0]["model_calls"]] == [
+            "resp_a",
+            "resp_b",
+        ]
+
+    def test_an_evidence_error_is_a_gap_and_never_another_attempt(self, monkeypatch: MonkeyPatch) -> None:
+        import responses_api_agents.cvdp_agent.app as cvdp_app
+
+        def refuse(*args, **kwargs):
+            raise ValueError("synthetic evidence failure")
+
+        monkeypatch.setattr(cvdp_app.TrajectoryRecord, "model_validate", refuse)
+        result, model_requests, verify_payloads, _ = self._run(
+            [self._reply("resp_a", "module a; endmodule", (10, 5))], [False]
+        )
+
+        assert len(model_requests) == 1 and len(verify_payloads) == 1
+        assert result["reward"] == 0.0 and result["response"]["id"] == "resp_a"
+        assert [(g["code"], g["detail"]) for g in result["ng_trajectory"]["gaps"]] == [
+            ("agent_observations_invalid", "attempt:1:ValueError")
+        ]
+        assert result["ng_trajectory"]["invocations"][0]["model_calls"] == []
+        assert result["ng_trajectory"]["invocations"][0]["status"] == "unknown"
+
+    @pytest.mark.parametrize("usage", [(10, 5), None], ids=["usage", "missing_usage"])
+    @pytest.mark.parametrize(
+        ("outcome", "expected_status", "expected_stop_reason"),
+        [
+            ("iteration_limit", "incomplete", "max_iterations"),
+            ("failed", "failed", None),
+            ("incomplete", "incomplete", "max_output_tokens"),
+            ("completed", "completed", None),
+            ("legacy", "completed", None),
+        ],
+    )
+    def test_invocation_outcome_preserves_requests_verification_and_results(
+        self, outcome: str, expected_status: str, expected_stop_reason: str | None, usage: tuple[int, int] | None
+    ) -> None:
+        reply = self._reply("resp_a", "module a; endmodule", usage)
+        if outcome == "iteration_limit":
+            reply["status"] = "completed"
+            reply["output"] = [{"id": "reason_a", "type": "reasoning", "summary": []}]
+        elif outcome == "failed":
+            reply["status"] = "failed"
+            reply["error"] = {"code": "server_error", "message": "synthetic failure with partial output"}
+        elif outcome == "incomplete":
+            reply["status"] = "incomplete"
+            reply["incomplete_details"] = {"reason": "max_output_tokens"}
+        elif outcome == "completed":
+            reply["status"] = "completed"
+
+        result, requests, verified, _ = self._run([reply], [False], max_steps=1)
+        without_capture, plain_requests, plain_verified, _ = self._run([reply], [False], capture=False, max_steps=1)
+
+        invocation = result["ng_trajectory"]["invocations"][0]
+        assert (invocation["status"], invocation["stop_reason"]) == (expected_status, expected_stop_reason)
+        assert [ref["response_id"] for ref in invocation["model_calls"]] == ["resp_a"]
+        assert len(requests) == len(verified) == 1
+        assert requests == plain_requests
+        assert verified == plain_verified
+        assert {key: value for key, value in result.items() if key != "ng_trajectory"} == without_capture
+        assert result["response"] == verified[0]["response"]
+        assert result["reward"] == 0.0
+
+    def test_recovered_iteration_limit_uses_final_attempt_outcome_and_keeps_both_calls(self) -> None:
+        first = self._reply("resp_a", None, None)
+        first["output"] = [{"id": "reason_a", "type": "reasoning", "summary": []}]
+        last = self._reply("resp_b", "module a; endmodule", (10, 5))
+        result, requests, verified, _ = self._run([first, last], [True, False], max_steps=1)
+        invocation = result["ng_trajectory"]["invocations"][0]
+        assert (invocation["status"], invocation["stop_reason"]) == ("completed", None)
+        assert [ref["response_id"] for ref in invocation["model_calls"]] == ["resp_a", "resp_b"]
+        assert len(requests) == len(verified) == 2
+        assert requests[0] == requests[1]
+        assert result["response"]["usage"] is None
+        assert result["response"]["output"] == verified[-1]["response"]["output"]
+        assert result["reward"] == 0.0
