@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import bisect
+import copy
 import functools
 import glob as glob_module
 import hashlib
@@ -37,7 +38,7 @@ from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import aiohttp
 import orjson
@@ -649,10 +650,9 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         rollout_id = identity.get("rollout_id")
         if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
             return task_id, rollout_id
-    task_id = next(
-        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
-        str(row[TASK_INDEX_KEY_NAME]),
-    )
+    task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+    if task_id is None:
+        task_id = str(row[TASK_INDEX_KEY_NAME])
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 
@@ -1183,6 +1183,104 @@ def _attach_ng_perf(
         return
     if ng_perf is not None:
         result[NG_PERF_KEY] = ng_perf
+
+
+def _names_its_task(row: dict[str, Any]) -> bool:
+    if isinstance(row.get("trajectory_identity"), dict):
+        return True
+    return TASK_INDEX_KEY_NAME in row or any(row.get(key) is not None for key in TASK_ID_FIELDS)
+
+
+async def enrich_run_result(
+    row: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    capture_dirs: list[Path],
+    observability_enabled: bool,
+    include_payloads: bool = True,
+    rollout_latency_ms: Optional[float] = None,
+    delete_capture: bool = False,
+) -> dict[str, Any]:
+    """Attach a finished rollout's collected evidence to its ``/run`` result, in place.
+
+    These are the per-rollout steps ``ng_collect_rollouts`` runs, shared so a framework that dispatches through
+    ``run_examples`` records the same thing: wait for the model server's in-flight capture writes for this rollout,
+    merge its captured model calls (``ng_model_call_capture``) and join the agent's observations to them, project the
+    standardized ``ng_trajectory``, and assemble ``ng_perf`` when observability is enabled.
+
+    The row's rollout identity is copied onto the result where the result lacks it, because the capture key is read
+    from the record. Harness output and reward are never modified. A row that names no task (no task id field,
+    task index or trajectory identity) gets no ``ng_trajectory`` rather than a guessed task id.
+    ``include_payloads=False`` keeps call metadata only; ``delete_capture`` removes the rollout's capture file once it
+    has been merged, so it requires the payloads to be kept.
+    """
+    if not isinstance(result, dict):
+        return result
+    if delete_capture and not include_payloads:
+        raise ValueError(
+            "delete_capture would drop the model-call bodies that include_payloads=False leaves in the store"
+        )
+    for key in (ROLLOUT_ID_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
+        if key in row and key not in result:
+            result[key] = row[key]
+
+    failure_class = result.get(NG_FAILURE_CLASS_KEY)
+    # No rollout happened (a drained or interrupted try), so there is nothing to capture; a failed episode that
+    # returned agent evidence made model calls worth joining.
+    no_result = failure_class in _NO_RESULT_FAILURE_CLASSES or bool(result.get(NG_DISPATCH_DRAINED_KEY))
+    # The capture file may go only once its bodies are safely on the record: writes drained, readback complete,
+    # nothing unreadable, and the bodies kept (not redacted).
+    safe_to_delete = False
+    if capture_dirs and (
+        not no_result or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
+    ):
+        # A cancelled call's capture write runs detached, so drain the claims this
+        # rollout still holds before snapshotting; otherwise a late row is lost.
+        rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
+        quiesced = False
+        if rollout_id_for_capture is not None:
+            quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
+        payloads_kept = include_payloads and not _has_observation_gap(result, "multimodal_history_redacted")
+        merge_model_call_capture_into_record(result, capture_dirs, include_payloads=payloads_kept)
+        capture = result.get("ng_model_call_capture")
+        safe_to_delete = quiesced and payloads_kept and isinstance(capture, dict) and not capture.get("gaps")
+
+    if _names_its_task(row) and (
+        "ng_model_call_capture" in result
+        or NG_AGENT_OBSERVATIONS_KEY in result
+        or NG_TRAJECTORY_KEY in result
+        or NG_VERIFIER_INVOCATIONS_KEY in result
+    ):
+        _attach_trajectory_record(row, result)
+
+    # Assembles ng_perf from ng_trajectory when observability is enabled.
+    _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
+
+    if delete_capture and safe_to_delete:
+        clear_model_call_captures_for_rollouts([result], capture_dirs)
+    return result
+
+
+_ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
+
+
+async def _enrich_returned_result(
+    row: dict[str, Any], result: dict[str, Any], rollout_latency_ms: Optional[float], **options: Any
+) -> None:
+    """``enrich_run_result`` for a result ``run_examples`` returns, keeping its public shape.
+
+    An Environment Server reply to a materialized task is a ``BaseEpisodeResponse`` whose evidence is nested; it is
+    enriched through the record the collector stores, and the enrichment keys are added to the reply's top level.
+    """
+    if _materialized_taskset(row) is not None and _is_episode_response(result):
+        record = _episode_record(copy.deepcopy(result))
+        await enrich_run_result(row, record, rollout_latency_ms=rollout_latency_ms, **options)
+        identity = (ROLLOUT_ID_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME)
+        for key in (*_ENRICHMENT_KEYS, *identity):
+            if key in record and key not in result:
+                result[key] = record[key]
+        return
+    await enrich_run_result(row, result, rollout_latency_ms=rollout_latency_ms, **options)
 
 
 def _drop_truncated_tail(fpath: Path) -> None:
@@ -2796,8 +2894,13 @@ class _RowResultIterator:
     direct caller can stop collecting and cancel the rollouts still in flight.
     """
 
-    def __init__(self, completions: Iterator[Future]):
+    def __init__(
+        self,
+        completions: Iterator[Future],
+        enrich: Optional[Callable[[dict, dict, Optional[float]], Awaitable[Any]]] = None,
+    ):
         self._completions = completions
+        self._enrich = enrich
         self._closed = False
 
     def __iter__(self):
@@ -2808,9 +2911,10 @@ class _RowResultIterator:
             raise StopIteration
         return self._without_metadata(next(self._completions))
 
-    @staticmethod
-    async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
+    async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict]:
         completed = await future
+        if self._enrich is not None:
+            await self._enrich(completed.row, completed.result, completed.rollout_latency_ms)
         return completed.row, completed.result
 
     async def aclose(self) -> None:
@@ -2864,6 +2968,14 @@ class _RowResultIterator:
                 outcome.exception()
             else:
                 result = task.result()
+                if self._enrich is not None:
+                    try:
+                        await self._enrich(result.row, result.result, result.rollout_latency_ms)
+                    except Exception as enrich_error:
+                        outcome.set_exception(enrich_error)
+                        outcome.exception()
+                        outcomes.append(outcome)
+                        continue
                 outcome.set_result((result.row, result.result))
             outcomes.append(outcome)
         return outcomes
@@ -3817,33 +3929,14 @@ class RolloutCollectionHelper(BaseModel):
                 _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
-                # when capture is off). Never alters the harness output/reward already in `result`.
-                # A failed episode that returned agent evidence made model calls worth joining.
-                if capture_dirs and (
-                    not no_result or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
-                ):
-                    # A cancelled call's capture write runs detached, so drain the claims this
-                    # rollout still holds before snapshotting; otherwise a late row is lost.
-                    rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
-                    if rollout_id_for_capture is not None:
-                        await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
-                    merge_model_call_capture_into_record(
-                        result,
-                        capture_dirs,
-                        include_payloads=not _has_observation_gap(result, "multimodal_history_redacted"),
-                    )
-
-                if (
-                    "ng_model_call_capture" in result
-                    or NG_AGENT_OBSERVATIONS_KEY in result
-                    or NG_TRAJECTORY_KEY in result
-                    or NG_VERIFIER_INVOCATIONS_KEY in result
-                ):
-                    _attach_trajectory_record(row, result)
-
-                # Assembles ng_perf from ng_trajectory when observability is enabled.
-                _attach_ng_perf(
-                    result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms
+                # when capture is off), project ng_trajectory and assemble ng_perf. Never alters the
+                # harness output/reward already in `result`.
+                await enrich_run_result(
+                    row,
+                    result,
+                    capture_dirs=capture_dirs,
+                    observability_enabled=observability_enabled,
+                    rollout_latency_ms=rollout_latency_ms,
                 )
 
                 # Freeze and rebuild tokens only for participating agents.
@@ -4874,6 +4967,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
+        enrich_results: bool = False,
+        include_model_call_payloads: bool = True,
+        delete_model_call_capture: bool = False,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -4936,7 +5032,32 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
+
+        ``enrich_results`` runs :func:`enrich_run_result` on each result before it is returned, so the caller receives
+        what ``ng_collect_rollouts`` records: the row's rollout identity, the captured model calls
+        (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
+        the standardized ``ng_trajectory`` and ``ng_perf``. Model calls are captured only when the global config
+        enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
+        is merged, and needs the payloads kept. With ``enrich_results`` off, results are exactly what `/run` returned.
         """
+        if delete_model_call_capture and not include_model_call_payloads:
+            raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
+        enrich = None
+        if enrich_results:
+            global_config = self.setup_server_client(head_server_config).global_config_dict
+            capture_dirs = model_call_capture_dirs_from_config(global_config)
+            observability_enabled = observability_enabled_from_config(global_config)
+
+            async def enrich(row: dict, result: dict, rollout_latency_ms: Optional[float]) -> None:
+                await _enrich_returned_result(
+                    row,
+                    result,
+                    rollout_latency_ms,
+                    capture_dirs=capture_dirs,
+                    observability_enabled=observability_enabled,
+                    include_payloads=include_model_call_payloads,
+                    delete_capture=delete_model_call_capture,
+                )
 
         return _RowResultIterator(
             self._run_examples_with_metadata(
@@ -4950,7 +5071,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 drain_margin_s=drain_margin_s,
                 latency_tracker=latency_tracker,
                 **({"retry_requests": False} if not retry_requests else {}),
-            )
+            ),
+            enrich=enrich,
         )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
