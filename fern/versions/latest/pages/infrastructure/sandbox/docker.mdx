@@ -124,11 +124,115 @@ Uploads and downloads use `docker cp` in both directions, creating the target's 
 
 ## Interactive Terminals
 
-The provider implements `SupportsSandboxPty`, so `await sandbox.pty.create(...)` and `await sandbox.pty.exec(...)` work on Docker as they do on OpenSandbox, and so does the interactive sandbox shell (`python -m nemo_gym.sandbox.shell`). A harness that drives a terminal session, a Terminus-2-style PTY harness say, can build on them; the Terminus-2 sandboxed agent shipped in this repository drives tmux over `exec` and does not use them. A session is one `docker exec -i -t` client process running under a host pseudo-terminal of its own: the CLI sees a terminal, allocates one in the container and forwards bytes both ways, and the session reads and writes the host terminal's master side. `rows`/`cols` size the host terminal before the client starts, and the CLI applies that size to the container's terminal when the exec starts, so a program that reads the size at once sees the requested one; `resize()` changes the size and sends the client `SIGWINCH`, which the CLI turns into a resize of the container's terminal. `cwd`, `env` and `user` map to `-w`, `--env` and `--user` as for `exec()`. `pty=False` runs the client on plain pipes, so `read()` carries stdout and `read_stderr()` stderr.
+The provider implements `SupportsSandboxPty`, so `await sandbox.pty.create(...)`, `await sandbox.pty.exec(...)` and the
+interactive sandbox shell (`python -m nemo_gym.sandbox.shell`) work on Docker as they do on OpenSandbox. A harness that
+drives a terminal session, such as a Terminus-2-style PTY harness, can build on them. The Terminus-2 sandboxed agent in
+this repository drives tmux over `exec` instead.
 
-The session's program starts through a one-line launcher that records its pid in `/tmp/.nemo-gym-pty-<session id>.pid` inside the container, or in `/dev/shm/.nemo-gym-pty-<session id>.pid` when `/tmp` refuses the write (a container run with `read_only: true` and no tmpfs on `/tmp`; `/dev/shm` is a writable tmpfs in every container that does not run with `--ipc=none`), and then `exec`s the program (the shell itself when `create()` names no command: `bash` when the image has it, else `sh`). That pid is how `send_signal()` and `close()` reach the process. A session whose pid can be recorded in neither place could be neither signalled nor cleaned up, so the launcher does not start it: it prints `nemo-gym: cannot record the pid of this PTY session in ...` on stderr (the terminal in PTY mode) and exits 1, and the session ends at once with that message (`create_pty()` itself returns as soon as the client is spawned, without a round trip). The record is read when `send_signal()` or `close()` first needs it, and the read waits up to two seconds for the launcher to write it, because a call issued right after `create_pty()` reaches the container through a second `docker exec` that races the session's own to the daemon. The read is bounded against the record's owner too: a record that is not a regular file (a FIFO, or a link to a device, put at the path by the session's user) is refused at once rather than opened, the file is opened on a pinned descriptor and tested again there, so a swap of the path after the test cannot hand the read something that blocks, at most 32 bytes are read, and the exec that reads it runs under a 30-second timeout of its own (`PID_READ_TIMEOUT_S`) instead of `exec.default_timeout_s`; the session's user can make its record useless, never make `send_signal()` or `close()` wait on it. `send_signal("SIGINT" | "SIGTERM" | "SIGKILL" | "SIGQUIT" | "SIGHUP")` runs `kill` through a second `docker exec` as root, addressed in PTY mode to the foreground process group of the session's terminal (read from `/proc/<pid>/stat`), which is what a key press would reach: the program of a command session, or the job an interactive shell is running (the idle shell itself when there is none). A shell with job control runs each job in a process group of its own, so a signal to the shell's group would never reach the running command; a pipe session has no terminal, and there the signal goes to the process's own group and then the process. Because a docker client that goes away does not end the process it started, `close()` of a live session ends it through one more exec: `SIGHUP` to the recorded process's group, up to a second for a shell to relay the hangup to its jobs (under job control the foreground and the background jobs of an interactive shell sit in process groups of their own, which a signal to the shell's group never reaches), then `SIGKILL` to every process still in the recorded process's session; both pid paths are removed with it. `close()` of a session whose process exited only removes them. The pid file is written by the session's own user, who can rewrite it or replace it by a link to a file it does not own (in a world-writable `/tmp` a hard link keeps the linked inode's owner, so the file's owner is no identity either), so neither its content nor its owner is trusted as such: it is read once, as the session's own user (`/proc/<pid>/environ` is readable by the process's own uid but not by a root without `CAP_SYS_PTRACE`, which Docker's default capability set does not grant, so a root-side read would fail for every non-root session; the `kill` and the cleanup run as root and need no added capability), and followed only when it names a plain pid above 1 whose process carries the session's marker in its environment (`NEMO_GYM_PTY_SESSION=<session id>`, set by the session's own `docker exec --env`, which a process can pass only to its own children) and whose parent is outside the container (`PPid` 0 in the container's pid namespace, true of a process the runtime injected and of nothing started inside it, the agent's own children included) and, in PTY mode, leads its session; otherwise `send_signal()` raises `SandboxPtyError` and `close()` leaves the process to the container's removal. A rewritten or relinked file can therefore never aim the root-side `kill` at a process the session did not start. The in-container `kill` lines are spelled for busybox `sh` as well as dash and bash (`kill -INT -<pgid>`), since `sh` is busybox in Alpine-based images. `wait_exit()` returns the program's exit status as `docker exec` reports it. A client that exits without having started the program (the daemon refused the exec: the container is paused or gone, or the daemon is unreachable, told by the client's own stderr with the same lines that make `exec()` return `error_type="sandbox"`) ends the session with `SandboxPtyError` from `wait_exit()` and `read()` instead of reporting the client's exit code as the program's, so `sandbox.pty.exec()` raises where `sandbox.exec()` returns the runtime sentinel; in PTY mode the client's own stderr is kept apart from the terminal's output for that, in pipe mode it is the program's stderr too and is classified as `exec()` classifies its stderr.
+### How a session runs
 
-Sessions live in the Gym process, not in the sandbox: there is no re-attach by id from another process (`SupportsSandboxPtyAttach` is not implemented), and `pty.exec(detach=True)` runs attached, since there is no proxied connection to spare between polls. `send_signal()` and `close()` rely on the container's own pid namespace (`PPid` 0 marks the runtime's execs), so a container that shares the host's (`--pid=host` through `extra_run_args`) cannot be signalled or cleaned up through them, and neither can a session whose program changes its user or `exec`s a setuid program (`su`, `sudo -i`): its environment is no longer readable by the session's user, so `send_signal()` raises and `close()` leaves the process to the container's removal. A record the session's user has made unusable (rewritten, relinked, or replaced by something that is not a regular file) is refused, not waited on: `send_signal()` raises within the two-second wait and `close()` only removes the record. The pid record needs a writable `/tmp` or `/dev/shm`: under `read_only: true` without a tmpfs on `/tmp` it goes to `/dev/shm` (a file on the host's `/dev/shm` under `--ipc=host`), and a container with neither (`--ipc=none` as well) cannot host a PTY session; it ends at once with the launcher's message. Session clients are long-lived and are not counted against `exec.concurrency`. Stopping the sandbox releases its sessions before `docker rm -f`; `aclose()` on the provider closes any still open.
+- In PTY mode (the default), each session is one `docker exec -i -t` client running under a host pseudo-terminal of
+  its own. The CLI sees a
+  terminal, allocates one in the container and forwards bytes both ways; the session reads and writes the host
+  terminal's master side.
+- `rows` and `cols` size the host terminal before the client starts, and the CLI applies that size to the container's
+  terminal when the exec starts, so a program that reads its size at once sees the requested one. `resize()` changes
+  the host terminal's size and sends the client `SIGWINCH`, which the CLI turns into a resize of the container's
+  terminal.
+- `cwd`, `env` and `user` map to `-w`, `--env` and `--user`, as for `exec()`.
+- `pty=False` runs the client on plain pipes: `read()` returns stdout and `read_stderr()` stderr.
+- With no command, `create()` starts a shell: `bash` when the image has it, else `sh`.
+- `wait_exit()` returns the program's exit status as `docker exec` reports it.
+- Session clients are long-lived and are not counted against `exec.concurrency`. Stopping the sandbox releases its
+  sessions before `docker rm -f`, and `aclose()` on the provider closes any still open.
+
+### The pid record
+
+A one-line launcher records the program's pid, then `exec`s the program. `send_signal()` and `close()` reach the process
+through that pid.
+
+- The record goes to `/tmp/.nemo-gym-pty-<session id>.pid`, or to `/dev/shm/.nemo-gym-pty-<session id>.pid` when `/tmp`
+  refuses the write (a container with `read_only: true` and no tmpfs on `/tmp`). `/dev/shm` is a writable tmpfs in every
+  container that does not run with `--ipc=none`; under `--ipc=host` it is the host's `/dev/shm`.
+- A session whose pid can be recorded in neither place could be neither signalled nor cleaned up, so the launcher does not start
+  it. It prints `nemo-gym: cannot record the pid of this PTY session in ...` on stderr (the terminal in PTY mode) and
+  exits 1, and the session ends at once with that message. `create_pty()` itself returns as soon as the client is
+  spawned, without a round trip.
+- `send_signal()` and `close()` read the record the first time they need it, waiting up to two seconds for the launcher
+  to write it: a call made right after `create_pty()` uses a second `docker exec` that races the session's own to the
+  daemon.
+
+### Signals and close
+
+- `send_signal()` takes `"SIGINT"`, `"SIGTERM"`, `"SIGKILL"`, `"SIGQUIT"` or `"SIGHUP"` and runs `kill` as root through
+  a second `docker exec`.
+  - In PTY mode it signals the foreground process group of the session's terminal (read from `/proc/<pid>/stat`), which
+    is what a key press would reach: the program of a command session, or the job an interactive shell is running (the
+    idle shell itself when there is none). A shell with job control runs each job in its own process group, so a signal
+    to the shell's group would never reach the running command.
+  - In pipe mode, which has no terminal, it signals the process's own group, then the process.
+- A docker client that goes away does not end the process it started, so `close()` of a live session ends it through one
+  more exec: `SIGHUP` to the recorded process's group, up to one second for a shell to relay the hangup to its jobs
+  (under job control, an interactive shell's foreground and background jobs sit in process groups of their own, which
+  a signal to the shell's group never reaches), then `SIGKILL` to every
+  process still in the recorded process's session. Both pid paths are removed with it. `close()` of a session whose
+  process already exited only removes them.
+- The in-container `kill` lines work in busybox `sh` (Alpine-based images) as well as dash and bash
+  (`kill -INT -<pgid>`).
+
+<Accordion title="How the pid record is protected against tampering">
+
+The session's own user writes the pid file and can rewrite it, or replace it with a link to a file it does not own (in a
+world-writable `/tmp` a hard link keeps the linked inode's owner). So neither the file's content nor its owner is
+trusted as such:
+
+- It is read once, as the session's own user, at most 32 bytes, under a timeout of its own: `PID_READ_TIMEOUT_S`
+  (30 seconds), or `exec.default_timeout_s` when that is shorter. A path that is not a regular file (a FIFO, or a link
+  to a device) is refused at once rather than opened, and the file is tested again on its opened descriptor, so swapping the path
+  after the test cannot hand the read something that blocks.
+- The read runs as the session's user because `/proc/<pid>/environ` is readable by the process's own uid but not by a
+  root without `CAP_SYS_PTRACE`, which Docker's default capability set does not grant, so a root-side read would fail
+  for every non-root session. The `kill` and the cleanup run as root
+  and need no added capability.
+- The pid is followed only when it is a plain pid above 1 whose process:
+  - carries the session's marker, `NEMO_GYM_PTY_SESSION=<session id>`, in its environment (set by the session's own
+    `docker exec --env`, which a process can pass only to its own children);
+  - has its parent outside the container (`PPid` 0 in the container's pid namespace, true of a process the runtime
+    injected and of nothing started inside it, the agent's own children included);
+  - and, in PTY mode, leads its session.
+
+  Otherwise `send_signal()` raises `SandboxPtyError` and `close()` leaves the process to the container's removal.
+- A rewritten or relinked record can therefore never aim the root-side `kill` at a process the session did not start.
+  The session's user can make its record useless, but cannot make `send_signal()` or `close()` wait on it past the
+  two-second wait: a record that is not a regular file is refused at once, and any other unusable record (rewritten,
+  relinked, emptied or removed) is refused by the end of that wait, so `send_signal()` raises and `close()` only
+  removes the record.
+
+</Accordion>
+
+### Errors
+
+When the daemon refuses the exec (the container is paused or gone, or the daemon is unreachable), the client exits
+without starting the program. Gym tells this from the client's stderr, using the same lines that make `exec()` return
+`error_type="sandbox"`, and ends the session with `SandboxPtyError` from `wait_exit()` and `read()` instead of
+reporting the client's exit code as the program's. So `sandbox.pty.exec()` raises where `sandbox.exec()` returns the
+runtime sentinel. In PTY mode the client's own stderr is kept apart from the terminal output for this; in pipe mode it
+is the program's stderr too, and is classified as `exec()` classifies its stderr.
+
+### Limitations
+
+- **No re-attach.** Sessions live in the Gym process, not in the sandbox, so another process cannot re-attach by id
+  (`SupportsSandboxPtyAttach` is not implemented).
+- **`detach=True` runs attached.** `pty.exec(detach=True)` stays attached, since there is no proxied connection to
+  spare between polls.
+- **Host pid namespace.** `send_signal()` and `close()` rely on the container's own pid namespace (`PPid` 0 marks the
+  runtime's execs), so a container that shares the host's (`--pid=host` through `extra_run_args`) cannot be signalled
+  or cleaned up through them.
+- **Programs that change user.** A session whose program changes its user or `exec`s a setuid program (`su`,
+  `sudo -i`) has an environment the session's user can no longer read, so `send_signal()` raises and `close()` leaves
+  the process to the container's removal.
+- **No writable `/tmp` or `/dev/shm`.** A container with neither (`read_only: true` without a tmpfs on `/tmp`, and
+  `--ipc=none`) cannot host a PTY session; it ends at once with the launcher's message.
 
 ## Isolation and Security
 
