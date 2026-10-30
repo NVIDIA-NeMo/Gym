@@ -23,6 +23,7 @@ def pytest_addoption(parser):
     For now:
         --cpu: use CPU during testing (DEFAULT: GPU)
         --use_local_test_data: use local test data/skip downloading from URL/GitHub (DEFAULT: False)
+        --with_evalrdl_sdk: run the tests that need the real EvalRDL SDK (DEFAULT: False)
     """
     parser.addoption(
         "--cpu", action="store_true", help="pass that argument to use CPU during testing (DEFAULT: False = GPU)"
@@ -31,6 +32,11 @@ def pytest_addoption(parser):
         "--with_downloads",
         action="store_true",
         help="pass this argument to active tests which download models from the cloud.",
+    )
+    parser.addoption(
+        "--with_evalrdl_sdk",
+        action="store_true",
+        help="pass this argument to run tests that install the real EvalRDL SDK (needs your organization's package index).",
     )
 
 
@@ -62,6 +68,14 @@ def downloads_weights(request, device):
 
 
 @pytest.fixture(autouse=True)
+def evalrdl_sdk_tests(request):
+    """Fixture to skip the tests that need the real EvalRDL SDK unless --with_evalrdl_sdk is passed"""
+    if request.node.get_closest_marker("with_evalrdl_sdk"):
+        if not request.config.getoption("--with_evalrdl_sdk"):
+            pytest.skip("To run this test, pass --with_evalrdl_sdk. It installs the real EvalRDL SDK.")
+
+
+@pytest.fixture(autouse=True)
 def reset_env_vars():
     """Reset environment variables"""
     # Store the original environment variables before the test
@@ -89,4 +103,8 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "with_downloads: runs the test using data present in tests/.data",
+    )
+    config.addinivalue_line(
+        "markers",
+        "with_evalrdl_sdk: runs the test against the real EvalRDL SDK; skipped unless --with_evalrdl_sdk is passed",
     )

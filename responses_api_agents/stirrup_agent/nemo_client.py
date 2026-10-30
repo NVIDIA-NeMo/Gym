@@ -65,7 +65,7 @@ from responses_api_agents.stirrup_agent.stirrup_utils import to_provider_openai_
 
 
 if TYPE_CHECKING:
-    from nemo_gym.openai_utils import NeMoGymChatCompletionMessageParam
+    from nemo_gym.core import NeMoGymChatCompletionMessageParam
 
 
 LOGGER = logging.getLogger(__name__)

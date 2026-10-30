@@ -6,35 +6,46 @@
 from typing import Any
 
 from fastapi import FastAPI
+from pydantic import ConfigDict, PositiveFloat
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from nemo_gym.episode_types import (
-    EpisodeId,
-)
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.single_agent_turn_types import (
+from nemo_gym.core import (
+    EpisodeId,
+    maybe_rollout_id_from_run_body,
+)
+from nemo_gym.server_runtime import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
 )
 from nemo_gym.task_materialization import materialize_task
+from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+class SingleAgentTurnLegacyEnvironmentServerConfig(SingleAgentTurnEnvironmentServerConfig):
+    """Keep the migrated relay's timeout defaults for flat-row episodes."""
+
+    # Existing callers can still pass a typed SingleAgentTurnEnvironmentServerConfig, including its explicit limits.
+    model_config = ConfigDict(from_attributes=True)
+
+    default_episode_timeout_seconds: PositiveFloat | None = 21600
+    cleanup_timeout_seconds: PositiveFloat = 180
 
 
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
-    config: SingleAgentTurnEnvironmentServerConfig
+    config: SingleAgentTurnLegacyEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -54,12 +65,12 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return self._legacy_result(response)
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
-        task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
+        task_source = row.get(TASK_SOURCE_KEY_NAME, self.resources_server_name)
         if not isinstance(task_source, str) or not task_source:
             raise ValueError("task_source must be a non-empty string when provided")
         # Collation sets task_source to the instance that declares the dataset: usually the agent,
         # sometimes the Resources Server, and possibly this Environment Server.
-        bound = (self.config.resources_server.name, self.config.agent_server.name, self.config.name)
+        bound = (self.resources_server_name, self.config.agent_server.name, self.config.name)
         if task_source not in bound:
             raise ValueError(
                 f"Row task_source {task_source!r} names none of this Environment Server's instances: {list(bound)}"
@@ -101,6 +112,10 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
                 failure[NG_AGENT_OBSERVATIONS_KEY] = response.failure.agent_observations.model_dump(mode="json")
             if response.failure.trajectory is not None:
                 failure[NG_TRAJECTORY_KEY] = response.failure.trajectory.model_dump(mode="json")
+            if response.failure.verifier_invocations is not None:
+                failure[NG_VERIFIER_INVOCATIONS_KEY] = [
+                    invocation.model_dump(mode="json") for invocation in response.failure.verifier_invocations
+                ]
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")

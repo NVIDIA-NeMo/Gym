@@ -32,8 +32,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
@@ -41,8 +43,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.browsecomp_agent.app import (
     BrowsecompAgent,
     BrowsecompAgentConfig,

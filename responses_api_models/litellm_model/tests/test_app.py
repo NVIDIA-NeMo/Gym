@@ -21,12 +21,9 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from responses_api_models.litellm_model.app import (
     LiteLLMModelServer,
     LiteLLMModelServerConfig,

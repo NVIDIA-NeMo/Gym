@@ -33,45 +33,50 @@ from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
-from nemo_gym._checkpoint.control import CheckpointRequest
-from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
-from nemo_gym._checkpoint.model import PolicyModelParticipant, generation_cut_requester
-from nemo_gym.openai_utils import (
-    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
-    NeMoGymAsyncOpenAI,
+from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
+from nemo_gym.core import (
     NeMoGymChatCompletion,
-    NeMoGymChatCompletionAssistantMessageForTrainingParam,
-    NeMoGymChatCompletionAssistantMessageParam,
-    NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageForTraining,
+    NeMoGymChoice,
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInput,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
+    rollout_context,
+)
+from nemo_gym.core.responses_api_types import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    NeMoGymChatCompletionAssistantMessageForTrainingParam,
+    NeMoGymChatCompletionAssistantMessageParam,
+    NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionToolMessageParam,
     NeMoGymChatCompletionUserMessageParam,
-    NeMoGymChoice,
-    NeMoGymEasyInputMessage,
     NeMoGymFunction,
-    NeMoGymFunctionCallOutput,
     NeMoGymFunctionToolParam,
-    NeMoGymMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseInput,
     NeMoGymResponseInputText,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
-    NeMoGymResponseReasoningItem,
-    NeMoGymSummary,
-    PermanentEndpointError,
 )
+from nemo_gym.models._checkpoint import PolicyModelParticipant, generation_cut_requester
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
+from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
+from nemo_gym.server_runtime._checkpoint.generation_cut import (
+    GenerationCutInventory,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
@@ -853,7 +858,7 @@ class TestApp:
 
         get_global_config_dict_mock = MagicMock()
         get_global_config_dict_mock.return_value = dict()
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
 
         global_config = {}
         if external_staging_backend is not None:
@@ -1364,11 +1369,18 @@ class TestApp:
             else:
                 assert response.json()["choices"][0]["finish_reason"] == finish_reason
 
-    async def test_provider_abort_skips_scoring_and_can_be_retried(self, monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize(
+        "max_model_retries,abort_count",
+        [(None, 1), (None, 3), (0, 1)],
+        ids=["agent-recovers", "agent-exhausts-retries", "agent-retries-disabled"],
+    )
+    async def test_provider_abort_skips_scoring_and_can_be_retried(
+        self, monkeypatch: MonkeyPatch, max_model_retries: int | None, abort_count: int
+    ) -> None:
         model = self._setup_server(monkeypatch)
         provider = MagicMock(spec=NeMoGymAsyncOpenAI)
         provider.create_chat_completion = AsyncMock(
-            side_effect=[self._provider_reply("abort"), self._provider_reply("stop")]
+            side_effect=[self._provider_reply("abort") for _ in range(abort_count)] + [self._provider_reply("stop")]
         )
         model._clients = [provider]
         model_app = model.setup_webserver()
@@ -1386,6 +1398,8 @@ class TestApp:
             ),
             server_client=transport,
         )
+        if max_model_retries is not None:
+            agent.config.max_model_retries = max_model_retries
         request = MagicMock(cookies={}, path_params={}, headers={})
         verify = AsyncMock()
 
@@ -1401,6 +1415,7 @@ class TestApp:
 
         async def post(*, server_name, url_path, json, cookies, headers=None):
             if server_name == "model":
+                verify.assert_not_awaited()
                 result = model_client.post(url_path, json=json.model_dump(exclude_none=True))
                 return reply(result.json(), result.status_code)
             if url_path == "/seed_session":
@@ -1418,23 +1433,25 @@ class TestApp:
                 input=[{"role": "user", "content": "hi"}], max_output_tokens=4096
             )
         )
-        with raises(ClientResponseError) as error:
-            await agent.run(request, body)
-        verify.assert_not_awaited()
-        failure = _agent_request_failure_row(error.value, error.value.status)
-        assert "provider_cancelled" in failure["_ng_failure_response_body"]
-        assert "abort" in failure["_ng_failure_response_body"]
-        assert "reward" not in failure and "response" not in failure
-        assert not is_terminal_failure(failure)
+        if abort_count > agent.config.max_model_retries:
+            with raises(ClientResponseError) as error:
+                await agent.run(request, body)
+            verify.assert_not_awaited()
+            assert provider.create_chat_completion.await_count == agent.config.max_model_retries + 1
+            failure = _agent_request_failure_row(error.value, error.value.status)
+            assert "provider_cancelled" in failure["_ng_failure_response_body"]
+            assert "abort" in failure["_ng_failure_response_body"]
+            assert "reward" not in failure and "response" not in failure
+            assert not is_terminal_failure(failure)
 
-        # Resuming the same task makes a fresh generation; only that successful
-        # response is sent to the verifier and can become a scored result.
+        # Recovery happens within the agent retry budget, or in a fresh rollout
+        # after that budget is exhausted. Only the successful response is scored.
         result = await agent.run(request, body)
         verify.assert_awaited_once()
         assert result.response.status == "completed"
         assert result.response.incomplete_details is None
         assert result.reward == 1.0
-        assert provider.create_chat_completion.await_count == 2
+        assert provider.create_chat_completion.await_count == abort_count + 1
 
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
@@ -4985,6 +5002,9 @@ class TestAudioDataSplice:
 
 import base64 as _b64  # noqa: E402  (kept local to the audio_path tests)
 
+import nemo_gym.client.http_client
+import nemo_gym.client.server_client
+
 
 _AUDIO_BYTES = b"RIFF" + b"\x00" * 8 + b"WAVEfmt "  # not a valid WAV — splice doesn't decode
 
@@ -5259,7 +5279,8 @@ async def test_a_budget_larger_than_the_named_window_is_an_invalid_parameter(
 ) -> None:
     """No prompt fits a budget larger than the whole window the engine names, so the budget is at fault. The budget
     is the one the engine received: chat reads max_completion_tokens first, and completions passes max_tokens."""
-    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
     model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
     model.config.propagate_context_overflow_errors = propagate
     error = ClientResponseError(MagicMock(), (), status=400, message="backend request failed")
@@ -5349,7 +5370,8 @@ async def test_backend_context_overflow_handling(
     error_content: str,
     expect_length: bool,
 ) -> None:
-    monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", MagicMock(return_value={}))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", MagicMock(return_value={}))
     model = _make_completions_backend_model() if use_completions_api else TestApp()._setup_server(monkeypatch)
     model.config.propagate_context_overflow_errors = propagate
     error = ClientResponseError(MagicMock(), (), status=status, message="backend request failed")
@@ -7078,9 +7100,9 @@ async def test_generation_cut_reaches_each_owning_backend(
     async def fake_get_response_json(response: SimpleNamespace) -> dict[str, Any]:
         return response.payload
 
-    monkeypatch.setattr("nemo_gym.server_utils.request", fake_request)
-    monkeypatch.setattr("nemo_gym.server_utils.raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr("nemo_gym.server_utils.get_response_json", fake_get_response_json)
+    monkeypatch.setattr("nemo_gym.client.http_client.request", fake_request)
+    monkeypatch.setattr("nemo_gym.client.http_client.raise_for_status", fake_raise_for_status)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_response_json", fake_get_response_json)
 
     await participant.close_admission(CheckpointRequest(checkpoint_id="checkpoint-1", deadline_ts=time.time() + 5))
 
@@ -7111,7 +7133,7 @@ class TestPrefixSupply:
             supply_prefix_token_ids=enabled,
         )
         get_global_config_dict_mock = MagicMock(return_value={})
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
+        monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", get_global_config_dict_mock)
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     @staticmethod
@@ -7862,6 +7884,497 @@ def test_a_backend_without_a_control_url_fails_its_cut_instead_of_guessing_a_roo
     assert model.generation_cut_control_root("http://worker-0:8000/v1") == "http://control-0:9000"
     with raises(ValueError, match="no generation_cut_control_url is configured for backend http://worker-9:8000/v1"):
         model.generation_cut_control_root("http://worker-9:8000/v1")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Codex CLI requests on the chat-backed Responses path
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestCodexRequests:
+    """Options that let the chat-backed Responses path serve the Codex CLI's requests as sent."""
+
+    REASONING_TEXT = "Look at the failing test before editing."
+    SHELL_TOOL = {
+        "type": "function",
+        "name": "shell_command",
+        "description": "Run a shell command.",
+        "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        "strict": False,
+    }
+    APPLY_PATCH_TOOL = {
+        "type": "custom",
+        "name": "apply_patch",
+        "description": "Use the `apply_patch` tool to edit files.",
+        "format": {"type": "grammar", "syntax": "lark", "definition": "start: begin_patch hunk+ end_patch"},
+    }
+    # What a Codex deployment against a chat backend turns on for its request fields.
+    CODEX_FIELDS = {"drop_unrepresentable_request_fields": True, "forward_unvalidated_reasoning_effort": True}
+
+    @staticmethod
+    def _server(**overrides: Any) -> tuple[VLLMModel, MagicMock]:
+        settings = dict(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://vllm.test/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="served-model",
+            entrypoint="",
+            name="policy",
+            return_token_id_information=False,
+            uses_reasoning_parser=True,
+            reasoning_field="both",
+        )
+        config = VLLMModelConfig(**{**settings, **overrides})
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._clients = [client]
+        return server, client
+
+    @staticmethod
+    def _completion(message: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "served-model",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 5, "total_tokens": 16},
+        }
+
+    @classmethod
+    def _codex_body(cls, input_items: list[dict[str, Any]]) -> dict[str, Any]:
+        """A streaming request shaped like the ones the Codex CLI sends, effort max and reasoning context on."""
+        return {
+            "model": "codex-model",
+            "instructions": "You are Codex.",
+            "input": input_items,
+            "tools": [cls.SHELL_TOOL, cls.APPLY_PATCH_TOOL],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "reasoning": {"effort": "max", "summary": "auto", "context": "all_turns"},
+            "store": False,
+            "stream": True,
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "019a-thread",
+            "text": {"verbosity": "low"},
+            "client_metadata": {"x-codex-turn": "1"},
+        }
+
+    @staticmethod
+    def _events(text: str) -> list[dict[str, Any]]:
+        return [json.loads(line[len("data: ") :]) for line in text.splitlines() if line.startswith("data: ")]
+
+    USER = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the test"}]}
+
+    def test_forward_unvalidated_reasoning_effort_requires_the_chat_path(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(forward_unvalidated_reasoning_effort=True, is_responses_native=True)
+        # /v1/completions has no reasoning_effort, so the forwarded effort would be dropped silently.
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(forward_unvalidated_reasoning_effort=True, use_completions_api=True)
+        default, _ = self._server()
+        assert not default.config.forward_unvalidated_reasoning_effort
+
+    def test_codex_turns_convert_to_the_expected_chat_requests(self) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True)
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "shell_command", "arguments": '{"command":"ls"}'},
+        }
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion(
+                {"role": "assistant", "content": None, "reasoning": self.REASONING_TEXT, "tool_calls": [call]}
+            )
+        )
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        assert first.status_code == 200
+        events = self._events(first.text)
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        reasoning_item, call_item = (event["item"] for event in events[1:3])
+        assert reasoning_item["type"] == "reasoning"
+        assert reasoning_item["summary"] == [{"type": "summary_text", "text": self.REASONING_TEXT}]
+        assert reasoning_item["encrypted_content"] is None
+        assert call_item["type"] == "function_call"
+        expected_request = {
+            "model": "served-model",
+            "messages": [
+                {"role": "system", "content": "You are Codex."},
+                {"role": "user", "content": [{"type": "text", "text": "fix the test"}]},
+            ],
+            # The custom apply_patch tool is dropped by drop_custom_tools.
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "shell_command",
+                        "description": "Run a shell command.",
+                        "parameters": self.SHELL_TOOL["parameters"],
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": True,
+            "reasoning_effort": "max",
+            "store": False,
+            "prompt_cache_key": "019a-thread",
+            "verbosity": "low",
+        }
+        assert client.create_chat_completion.await_args.kwargs == expected_request
+
+        # Codex replays the reasoning item it received (summary only) with the call and its output.
+        # The reasoning reaches the engine on the assistant turn that made the call.
+        output = {"type": "function_call_output", "call_id": "call_1", "output": "a.py"}
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "Fixed.", "reasoning": "Done."})
+        )
+
+        second = TestClient(app).post(
+            "/v1/responses", json=self._codex_body([self.USER, reasoning_item, call_item, output])
+        )
+
+        assert second.status_code == 200
+        assert self._events(second.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs == {
+            **expected_request,
+            "messages": [
+                *expected_request["messages"],
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": self.REASONING_TEXT,
+                    "reasoning": self.REASONING_TEXT,
+                    "tool_calls": [call],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "a.py"},
+            ],
+        }
+
+    def test_slow_codex_turn_streams_keepalives_until_the_completion_returns(self) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, drop_custom_tools=True, stream_keepalive_s=0.02)
+
+        async def slow_completion(**_: Any) -> dict[str, Any]:
+            await asyncio.sleep(0.3)
+            return self._completion({"role": "assistant", "content": "Fixed.", "reasoning": "Long thought."})
+
+        client.create_chat_completion = AsyncMock(side_effect=slow_completion)
+
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        assert response.status_code == 200
+        types = [event["type"] for event in self._events(response.text)]
+        assert types[:2] == ["response.created", "response.in_progress"]
+        assert types.count("response.in_progress") >= 2
+        assert types.count("response.created") == 1
+        assert types[-3:] == ["response.output_item.done", "response.output_item.done", "response.completed"]
+        assert client.create_chat_completion.await_args.kwargs["reasoning_effort"] == "max"
+        events = self._events(response.text)
+        assert {event["response"]["id"] for event in events if "response" in event} == {events[0]["response"]["id"]}
+
+    def test_keepalive_streams_are_refused_on_the_native_responses_path(self) -> None:
+        # vLLM issues the native path's response ids, which a keepalive stream cannot announce in advance.
+        server, _ = self._server(is_responses_native=True, stream_keepalive_s=0.02)
+        with raises(ValueError, match="stream_keepalive_s"):
+            server.setup_webserver()
+
+    def test_non_streaming_request_forwards_the_effort_too(self) -> None:
+        server, client = self._server(forward_unvalidated_reasoning_effort=True)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "ok", "reasoning": "r"})
+        )
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "hi", "reasoning": {"effort": "max"}}
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "completed"
+        assert client.create_chat_completion.await_args.kwargs["reasoning_effort"] == "max"
+
+    @mark.parametrize(
+        "overrides, reasoning, include, expected",
+        [
+            # Defaults are unchanged: the SDK enum rejects "max", and the conversion refuses the rest.
+            ({}, {"effort": "max"}, None, 422),
+            ({}, {"effort": "high"}, ["reasoning.encrypted_content"], "failed"),
+            ({}, {"effort": "high", "summary": "auto"}, None, "failed"),
+            ({}, {"effort": "high", "context": "all_turns"}, None, "failed"),
+            # Each option relaxes only its own fields.
+            ({"forward_unvalidated_reasoning_effort": True}, {"effort": "max"}, None, "max"),
+            (
+                {"forward_unvalidated_reasoning_effort": True},
+                {"effort": "max"},
+                ["reasoning.encrypted_content"],
+                "failed",
+            ),
+            ({"forward_unvalidated_reasoning_effort": True}, {"effort": ""}, None, 422),
+            (
+                {"drop_unrepresentable_request_fields": True},
+                {"effort": "high"},
+                ["reasoning.encrypted_content"],
+                "high",
+            ),
+            ({"drop_unrepresentable_request_fields": True}, {"effort": "max"}, ["reasoning.encrypted_content"], 422),
+            (
+                {"drop_unrepresentable_request_fields": True},
+                {"effort": "high", "summary": "auto", "context": "all_turns"},
+                None,
+                "high",
+            ),
+            (
+                {"drop_unrepresentable_request_fields": True},
+                {"effort": "high", "context": "current_turn"},
+                None,
+                "failed",
+            ),
+            # Efforts the SDK lists keep their existing path, "none" included.
+            (CODEX_FIELDS, {"effort": "none", "summary": "auto"}, None, "none"),
+            (CODEX_FIELDS, {"effort": "xhigh"}, ["reasoning.encrypted_content"], "xhigh"),
+            (
+                CODEX_FIELDS,
+                {"effort": "max", "summary": "auto", "context": "all_turns"},
+                ["reasoning.encrypted_content"],
+                "max",
+            ),
+        ],
+    )
+    def test_each_option_is_opt_in(
+        self, overrides: dict[str, Any], reasoning: dict[str, Any], include: Any, expected: Union[int, str]
+    ) -> None:
+        server, client = self._server(**overrides)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "ok", "reasoning": "r"})
+        )
+        body = {"stream": True, "input": "hi", "reasoning": reasoning}
+        if include is not None:
+            body["include"] = include
+
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json=body)
+
+        if isinstance(expected, int):
+            assert response.status_code == expected
+            client.create_chat_completion.assert_not_awaited()
+            return
+        assert response.status_code == 200
+        terminal = self._events(response.text)[-1]
+        if expected == "failed":
+            assert terminal["type"] == "response.failed"
+            client.create_chat_completion.assert_not_awaited()
+        else:
+            assert terminal["type"] == "response.completed"
+            assert client.create_chat_completion.await_args.kwargs["reasoning_effort"] == expected
+
+    PATCH = "*** Begin Patch\n*** Update File: a.py\n@@\n-x = 1\n+x = 2\n*** End Patch\n"
+    PATCH_OUTPUT = "Success. Updated the following files:\nM a.py\n"
+
+    @classmethod
+    def _apply_patch_completion(cls) -> dict[str, Any]:
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "apply_patch", "arguments": json.dumps({"input": cls.PATCH})},
+        }
+        return cls._completion(
+            {"role": "assistant", "content": None, "reasoning": cls.REASONING_TEXT, "tool_calls": [call]}
+        )
+
+    def test_codex_apply_patch_round_trips_through_the_function_bridge(self) -> None:
+        # The configuration a Codex deployment uses: the request-field options and main's function
+        # bridge for apply_patch. drop_custom_tools stays off, because it would drop the tool first.
+        server, client = self._server(**self.CODEX_FIELDS, custom_tool_strategy="function_bridge")
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        assert first.status_code == 200
+        events = self._events(first.text)
+        assert [event["type"] for event in events] == [
+            "response.created",
+            "response.output_item.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        reasoning_item, call_item = (event["item"] for event in events[1:3])
+        assert reasoning_item["type"] == "reasoning"
+        assert call_item == {
+            "type": "custom_tool_call",
+            "call_id": "call_1",
+            "id": "call_1",
+            "name": "apply_patch",
+            "input": self.PATCH,
+            "namespace": None,
+            "status": "completed",
+        }
+        assert events[-1]["response"]["output"] == [reasoning_item, call_item]
+        sent_tools = client.create_chat_completion.await_args.kwargs["tools"]
+        assert sent_tools[1] == {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "The raw text payload of this free-form tool."}
+                    },
+                    "required": ["input"],
+                },
+            },
+        }
+        assert sent_tools[0]["function"]["name"] == "shell_command"
+
+        # Codex replays the reasoning, the custom tool call and its output on the next turn.
+        output = {"type": "custom_tool_call_output", "call_id": "call_1", "output": self.PATCH_OUTPUT}
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "Fixed.", "reasoning": "Done."})
+        )
+
+        second = TestClient(app).post(
+            "/v1/responses", json=self._codex_body([self.USER, reasoning_item, call_item, output])
+        )
+
+        assert second.status_code == 200
+        assert self._events(second.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"] == [
+            {"role": "system", "content": "You are Codex."},
+            {"role": "user", "content": [{"type": "text", "text": "fix the test"}]},
+            {
+                # The prior reasoning reaches the engine on the turn that made the call.
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": self.REASONING_TEXT,
+                "reasoning": self.REASONING_TEXT,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "apply_patch", "arguments": json.dumps({"input": self.PATCH})},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": self.PATCH_OUTPUT},
+        ]
+
+    def test_non_streaming_response_carries_the_custom_tool_call(self) -> None:
+        server, client = self._server(custom_tool_strategy="function_bridge")
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"input": "fix the test", "tools": [self.APPLY_PATCH_TOOL]}
+        )
+
+        assert response.status_code == 200
+        output = response.json()["output"]
+        assert [item["type"] for item in output] == ["reasoning", "custom_tool_call"]
+        assert (output[1]["call_id"], output[1]["name"], output[1]["input"]) == ("call_1", "apply_patch", self.PATCH)
+        # The response echoes the custom tool as the client sent it.
+        assert [(tool["type"], tool["name"]) for tool in response.json()["tools"]] == [("custom", "apply_patch")]
+        sent_tool = client.create_chat_completion.await_args.kwargs["tools"][0]
+        assert (sent_tool["type"], sent_tool["function"]["name"]) == ("function", "apply_patch")
+
+    def test_custom_tools_are_unchanged_without_the_conversion(self) -> None:
+        server, client = self._server(**self.CODEX_FIELDS)
+        client.create_chat_completion = AsyncMock(return_value=self._apply_patch_completion())
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+
+        # The custom tool is forwarded as a Chat Completions custom tool, and the call stays a function call.
+        assert client.create_chat_completion.await_args.kwargs["tools"][1] == {
+            "type": "custom",
+            "custom": {
+                "name": "apply_patch",
+                "description": "Use the `apply_patch` tool to edit files.",
+                "format": {
+                    "type": "grammar",
+                    "grammar": {"syntax": "lark", "definition": "start: begin_patch hunk+ end_patch"},
+                },
+            },
+        }
+        assert self._events(first.text)[2]["item"]["type"] == "function_call"
+
+        # A replayed custom tool call has no chat representation.
+        client.create_chat_completion.reset_mock()
+        call_item = {"type": "custom_tool_call", "call_id": "call_1", "name": "apply_patch", "input": self.PATCH}
+        output = {"type": "custom_tool_call_output", "call_id": "call_1", "output": self.PATCH_OUTPUT}
+        second = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER, call_item, output]))
+
+        assert second.status_code == 200
+        assert self._events(second.text)[-1]["type"] == "response.failed"
+        client.create_chat_completion.assert_not_awaited()
+
+    VIEW_IMAGE_CALL = {
+        "type": "function_call",
+        "call_id": "call_img",
+        "name": "view_image",
+        "arguments": json.dumps({"path": "/app/work/plot.png"}),
+    }
+    PNG_URL = "data:image/png;base64,iVBORw0KGgo="
+    # As the Codex CLI sends it: the image alone, with detail "high".
+    VIEW_IMAGE_OUTPUT = {
+        "type": "function_call_output",
+        "call_id": "call_img",
+        "output": [{"type": "input_image", "image_url": PNG_URL, "detail": "high"}],
+    }
+
+    def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(inline_tool_output_images=True, is_responses_native=True)
+
+    @mark.parametrize(
+        ("overrides", "content"),
+        [
+            (
+                {"inline_tool_output_images": True},
+                [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}],
+            ),
+            # Without it, drop_unrepresentable_request_fields puts its placeholder in the image's place.
+            ({}, [{"type": "text", "text": "[image omitted from tool output]"}]),
+        ],
+        ids=["inline", "placeholder"],
+    )
+    def test_codex_view_image_output_reaches_the_engine(
+        self, overrides: dict[str, Any], content: list[dict[str, Any]]
+    ) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, **overrides)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "done", "reasoning": "r"})
+        )
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=self._codex_body([self.USER, self.VIEW_IMAGE_CALL, self.VIEW_IMAGE_OUTPUT])
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"][-1] == {
+            "role": "tool",
+            "tool_call_id": "call_img",
+            "content": content,
+        }
+
+    def test_view_image_output_fails_the_turn_by_default(self) -> None:
+        server, client = self._server()
+        client.create_chat_completion = AsyncMock()
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses",
+            json={"stream": True, "input": [self.USER, self.VIEW_IMAGE_CALL, self.VIEW_IMAGE_OUTPUT]},
+        )
+
+        assert response.status_code == 200
+        terminal = self._events(response.text)[-1]
+        assert terminal["type"] == "response.failed"
+        assert "input_image" in terminal["response"]["error"]["message"]
+        client.create_chat_completion.assert_not_awaited()
 
 
 def _custom_tool_config(**overrides: Any) -> VLLMModelConfig:

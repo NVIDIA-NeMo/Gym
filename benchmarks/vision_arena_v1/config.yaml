@@ -52,9 +52,13 @@ responses_create_params:
   max_output_tokens: 16384
   stream: false
 
+# Judge outages go to the failures sidecar, not the score; above this share of expected rollouts the run's
+# health check reports it unhealthy (the score is still published).
+health_check_max_not_final_failure_fraction: 0.05
+
 vision_arena_v1_benchmark_environment_server:
   _inherit_from: vision_arena_v1_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: vision_arena_v1_benchmark_agent

@@ -1,0 +1,32 @@
+config_paths:
+  - resources_servers/genrm_eval/configs/genrm_eval.yaml
+
+genrm_rewardbench2_resources_server:
+  _inherit_from: genrm_eval
+  resources_servers:
+    genrm_eval:
+      scoring_module: benchmarks.genrm_rewardbench2.metrics
+      metric_key: metrics/overall
+      additional_metric_keys: [metrics/subset_coverage]
+
+genrm_rewardbench2_benchmark_agent:
+  _inherit_from: genrm_eval_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: genrm_rewardbench2_resources_server
+      datasets:
+        - name: genrm_rewardbench2
+          type: benchmark
+          jsonl_fpath: benchmarks/genrm_rewardbench2/data/rewardbench2_validation.jsonl
+          prepare_script: benchmarks/genrm_rewardbench2/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: ODC-BY-1.0
+
+genrm_rewardbench2_environment_server:
+  _inherit_from: genrm_eval_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: genrm_rewardbench2_benchmark_agent

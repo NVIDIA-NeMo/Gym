@@ -13,7 +13,7 @@ import pytest
 from fastapi import HTTPException
 
 import resources_servers.genrm_compare.app as genrm
-from nemo_gym.openai_utils import TOKEN_METADATA_FIELDS, NeMoGymResponse
+from nemo_gym.core import TOKEN_METADATA_FIELDS, NeMoGymResponse
 from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import comparison_result, member
 from resources_servers.genrm_compare.utils import extract_from_response_obj

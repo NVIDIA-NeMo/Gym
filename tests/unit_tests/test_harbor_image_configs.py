@@ -43,6 +43,12 @@ MAIN_IMAGE = "harborframework/terminal-bench:ctr-environment-abc@sha256:" + "a" 
 SIDECAR_IMAGE = "harborframework/terminal-bench:ctr-sidecar-api-def@sha256:" + "b" * 64
 
 
+@pytest.fixture(autouse=True)
+def no_real_registry():
+    """Opts out of the conftest fake: this module runs the real ``RegistryClient`` against its own fake HTTP
+    registry (``patch_opener``), so what it checks is how prepare reads and records what a registry answers."""
+
+
 def write_task(
     root: Path,
     name: str,
@@ -1050,7 +1056,8 @@ class TestComposeVariablesAndEnvFile:
     def test_a_missing_env_file_fails_prepare_naming_it(self, tmp_path):
         write_task(tmp_path, "ctr", compose="services:\n  api:\n    image: redis:7\n    env_file: secrets.env\n")
         (task,) = discover_tasks(tmp_path)
-        with pytest.raises(ImageConfigError, match="env_file 'secrets.env' not found"):
+        # Reported at the reading after the merge (a later file could have dropped the entry), by the resolved path.
+        with pytest.raises(ImageConfigError, match=r"env_file '.*/ctr/environment/secrets\.env' not found"):
             load_compose_document(task)
 
     def test_a_task_without_compose_has_no_document(self, tmp_path):
@@ -1426,7 +1433,7 @@ class TestRecordComposeImages:
         assert path == tmp_path / "compose-images.json"
         assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine"]
         assert sorted(skipped) == ["bad-env-file", "bad-required"]
-        assert "env_file 'secrets.env' not found" in skipped["bad-env-file"]
+        assert "environment/secrets.env' not found" in skipped["bad-env-file"]
         assert skipped["bad-required"] == "bad-required: docker-compose.yaml: ${X} is required: need X"
 
     def test_without_a_skipped_map_one_error_names_every_task_that_does_not_resolve(self, tmp_path, monkeypatch):

@@ -18,30 +18,32 @@ access. Cross-UID, unprivileged artifact collection is not supported.
 """
 
 import asyncio
+import logging
 import os
 import signal
 import sys
 import tempfile
 from collections.abc import Callable
-from functools import partial
 from pathlib import Path
 from typing import Literal
 
 from aiohttp import ClientResponse
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
-from nemo_gym.server_utils import (
+from nemo_gym.client import (
     GlobalAIOHTTPAsyncClientConfig,
     request,
     set_global_aiohttp_client,
 )
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunRequest, NOOARunResult
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxInput(BaseModel):
@@ -113,12 +115,11 @@ def _write_json(path: Path, value: BaseModel) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def write_checkpoint(path: Path, result: NOOARunResult) -> None:
-    """Atomically persist serializable evidence without arbitrary return values."""
+def _checkpoint_snapshot(result: NOOARunResult) -> SandboxCheckpoint:
     gap = ObservationGap(
         code="partial_checkpoint", detail="Partial NOOA checkpoint: evidence only, not a terminal or gradable result."
     )
-    checkpoint = SandboxCheckpoint(
+    return SandboxCheckpoint(
         partial=True,
         response=result.episode.response.model_copy(update={"status": "incomplete", "error": None}),
         observations=result.episode.observations.model_copy(update={"gaps": [*result.episode.observations.gaps, gap]}),
@@ -129,8 +130,58 @@ def write_checkpoint(path: Path, result: NOOARunResult) -> None:
         ),
         model_cookies=result.model_cookies,
         resource_cookies=result.resource_cookies,
-    )
-    _write_json(path, checkpoint)
+    ).model_copy(deep=True)
+
+
+def write_checkpoint(path: Path, result: NOOARunResult) -> None:
+    """Atomically persist serializable evidence without arbitrary return values."""
+    _write_json(path, _checkpoint_snapshot(result))
+
+
+async def _join_write(task: asyncio.Task[None]) -> None:
+    # Cancelling to_thread's awaiter does not stop its thread. Wait through even
+    # repeated cancellation before allowing callers to remove artifact files.
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            cancelled = error
+    task.result()
+    if cancelled is not None:
+        raise cancelled
+
+
+class _CheckpointWriter:
+    """Serialize detached snapshots in order, keeping only the latest pending one."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._pending: SandboxCheckpoint | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._closed = False
+
+    def submit(self, result: NOOARunResult) -> None:
+        if self._closed:
+            raise RuntimeError("NOOA checkpoint writer is closed")
+        # Called synchronously on the rollout event loop: projection can share
+        # nested model objects with the live trace, so detach before yielding.
+        self._pending = _checkpoint_snapshot(result)
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._write_pending())
+
+    async def _write_pending(self) -> None:
+        while self._pending is not None:
+            snapshot, self._pending = self._pending, None
+            try:
+                await asyncio.to_thread(_write_json, self._path, snapshot)
+            except Exception:
+                logger.exception("Failed to persist NOOA partial checkpoint")
+
+    async def close(self) -> None:
+        self._closed = True
+        if self._task is not None:
+            await _join_write(self._task)
 
 
 class _ModelClient:
@@ -202,16 +253,21 @@ async def execute(
 
 async def _main(input_path: Path, output_path: Path) -> None:
     payload = SandboxInput.model_validate_json(input_path.read_text())
-    task = asyncio.create_task(
-        execute(payload, on_progress=partial(write_checkpoint, output_path.with_name("checkpoint.json")))
-    )
-    asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, task.cancel)
     client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+    writer = _CheckpointWriter(output_path.with_name("checkpoint.json"))
+    task = asyncio.create_task(execute(payload, on_progress=writer.submit))
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, task.cancel)
     try:
-        result = await task
+        try:
+            result = await task
+        finally:
+            await writer.close()
+        # Final evidence takes precedence only after it has been fully published.
+        await _join_write(asyncio.create_task(asyncio.to_thread(_write_json, output_path, result)))
     finally:
+        loop.remove_signal_handler(signal.SIGTERM)
         await client.close()
-    _write_json(output_path, result)
 
 
 if __name__ == "__main__":

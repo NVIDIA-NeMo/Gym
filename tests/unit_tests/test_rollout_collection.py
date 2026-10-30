@@ -26,6 +26,7 @@ import warnings
 import weakref
 from asyncio import Future
 from collections import Counter, defaultdict
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
@@ -37,26 +38,37 @@ import orjson
 import pytest
 import uvicorn
 import yaml
-from aiohttp import ClientConnectorError, ClientResponseError, ClientSession, ServerDisconnectedError
+from aiohttp import (
+    ClientConnectorError,
+    ClientPayloadError,
+    ClientResponseError,
+    ClientSession,
+    ServerDisconnectedError,
+)
 from anyio import CancelScope
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
 import nemo_gym.batch_status
+import nemo_gym.client.http_client
 import nemo_gym.rollout_collection
 import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.artifacts.rollout_rows import (
+    NG_DISPATCH_DRAINED_KEY,
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    _rollout_for_export,
+)
 from nemo_gym.batch_status import observe_materialized_rows
-from nemo_gym.config_types import (
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.config_types import (
     AmbiguousEnvironmentServerError,
     BaseServerConfig,
     ConfigError,
     ConfigPathNotFoundError,
 )
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -64,10 +76,11 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.health.types import RunHealthLimits
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.path_utils import aggregation_sources_path_for, materialized_path_for
-from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -77,12 +90,9 @@ from nemo_gym.rollout_collection import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_DATASET_DIGEST_KEY,
     NG_DIGEST_KEY,
-    NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
-    NG_FAILURE_CLASS_KEY,
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
-    NG_NO_PERSIST_KEY,
     NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
     NG_RESULT_TYPE_KEY,
@@ -109,7 +119,6 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
     _masking_step_metrics,
     _missing_rollout_rows_counted_as_zero,
-    _rollout_for_export,
     _rollout_order_key,
     _rollout_request_debug_summary,
     _round_robin_by_agent,
@@ -118,21 +127,14 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     loads_jsonl_line,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
-from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
+from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.token_id_capture import (
-    LineageResolution,
-    ParentResolutionStatus,
-    TokenCaptureSnapshot,
-    TokenCaptureStore,
-    TokenEntry,
-    clear_token_captures_for_rollouts,
-    stamp_lineage,
-)
+from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.consumer import clear_token_captures_for_rollouts
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
     TOKEN_CAPTURE_KEY,
@@ -141,6 +143,10 @@ from nemo_gym.token_id_capture.delivery import (
     retire_rollout_token_capture,
     rollout_carries_token_ids,
 )
+from nemo_gym.token_id_capture.protocols import LineageResolution, TokenCaptureSnapshot
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
+from nemo_gym.token_id_capture.store import TokenCaptureStore
+from nemo_gym.utils.path_utils import aggregation_sources_path_for, materialized_path_for
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 
 
@@ -204,6 +210,28 @@ class FakeResponse:
 
     def release(self) -> None:
         self.released = True
+
+    async def read(self) -> bytes:
+        return orjson.dumps(self.payload)
+
+
+def _guarded_replies(replies: list) -> Callable[..., Awaitable]:
+    """A transport side effect that returns `replies` in order and fails the test on any request past them.
+
+    `AsyncMock(side_effect=list)` raises StopAsyncIteration when the list runs out, which the request retry loop
+    treats as a failed attempt and retries, so an unexpected extra request would hang instead of failing.
+    """
+    remaining = list(replies)
+
+    async def send(*_args, **_kwargs):
+        if not remaining:
+            pytest.fail(f"unexpected extra request after {len(replies)} expected")
+        reply = remaining.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply  # As AsyncMock does for an exception in its side_effect list.
+        return reply
+
+    return send
 
 
 def http_error(status: int, message: str = "boom", body: bytes | None = None) -> ClientResponseError:
@@ -1255,7 +1283,7 @@ class TestRolloutCollection:
         assert ng_perf == {"num_turns": 1, "num_tool_calls": 0, "token_observability_coverage": 0.0}
 
     def test_build_ng_perf_dedupes_model_call_claimed_by_two_invocations(self) -> None:
-        # Simulates a join_model_call_observations conflict: the losing invocation keeps an
+        # Simulates a join_agent_model_calls conflict: the losing invocation keeps an
         # unresolved ref pointing at a model_call_id another invocation already claimed. Tokens
         # for that call must be counted once, not twice.
         result = {
@@ -1284,7 +1312,7 @@ class TestRolloutCollection:
 
     def test_ng_perf_matches_model_calls_by_response_id_pair_like_simple_agent(self) -> None:
         # Integration test: simple_agent sets result["ng_trajectory"] directly (see
-        # responses_api_agents/simple_agent/app.py), bypassing join_model_call_observations
+        # responses_api_agents/simple_agent/app.py), bypassing join_agent_model_calls
         # entirely -- so its ModelCallRef is never canonicalized with a model_call_id and only
         # ever carries (model_ref, response_id). Token fields must still populate.
         row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
@@ -1717,8 +1745,8 @@ class TestRolloutCollection:
             else ServerDisconnectedError()
         )
         transport.request = AsyncMock(side_effect=[failure, FakeResponse(200, {"reward": 1})])
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
-        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", AsyncMock())
         run = RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests)
         if retry_requests or connection_refused:
             _, result = await next(run)
@@ -1730,6 +1758,106 @@ class TestRolloutCollection:
         for call in transport.request.call_args_list:
             assert call.kwargs["url"] == "http://agent:1234/run"
             assert "_resend_after_disconnect" not in call.kwargs
+
+    @pytest.mark.parametrize("route_failures_to_sidecar", [False, True])
+    @pytest.mark.parametrize("retry_requests", [True, False])
+    async def test_run_reply_cut_off_mid_body_is_one_failed_attempt(
+        self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool, route_failures_to_sidecar: bool
+    ) -> None:
+        """Each /run sent starts an episode, so a cut-off reply is not resent; collection's failure handling owns it.
+
+        It ends the run, or with ``route_failures_to_sidecar`` it is a failure row that resume retries within
+        ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS``. The server answered 200, so the rollout ran.
+        """
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
+        # The real read: collection's own read of the reply is the step under test.
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_response_json", nemo_gym.client.http_client.get_response_json
+        )
+        replies = []
+        for _ in range(3):
+            cut_off = FakeResponse(200, {"reward": 0})
+            cut_off.read = AsyncMock(side_effect=ClientPayloadError("Response payload is not completed"))
+            replies.append(cut_off)
+        transport = MagicMock(request=AsyncMock(side_effect=_guarded_replies(replies)))
+        monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", AsyncMock())
+        run = RolloutCollectionHelper().run_examples(
+            [failing_row()], retry_requests=retry_requests, route_failures_to_sidecar=route_failures_to_sidecar
+        )
+        if route_failures_to_sidecar:
+            _, result = await next(run)
+            assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+            assert result["_ng_failure_type"] == "ClientPayloadError"
+            assert result["_ng_failure_http_status"] == 200
+            assert NG_TERMINAL_KEY not in result
+            assert replies[0].released
+        else:
+            with pytest.raises(ClientPayloadError):
+                await next(run)
+        assert transport.request.await_count == 1
+
+    @pytest.mark.parametrize(
+        ("reply", "reward", "failure_body"),
+        [
+            pytest.param(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 39\r\n\r\n"
+                b'{"detail": "verifier failed: KeyError"}',
+                None,
+                '{"detail": "verifier failed: KeyError"}',
+                id="complete-500",
+            ),
+            pytest.param(
+                b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{"reward": 1.0}',
+                1.0,
+                None,
+                id="complete-200",
+            ),
+        ],
+    )
+    async def test_a_complete_run_reply_over_http_reaches_collection_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, reply: bytes, reward: float | None, failure_body: str | None
+    ) -> None:
+        """A complete error reply keeps its body in the failure row; a complete success reply keeps its result."""
+        requests = []
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readuntil(b"\r\n\r\n")
+            requests.append(1)
+            if len(requests) > 1:
+                writer.write(b"HTTP/1.1 599 Unexpected Extra Request\r\nContent-Length: 0\r\n\r\n")
+            else:
+                writer.write(reply)
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update(
+            {"host": "127.0.0.1", "port": server.sockets[0].getsockname()[1]}
+        )
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_response_json", nemo_gym.client.http_client.get_response_json
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "raise_for_status", nemo_gym.client.http_client.raise_for_status
+        )
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
+            run = RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True)
+            _, result = await next(run)
+        if failure_body is None:
+            assert result["reward"] == reward and NG_FAILURE_CLASS_KEY not in result
+        else:
+            assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+            assert result["_ng_failure_http_status"] == 500
+            assert result["_ng_failure_response_body"] == failure_body
+        assert len(requests) == 1
 
     @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
     async def test_run_examples_propagates_non_request_failures(
@@ -4950,6 +5078,7 @@ class TestRolloutCollection:
             workers=None,
             ignored_checks=[],
             limits=RunHealthLimits(),
+            model_call_capture_dirs=[],
         )
         format_health_report.assert_called_once_with(health_result)
 
@@ -5583,6 +5712,41 @@ class TestRolloutCollection:
         ]
         assert (tmp_path / "output_resubmit_offset").read_text() == "2\n"
 
+    @pytest.mark.parametrize("missing", ["output", "materialized inputs"])
+    async def test_a_resume_with_nothing_to_resume_starts_the_tracking_run_over(
+        self, tmp_path: Path, empty_global_config: MagicMock, monkeypatch: pytest.MonkeyPatch, missing: str
+    ) -> None:
+        """The exporters reopened the run recorded next to the output, but collection starts the output anew."""
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}) + b"\n"
+        )
+        output_fpath = tmp_path / "output.jsonl"
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result={"reward": 1.0}, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        base = dict(input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True)
+        await Helper().run_from_config(RolloutCollectionConfig(**base, resume_from_cache=False))
+        exporter = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_exporters", lambda: [exporter])
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_rollouts", MagicMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "export_metrics", MagicMock())
+
+        config = RolloutCollectionConfig(**base, resume_from_cache=True)
+        await Helper().run_from_config(config)
+        exporter.start_over.assert_not_called()
+
+        (output_fpath if missing == "output" else config.materialized_jsonl_fpath).unlink()
+        await Helper().run_from_config(config)
+        exporter.start_over.assert_called_once_with()
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     async def test_run_from_config_creates_missing_output_dir(
         self, tmp_path: Path, empty_global_config: MagicMock, resume_from_cache: bool
@@ -5706,7 +5870,7 @@ class TestRolloutCollection:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from nemo_gym.base_responses_api_model import CaptureStore
-        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+        from nemo_gym.config.global_config import ROLLOUT_ID_KEY_NAME
 
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(
@@ -5799,6 +5963,86 @@ class TestRolloutCollection:
 
         assert MASK_SAMPLE_KEY not in result
         assert TOKEN_CAPTURE_KEY not in result
+
+    async def test_run_from_config_validates_the_token_capture_config_a_constant_number_of_times(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The participation check reuses one validated token-capture config for every row and rollout.
+
+        The global config is static during a run.
+        Validating it again for each row or finished rollout repeats the same work on the collector's event loop.
+        The test runs a small and a large input and requires the same number of validations for both.
+        It also requires the finalizer to see exactly the participating agent's rollouts.
+        """
+        capture_dir = tmp_path / "tokens"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "token_id_capture": {"enabled": True, "dir": str(capture_dir)},
+                "captured": {"responses_api_agents": {"implementation": {"token_id_capture": True}}},
+                "ordinary": {"responses_api_agents": {"implementation": {"token_id_capture": False}}},
+            },
+        )
+        original_model_validate = TokenIdCaptureConfig.model_validate
+        validations = 0
+
+        def counting_model_validate(cls, *args, **kwargs):
+            nonlocal validations
+            validations += 1
+            return original_model_validate(*args, **kwargs)
+
+        monkeypatch.setattr(TokenIdCaptureConfig, "model_validate", classmethod(counting_model_validate))
+        finalized_agents: list[str] = []
+
+        async def finalize(result, token_source, **kwargs):
+            finalized_agents.append(result["agent"])
+            return None
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "finalize_rollout_token_capture", finalize)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example,
+                            result={
+                                "response": {"output": [], "usage": {}},
+                                "agent": example[AGENT_REF_KEY_NAME]["name"],
+                            },
+                            rollout_latency_ms=None,
+                        )
+                    )
+                    futures.append(future)
+                return futures
+
+        async def run(rows_per_agent: int) -> int:
+            nonlocal validations
+            validations = 0
+            finalized_agents.clear()
+            input_fpath = tmp_path / f"input_{rows_per_agent}.jsonl"
+            input_fpath.write_bytes(
+                b"".join(
+                    orjson.dumps({"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": agent}})
+                    + b"\n"
+                    for _ in range(rows_per_agent)
+                    for agent in ("captured", "ordinary")
+                )
+            )
+            config = RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_fpath),
+                output_jsonl_fpath=str(tmp_path / f"output_{rows_per_agent}.jsonl"),
+                resume_from_cache=False,
+                disable_aggregation=True,
+            )
+            await Helper().run_from_config(config)
+            assert finalized_agents == ["captured"] * rows_per_agent
+            return validations
+
+        assert await run(rows_per_agent=1) == await run(rows_per_agent=20)
 
     async def test_run_from_config_requires_source_before_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -6305,6 +6549,35 @@ class TestRolloutCollection:
         )
 
         assert expected_results == actual_returned_results
+
+    async def test_opted_in_helper_reuses_its_client_across_run_examples_and_aggregation(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Every head-server lookup on an opted-in helper goes through the one cached client."""
+        rows = [
+            {TASK_INDEX_KEY_NAME: task_index, ROLLOUT_INDEX_KEY_NAME: 0, NG_ENVIRONMENT_SERVER_KEY: "environment"}
+            for task_index in range(2)
+        ]
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/aggregate_metrics":
+                metrics = compute_aggregate_metrics([dict(r) for r in json.verify_responses])
+                return FakeResponse(200, metrics.model_dump())
+            return FakeResponse(200, {"reward": 1.0})
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = _environment_server_config()
+        loader = MagicMock(return_value=client)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", loader)
+
+        helper = RolloutCollectionHelper(reuse_server_client=True)
+        scored = []
+        for row in rows:
+            _, result = await next(helper.run_examples([row]))
+            scored.append(dict(row, **result))
+        await helper._call_aggregate_metrics(scored, scored, tmp_path / "output.jsonl")
+
+        loader.assert_called_once_with(None)
 
     async def test_call_aggregate_metrics(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
@@ -7266,7 +7539,7 @@ class TestRunExamplesAclose:
             )
             monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda *args: server_client)
             async with ClientSession() as session:
-                monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+                monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", session)
                 completions = RolloutCollectionHelper().run_examples(
                     [self._row(0)], max_resident_tasks=max_resident_tasks
                 )
@@ -8070,18 +8343,18 @@ class TestDisableAggregationAndCallerTaskIndex:
         assert not (tmp_path / "rollout_verdicts.jsonl").exists()
 
     def test_preprocess_honors_caller_task_index(self, tmp_path: Path) -> None:
-        """A row arriving with `_ng_task_index` pre-set is used verbatim — the
+        """A row arriving with `_ng_task_index` pre-set is used verbatim â€” the
         original `row_to_task_idx` auto-numbering is bypassed. This is the seam
         an upstream slicer relies on to keep task identifiers globally-stable
         across shards.
         """
         fpath = tmp_path / "input.jsonl"
         rows = [
-            # Same prompt twice with *different* caller-stamped indices — must
+            # Same prompt twice with *different* caller-stamped indices â€” must
             # NOT be collapsed to one task by the row_str dedup path.
             {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, TASK_INDEX_KEY_NAME: 42},
             {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, TASK_INDEX_KEY_NAME: 99},
-            # And a third row with no caller index — auto-numbering still applies.
+            # And a third row with no caller index â€” auto-numbering still applies.
             {"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}, "diff": "row"},
         ]
         fpath.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
@@ -8103,11 +8376,11 @@ class TestDisableAggregationAndCallerTaskIndex:
 
 
 class TestRolloutAggregationHelper:
-    """End-to-end shape of `ng_aggregate_rollouts`: glob → load → sort → aggregate."""
+    """End-to-end shape of `ng_aggregate_rollouts`: glob â†’ load â†’ sort â†’ aggregate."""
 
     async def test_run_from_config_full_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         # Two shards. Records have globally-stamped task indices (out of order)
-        # — the helper should sort by (task_index, rollout_index) before calling
+        # â€” the helper should sort by (task_index, rollout_index) before calling
         # _call_aggregate_metrics so downstream groupby is deterministic.
         shard0 = tmp_path / "rollouts-chunk0.jsonl"
         shard1 = tmp_path / "rollouts-chunk1.jsonl"
@@ -8262,7 +8535,7 @@ class TestRolloutAggregationHelper:
         )
         await RolloutAggregationHelper().run_from_config(cfg)
 
-        # merge_shards=False ⇒ no concatenated rollouts file is written, even
+        # merge_shards=False â‡’ no concatenated rollouts file is written, even
         # though output_jsonl_fpath is used to derive the metrics path.
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
@@ -8525,6 +8798,26 @@ class TestRolloutAggregationHelper:
 
         # The merged file has no sidecar or inventory of its own.
         assert (artifacts["expected"], artifacts["failed"]) == (None, None)
+
+    async def test_a_recheck_of_merged_shards_keeps_their_timeouts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Run A landed task 0/0; run B's 0/0 timed out and left only a failure row. Aggregation and a default
+        recheck of the merged directory count the same timeout; the merged file checked alone has none."""
+        run_a, run_b = self._landed_and_failed_runs(tmp_path, same_indices=True)
+        merged_dir = tmp_path / "merged"
+        aggregated = orjson.loads((await self._merge(monkeypatch, merged_dir, run_a, run_b)).read_bytes())["run"]
+        rechecked = health_check_run_dir(merged_dir).summary["run"]
+
+        for run in (aggregated, rechecked):
+            timeouts = run["stats"]["timeouts"]
+            assert (timeouts["rollouts"], timeouts["timed_out"]) == (2, 1)
+            assert timeouts["by_evidence"]["legacy"] == 1
+            assert run["artifacts"]["failed"]["total"] == 1
+        assert rechecked["stats"]["timeouts"] == aggregated["stats"]["timeouts"]
+
+        alone = health_check_run_dir(merged_dir, rollout_file="rollouts.jsonl").summary["run"]["stats"]["timeouts"]
+        assert (alone["rollouts"], alone["timed_out"]) == (1, 0)
 
     @pytest.mark.parametrize(
         "change", ["appended", "edited, same size", "removed", "never moved into place", "shard list cut short"]
@@ -9442,7 +9735,7 @@ class TestE2EInputJsonlFpathRejected:
 
     def test_e2e_config_rejects_input_jsonl_fpath_from_dictconfig(self) -> None:
         # The CLI passes an OmegaConf DictConfig (a Mapping, not a dict). An isinstance(dict)
-        # check silently let input_jsonl_fpath through on the real path — pin the Mapping match.
+        # check silently let input_jsonl_fpath through on the real path â€” pin the Mapping match.
         with pytest.raises(ConfigError, match=r"not supported when serving end-to-end"):
             E2ERolloutCollectionConfig.model_validate(
                 DictConfig(
@@ -10050,7 +10343,7 @@ class TestTurnsFromModelCalls:
 
     @staticmethod
     def _call(call_id: str, response: dict, *, started_at: float, response_id: str | None = None):
-        from nemo_gym.rollout_observability import TrajectoryModelCall
+        from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 
         return TrajectoryModelCall.model_validate(
             {
@@ -10067,7 +10360,7 @@ class TestTurnsFromModelCalls:
 
     @staticmethod
     def _invocation(invocation_id: str, call_ids: list[str]):
-        from nemo_gym.rollout_observability import AgentInvocation
+        from nemo_gym.trajectory.trajectory_record import AgentInvocation
 
         return AgentInvocation.model_validate(
             {"invocation_id": invocation_id, "model_calls": [{"model_call_id": call_id} for call_id in call_ids]}
@@ -10108,7 +10401,7 @@ class TestTurnsFromModelCalls:
         assert turn.answer == {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]}
 
     def test_a_call_that_returned_nothing_is_not_a_turn(self) -> None:
-        from nemo_gym.rollout_observability import TrajectoryModelCall
+        from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 
         failed = TrajectoryModelCall.model_validate({"model_call_id": "failed", "started_at": 1.0})
         answered = self._call("answered", {"output": []}, started_at=2.0)
@@ -10165,7 +10458,8 @@ class TestTurnsFromModelCalls:
         assert "turns_unavailable" in {gap["code"] for gap in trajectory["gaps"]}
 
     @pytest.mark.parametrize("reference_key", ["model_call_id", "response_id"])
-    def test_judge_capture_does_not_become_a_policy_turn(self, reference_key: str) -> None:
+    @pytest.mark.parametrize("declared_verifier", [False, True])
+    def test_judge_capture_does_not_become_a_policy_turn(self, reference_key: str, declared_verifier: bool) -> None:
         from nemo_gym.health.checks import (
             _bind_policy_call_views,
             _normalized_trajectory_calls,
@@ -10220,18 +10514,54 @@ class TestTurnsFromModelCalls:
             },
         }
 
+        if declared_verifier:
+            result["ng_model_call_capture"]["verifier_invocations"] = [
+                {"invocation_id": "judge-invocation", "model_calls": [{"model_call_id": "judge"}]}
+            ]
         _attach_trajectory_record(row, result)
 
         trajectory = result[NG_TRAJECTORY_KEY]
         assert [call["model_call_id"] for call in trajectory["model_calls"]] == ["policy", "judge"]
         assert [turn["model_calls"][0]["model_call_id"] for turn in trajectory["turns"]] == ["policy"]
-        turns, _ = _bind_policy_call_views(trajectory, _normalized_trajectory_calls(trajectory))
+        if declared_verifier:
+            assert len(trajectory["invocations"]) == 1
+            assert trajectory["verifier_invocations"][0]["kind"] == "verifier_invocation"
+            assert trajectory["verifier_invocations"][0]["model_calls"][0]["model_call_id"] == "judge"
+        turns, owned = _bind_policy_call_views(trajectory, _normalized_trajectory_calls(trajectory))
         assert _rollout_token_count_mismatch(result, turns, {"task_index": 0}) == []
+        assert _rollout_token_count_mismatch(result, owned, {"task_index": 0}) == []
         perf = _build_ng_perf(result, rollout_latency_ms=None)
         assert perf["num_turns"] == 1
         assert perf["prompt_tokens"] == 10
         assert perf["completion_tokens"] == 2
         assert perf["token_observability_coverage"] == 1.0
+
+
+@pytest.mark.parametrize("status", [200, 400])
+def test_collector_owns_explicit_judge_attempt_without_provider_response_id(status):
+    row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+    result = {
+        "ng_model_call_capture": {
+            "calls": [
+                {
+                    "model_call_id": "judge-call",
+                    "status_code": status,
+                }
+            ],
+            "verifier_invocations": [
+                {"invocation_id": "judge-invocation", "model_calls": [{"model_call_id": "judge-call"}]}
+            ],
+        }
+    }
+    trajectory = _build_trajectory_record(row, result)
+    assert trajectory.turns == []
+    assert trajectory.invocations == []
+    invocation = trajectory.verifier_invocations[0]
+    assert invocation.invocation_id == "judge-invocation"
+    assert invocation.model_calls[0].model_call_id == "judge-call"
+    assert invocation.model_calls[0].response_id is None
+    result[NG_TRAJECTORY_KEY] = trajectory.model_dump(mode="json")
+    assert _build_trajectory_record(row, result).verifier_invocations == trajectory.verifier_invocations
 
 
 class TestMaskingStepMetrics:
@@ -10412,6 +10742,84 @@ class TestEnvironmentServerRouting:
                 },
             },
         }
+
+    @pytest.mark.parametrize(
+        "reply, timed_out",
+        [
+            ({"failure": {"failure_reason": "Episode timed out", "terminal": False}}, True),
+            ({"result": {"reward": 0.0, "agent_timed_out": True}}, True),
+            ({"result": {"reward": 1.0}}, False),
+        ],
+        ids=["episode deadline", "timeout inside the result", "completed"],
+    )
+    async def test_the_timing_table_reads_an_episode_reply_as_saved_health_does(
+        self, monkeypatch: pytest.MonkeyPatch, reply: dict, timed_out: bool
+    ) -> None:
+        from nemo_gym.rollout_collection import RunTimingReport, _episode_record
+
+        envelope = {
+            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+        } | reply
+        client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, envelope)))
+        client.global_config_dict = _environment_server_config()
+        materialized = {
+            "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+            "task_input": {"responses_create_params": {"input": "fix it"}, "task_data": {"instance_id": "instance"}},
+        }
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath="input.jsonl",
+            output_jsonl_fpath="output.jsonl",
+            environment_routing_mode="taskset",
+            environment_server_routes={"swe_pro": "environment"},
+            num_repeats=1,
+        )
+        rows = RolloutCollectionHelper._preprocess_raw_rows(
+            [(0, orjson.dumps(materialized).decode(), materialized)], config
+        )
+        report = RunTimingReport(
+            total=1,
+            start_within_s=1800,
+            start_min_fraction=0.95,
+            all_started_within_s=2700,
+            long_rollout_s=9000,
+            long_rollout_max_fraction=0.10,
+            timed_out_max_fraction=0.05,
+        )
+        (future,) = RolloutCollectionHelper()._run_examples_with_metadata(rows, run_timing=report)
+        completed = await future
+
+        # The raw reply stays as the server sent it; only the table reads the saved record's projection.
+        assert completed.result == envelope
+        saved = _episode_record(completed.result)
+        assert (
+            bool(saved.get("_ng_failure_message") == "Episode timed out" or saved.get("agent_timed_out")) is timed_out
+        )
+        line = next(line for line in report.table().splitlines() if "hit wall-clock limit" in line)
+        assert ("100.0% (1)" if timed_out else "0.0% (0)") in line
+
+    async def test_a_legacy_reply_echoing_episode_identities_is_timed_as_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A row that went out without a materialized task is not projected, even if its reply looks like one."""
+        from nemo_gym.rollout_collection import RunTimingReport
+
+        reply = {"episode_id": {"rollout_id": "0-0"}, "task_id": {"task_id": "x"}, "agent_timed_out": True}
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, reply)))
+        report = RunTimingReport(
+            total=1,
+            start_within_s=1800,
+            start_min_fraction=0.95,
+            all_started_within_s=2700,
+            long_rollout_s=9000,
+            long_rollout_max_fraction=0.10,
+            timed_out_max_fraction=0.05,
+        )
+        row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+        (future,) = RolloutCollectionHelper()._run_examples_with_metadata([row], run_timing=report)
+        assert (await future).result == reply
+        line = next(line for line in report.table().splitlines() if "hit wall-clock limit" in line)
+        assert "100.0% (1)" in line
 
     def test_taskset_route_requires_a_configured_environment_server(self) -> None:
         row = {
@@ -11675,6 +12083,106 @@ class TestRecordedAttemptCap:
         assert NG_FAILURE_MAX_ATTEMPTS_KEY not in _counted_failure_row(self._failure(0, 3))
 
 
+class TestRecordPolicyModelServer:
+    def _config(self, model_server: dict | None):
+        from omegaconf import OmegaConf
+
+        agent = (
+            {"entrypoint": "app.py"}
+            if model_server is None
+            else {"entrypoint": "app.py", "model_server": model_server}
+        )
+        return OmegaConf.create({"my_agent": {"responses_api_agents": {"simple_agent": agent}}})
+
+    def test_names_the_agents_policy_server_in_the_capture(self) -> None:
+        from nemo_gym.rollout_collection import _record_policy_model_server
+
+        result = {"ng_model_call_capture": {"calls": []}}
+        config = self._config({"type": "responses_api_models", "name": "policy_model_reasoning_off"})
+        _record_policy_model_server(result, config, "my_agent")
+        assert result["ng_policy_model_server"] == "policy_model_reasoning_off"
+
+    def test_leaves_the_capture_unchanged_without_a_policy_server(self) -> None:
+        from nemo_gym.rollout_collection import _record_policy_model_server
+
+        for config, agent in ((self._config(None), "my_agent"), (self._config(None), "unknown_agent")):
+            result = {"ng_model_call_capture": {"calls": []}}
+            _record_policy_model_server(result, config, agent)
+            assert result == {"ng_model_call_capture": {"calls": []}}
+        failed_without_capture: dict = {"_ng_failure_class": "timeout_exceeded"}
+        _record_policy_model_server(failed_without_capture, self._config({"name": "p"}), "my_agent")
+        assert failed_without_capture["ng_policy_model_server"] == "p"
+
+
+async def test_collection_persists_policy_alias_for_offline_failed_rollout_timing(tmp_path, monkeypatch):
+    import time
+
+    from nemo_gym.observability.model_calls import CaptureStore
+    from nemo_gym.rollout_health import health_check_run_dir
+    from tests.unit_tests.test_health_timeouts import exchange
+
+    elapsed = [0.0]
+
+    class Clock:
+        def monotonic(self):
+            return elapsed[0]
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    monkeypatch.setattr(nemo_gym.rollout_collection, "time", Clock())
+    config_dict = {
+        "my_agent": {
+            "responses_api_agents": {
+                "pinchbench_agent": {"model_server": {"type": "responses_api_models", "name": "policy"}}
+            }
+        }
+    }
+    monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", lambda *a, **k: config_dict)
+    (tmp_path / "input.jsonl").write_text(
+        json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+    )
+    output = tmp_path / "rollouts.jsonl"
+
+    async def post(server_name: str, url_path: str, json: dict, **kwargs):
+        assert url_path == "/run"
+        elapsed[0] += 100.0
+        # The environment's episode deadline cut the rollout: a failure row with no embedded capture.
+        return FakeResponse(
+            200,
+            {"_ng_failure_class": "environment_server_failed", "_ng_failure_message": "Episode timed out"},
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+                output_jsonl_fpath=str(output),
+                route_failures_to_sidecar=True,
+                disable_health_check=True,
+                require_complete=False,
+            )
+        )
+    failures = [orjson.loads(line) for line in _failures_path_for(output).read_bytes().splitlines()]
+    assert [r.get("ng_policy_model_server") for r in failures] == ["policy"]
+    assert "ng_model_call_capture" not in failures[0]
+    assert failures[0]["_ng_elapsed_s"] == 100.0
+
+    capture_dir = tmp_path / "model-calls"
+    store = CaptureStore(capture_dir)
+    for recorded in (exchange(0, 40, model="policy"), exchange(50, 60, model="judge_model")):
+        if recorded["model_ref"]["name"] == "policy":
+            recorded["response"] = {"usage": {"completion_tokens": 400}}
+        store.record("0-0", recorded)
+    timeouts = health_check_run_dir(tmp_path, model_call_capture_dir=capture_dir).summary["run"]["stats"]["timeouts"]
+    split = timeouts["time_split"]
+    assert split["rollouts_with_captures"] == 1
+    assert split["policy_calls_per_rollout"]["p50"] == 1
+    assert (split["policy_model"], split["other_model"]) == (0.4, 0.1)
+    assert split["policy_output_tokens_per_s"] == {"p50": 10.0, "p5": 10.0}
+
+
 class TestOmittedRolloutRecords:
     """record_omitted_rollouts: a rollout that produced no result leaves one sidecar row marked _ng_no_persist."""
 
@@ -11834,10 +12342,14 @@ class TestSidecarReadersSkipOmittedRows:
         }
 
     def test_run_health_counts_them_missing(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_health import _rollout_accounting
+        from nemo_gym.rollout_health import _read_failures, _rollout_accounting
 
         accounting = _rollout_accounting(
-            set(), [self._output(tmp_path)], limits=RunHealthLimits(), limits_source="config", duplicated=0
+            set(),
+            _read_failures(set(), [self._output(tmp_path)]),
+            limits=RunHealthLimits(),
+            limits_source="config",
+            duplicated=0,
         )
 
         assert accounting["failed"]["by_class"] == {AGENT_RUN_ERROR_FAILURE_CLASS: 1}
@@ -11913,10 +12425,14 @@ class TestOmittedRowsAndTheLatestAttempt:
         }
 
     def test_run_health(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_health import _rollout_accounting
+        from nemo_gym.rollout_health import _read_failures, _rollout_accounting
 
         accounting = _rollout_accounting(
-            set(), [self._output(tmp_path)], limits=RunHealthLimits(), limits_source="config", duplicated=0
+            set(),
+            _read_failures(set(), [self._output(tmp_path)]),
+            limits=RunHealthLimits(),
+            limits_source="config",
+            duplicated=0,
         )
 
         assert accounting["failed"]["by_class"] == {"judge_failed": 1, KILL_SHAPED: 1}
@@ -11932,7 +12448,7 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     """An Environment Server's failure kind (Harbor's ``harbor:task_deadline``) reaches the sidecar row as it left
     the wire, under the key the metrics label reads; a failure that names no kind adds no key."""
     import nemo_gym.rollout_collection as rollout_collection
-    from nemo_gym.episode_types import EpisodeFailure
+    from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     failure = EpisodeFailure(
         failure_reason="Episode exceeded the time budget",
@@ -11953,3 +12469,39 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     assert "failure_kind" not in rollout_collection._counted_failure_row(record)
     plain = rollout_collection._episode_record(reply | {"failure": {"failure_reason": "bad task", "terminal": True}})
     assert "failure_kind" not in plain and not any(key.endswith("_step") for key in plain)
+
+
+@pytest.mark.parametrize("with_policy", [False, True])
+def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(with_policy):
+    call_ids = ["policy", "judge"] if with_policy else ["judge"]
+    agent_refs = [{"model_call_id": call_id} for call_id in call_ids]
+    judge_ref = {"model_call_id": "judge"}
+    result = {
+        "ng_agent_observations": {
+            "source": "harness",
+            "records": [{"kind": "agent_invocation", "invocation_id": "agent", "model_calls": agent_refs}],
+        },
+        "ng_verifier_invocations": [{"invocation_id": "verify", "model_calls": [judge_ref]}],
+        "ng_model_call_capture": {
+            "calls": [
+                {
+                    "model_call_id": call_id,
+                    "model_ref": {"type": "responses_api_models", "name": call_id},
+                    # Response IDs are scoped to their model server.
+                    "response_id": "shared-id",
+                    "status_code": 200,
+                    "request": {"input": call_id},
+                    "response": {"id": "shared-id", "output": []},
+                }
+                for call_id in call_ids
+            ]
+        },
+    }
+    trajectory = _build_trajectory_record({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, result)
+    assert [ref.model_call_id for turn in trajectory.turns for ref in turn.model_calls] == (
+        ["policy"] if with_policy else []
+    )
+    assert [call.model_call_id for call in trajectory.model_calls] == call_ids
+    # Do not repair conflicting ownership silently: the checker must still see both claims.
+    assert [ref.model_call_id for ref in trajectory.invocations[0].model_calls] == call_ids
+    assert trajectory.verifier_invocations[0].model_calls[0].model_dump(exclude_none=True) == judge_ref

@@ -21,11 +21,11 @@ from unittest.mock import MagicMock, mock_open
 from pydantic import ValidationError
 from pytest import MonkeyPatch, raises
 
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 import nemo_gym.train_data_utils
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.global_config import DictConfig, GlobalConfigDictParser
+from nemo_gym.config.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.config.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
     AvgMinMax,
     CategoricalMetrics,
@@ -101,7 +101,7 @@ class TestLoadAndValidateServerInstanceConfigs:
         # Fix the port returned
         find_open_port_mock = MagicMock()
         find_open_port_mock.return_value = 12345
-        monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", find_open_port_mock)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", find_open_port_mock)
 
         config = TrainDataProcessorConfig(
             output_dirpath="",
@@ -1383,6 +1383,17 @@ class TestCollateSamples:
         assert prepare_path.exists()  # parent dir auto-created; write did not crash
         assert json.loads(prepare_path.read_text().strip())["foo"] == "bar"
 
+    def test_collate_writes_each_task_once_when_the_run_sets_num_repeats(self, tmp_path: Path) -> None:
+        # A dataset's num_repeats copies each task; a run's --num-repeats replaces it, so each task is written once.
+        data = tmp_path / "data.jsonl"
+        data.write_text('{"id": 0}\n{"id": 1}\n')
+        cfg = _make_agent_instance_config(
+            "ex", [{"name": "example", "type": "example", "jsonl_fpath": str(data), "num_repeats": 3}]
+        )
+        for num_repeats, expected in ((None, [0, 0, 0, 1, 1, 1]), (2, [0, 1])):
+            (path,) = TrainDataProcessor()._collate_samples_single_type("example", [cfg], num_repeats=num_repeats)
+            assert [json.loads(line)["id"] for line in path.read_text().splitlines()] == expected
+
     def test_collate_samples_metrics_conflict_raises_ValueError(self, monkeypatch: MonkeyPatch) -> None:
         write_filenames_to_mock = dict()
 
@@ -1486,7 +1497,7 @@ class TestCollateSamples:
 def _instance(name: str, server_type: str, impl: dict):
     from omegaconf import OmegaConf
 
-    from nemo_gym.config_types import maybe_get_server_instance_config
+    from nemo_gym.config.config_types import maybe_get_server_instance_config
 
     cfg, err = maybe_get_server_instance_config(name, OmegaConf.create({server_type: {"impl": impl}}))
     assert err is None, err

@@ -19,6 +19,6 @@ nemotron_imo_dev30_proof_jury_judge_simple_agent:
 nemotron_imo_dev30_proof_jury_judge_environment_server:
   _inherit_from: proof_jury_judge_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: nemotron_imo_dev30_proof_jury_judge_simple_agent

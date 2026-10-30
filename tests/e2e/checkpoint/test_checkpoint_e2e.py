@@ -43,9 +43,10 @@ from checkpoint_deployment import (
     weather_row,
 )
 
+import nemo_gym.client.http_client
 import nemo_gym.server_utils as server_utils
-from nemo_gym._checkpoint import coordination
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.server_runtime._checkpoint import coordination
 
 
 # The policy model server runs in one process, or as a coordinator plus uvicorn workers.
@@ -62,14 +63,14 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 async def gym_http_client() -> AsyncIterator[None]:
     """Coordination calls go through Gym's global aiohttp client, which is bound to this test's loop."""
-    server_utils.set_global_aiohttp_client(server_utils.GlobalAIOHTTPAsyncClientConfig())
+    nemo_gym.client.http_client.set_global_aiohttp_client(server_utils.GlobalAIOHTTPAsyncClientConfig())
     yield
-    await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-    server_utils._GLOBAL_AIOHTTP_CLIENT = None
+    await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
+    nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
     # Coordination uses the reserved control pool, created on first use in this test's loop.
-    if server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
-        await server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
-        server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
+    if nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
+        await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
+        nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
 
 
 async def lift_connection_limit() -> None:
@@ -78,9 +79,9 @@ async def lift_connection_limit() -> None:
     Each ``/run`` holds a connection until its episode replies,
     so a pool smaller than the rollouts in flight would leave the rest unsent.
     """
-    await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-    server_utils._GLOBAL_AIOHTTP_CLIENT = None
-    server_utils.set_global_aiohttp_client(
+    await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
+    nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
+    nemo_gym.client.http_client.set_global_aiohttp_client(
         server_utils.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=0)
     )
 
@@ -387,7 +388,7 @@ async def test_token_lineage_continues_across_a_crash(deploy, tmp_path: Path, po
     # Call 1 was never delivered,
     # so its replacement (call 2) continues from call 0 and call 1 is not part of the continued lineage.
     assert replacement.json()["reward"] == 1.0
-    assert admissions[2]["rollout_id"] == "counter-1-a1"
+    assert admissions[2]["capture_key"] == "counter-1-a1"
     assert admissions[2]["parent_call_id"] == admissions[0]["model_call_id"]
     assert chain[0] == admissions[0]["model_call_id"]
     assert admissions[1]["model_call_id"] not in chain
@@ -410,7 +411,7 @@ async def test_an_in_flight_generation_is_cut_and_its_prefix_continued(
         first.cancel()
         replacement = await http.post("/run", json=weather_episode("cut-1", attempt=1))
 
-    after = [call for call in deployment.backend_calls() if call["admission"]["rollout_id"] == "cut-1-a1"]
+    after = [call for call in deployment.backend_calls() if call["admission"]["capture_key"] == "cut-1-a1"]
     assert cut_rounds == [[cut_call]]
     assert [call.get("continued_from") for call in after] == [cut_call]
     assert replacement.json()["result"]["reward"] == 1.0

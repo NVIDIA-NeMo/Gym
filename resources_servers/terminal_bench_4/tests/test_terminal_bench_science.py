@@ -14,14 +14,11 @@ from fastapi import HTTPException
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_science import prepare as preparation
-from nemo_gym import global_config
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox import SandboxExecResult, create_provider, resolve_provider_config
-from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, global_config
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.sandbox import AsyncSandboxCompose, SandboxExecResult, create_provider, resolve_provider_config
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 from resources_servers.terminal_bench_4 import environment as environment_module
 from resources_servers.terminal_bench_4 import shared_logs as shared_logs_module
@@ -481,6 +478,7 @@ async def test_every_trial_sandbox_asks_for_single_process_oom_kills(tmp_path, m
         await provider.create(spec)
         assert sent[-1]["nemo.nvidia.com/oom-kill"] == "process", role
         assert sent[-1]["nemo.nvidia.com/resources"] == "custom", role
+        assert sent[-1]["nemo.nvidia.com/s3-hostpath"] == "false", role
     await provider.aclose()
 
 
@@ -668,6 +666,20 @@ async def test_finalize_session_runs_the_verifier_with_the_profile_timeout(
     [
         ({"tbsci_verifier_timeout_overrides": {"finite-free-stamp": 1800}}, "verifier_timeout_overrides"),
         ({"tbsci_task_images": {"symbolic-regresion": {"agent": "registry.invalid/sr"}}}, "task_images.by_task"),
+        (
+            {
+                "terminal_bench_science": {
+                    "resources_servers": {
+                        "terminal_bench_4": {
+                            "environment": {
+                                "compose_service_overrides": {"protein-active-learnin": {"submission": {"user": None}}}
+                            }
+                        }
+                    }
+                }
+            },
+            "compose_service_overrides",
+        ),
     ],
 )
 def test_per_task_settings_must_name_manifest_tasks(tmp_path, monkeypatch, override, setting):
@@ -772,3 +784,184 @@ async def test_seed_rejects_a_task_whose_verifier_budget_outlasts_the_exec_limit
     # Resume gates a terminal failure instead of retrying it.
     assert verified["_ng_failure_terminal"] is True
     assert verified["reward"] == 0.0 and verified["evaluation_completed"] is False
+
+
+@pytest.mark.parametrize("timeout_sec", [28800.0, 3600.0])
+def test_codex_rows_embed_the_official_instruction(tmp_path, monkeypatch, timeout_sec):
+    from benchmarks.terminal_bench_science import prepare_codex
+
+    monkeypatch.setattr(prepare_codex, "OUTPUT_PATH", tmp_path / "benchmark_codex.jsonl")
+    loaded = []
+
+    async def load(names_and_refs, download_dir):
+        loaded.extend(names_and_refs)
+        return [
+            SimpleNamespace(
+                instruction=f"Solve {name}.", config=SimpleNamespace(agent=SimpleNamespace(timeout_sec=timeout_sec))
+            )
+            for name, _ in names_and_refs
+        ]
+
+    monkeypatch.setattr(prepare_codex, "_load_tasks", load)
+    selection = ["mri-harmonization", "eeg-erp-recovery"]
+    if timeout_sec != prepare_codex.AGENT_TIMEOUT_SEC:
+        with pytest.raises(ValueError, match="agent budget"):
+            prepare_codex.prepare(task_names=selection)
+        return
+    rows = read_rows(prepare_codex.prepare(task_names=selection))
+    identities = {
+        row["task_name"]: row
+        for row in (preparation.task_row(preparation.load_manifest(), t) for t in preparation.load_manifest()["tasks"])
+    }
+    assert [(row["task_name"], row["task_ref"]) for row in rows] == loaded
+    for row in rows:
+        assert row["responses_create_params"] == {"input": [{"role": "user", "content": f"Solve {row['task_name']}."}]}
+        assert {key: value for key, value in row.items() if key != "responses_create_params"} == {
+            key: value for key, value in identities[row["task_name"]].items() if key != "responses_create_params"
+        }
+
+
+def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_missing(tmp_path, monkeypatch):
+    from benchmarks.terminal_bench_science import prepare_codex
+    from nemo_gym import PARENT_DIR
+    from nemo_gym.cli import setup_command
+
+    monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
+    monkeypatch.chdir(tmp_path)
+    runs = []
+
+    def run_command(command, working_dir_path, **kwargs):
+        runs.append((command, working_dir_path, kwargs))
+        return SimpleNamespace(wait=lambda: 0)
+
+    monkeypatch.setattr(setup_command, "run_command", run_command)
+    selection = ["mri-harmonization", "eeg-erp-recovery"]
+    assert prepare_codex.prepare(task_names=selection, task_download_dir="packages") == prepare_codex.OUTPUT_PATH
+
+    [(command, working_dir, kwargs)] = runs
+    in_manifest_order = [
+        task["name"] for task in preparation.select_tasks(preparation.load_manifest(), task_names=selection)
+    ]
+    python = prepare_codex.SERVER_DIR / ".venv" / "bin" / "python"
+    assert command.endswith(
+        f" && {python} -m benchmarks.terminal_bench_science.prepare_codex --task-names {' '.join(in_manifest_order)} "
+        f"--task-download-dir {tmp_path / 'packages'}"
+    )
+    assert "uv pip install" in command  # sets up the server's environment as `gym env start` does
+    assert (working_dir, kwargs["project_root"]) == (prepare_codex.SERVER_DIR, PARENT_DIR)
+    assert kwargs["extra_env"] == {prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR: "1"}
+
+
+def test_codex_rows_fail_when_the_server_environment_run_fails(monkeypatch):
+    from benchmarks.terminal_bench_science import prepare_codex
+    from nemo_gym.cli import setup_command
+
+    monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
+    monkeypatch.setattr(setup_command, "run_command", lambda *args, **kwargs: SimpleNamespace(wait=lambda: 3))
+    with pytest.raises(RuntimeError, match=r"server's environment failed \(exit 3\)"):
+        prepare_codex.prepare(task_names=["mri-harmonization"])
+    # An unknown task fails here, before any hand-off.
+    with pytest.raises(ValueError):
+        prepare_codex.prepare(task_names=["no-such-task"])
+
+
+def test_codex_rows_hand_off_only_once_and_only_without_pathspec(monkeypatch):
+    import importlib.util
+
+    from benchmarks.terminal_bench_science import prepare_codex
+
+    monkeypatch.delenv(prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR, raising=False)
+    assert importlib.util.find_spec("pathspec") is not None  # these tests run in the server's environment
+    assert not prepare_codex._needs_server_environment()
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)
+    assert prepare_codex._needs_server_environment()
+    monkeypatch.setenv(prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR, "1")
+    assert not prepare_codex._needs_server_environment()
+
+
+def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_server():
+    config = OmegaConf.load(BENCHMARK_DIR / "codex.yaml")
+    resources = config.terminal_bench_science_codex_resources_server.resources_servers.terminal_bench_4
+    agent = config.terminal_bench_science_codex_agent.responses_api_agents.codex_agent
+    environment = config.terminal_bench_science_codex.environment_servers.single_agent_turn_legacy
+    assert resources.sandbox_provider_ref == "terminal_bench_science_sandbox"
+    assert list(config.terminal_bench_science_sandbox) == ["opensandbox"]
+    assert resources.datasets[0].num_repeats == 1
+    assert environment.resources_server.name == "terminal_bench_science_codex_resources_server"
+    assert environment.agent_server.name == "terminal_bench_science_codex_agent"
+    assert agent.inherit_sandbox_environment is True
+    assert (agent.timeout, agent.codex_version) == (28800, "0.155.1")
+    assert (agent.verify_after_agent_error, agent.raise_oom_score_adj) == (True, True)
+
+
+# The README's vllm_model settings for Codex in front of a chat-completions server.
+CODEX_VLLM_MODEL_OPTIONS = {
+    "custom_tool_strategy": "function_bridge",
+    "drop_custom_tools": False,
+    "drop_hosted_tools": True,
+    "forward_unvalidated_reasoning_effort": True,
+    "drop_unrepresentable_request_fields": True,
+    "inline_tool_output_images": True,
+    "stream_keepalive_s": 15,
+}
+
+
+def test_codex_deepseek_flash_config_matches_the_reference_codex_launch(monkeypatch):
+    run_config = OmegaConf.load(BENCHMARK_DIR / "codex_deepseek_flash.yaml")
+    assert list(run_config.config_paths) == [
+        "benchmarks/terminal_bench_science/codex.yaml",
+        "responses_api_models/vllm_model/configs/vllm_model.yaml",
+    ]
+    # A run config's own values win over the files it loads.
+    config = OmegaConf.merge(OmegaConf.load(BENCHMARK_DIR / "codex.yaml"), run_config)
+    agent = OmegaConf.to_container(config.terminal_bench_science_codex_agent.responses_api_agents.codex_agent)
+    resolved = OmegaConf.to_container(
+        config.terminal_bench_science_codex_agent.responses_api_agents.codex_agent, resolve=True
+    )
+    # Codex 0.154.0, no catalog, effort max, the full 8-hour budget, the task's environment.
+    assert {key: resolved[key] for key in ("model", "codex_version", "reasoning_effort", "timeout")} == {
+        "model": "deepseek-flash",
+        "codex_version": "0.154.0",
+        "reasoning_effort": "max",
+        "timeout": 28800,
+    }
+    assert resolved["model_server_forwards_reasoning_effort"] is True
+    assert resolved["inherit_sandbox_environment"] is True
+    # Codex's own feature defaults, as a plain `codex exec` launch has them.
+    assert agent["features"] == {"multi_agent": None, "code_mode": None}
+    # vllm_model is the policy model server and turns Codex's requests into chat completions.
+    loaded = _load_run_config(BENCHMARK_DIR / "codex_deepseek_flash.yaml")
+    assert list(loaded.policy_model.responses_api_models) == ["vllm_model"]
+    model = OmegaConf.to_container(loaded.policy_model.responses_api_models.vllm_model)
+    assert (model["base_url"], model["model"]) == ("${policy_base_url}", "${policy_model_name}")
+    assert {key: model[key] for key in CODEX_VLLM_MODEL_OPTIONS} == CODEX_VLLM_MODEL_OPTIONS
+    assert config.policy_model_name == "deepseek-flash"
+    # The key comes from the environment variable the run names, POLICY_API_KEY by default.
+    monkeypatch.setenv("POLICY_API_KEY", "default-variable")
+    monkeypatch.setenv("DEEPSEEK_ENDPOINT_KEY", "named-variable")
+    assert config.policy_api_key == "default-variable"
+    assert OmegaConf.merge(config, {"tbsci_model_api_key_env": "DEEPSEEK_ENDPOINT_KEY"}).policy_api_key == (
+        "named-variable"
+    )
+
+
+def _load_run_config(path: Path):
+    """A run config merged the way Gym loads it: its config_paths first, then its own values."""
+    run_config = OmegaConf.load(path)
+    parts = [_load_run_config(REPOSITORY / part) for part in run_config.pop("config_paths", [])]
+    return OmegaConf.merge(*parts, run_config)
+
+
+def test_codex_profile_passes_codex_provider_retries_through():
+    config = _load_run_config(BENCHMARK_DIR / "codex.yaml")
+    path = "terminal_bench_science_codex_agent.responses_api_agents.codex_agent"
+    keys = ("request_max_retries", "stream_max_retries", "stream_idle_timeout_ms")
+    # Codex's own retry defaults and the CLI's 300-second idle timer, as in the reference runs.
+    assert [OmegaConf.select(config, f"{path}.{key}") for key in keys] == [None, None, 300000]
+    overrides = {
+        "tbsci_codex_request_max_retries": 8,
+        "tbsci_codex_stream_max_retries": 10,
+        "tbsci_stream_idle_timeout_ms": 90000000,
+    }
+    tuned = OmegaConf.merge(config, overrides)
+    assert [OmegaConf.select(tuned, f"{path}.{key}") for key in keys] == [8, 10, 90000000]

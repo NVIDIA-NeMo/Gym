@@ -732,7 +732,7 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "checkout main" in out
     assert "uv venv --seed .venv" in out
     assert "source .venv/bin/activate" in out
-    assert "uv pip install -e ." in out
+    assert 'uv pip install -e ".[ray]"' in out
     assert "--system" not in out
     assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
