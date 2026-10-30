@@ -138,6 +138,8 @@ JSON_OUTPUT_KEY_NAME = "json"
 QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
+# Exported by `gym eval submit` to a `command:` benchmark, whose own Gym calls it cannot add overrides to.
+MODEL_CALL_CAPTURE_DIR_ENV = "NEMO_GYM_MODEL_CALL_CAPTURE_DIR"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/token_id_capture/config.py``.
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
@@ -1686,6 +1688,19 @@ Set the keys individually, in a config or as overrides, e.g.:
             global_config_dict.setdefault(SKIP_VENV_IF_PRESENT_KEY_NAME, False)
 
             global_config_dict.setdefault(DRY_RUN_KEY_NAME, False)
+
+            # A capture directory exported to this process (a `command:` benchmark under `gym eval submit`) turns on
+            # model-call capture there, as submit's override does for `gym eval run`. An explicit key wins, and an
+            # explicit `observability_enabled: false` still turns capture off.
+            exported_capture_dir = environ.get(MODEL_CALL_CAPTURE_DIR_ENV, "").strip()
+            if exported_capture_dir and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in global_config_dict:
+                if not Path(exported_capture_dir).is_absolute():
+                    # Processes started from different working directories would each resolve it elsewhere.
+                    raise ConfigError(
+                        f"{MODEL_CALL_CAPTURE_DIR_ENV} must be an absolute path, got {exported_capture_dir!r}."
+                    )
+                global_config_dict[MODEL_CALL_CAPTURE_DIR_KEY_NAME] = exported_capture_dir
+                global_config_dict.setdefault(OBSERVABILITY_ENABLED_KEY_NAME, True)
 
             # Bound server startup independently of model-endpoint readiness. Multi-worker
             # supervisors can otherwise replace a deterministically failing worker forever.

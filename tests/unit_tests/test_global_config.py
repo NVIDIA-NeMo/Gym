@@ -201,6 +201,40 @@ class TestGlobalConfig:
         assert config[UV_LOCK_TIMEOUT_KEY_NAME] == expected
         assert nemo_gym.global_config.environ["UV_LOCK_TIMEOUT"] == str(expected)
 
+    @mark.parametrize(
+        ("exported", "configured", "expected_dir", "expected_enabled"),
+        [
+            ("/run/model-calls", {}, "/run/model-calls", True),  # a submitted command's Gym captures
+            ("/run/model-calls", {"model_call_capture_dir": "/mine"}, "/mine", None),  # the config key wins
+            ("/run/model-calls", {"observability_enabled": False}, "/run/model-calls", False),  # an opt-out holds
+            ("", {}, None, None),  # an empty export turns nothing on
+        ],
+    )
+    def test_an_exported_capture_dir_is_the_default(
+        self,
+        monkeypatch: MonkeyPatch,
+        exported: str,
+        configured: dict,
+        expected_dir: str | None,
+        expected_enabled: bool | None,
+    ) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.global_config, "environ", {"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": exported})
+        self._mock_parse_environment(monkeypatch, DictConfig(configured))
+
+        config = get_global_config_dict()
+
+        assert config.get("model_call_capture_dir") == expected_dir
+        assert config.get("observability_enabled") == expected_enabled
+
+    def test_a_relative_exported_capture_dir_is_refused(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(nemo_gym.global_config, "environ", {"NEMO_GYM_MODEL_CALL_CAPTURE_DIR": "model-calls"})
+        self._mock_parse_environment(monkeypatch, DictConfig({}))
+
+        with raises(ConfigError, match="must be an absolute path"):
+            get_global_config_dict()
+
     def test_null_uv_lock_timeout_leaves_the_environment_alone(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
         monkeypatch.setattr(nemo_gym.global_config, "environ", dict())
