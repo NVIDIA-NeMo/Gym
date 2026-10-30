@@ -260,6 +260,111 @@ class TestRun:
         assert model_calls == [(model_path, None)]
 
     @pytest.mark.asyncio
+    async def test_environment_failure_from_final_step_masks_the_sample(self):
+        agent = _make_agent()
+        model_path = "/ng-rollout/2-0/v1/responses"
+        failure = {
+            "mask_sample": True,
+            "failure_kind": "transport_unreachable",
+            "failure_reason": "perception service at 127.0.0.1:8114 is unreachable",
+        }
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            model_path: [_model_response("move A")],
+            "/step": [{"observation": None, "reward": 0.0, "terminated": False, "truncated": True, "info": failure}],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        assert result.mask_sample is True
+        assert result.evaluation_completed is False
+        assert result.failure_kind == "transport_unreachable"
+        assert result.failure_reason == failure["failure_reason"]
+
+    @pytest.mark.asyncio
+    async def test_observed_rollout_records_one_turn_per_model_call(self):
+        agent = _make_agent()
+        model_path = "/ng-rollout/2-0/v1/responses"
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            model_path: [_model_response("move A"), _model_response("move B")],
+            "/step": [
+                {"observation": "keep going", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
+                {"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}},
+            ],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        trajectory = result.model_dump()["ng_trajectory"]
+        assert [turn["turn_no"] for turn in trajectory["turns"]] == [1, 2]
+        assert len(trajectory["invocations"][0]["model_calls"]) == 2
+        assert trajectory["invocations"][0]["status"] == "completed"
+        assert all(len(turn["model_calls"]) == 1 for turn in trajectory["turns"])
+
+    @pytest.mark.asyncio
+    async def test_unobserved_rollout_has_no_trajectory(self):
+        agent = _make_agent(observability=False)
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            "/v1/responses": [_model_response("move A")],
+            "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+        result = await agent.run(req, body)
+        assert "ng_trajectory" not in result.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_policy_outcome_is_not_masked(self):
+        agent = _make_agent()
+        model_path = "/ng-rollout/2-0/v1/responses"
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            model_path: [_model_response("move A")],
+            "/step": [{"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "info": {}}],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        assert result.mask_sample is False
+        assert result.evaluation_completed is True
+        assert result.failure_kind is None
+
+    @pytest.mark.asyncio
     async def test_successful_rollout_survives_close_http_failure(self):
         agent = _make_agent()
         payloads = {
