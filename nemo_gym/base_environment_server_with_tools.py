@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import Field, JsonValue, field_validator
+from pydantic import Field, JsonValue, ValidationError, field_validator
 
 from nemo_gym.base_environment_server import (
     BaseEnvironmentServer,
@@ -28,6 +28,7 @@ from nemo_gym.episode_tokens import EPISODE_TOKEN_HEADER, EpisodeTokenClaims, Ep
 from nemo_gym.episode_tools import EpisodeToolset, ToolArgumentsError, ToolCallRecord, ToolSpec
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.session_routing import SessionClaims, SessionKind
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess, ToolAccess
 
 
@@ -36,6 +37,15 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
+
+# An episode's tool calls name it only by the episode token header; no cookie, seed or close names it.
+EPISODE_TOOL_SESSIONS = SessionKind(
+    cookie_key=None,
+    id_field=None,
+    seed_path=None,
+    close_path=None,
+    cookie_session=False,
+)
 
 ToolTransport = Literal["direct_http", "mcp"]
 # The path ``nemo_gym.mcp_auto_exposure.mount_mcp_endpoint`` serves. Kept here so that a server without MCP never
@@ -112,17 +122,23 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     Both transports check the token the same way. Calls to one episode run one at a time, whatever their
     transport, and each is recorded in ``ServedTools.calls``.
 
+    With several workers, the worker that runs the episode claims it (``nemo_gym.session_routing``), so a tool
+    call that reaches another worker, over either transport, is forwarded there, by the episode its token names.
+
     When the server shuts down, it finishes the cleanups of every episode still running, such as stopping its
     sandbox.
     """
 
     config: BaseEnvironmentServerWithToolsConfig
 
+    routes_sessions_to_owner = True
     _episode_tokens: Optional[EpisodeTokens] = None
     _open_episodes: Optional[dict[EpisodeId, _OpenEpisode]] = None
     # Keyed by id(): two attempts of one episode can run at once without checkpointing.
     _running_cleanups: Optional[dict[int, CleanupContext]] = None
     _reserved_tool_names: frozenset[str] = frozenset()
+    # With several workers, which worker runs each episode (see nemo_gym.session_routing).
+    _session_claims: Optional[SessionClaims] = None
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -179,8 +195,27 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         """
         await asyncio.gather(*(cleanup.aclose() for cleanup in list(self._running_cleanups.values())))
 
-    def multiple_workers_unsupported_reason(self) -> Optional[str]:
-        return "a tool call reaches whichever worker accepts it, and only the worker that runs the episode holds it"
+    def claimed_session_routing(self) -> dict[str, Any]:
+        return {
+            "kind": EPISODE_TOOL_SESSIONS,
+            "session_header": EPISODE_TOKEN_HEADER,
+            "session_from_header": self._episode_session_id,
+            "session_holder": self,
+        }
+
+    def _episode_session_id(self, token: str) -> Optional[str]:
+        # Routing needs only the episode the token names; the worker that runs the episode checks its nonce.
+        claims = self._episode_tokens.read(token)
+        return claims.episode_id.capture_key if claims is not None else None
+
+    def holds_session(self, session_id: str) -> bool:
+        try:
+            return EpisodeId.from_capture_key(session_id) in self._open_episodes
+        except (ValueError, ValidationError):
+            return False
+
+    def use_session_claims(self, claims: SessionClaims) -> None:
+        self._session_claims = claims
 
     async def serve_tools(
         self, request: EpisodeRequestT, toolset: EpisodeToolset, cleanup: CleanupContext
@@ -206,6 +241,10 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             if unnamable:
                 raise ValueError(f"MCP tool names may use only letters, digits, _ and -: {', '.join(unnamable)}")
 
+        session_claims = self._session_claims
+        if session_claims is not None and session_claims.claim(episode_id.capture_key) != session_claims.routing_id:
+            raise ValueError(f"Episode {episode_id.capture_key} already serves its tools on another worker")
+
         token, claims = self._episode_tokens.mint(episode_id)
         episode = _OpenEpisode(claims=claims, toolset=toolset, specs=specs, calls=[])
         self._open_episodes[episode_id] = episode
@@ -213,6 +252,8 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         async def stop_serving() -> None:
             if self._open_episodes.get(episode_id) is episode:
                 del self._open_episodes[episode_id]
+                if session_claims is not None:
+                    session_claims.release(episode_id.capture_key)
 
         cleanup.register_cleanup("episode tools", stop_serving)
         base_url = self.server_client._resolve_base_url(self.config.name).rstrip("/")

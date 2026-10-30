@@ -67,6 +67,7 @@ jobs:
             nemo_gym/server_utils.py
             nemo_gym/base_responses_api_agent.py
             nemo_gym/base_resources_server.py
+            nemo_gym/base_environment_server_with_tools.py
             nemo_gym/mcp_auto_exposure.py
             tests/e2e/session_routing/**
 

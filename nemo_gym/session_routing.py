@@ -37,6 +37,7 @@ Where the session ID comes from:
 | A typed resources ``/seed_session`` or ``/close_session`` | The body's ``resources_session_id`` |
 | Any request to an agent server | The session cookie's ``agent_session_id`` |
 | An agent session seed or close | The body's ``agent_session_id`` |
+| A tool call to a ``BaseEnvironmentServerWithTools`` | The episode named in its episode token header |
 
 The body is read only on the seed and close routes, where it names the session before any cookie exists.
 If the cookie and the body name different sessions, the reply is 409.
@@ -59,7 +60,9 @@ A claim ends once its session's last record on the claimant is gone:
   which is its close receipt or failed seed, ``session_close_retry_window_seconds`` after it was written;
 - a resources session's claim lasts while the session is open, from a successful seed until its close or ``/verify``,
   and ends ``session_close_retry_window_seconds`` after the last request for it otherwise.
-  A ``/verify`` that says a close follows, as an environment server's does, leaves the session open for that close.
+  A ``/verify`` that says a close follows, as an environment server's does, leaves the session open for that close;
+- an episode of a ``BaseEnvironmentServerWithTools`` is claimed by the worker that runs it, when it starts serving
+  the episode's tools, and released when it stops (see ``SessionHolder``).
 
 The claims of a worker that exited stay until the server exits, so its sessions keep getting a 410.
 The whole directory goes with the server's runtime directory when the server exits.
@@ -153,15 +156,19 @@ def _paths(paths: tuple[str, ...]) -> re.Pattern[str]:
 
 @dataclass(frozen=True)
 class SessionKind:
-    """Where one kind of server's requests name their session."""
+    """Where one kind of server's requests name their session.
+
+    A kind whose requests name their session only in a header, such as the episode tool calls of a
+    ``BaseEnvironmentServerWithTools``, has no cookie key, body field or seed and close routes.
+    """
 
     #: The key of the session ID in the session cookie.
-    cookie_key: str
+    cookie_key: Optional[str]
     #: The body field that names the session on the seed and close routes.
-    id_field: str
+    id_field: Optional[str]
     #: The seed and close routes, whose body names the session.
-    seed_path: str
-    close_path: str
+    seed_path: Optional[str]
+    close_path: Optional[str]
     #: Whether the session ID is the cookie session's own ID, as on a resources server:
     #: a typed seed's ID becomes it, and a request without one gets a new ID,
     #: claimed if the request starts a session or its handler uses the session.
@@ -169,8 +176,9 @@ class SessionKind:
     cookie_session: bool
 
     @property
-    def body_paths(self) -> re.Pattern[str]:
-        return _paths((self.seed_path, self.close_path))
+    def body_paths(self) -> Optional[re.Pattern[str]]:
+        paths = tuple(path for path in (self.seed_path, self.close_path) if path is not None)
+        return _paths(paths) if paths else None
 
 
 def create_session_socket_dir() -> str:
@@ -531,6 +539,42 @@ class ResourcesSessionLifetimes:
         return len(self._until.keys() | self._retained)
 
 
+class SessionHolder(Protocol):
+    """A server that claims each of its sessions itself, and keeps the claim for as long as it holds the session.
+
+    A ``BaseEnvironmentServerWithTools`` is one: it claims an episode when it starts serving the episode's tools, and
+    releases the claim when it stops.
+    """
+
+    def holds_session(self, session_id: str) -> bool:
+        """Whether this worker still holds the session."""
+        ...
+
+    def use_session_claims(self, claims: SessionClaims) -> None:
+        """Keep the claims, to claim a session when it starts and release it when it ends."""
+        ...
+
+
+class _HeldSessionLifetimes:
+    """A holder's own state decides its claims: it claims and releases each one itself."""
+
+    def __init__(self, holder: SessionHolder) -> None:
+        self.holder = holder
+
+    def holds(self, session_id: str) -> bool:
+        return self.holder.holds_session(session_id)
+
+    def served(self, session_id: str, scope: Scope, status: Optional[int]) -> None:
+        pass
+
+    def starts(self, path: str) -> bool:
+        # The holder claims a session when it starts it, not on a request.
+        return False
+
+    def sweep(self) -> list[str]:
+        return []
+
+
 class AgentSessionHolder(Protocol):
     """An agent server, whose sessions are claimed by ``agent_session_id`` across workers."""
 
@@ -596,6 +640,8 @@ class SessionRoutingMiddleware:
         mcp_token_header: Optional[str] = None,
         mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
         mcp_path: str = "/mcp",
+        session_header: Optional[str] = None,
+        session_from_header: Optional[Callable[[str], Optional[str]]] = None,
     ) -> None:
         self.app = app
         self.kind = kind
@@ -612,13 +658,20 @@ class SessionRoutingMiddleware:
         self.mcp_token_header = mcp_token_header
         self.mcp_token_serializer = mcp_token_serializer
         self.mcp_path = mcp_path
+        # A header that names the session, and the server's reader of its value; ahead of the cookie and MCP token.
+        self.session_header = session_header
+        self.session_from_header = session_from_header
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         claims = self.claims
-        names_by_body = scope["method"] == "POST" and self.body_paths.fullmatch(scope["path"]) is not None
+        names_by_body = (
+            scope["method"] == "POST"
+            and self.body_paths is not None
+            and self.body_paths.fullmatch(scope["path"]) is not None
+        )
         if claims is None and not names_by_body:
             await self.app(scope, receive, send)
             return
@@ -696,7 +749,8 @@ class SessionRoutingMiddleware:
         elif forwarded:
             # The claimant released the ID while the request was forwarded here, and another worker claimed it since.
             await _conflict(
-                f"This {self.kind.id_field} moved to another server worker while the request was forwarded. Retry it.",
+                f"This {self.kind.id_field or 'session'} moved to another server worker while the request was "
+                "forwarded. Retry it.",
                 scope,
                 receive,
                 send,
@@ -723,7 +777,13 @@ class SessionRoutingMiddleware:
                     self.lifetimes.served(session_id, scope, status[0] if status else None)
 
     def _session_id_from_headers(self, connection: HTTPConnection) -> Optional[str]:
-        cookie = connection.cookies.get(self.session_cookie)
+        if self.session_header is not None:
+            value = connection.headers.get(self.session_header)
+            if value is not None:
+                # A value the reader rejects names no session; the handler refuses the request.
+                return self.session_from_header(value)
+        # A kind without a cookie key never names its session in the cookie.
+        cookie = connection.cookies.get(self.session_cookie) if self.kind.cookie_key is not None else None
         token = connection.headers.get(self.mcp_token_header) if self.mcp_token_serializer is not None else None
         path = connection.scope["path"]
         is_mcp = path == self.mcp_path or path.startswith(self.mcp_path + "/")
@@ -938,7 +998,10 @@ def install_session_routing(
     secret_key: str,
     mcp_token_header: Optional[str] = None,
     mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
+    session_header: Optional[str] = None,
+    session_from_header: Optional[Callable[[str], Optional[str]]] = None,
     agent_sessions: Optional[AgentSessionHolder] = None,
+    session_holder: Optional[SessionHolder] = None,
     close_window_seconds: Optional[float] = None,
     session_starts: tuple[str, ...] = (),
     session_ends: tuple[str, ...] = (),
@@ -951,7 +1014,9 @@ def install_session_routing(
     Without a ``socket_dir`` (one worker), it only reads the session ID of seeds and closes, and claims nothing.
     With one, it claims sessions in it and returns this worker's ID, also stored in ``app.state.nemo_gym_routing_id``.
     Pass the agent for an agent server, whose own records decide its claims' lifetimes,
+    the holder for a server that claims and releases each session itself (see ``SessionHolder``),
     or the close window and the session start and end routes for a resources server (see ``ResourcesSessionLifetimes``).
+    A server whose requests name their session in a header passes the header and its reader of the header's value.
     """
     route_by = dict(
         kind=kind,
@@ -959,7 +1024,11 @@ def install_session_routing(
         secret_key=secret_key,
         mcp_token_header=mcp_token_header,
         mcp_token_serializer=mcp_token_serializer,
+        session_header=session_header,
+        session_from_header=session_from_header,
     )
+    if session_header is not None and session_from_header is None:
+        raise ValueError("install_session_routing needs session_from_header with a session_header")
     if socket_dir is None:
         # An agent's own seed handler already refuses a cookie of another session, so it needs nothing here.
         if kind.cookie_session:
@@ -972,6 +1041,9 @@ def install_session_routing(
     if agent_sessions is not None:
         lifetimes: SessionLifetimes = _AgentSessionLifetimes(agent_sessions)
         window = None
+    elif session_holder is not None:
+        lifetimes = _HeldSessionLifetimes(session_holder)
+        window = None
     elif close_window_seconds is not None:
         resources_lifetimes = ResourcesSessionLifetimes(
             close_window_seconds,
@@ -983,12 +1055,16 @@ def install_session_routing(
         lifetimes = resources_lifetimes
         window = close_window_seconds
     else:
-        raise ValueError("install_session_routing needs agent_sessions or close_window_seconds with a socket_dir")
+        raise ValueError(
+            "install_session_routing needs agent_sessions, session_holder or close_window_seconds with a socket_dir"
+        )
     claims = SessionClaims(socket_dir, routing_id, lifetimes.holds)
     app.state.nemo_gym_session_claims = claims
     if agent_sessions is not None:
         agent_sessions.use_agent_session_claims(claims)
         window = getattr(getattr(agent_sessions, "config", None), "session_close_retry_window_seconds", None)
+    if session_holder is not None:
+        session_holder.use_session_claims(claims)
     sweep_seconds = min(_MAX_SWEEP_SECONDS, max(_MIN_SWEEP_SECONDS, (window or _MAX_SWEEP_SECONDS) / 4))
     app.add_middleware(
         SessionRoutingMiddleware,

@@ -341,11 +341,14 @@ def test_one_episode_serves_its_tools_once() -> None:
     assert response.failure is not None and "already serves its tools" in response.failure.failure_reason
 
 
-def test_several_workers_are_refused_while_calls_reach_any_worker() -> None:
-    server, _ = _server(num_workers=2)
+def test_several_workers_route_each_episode_to_the_worker_that_runs_it() -> None:
+    """Routing is tested in test_episode_tools_session_routing.py; here, the server takes several workers."""
+    server, _ = _server(num_workers=4)
 
-    with pytest.raises(ValueError, match="needs num_workers=1"):
-        refuse_unsupported_num_workers(server)
+    refuse_unsupported_num_workers(server)
+
+    assert server.routes_sessions_to_owner
+    assert server.claimed_session_routing()["session_header"] == EPISODE_TOKEN_HEADER
 
 
 class _Sandbox:
