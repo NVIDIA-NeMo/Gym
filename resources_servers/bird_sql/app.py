@@ -6,6 +6,10 @@ Verifies a model-generated SQL query by executing it against the per-``db_id``
 SQLite database from the BIRD dev split, then comparing the result set against
 the ground-truth query's result set via unordered set equality (the official
 BIRD evaluator's rule).
+
+With ``dialect: spark`` the model is expected to write Spark SQL: it is executed on a local PySpark copy of
+the databases (see ``setup_bird_spark.py``) and its result set is compared against the original SQLite
+gold query's result set. The gold SQL is never transpiled.
 """
 
 import asyncio
@@ -13,7 +17,7 @@ import logging
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
 from pydantic import ConfigDict
 
@@ -29,8 +33,8 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
-from resources_servers.bird_sql.eval_utils import execute_and_compare
-from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
+from resources_servers.bird_sql.eval_utils import execute_and_compare, execute_and_compare_spark
+from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bird_train
 
 
 logger = logging.getLogger(__name__)
@@ -81,6 +85,11 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "bird_sql"
     bird_sql_dir: str = "resources_servers/bird_sql/.bird_sql"
+    dialect: Literal["sqlite", "spark"] = "sqlite"
+    # Which BIRD split's databases to verify against. ``train`` uses a different db_id set than dev, so pair it with
+    # its own ``spark_warehouse_dir`` when ``dialect`` is ``spark``.
+    split: Literal["dev", "train"] = "dev"
+    spark_warehouse_dir: str = "resources_servers/bird_sql/.bird_sql/spark_warehouse"
     max_concurrency: int = 32
     sql_execution_timeout_s: float = 30.0
 
@@ -110,22 +119,58 @@ class BirdSqlVerifyResponse(BaseVerifyResponse):
     failure_reason: Optional[FailureCode] = None
 
 
+# Execution failures that are logged as they happen, with running totals, so a bad run can be spotted and stopped.
+_EXECUTION_FAILURE_LABELS = {
+    FailureCode.GOLD_EXECUTION_ERROR: "gold-sql-error",
+    FailureCode.GOLD_EXECUTION_TIMEOUT: "gold-sql-timeout",
+    FailureCode.EXECUTION_ERROR: "pred-sql-error",
+    FailureCode.EXECUTION_TIMEOUT: "pred-sql-timeout",
+}
+
+# Per-rollout 0/1 scores reported next to accuracy, each over every rollout. Names are the metric names users see.
+_FAILURE_SCORE_NAMES = (
+    "no_sql",
+    "gold-sql-timeout",
+    "pred-sql-timeout",
+    "sql-timeout",
+    "gold-sql-error",
+    "pred-sql-error",
+    "sql_errors",
+    "unclean",
+)
+
+
 class BirdSqlResourcesServer(SimpleResourcesServer):
     config: BirdSqlResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._dev_databases_dir: Path = ensure_bird_sql(self._resolve_bird_sql_dir())
+        base_dir = self._resolve_dir(self.config.bird_sql_dir)
+        if self.config.split == "train":
+            self._databases_dir: Path = ensure_bird_train(base_dir) / "train_databases"
+        else:
+            self._databases_dir = ensure_bird_sql(base_dir)
         self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
+        self._spark_sessions: Dict[str, Any] = {}
+        self._verified_count = 0
+        self._failure_counts: Dict[str, int] = {label: 0 for label in _EXECUTION_FAILURE_LABELS.values()}
+        if self.config.dialect == "spark":
+            # Imported here so the default SQLite path needs neither pandas nor pyspark/JVM.
+            from resources_servers.bird_sql.setup_bird_spark import ensure_bird_spark
 
-    def _resolve_bird_sql_dir(self) -> Path:
-        p = Path(self.config.bird_sql_dir)
+            self._spark_sessions = ensure_bird_spark(
+                self._databases_dir, self._resolve_dir(self.config.spark_warehouse_dir)
+            )
+
+    @staticmethod
+    def _resolve_dir(path: str) -> Path:
+        p = Path(path)
         if not p.is_absolute():
             p = Path(__file__).parent.parent.parent / p
         return p
 
     def _db_path(self, db_id: str) -> Path:
-        return self._dev_databases_dir / db_id / f"{db_id}.sqlite"
+        return self._databases_dir / db_id / f"{db_id}.sqlite"
 
     async def verify(self, body: BirdSqlVerifyRequest) -> BirdSqlVerifyResponse:
         generated = body.response.output_text or ""
@@ -167,13 +212,23 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             )
 
         try:
-            match, _gold, _pred, err = await execute_and_compare(
-                db_path=db_path,
-                gold_sql=body.gt_sql,
-                pred_sql=extracted_sql,
-                semaphore=self._semaphore,
-                timeout_s=self.config.sql_execution_timeout_s,
-            )
+            if self.config.dialect == "spark":
+                match, _gold, _pred, err = await execute_and_compare_spark(
+                    db_path=db_path,
+                    session=self._spark_sessions[body.db_id],
+                    gold_sql=body.gt_sql,
+                    pred_sql=extracted_sql,
+                    semaphore=self._semaphore,
+                    timeout_s=self.config.sql_execution_timeout_s,
+                )
+            else:
+                match, _gold, _pred, err = await execute_and_compare(
+                    db_path=db_path,
+                    gold_sql=body.gt_sql,
+                    pred_sql=extracted_sql,
+                    semaphore=self._semaphore,
+                    timeout_s=self.config.sql_execution_timeout_s,
+                )
         except Exception as e:
             logger.exception("BIRD verify execution error on id=%s db_id=%s: %s", body.id, body.db_id, e)
             return _response(
@@ -196,15 +251,56 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
 
         reward = 1.0 if execution_match else 0.0
 
+        self._log_execution_failure(body, failure_reason)
+
         return _response(
             extracted_sql=extracted_sql,
             failure_reason=failure_reason,
             had_codeblock=had_codeblock,
         )
 
+    def _log_execution_failure(self, body: BirdSqlVerifyRequest, failure_reason: FailureCode) -> None:
+        """Log each gold/pred SQL error or timeout as it happens, with running totals."""
+        self._verified_count += 1
+        label = _EXECUTION_FAILURE_LABELS.get(failure_reason)
+        if label is None:
+            return
+        self._failure_counts[label] += 1
+        totals = " ".join(f"{name}={count}" for name, count in self._failure_counts.items())
+        logger.warning(
+            "BIRD %s on id=%s db_id=%s | running totals over %d verified: %s",
+            label,
+            body.id,
+            body.db_id,
+            self._verified_count,
+            totals,
+        )
+
     @staticmethod
     def _score_fn(r: dict) -> Dict[str, float]:
-        return {"accuracy": float(r.get("reward", 0.0) > 0)}
+        """Accuracy plus the failure-breakdown scores for one rollout; every score is 0/1.
+
+        A failed LLM request is not scored here: it aborts the run (``route_failures_to_sidecar`` stays off), so
+        every row seen is a completed rollout. A row without a ``failure_reason`` is counted ``unclean``.
+        """
+        reason = r.get("failure_reason")
+        gold_timeout = reason == FailureCode.GOLD_EXECUTION_TIMEOUT
+        pred_timeout = reason == FailureCode.EXECUTION_TIMEOUT
+        gold_error = reason == FailureCode.GOLD_EXECUTION_ERROR
+        pred_error = reason == FailureCode.EXECUTION_ERROR
+        scores = {
+            "accuracy": r.get("reward", 0.0) > 0,
+            "no_sql": reason == FailureCode.NO_SQL_EXTRACTED,
+            "gold-sql-timeout": gold_timeout,
+            "pred-sql-timeout": pred_timeout,
+            "sql-timeout": gold_timeout or pred_timeout,
+            "gold-sql-error": gold_error,
+            "pred-sql-error": pred_error,
+            "sql_errors": gold_error or pred_error,
+            # Clean = ran to a verdict: correct, or a well-formed query with a wrong answer.
+            "unclean": reason not in (FailureCode.NONE, FailureCode.RESULT_MISMATCH),
+        }
+        return {name: float(value) for name, value in scores.items()}
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """BIRD metrics: overall pass@k + per-difficulty (simple/moderate/challenging) pass@k."""
@@ -221,6 +317,16 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 "extracted_sql",
             )
         )
+        rollouts = [r for task in tasks for r in task]
+        scores = [self._score_fn(r) for r in rollouts]
+        metrics["rollouts_count"] = len(rollouts)
+        for name in _FAILURE_SCORE_NAMES:
+            metrics[f"{name}_count"] = int(sum(score[name] for score in scores))
+        logger.info(
+            "BIRD run breakdown over %d rollouts: %s",
+            len(rollouts),
+            " ".join(f"{name}={metrics[f'{name}_count']}" for name in _FAILURE_SCORE_NAMES),
+        )
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -231,6 +337,10 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
 
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=list(_FAILURE_SCORE_NAMES)))
+        for name in ("rollouts", *_FAILURE_SCORE_NAMES):
+            if f"{name}_count" in agent_metrics:
+                key[f"{name}_count"] = agent_metrics[f"{name}_count"]
 
         for prefix in {k.split("/pass@")[0] for k in agent_metrics if "/pass@" in k and k[0].islower()}:
             key.update(highest_k_metrics(agent_metrics, f"{prefix}/pass@1[avg-of-{{k}}]", score_names=["accuracy"]))
