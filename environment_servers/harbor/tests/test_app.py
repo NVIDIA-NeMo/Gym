@@ -72,9 +72,9 @@ from environment_servers.harbor.verifier import (
 from nemo_gym import failure_kinds
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env
+from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, cpu_cap_env
+from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
@@ -2468,7 +2468,7 @@ class TestComposeAndRouting:
         recorded images stand in, so the ``build:`` and ``pull_policy: build`` keys that only describe those builds are
         dropped before the Compose adapter, which starts images only, and the sidecar's entrypoint, command and
         ports come from its recorded configuration like any pulled image's."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+        from nemo_gym.sandbox import AsyncSandboxCompose
         from nemo_gym.tasks.harbor.digest import context_digest
         from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
         from nemo_gym.tasks.harbor.task import built_service_images
@@ -2605,7 +2605,7 @@ class TestComposeAndRouting:
         """Harbor's own template already builds ``main`` from ``environment/Dockerfile`` with ``context: ${CONTEXT_DIR}``,
         so a task file that only restates that (orca-bench, terminal_bench_aai) changes nothing there. Gym runs the
         Dockerfile without a build in pull and overlay mode, so the section is dropped and the document starts."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+        from nemo_gym.sandbox import AsyncSandboxCompose
         from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile=dockerfile)
@@ -2657,7 +2657,7 @@ class TestComposeAndRouting:
         invalid value is the task's error, as prepare reports it (review: the key was dropped from every service
         before the field check, by prepare and again here, so the advertised support never saw a task's setting).
         Only ``pull_policy: build`` leaves, with the build it names (``test_built_images_stand_in...``)."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+        from nemo_gym.sandbox import AsyncSandboxCompose
         from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
         from nemo_gym.tasks.harbor.registry import ImageConfigError
 
@@ -2712,7 +2712,7 @@ class TestComposeAndRouting:
         adapter and prepare's check normalizes it the same way; only ``pull_policy: build``, the policy naming that
         build, leaves with it (review: ``with_built_images`` dropped every policy of a built service, so with a
         recorded build preparation succeeded and the server and the adapter received no policy)."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+        from nemo_gym.sandbox import AsyncSandboxCompose
         from nemo_gym.tasks.harbor.digest import context_digest
         from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
 
@@ -2839,7 +2839,7 @@ class TestComposeAndRouting:
         the task) < the task's Compose file < the host-resolved ``[environment].env`` (its env override file). A key
         the file sets beats the Dockerfile's, a ``${FOO:-}`` that interpolated to empty at prepare does not hide the
         host value, and a sidecar keeps its file's environment."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+        from nemo_gym.sandbox import AsyncSandboxCompose
 
         server, task, _, _ = make_server(
             tmp_path,
@@ -2965,7 +2965,7 @@ class TestComposeAndRouting:
         """The compose adapter's bootstrap execs run through the facade default before any overlay RUN line has
         created the task's user, so an overlay task starts with no default user and gets it afterwards."""
         import environment_servers.harbor.sandboxes as sandboxes_module
-        from nemo_gym.sandbox.providers.base import SandboxHandle
+        from nemo_gym.sandbox import SandboxHandle
 
         class DockerLikeProvider:
             """exec behaves like `docker exec --user <name>`: it fails until the user exists in the container."""
@@ -3049,7 +3049,7 @@ class TestComposeAndRouting:
         setup inside the start: RUN lines, then the uploads, then the command (Harbor's build, then `compose up`
         with the mounts). A failing RUN line is still the seed's 422 reason, and leaves no names behind."""
         import environment_servers.harbor.sandboxes as sandboxes_module
-        from nemo_gym.sandbox.providers.base import SandboxHandle
+        from nemo_gym.sandbox import SandboxHandle
 
         class RecordingProvider:
             name = "fake"
@@ -4526,7 +4526,7 @@ class TestGeneralization:
 
     def retrying_server(self, tmp_path, monkeypatch, failures):
         """A server whose real `_create_sandbox` runs against a provider that fails `failures` starts in turn."""
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, image_pull_retries=2)
         monkeypatch.setattr(server, "_create_sandbox", HarborEnvironmentServer._create_sandbox.__get__(server))
@@ -4576,7 +4576,7 @@ class TestGeneralization:
         before the sandbox was ready would have expired, while the post-seed path keeps its full budget in real
         time. The second episode jumps the clock during the agent's turn instead and does hit the deadline.
         """
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         toml = TASK_TOML.replace("timeout_sec = 300.0", "timeout_sec = 10.0").replace(
             "timeout_sec = 120.0", "timeout_sec = 10.0"
@@ -4652,7 +4652,7 @@ class TestGeneralization:
         assert len(starts) == 1 and not server._sandboxes
 
     async def test_compose_group_pull_failures_are_retried_in_the_server(self, tmp_path, monkeypatch):
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=2)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
@@ -4701,7 +4701,7 @@ class TestGeneralization:
         assert [g.provider_config for g in groups] == [{"opensandbox": {}}] * 2
 
     async def test_exhausted_compose_pull_retries_are_a_retryable_seed_failure(self, tmp_path, monkeypatch):
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=1)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
@@ -4737,7 +4737,7 @@ class TestGeneralization:
 
     def test_pull_failure_is_found_inside_an_exception_group(self):
         """A Compose group whose cleanup failed too raises an ExceptionGroup; the pull failure is still found."""
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         pull = SandboxCreateError("create failed: ImagePullBackOff for org/kafka:1")
         cleanup = RuntimeError("Shared volume cleanup failed: no space left")
@@ -4755,7 +4755,7 @@ class TestGeneralization:
         assert not _is_image_pull_failure(ExceptionGroup("x", [RuntimeError("quota exceeded")]))
 
     async def test_compose_pull_failure_whose_cleanup_also_failed_is_retried(self, tmp_path, monkeypatch):
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=1)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
@@ -4806,7 +4806,7 @@ class TestGeneralization:
     def verifier_retrying_server(self, tmp_path, monkeypatch, failures):
         """A separate-mode server whose real `_create_verifier_sandbox` runs against a provider that fails
         `failures` verifier starts in turn; the agent's sandbox is the usual fake."""
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         agent = AgentSandbox()
         server, task, _, _ = make_server(tmp_path, monkeypatch, agent, image_pull_retries=2)

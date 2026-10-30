@@ -38,8 +38,8 @@ from omegaconf import OmegaConf
 from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.config_types import ConfigError
-from nemo_gym.path_utils import failures_path_for, resubmit_offset_path_for
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
 logger = logging.getLogger(__name__)

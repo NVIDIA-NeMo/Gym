@@ -133,7 +133,7 @@ def prepare(
 
     from datasets import load_dataset
 
-    from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+    from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
 
     print(f"Downloading {REPO_ID} from HuggingFace...")
     hf_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)

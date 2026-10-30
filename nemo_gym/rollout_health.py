@@ -25,7 +25,7 @@ from typing import Any
 import orjson
 from pydantic import BaseModel, ValidationError
 
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -73,10 +73,10 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 from nemo_gym.rollout_records import resolve_rollout_path
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
+from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
 
 logger = logging.getLogger(__name__)

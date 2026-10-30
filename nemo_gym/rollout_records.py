@@ -30,10 +30,9 @@ from typing import BinaryIO
 import orjson
 from pydantic import ValidationError
 
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.path_utils import failures_path_for, resubmit_offset_path_for
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_recovery import (
@@ -46,6 +45,7 @@ from nemo_gym.rollout_recovery import (
     matches_failure_class,
     observed_elapsed,
 )
+from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
 RUN_ID_KEY = "_ng_run_id"

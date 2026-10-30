@@ -17,8 +17,8 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym import failure_kinds, server_utils
-from nemo_gym.config_types import DatasetConfig, ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
-from nemo_gym.server_metadata import visit_resources_server
+from nemo_gym.config import DatasetConfig, visit_resources_server
+from nemo_gym.config.config_types import ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader import app as adapter

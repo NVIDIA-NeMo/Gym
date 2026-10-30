@@ -35,8 +35,8 @@ from nemo_gym.comparison.loading import (
 from nemo_gym.comparison.report import render_key_metrics_tables, render_markdown, summary_lines, write_reports
 from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
 from nemo_gym.comparison.schema import ComparisonConfig
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.path_utils import aggregate_metrics_path_for
+from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
 
 AGENT = "bird_sql_simple_agent"
@@ -1559,8 +1559,8 @@ class TestReportEdgeCases:
 
 @pytest.mark.parametrize("legacy_alias_sidecars", [False, True])
 def test_comparison_uses_reverification_metrics_through_alias(tmp_path, legacy_alias_sidecars):
-    from nemo_gym.path_utils import failures_path_for
     from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.utils.path_utils import failures_path_for
 
     target = tmp_path / "original.jsonl"
     target.touch()
@@ -1635,9 +1635,9 @@ async def test_compare_reads_fresh_metrics_after_aggregation_through_alias(
 async def test_aggregation_and_compare_retain_legacy_alias_sidecars(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
 
-    from nemo_gym.path_utils import failures_path_for
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
     from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.utils.path_utils import failures_path_for
     from tests.unit_tests.test_rollout_collection import (
         FakeResponse,
         compute_aggregate_metrics,
@@ -1676,8 +1676,8 @@ async def test_aggregate_destination_with_competing_alias_companions_is_unchange
     from unittest.mock import AsyncMock
 
     from nemo_gym.comparison.loading import resolve_aggregate_metrics_fpath
-    from nemo_gym.path_utils import failures_path_for
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.utils.path_utils import failures_path_for
     from tests.unit_tests.test_rollout_collection import (
         FakeResponse,
         compute_aggregate_metrics,

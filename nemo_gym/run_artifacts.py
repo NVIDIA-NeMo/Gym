@@ -15,7 +15,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from nemo_gym.path_utils import (
+from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     export_done_path_for,
     exporter_run_id_path_for,

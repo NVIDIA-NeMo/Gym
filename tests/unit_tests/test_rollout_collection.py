@@ -54,15 +54,13 @@ import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     AmbiguousEnvironmentServerError,
     BaseServerConfig,
     ConfigError,
     ConfigPathNotFoundError,
 )
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -70,9 +68,10 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.episode_types import EpisodeId
+from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
 from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -131,16 +130,8 @@ from nemo_gym.rollout_reverification import RolloutReverificationConfig, _is_jud
 from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.token_id_capture import (
-    LineageResolution,
-    ParentResolutionStatus,
-    TokenCaptureSnapshot,
-    TokenCaptureStore,
-    TokenEntry,
-    clear_token_captures_for_rollouts,
-    stamp_lineage,
-)
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+from nemo_gym.token_id_capture.consumer import clear_token_captures_for_rollouts
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
     TOKEN_CAPTURE_KEY,
@@ -149,6 +140,10 @@ from nemo_gym.token_id_capture.delivery import (
     retire_rollout_token_capture,
     rollout_carries_token_ids,
 )
+from nemo_gym.token_id_capture.protocols import LineageResolution, TokenCaptureSnapshot
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
+from nemo_gym.token_id_capture.store import TokenCaptureStore
+from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 
 
@@ -6298,7 +6293,7 @@ class TestRolloutCollection:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
         from nemo_gym.base_responses_api_model import CaptureStore
-        from nemo_gym.global_config import ROLLOUT_ID_KEY_NAME
+        from nemo_gym.config.global_config import ROLLOUT_ID_KEY_NAME
 
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(

@@ -28,17 +28,17 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 import orjson
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.cli.utils import did_you_mean
 from nemo_gym.comparison.schema import RunFile
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
 )
 from nemo_gym.metrics_config import Stat
-from nemo_gym.path_utils import aggregate_metrics_path_for
 from nemo_gym.rollout_records import resolve_rollout_path
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+from nemo_gym.utils.text import did_you_mean
 
 
 RunRole = Literal["baseline", "candidate"]

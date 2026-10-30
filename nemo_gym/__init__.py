@@ -207,12 +207,12 @@ _LAZY_EXPORTS: dict[str, str] = {
     "get_response_json": "server_utils",
     "SESSION_ID_KEY": "server_utils",
     # Author-facing config and metrics types
-    "BaseServerConfig": "config_types",
-    "BaseRunServerInstanceConfig": "config_types",
-    "Domain": "config_types",
-    "AggregateMetrics": "config_types",
-    "AggregateMetricsRequest": "config_types",
-    "ModelServerRef": "config_types",
+    "BaseServerConfig": "config.config_types",
+    "BaseRunServerInstanceConfig": "config.config_types",
+    "Domain": "config.config_types",
+    "AggregateMetrics": "config.config_types",
+    "AggregateMetricsRequest": "config.config_types",
+    "ModelServerRef": "config.config_types",
     # High-level OpenAI-compatible client and API boundary types
     "NeMoGymAsyncOpenAI": "openai_utils",
     "NeMoGymResponse": "openai_utils",
@@ -243,7 +243,7 @@ def __getattr__(name: str):
     # Eager symbols and resolved lazy symbols never reach this function.
     module_name = _LAZY_EXPORTS.get(name)
     if module_name is None:
-        # A module that moved out of the package, such as `nemo_gym.global_config`, resolves with a warning.
+        # A module that moved out of the package, such as `nemo_gym.config.global_config`, resolves with a warning.
         return _moved_names(name)
 
     import importlib

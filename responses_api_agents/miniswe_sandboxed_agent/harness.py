@@ -17,7 +17,7 @@ from uuid import uuid4
 from minisweagent.models.utils.actions_toolcall_response import BASH_TOOL_RESPONSE_API
 from pydantic import BaseModel, Field, TypeAdapter
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,

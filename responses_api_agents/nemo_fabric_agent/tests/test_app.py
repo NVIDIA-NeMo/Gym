@@ -11,12 +11,13 @@ import pytest
 from nemo_fabric import Fabric
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    ModelServerRef,
+    ResourcesServerRef,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient

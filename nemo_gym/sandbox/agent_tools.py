@@ -21,7 +21,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config.config_types import ResourcesServerRef
 from nemo_gym.failure_kinds import AGENT_RUN_ERROR
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient, get_response_json, get_server_url, raise_for_status

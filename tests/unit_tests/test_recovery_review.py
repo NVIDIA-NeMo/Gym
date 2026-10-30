@@ -18,9 +18,8 @@ import nemo_gym.cli.eval as cli_eval
 import nemo_gym.rollout_collection as collection
 from nemo_gym.cli.eval import _check_saved_completion
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId
-from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_records import (
     coverage_path_for,
@@ -31,6 +30,7 @@ from nemo_gym.rollout_records import (
 )
 from nemo_gym.rollout_recovery import IncompleteEvaluationError, RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.utils.path_utils import failures_path_for
 from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
 from tests.unit_tests.test_rollout_recovery import runner_config  # noqa: F401
 from tests.unit_tests.test_rollout_store import prepared_run, snapshot  # noqa: F401
@@ -983,7 +983,7 @@ async def test_reverify_protects_source_companions(
 
 @pytest.mark.parametrize("companion", ["failure", "metrics"])
 async def test_reverify_checks_its_companion_destinations(prepared_run, fake_reverification, companion):
-    from nemo_gym.path_utils import aggregate_metrics_path_for
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
     reverify = fake_reverification
     output, prepare = prepared_run
@@ -1294,7 +1294,7 @@ async def test_reverify_writes_unambiguous_legacy_alias_layout(prepared_run, fak
 async def test_reverify_failure_source_protects_entire_parent_run(
     prepared_run, fake_reverification, artifact, mode, source_alias
 ):
-    from nemo_gym.path_utils import aggregate_metrics_path_for
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
     reverify = fake_reverification
     output, prepare = prepared_run
@@ -1411,7 +1411,7 @@ async def test_all_omitted_run_and_resume_have_no_score_and_exit_76(
     runner_config, monkeypatch, caplog, require_complete, producer
 ):
     from nemo_gym.cli.eval import _check_saved_completion
-    from nemo_gym.path_utils import aggregate_metrics_path_for
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
     runner_config.require_complete = require_complete
     runner_config.route_failures_to_sidecar = True

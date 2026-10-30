@@ -22,9 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.providers.base import SandboxProvider, SandboxSpec
-from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, SandboxSpec, cpu_cap_env
 
 from .runner import RESULT_BYTES_LIMIT, RESULT_EXIT_CODES, RUNTIME_PACKAGE, WORKER_ABORT_EXIT_CODES
 

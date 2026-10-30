@@ -50,7 +50,7 @@ from tqdm.asyncio import tqdm
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
     BaseNeMoGymCLIConfig,
@@ -60,18 +60,7 @@ from nemo_gym.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import EpisodeFailure, EpisodeId, TaskId, is_materialized_task_row
-from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.failure_kinds import (
-    CANCELLED,
-    ENVIRONMENT_PROTOCOL_VIOLATION,
-    ENVIRONMENT_SERVER_FAILED,
-    JUDGE_FAILED,
-    is_namespaced,
-    is_registered,
-)
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -95,6 +84,17 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.episode_types import EpisodeFailure, EpisodeId, TaskId, is_materialized_task_row
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.failure_kinds import (
+    CANCELLED,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
+    ENVIRONMENT_SERVER_FAILED,
+    JUDGE_FAILED,
+    is_namespaced,
+    is_registered,
+)
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -104,13 +104,6 @@ from nemo_gym.observability.model_calls import (
     observability_enabled_from_config,
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
-from nemo_gym.path_utils import (
-    aggregate_metrics_path_for,
-    aggregation_sources_path_for,
-    failures_path_for,
-    materialized_path_for,
-    resubmit_offset_path_for,
-)
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -174,6 +167,13 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.utils.path_utils import (
+    aggregate_metrics_path_for,
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 
 
 if TYPE_CHECKING:
@@ -4696,7 +4696,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         """Stamp an agent_ref onto every row that carries only a task_source.
 
         task_source names the config instance that declared the row's dataset. Resolution is
-        :func:`~nemo_gym.global_config.resolve_dataset_agent` — the same rules benchmark
+        :func:`~nemo_gym.config.global_config.resolve_dataset_agent` — the same rules benchmark
         discovery uses, so dispatch can never disagree with the listing. Conflicting `agent:`
         pins across one instance's datasets are a hard error (rows carry only the instance
         name), as are unknown/non-routable instances; +agent_map is the disambiguator.
@@ -5915,7 +5915,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
 # Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.eval`.
 # Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

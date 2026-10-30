@@ -22,8 +22,7 @@ from pathlib import Path
 import orjson
 import pytest
 
-from nemo_gym.config_types import ConfigError
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.rollout_records import (
     RUN_ID_KEY,
     RolloutRecord,
@@ -36,6 +35,7 @@ from nemo_gym.rollout_records import (
 )
 from nemo_gym.rollout_recovery import RunManifest, manifest_path_for
 from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.utils.path_utils import failures_path_for
 
 
 @pytest.fixture

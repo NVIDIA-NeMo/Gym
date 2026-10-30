@@ -42,8 +42,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.atif_json import strict_json_loads
 from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
-from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,

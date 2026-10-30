@@ -20,7 +20,7 @@ import pytest
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.conversational_tool_use_simulation.app import (

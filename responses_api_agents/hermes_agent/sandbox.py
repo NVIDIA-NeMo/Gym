@@ -17,7 +17,7 @@ from nemo_gym.agent_utils.uv_bootstrap import DEFAULT_UV_CACHE_DIR, uv_for_sandb
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox import read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)

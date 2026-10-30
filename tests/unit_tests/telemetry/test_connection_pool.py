@@ -10,7 +10,8 @@ import pytest
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym import global_config, server_utils
+from nemo_gym import server_utils
+from nemo_gym.config import global_config
 from nemo_gym.telemetry import connection_pool, gym_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 

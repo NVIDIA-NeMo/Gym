@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+from functools import cache
 from pathlib import Path
 from shlex import quote
 from time import monotonic, time
@@ -23,16 +24,30 @@ from nemo_gym.agent_utils.supervisor_client import (
 )
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
+from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.hermes_sandboxed_agent.runner import classify_stop, split_input
 
 
 LOG = logging.getLogger(__name__)
+
+DEPRECATION_WARNING = (
+    "DEPRECATED: hermes_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
+    "after the environment-server migration. Use hermes_agent with sandbox sessions under an environment server "
+    "instead. See responses_api_agents/hermes_agent/README.md#configure-and-run."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOG.warning(DEPRECATION_WARNING)
+
+
 MAX_OUTPUT_BYTES = 1024 * 1024
 
 
@@ -152,6 +167,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context):
         super().model_post_init(context)
+        _warn_deprecated_once()
         self._sem = asyncio.Semaphore(self.config.concurrency)
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:

@@ -1277,7 +1277,7 @@ class TestApp:
         assert resp.judge_response["raw_responses"] == ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]
 
     def test_aggregate_metrics_comparison_elo(self) -> None:
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1317,7 +1317,7 @@ class TestApp:
         """When verify responses carry ``total_wins``/``total_losses``/
         ``total_ties`` (multi-ref-repeat path), they're summed as raw judge
         votes rather than treated as one matchup each."""
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1642,7 +1642,7 @@ class TestMultiReference:
                 await server.verify(_NO_SESSION, body)
 
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1698,7 +1698,7 @@ class TestMultiReference:
         """A one-stage run is a special case of the full run: tagging the same
         rollouts with a single ``stage_index`` must yield the same headline
         eval_elo as the untagged (legacy full-220-vs-all-refs) aggregation."""
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1741,7 +1741,7 @@ class TestMultiReference:
 
     @pytest.mark.asyncio
     async def test_imputed_loss_coverage_is_separate_from_judgments(self) -> None:
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
         from resources_servers.gdpval.comparison import calculate_mle_elo
 
         server = _server(
@@ -1780,7 +1780,7 @@ class TestMultiReference:
 
     def test_aggregate_metrics_stage_aware_headline_is_expected_final_stage(self) -> None:
         """The declared final stage supplies the headline when its fit is usable."""
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1863,7 +1863,7 @@ class TestMultiReference:
         """An incomplete run exposes stage metrics but no misleading headline."""
         import asyncio as _asyncio
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1910,7 +1910,7 @@ class TestMultiReference:
         import asyncio as _asyncio
 
         from nemo_gym.base_resources_server import lost_session_verification
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1954,7 +1954,7 @@ class TestMultiReference:
         """A present final stage with no judged games cannot borrow an earlier ELO."""
         import asyncio as _asyncio
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -2011,7 +2011,7 @@ class TestMultiReference:
         """A drained final stage cannot publish an ELO from its surviving subset."""
         import asyncio as _asyncio
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -2080,7 +2080,7 @@ class TestMultiReference:
         """A final stage accepted by its partial-completion policy is not degraded."""
         import asyncio as _asyncio
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -2120,7 +2120,7 @@ class TestMultiReference:
         stage-aware aggregation must NOT trip RewardProfiler's duplicate-key
         guard — stages are distinguished by ``stage_index`` alone, with no
         per-stage index offset."""
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",

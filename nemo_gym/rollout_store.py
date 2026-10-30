@@ -30,14 +30,8 @@ from time import perf_counter
 import orjson
 from pydantic import ValidationError
 
-from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME
-from nemo_gym.path_utils import (
-    aggregate_metrics_path_for,
-    aggregation_sources_path_for,
-    failures_path_for,
-    resubmit_offset_path_for,
-)
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.rollout_records import (
     RUN_ID_KEY,
     RolloutRecord,
@@ -62,6 +56,12 @@ from nemo_gym.rollout_recovery import (
     validate_resume,
 )
 from nemo_gym.telemetry.observer import driver_metrics
+from nemo_gym.utils.path_utils import (
+    aggregate_metrics_path_for,
+    aggregation_sources_path_for,
+    failures_path_for,
+    resubmit_offset_path_for,
+)
 
 
 logger = logging.getLogger(__name__)

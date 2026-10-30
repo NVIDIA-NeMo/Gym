@@ -23,8 +23,7 @@ from unittest.mock import AsyncMock, Mock
 import orjson
 import pytest
 
-from nemo_gym.config_types import ConfigError
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.rollout_records import (
     RolloutRecord,
     journal_path_for,
@@ -33,6 +32,7 @@ from nemo_gym.rollout_records import (
 )
 from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for
 from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.utils.path_utils import failures_path_for
 
 
 @pytest.fixture
@@ -845,7 +845,7 @@ def test_judge_recovery_does_not_promote_diagnostics_to_saved_answers(saved):
 @pytest.mark.parametrize("stop_after_reset", [False, True])
 def test_resubmit_budget_survives_reopen_without_reusing_attempt_ids(prepared_run, stop_after_reset, monkeypatch):
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
-    from nemo_gym.path_utils import resubmit_offset_path_for
+    from nemo_gym.utils.path_utils import resubmit_offset_path_for
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -886,7 +886,7 @@ def test_resubmit_budget_survives_reopen_without_reusing_attempt_ids(prepared_ru
 @pytest.mark.parametrize("tail", [b"", b"\n\n", b'{"interrupted":'])
 def test_resubmit_repaired_tail_does_not_exempt_new_failures(prepared_run, tail, monkeypatch):
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
-    from nemo_gym.path_utils import resubmit_offset_path_for
+    from nemo_gym.utils.path_utils import resubmit_offset_path_for
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -926,7 +926,7 @@ def test_resubmit_identity_refusal_does_not_reset_budget(prepared_run, monkeypat
 
 
 def test_resubmit_offset_is_part_of_alias_ownership(prepared_run):
-    from nemo_gym.path_utils import resubmit_offset_path_for
+    from nemo_gym.utils.path_utils import resubmit_offset_path_for
 
     output, prepare = prepared_run
     RolloutStore.start_or_resume(output, prepare, resume=False)
@@ -964,7 +964,7 @@ def test_resubmit_legacy_main_file_failures_match_offline_budget(prepared_run, m
 
 @pytest.mark.parametrize("value", ["-1", "broken"])
 def test_resubmit_invalid_offset_is_actionable_and_preserves_history(prepared_run, value):
-    from nemo_gym.path_utils import resubmit_offset_path_for
+    from nemo_gym.utils.path_utils import resubmit_offset_path_for
 
     output, prepare = prepared_run
     RolloutStore.start_or_resume(output, prepare, resume=False)

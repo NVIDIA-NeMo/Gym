@@ -25,7 +25,7 @@ import pytest
 from omegaconf import OmegaConf
 
 import nemo_gym.rollout_collection as collection
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.episode_types import EpisodeFailure, EpisodeId
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_outcomes import RolloutFailureRecord

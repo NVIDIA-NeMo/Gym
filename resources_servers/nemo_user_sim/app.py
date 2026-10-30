@@ -26,10 +26,9 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, VERIFIER_ERROR, is_namespaced, is_registered
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

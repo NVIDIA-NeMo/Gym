@@ -20,7 +20,7 @@ from types import ModuleType
 import pytest
 from pydantic import BaseModel
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
