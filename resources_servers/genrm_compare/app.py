@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from functools import lru_cache
 from math import isfinite
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 
+import orjson
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator, model_validator
@@ -49,6 +51,7 @@ from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_runtime import (
@@ -114,17 +117,48 @@ def _warn_legacy_attempt() -> None:
     logger.warning("GenRM group attempt omitted; treating legacy requests as group attempt zero")
 
 
+def _contains_non_finite(value: object) -> bool:
+    """Check an acyclic JSON payload for NaN or infinities without walking numeric arrays in Python."""
+    pending = [value]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            try:
+                # Training token/log-probability arrays are large; sum checks them in C.
+                # Overflow may conservatively select the compatible JSON fallback too.
+                if not isfinite(sum(value, 0.0)):
+                    return True
+            except (TypeError, OverflowError):
+                pending.extend(value)
+        elif isinstance(value, float) and not isfinite(value):
+            return True
+    return False
+
+
 class CohortEvaluationError(RuntimeError):
     """A failed cohort attempt; replacement policy belongs to the caller."""
+
+
+# How _response_digest serializes a response before hashing it. A checkpoint saves each digest with its scheme, so a
+# change to that serialization needs a new name here; a restore refuses saved state under a scheme it cannot compare.
+RESPONSE_DIGEST_SCHEME = "orjson-sorted-sha256"
+# The previous serialization. Members restored from checkpoints that saved it are still compared under it.
+PREVIOUS_RESPONSE_DIGEST_SCHEME = "json-ascii-sha256"
+ResponseDigestScheme = Literal["orjson-sorted-sha256", "json-ascii-sha256"]
 
 
 @dataclass
 class _CohortMember:
     """One authoritative response for a logical rollout slot."""
 
-    body: Optional["GenRMCompareVerifyRequest"]
+    # Scoring text only; the caller's full response is echoed from its own request.
+    response_obj: Optional[Dict[str, Any]]
     response_digest: str
     waiters: List[asyncio.Future[VerifyResult]] = field(default_factory=list)
+    # A restored member keeps the scheme its digest was saved under, through replays and later checkpoints.
+    response_digest_scheme: ResponseDigestScheme = RESPONSE_DIGEST_SCHEME
 
 
 @dataclass
@@ -135,6 +169,12 @@ class _CohortState:
     key: str
     group_id: Optional[str] = None
     group_attempt: int = 0
+    # Scoring inputs shared by every member, kept from the first arrival until the cohort finishes.
+    # The prompt digest and cohort key cover all of them, so later members cannot disagree.
+    conversation_history: List[Dict[str, str]] = field(default_factory=list)
+    principle: Optional[str] = None
+    expected_rubric_ids: Optional[Tuple[int, ...]] = None
+    baseline_response: Optional[str] = None
     members: Dict[int, _CohortMember] = field(default_factory=dict)
     phase: Literal["collecting", "evaluating", "completed", "failed"] = "collecting"
     results: Dict[int, VerifyResult] = field(default_factory=dict)
@@ -150,11 +190,6 @@ class _CohortState:
     unreplayed_sessions: set[str] = field(default_factory=set)
 
 
-# How _response_digest serializes a response before hashing it. A checkpoint saves digests, so a change to that
-# serialization must also change this name; a restore then refuses saved state it cannot compare.
-RESPONSE_DIGEST_SCHEME = "json-ascii-sha256"
-
-
 class _CompletedMemberState(BaseModel):
     """One session's checkpointed share of a finished cohort: the reward or judge failure its member was given."""
 
@@ -166,7 +201,7 @@ class _CompletedMemberState(BaseModel):
     group_attempt: int = Field(ge=0)
     rollout_index: int = Field(ge=0)
     response_digest: str
-    response_digest_scheme: Literal["json-ascii-sha256"]
+    response_digest_scheme: ResponseDigestScheme
     # Exactly one of these: a completed cohort's reward, or a judge failure, which the caller records as a masked row.
     result: Optional[Dict[str, Any]] = None
     judge_failure: Optional[str] = None
@@ -184,7 +219,8 @@ class _GroupAttemptWatermark:
 
     latest_attempt: int
     prompt_digest: str
-    updated_at: float
+    # Fixed-baseline and rubric cohorts extend the group key, so keep the exact key of the latest attempt.
+    cohort_key: str
 
 
 class GenRMCompareConfig(BaseResourcesServerConfig):
@@ -212,8 +248,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         cohort_collection_timeout_s: Deadline to collect every logical rollout index
         cohort_evaluation_timeout_s: Separate deadline for all comparisons and aggregation
         judge_request_timeout_s: Deadline for each judge HTTP request, including transport retries
-        cohort_result_ttl_s: Optional retention time for completed and failed cohort tombstones
-        max_terminal_cohorts: Maximum number of completed and failed cohort tombstones
+        cohort_result_ttl_s: Optional retention time for results and finished-group attempt records
+        max_terminal_cohorts: Count limit applied separately to results and finished-group attempt records
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
     """
@@ -409,7 +445,17 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     config: GenRMCompareConfig
     _verify_cohorts: Dict[str, _CohortState] = PrivateAttr(default_factory=dict)
+    # Terminal records are ordered by completion.
+    _terminal_cohorts: OrderedDict[str, _CohortState] = PrivateAttr(default_factory=OrderedDict)
     _latest_group_attempts: Dict[str, _GroupAttemptWatermark] = PrivateAttr(default_factory=dict)
+    # Only groups whose latest attempt is terminal can be evicted, ordered by completion or last retry.
+    _idle_groups: OrderedDict[str, float] = PrivateAttr(default_factory=OrderedDict)
+    # Records an open checkpoint session needed when pruning last checked them, longest kept first.
+    # They keep their place in the orders above but do not count toward max_terminal_cohorts.
+    _kept_cohorts: OrderedDict[str, None] = PrivateAttr(default_factory=OrderedDict)
+    _kept_groups: OrderedDict[str, None] = PrivateAttr(default_factory=OrderedDict)
+    # Never suspend while holding either lock, except to acquire a cohort lock.
+    # In particular, model calls and timer waits must remain outside these sections.
     _cohort_registry_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
     # With checkpointing on, the member of a cohort with a group ID that each resources session verified as.
     # A restore installs the same session IDs, so this also serves a session that has not replayed yet.
@@ -495,6 +541,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 self._raise_cohort_failure(body, cohort)
             member = cohort.members.get(rollout_index)
             if member is not None:
+                if member.response_digest_scheme != RESPONSE_DIGEST_SCHEME:
+                    # Restored from a checkpoint saved under the previous scheme: compare under that scheme.
+                    response_digest = self._response_digest(body.response, scheme=member.response_digest_scheme)
                 if member.response_digest != response_digest:
                     raise HTTPException(
                         status_code=409,
@@ -516,22 +565,35 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                             f"rollout_index={rollout_index} cannot be added"
                         ),
                     )
+                try:
+                    response_obj = self._comparison_response(body.response)
+                    if not cohort.members:
+                        cohort.conversation_history = _input_to_conversation_history(input_messages)
+                        cohort.principle = principle
+                        cohort.expected_rubric_ids = body.expected_rubric_ids
+                        cohort.baseline_response = baseline_response
+                except Exception as error:
+                    # Preserve evaluation's whole-group failure policy for malformed direct Python inputs.
+                    logger.exception("GenRM cohort input conversion failed for %s", prompt_key)
+                    self._fail_verify_cohort_locked(
+                        cohort,
+                        f"GenRM cohort input conversion failed: {type(error).__name__}: {str(error)[:1000]}",
+                        "collecting",
+                        "cohort",
+                    )
+                    self._raise_cohort_failure(body, cohort)
                 cohort.members[rollout_index] = _CohortMember(
-                    body=body,
+                    response_obj=response_obj,
                     response_digest=response_digest,
                     waiters=[future],
                 )
                 self._remember_member(cohort, rollout_index, session_id)
-                if cohort.collection_timeout_task is None:
-                    cohort.collection_timeout_task = self._own_task(
-                        self._expire_collecting_cohort(
-                            prompt_key,
-                            cohort,
-                            cfg.cohort_collection_timeout_s,
-                        ),
-                        name=f"genrm-cohort-collection-{cohort_identity}-attempt-{body.group_attempt}",
-                    )
 
+            if cohort.collection_timeout_task is None and cohort.phase == "collecting":
+                cohort.collection_timeout_task = self._own_task(
+                    self._expire_collecting_cohort(prompt_key, cohort, cfg.cohort_collection_timeout_s),
+                    name=f"genrm-cohort-collection-{cohort_identity}-attempt-{body.group_attempt}",
+                )
             if len(cohort.members) == cfg.num_rollouts_per_prompt and cohort.phase == "collecting":
                 cohort.phase = "evaluating"
                 if cohort.collection_timeout_task is not None:
@@ -574,8 +636,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _verify_response(body: GenRMCompareVerifyRequest, result: VerifyResult) -> GenRMCompareVerifyResponse:
-        response_obj = body.response.model_dump() if hasattr(body.response, "model_dump") else body.response
-        reasoning_text, answer_text = extract_from_response_obj(response_obj)
+        # Read the text fields in place; dumping the response would copy its training arrays.
+        reasoning_text, answer_text = extract_from_response_obj(body.response)
         return GenRMCompareVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
@@ -618,9 +680,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if self._closed:
                 raise HTTPException(status_code=503, detail="GenRM server is shutting down")
             self._prune_terminal_cohorts()
-            now = time.monotonic()
             watermark = self._latest_group_attempts.get(body.group_id)
-            if watermark is not None and watermark.prompt_digest != prompt_digest:
+            cohort = self._verify_cohorts.get(prompt_key)
+            # A retained result still owns its prompt after the attempt record is evicted.
+            # Validate before recreating that record so a rejected retry cannot replace its identity.
+            if (watermark is not None and watermark.prompt_digest != prompt_digest) or (
+                cohort is not None and cohort.prompt_digest != prompt_digest
+            ):
                 raise HTTPException(
                     status_code=409,
                     detail=(f"GenRM group {body.group_id!r} received inconsistent prompt or principle content"),
@@ -634,21 +700,29 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     ),
                 )
 
-            self._restored_watermarks.discard(body.group_id)
             if watermark is None or body.group_attempt > watermark.latest_attempt:
-                self._latest_group_attempts[body.group_id] = _GroupAttemptWatermark(
-                    latest_attempt=body.group_attempt,
-                    prompt_digest=prompt_digest,
-                    updated_at=now,
-                )
                 await self._supersede_older_group_attempts(
                     group_id=body.group_id,
                     new_attempt=body.group_attempt,
                 )
-            else:
-                watermark.updated_at = now
+                # Retire older work before publishing the replacement identity.
+                self._latest_group_attempts[body.group_id] = _GroupAttemptWatermark(
+                    latest_attempt=body.group_attempt,
+                    prompt_digest=prompt_digest,
+                    cohort_key=prompt_key,
+                )
+            elif cohort is None:
+                # This attempt already finished and its tombstone was evicted.
+                # Recreating it would wait out the collection deadline or judge a duplicate group.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"GenRM group {body.group_id!r} attempt {body.group_attempt} already finished and its "
+                        f"result is no longer retained; retry with a higher {GROUP_ATTEMPT_KEY_NAME}"
+                    ),
+                )
+            self._restored_watermarks.discard(body.group_id)
 
-            cohort = self._verify_cohorts.get(prompt_key)
             if cohort is None:
                 cohort = _CohortState(
                     prompt_digest=prompt_digest,
@@ -657,6 +731,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     group_attempt=body.group_attempt,
                 )
                 self._verify_cohorts[prompt_key] = cohort
+                self._end_idle_group(body.group_id)
+            elif cohort.terminal_at is not None:
+                # A retry keeps the record for this finished attempt alive.
+                self._idle_groups.pop(body.group_id, None)
+                self._idle_groups[body.group_id] = time.monotonic()
             return cohort
 
     async def _supersede_older_group_attempts(
@@ -665,23 +744,27 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         group_id: str,
         new_attempt: int,
     ) -> None:
-        """Release waiters and payloads owned by older active attempts."""
-        for cohort in self._verify_cohorts.values():
-            if (
-                cohort.group_id != group_id
-                or cohort.group_attempt >= new_attempt
-                or cohort.phase not in ("collecting", "evaluating")
-            ):
-                continue
-            old_phase = cohort.phase
-            evaluation_task = cohort.evaluation_task
-            failed = await self._fail_verify_cohort(
-                cohort,
-                (f"GenRM group {group_id!r} attempt {cohort.group_attempt} was superseded by attempt {new_attempt}"),
-                expected_phase=old_phase,
-            )
-            if failed and evaluation_task is not None and not evaluation_task.done():
-                evaluation_task.cancel()
+        """Retire the latest tracked attempt and remove its saved result."""
+        watermark = self._latest_group_attempts.get(group_id)
+        if watermark is None:
+            return
+        cohort = self._verify_cohorts.get(watermark.cohort_key)
+        if cohort is None:
+            return
+        async with cohort.lock:
+            # Registry operations acquire cohort locks, so no cohort lock section
+            # may suspend: one slow group must not block every group's arrivals.
+            if cohort.phase in ("collecting", "evaluating"):
+                self._fail_verify_cohort_locked(
+                    cohort,
+                    f"GenRM group {group_id!r} attempt {cohort.group_attempt} was superseded by attempt {new_attempt}",
+                    cohort.phase,
+                    "cohort",
+                )
+        # Drop this tracked attempt's result so it cannot replay after its record is evicted.
+        # Results whose attempt records were already evicted are outside this lookup.
+        if self._verify_cohorts.get(watermark.cohort_key) is cohort:
+            self._drop_cohort(watermark.cohort_key)
 
     async def _expire_collecting_cohort(
         self,
@@ -718,11 +801,39 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 member.waiters.remove(waiter)
 
     @staticmethod
-    def _response_digest(response: Any) -> str:
+    def _comparison_response(response: NeMoGymResponse | Dict[str, Any]) -> Dict[str, Any]:
+        """Keep only scoring text, using the same extractor as the batch comparison API.
+
+        Read model attributes or dictionary fields without serializing training
+        arrays. The full response digest and HTTP response echo remain unchanged.
+        """
+        reasoning, answer = extract_from_response_obj(response)
+        return {
+            "output": [
+                {"type": "reasoning", "summary": [{"text": reasoning}]},
+                {"type": "message", "content": [{"type": "output_text", "text": answer}]},
+            ],
+        }
+
+    @staticmethod
+    def _response_digest(response: Any, scheme: ResponseDigestScheme = RESPONSE_DIGEST_SCHEME) -> str:
         """Hash the exact response payload whose tokens will receive the reward; see RESPONSE_DIGEST_SCHEME."""
         payload = response.model_dump(mode="json") if hasattr(response, "model_dump") else response
-        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        canonical = None
+        if scheme == RESPONSE_DIGEST_SCHEME:
+            try:
+                canonical = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
+            except TypeError:
+                # json.dumps supports lone surrogates and wide integers, and reports cycles clearly.
+                canonical = None
+            # Models can retain NaN/infinities too; orjson would collapse those distinct values to null.
+            # Serialize first so a cyclic Python payload never enters the non-finite scan.
+            if canonical is not None and _contains_non_finite(payload):
+                canonical = None
+        if canonical is None:
+            # The previous scheme, and this scheme's fallback for payloads orjson cannot represent exactly.
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     async def _evaluate_verify_cohort(
         self,
@@ -733,51 +844,32 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         """Evaluate exactly one immutable snapshot and publish results to all waiters."""
         try:
             sorted_indices = sorted(members)
-            first_body = members[sorted_indices[0]].body
-            if first_body is None:
-                raise RuntimeError("GenRM cohort member body was discarded before evaluation")
-            conversation_history = _input_to_conversation_history(
-                getattr(first_body.responses_create_params, "input", []) or []
-            )
             response_objs = []
             for index in sorted_indices:
-                member_body = members[index].body
-                if member_body is None:
+                response_obj = members[index].response_obj
+                if response_obj is None:
                     raise RuntimeError(f"GenRM cohort member rollout_index={index} was discarded before evaluation")
-                if member_body.expected_rubric_ids != first_body.expected_rubric_ids:
-                    raise ValueError("GenRM cohort members have inconsistent expected_rubric_ids")
-                response_objs.append(
-                    member_body.response.model_dump()
-                    if hasattr(member_body.response, "model_dump")
-                    else member_body.response
-                )
+                response_objs.append(response_obj)
 
             async with asyncio.timeout(self.config.cohort_evaluation_timeout_s):
                 if self.config.comparison_mode == "fixed_baseline":
-                    baselines = [
-                        (member.body.responses_create_params.metadata or {}).get("baseline_response")
-                        for member in members.values()
-                        if member.body is not None
-                    ]
-                    baseline_response = baselines[0] if baselines else None
+                    baseline_response = cohort.baseline_response
                     if not isinstance(baseline_response, str) or not baseline_response.strip():
                         raise ValueError("comparison_mode=fixed_baseline requires metadata.baseline_response")
-                    if any(baseline != baseline_response for baseline in baselines):
-                        raise ValueError("GenRM cohort members have inconsistent baseline_response values")
                     compare_result = await self._run_fixed_baseline_compare(
-                        conversation_history,
+                        cohort.conversation_history,
                         response_objs,
                         baseline_response,
-                        first_body.principle,
+                        cohort.principle,
                         prompt_key,
-                        first_body.expected_rubric_ids,
+                        cohort.expected_rubric_ids,
                     )
                 else:
                     raw_results, metadata = await self._collect_comparisons(
-                        conversation_history=conversation_history,
+                        conversation_history=cohort.conversation_history,
                         response_objs=response_objs,
-                        principle=first_body.principle,
-                        expected_rubric_ids=first_body.expected_rubric_ids,
+                        principle=cohort.principle,
+                        expected_rubric_ids=cohort.expected_rubric_ids,
                     )
                     compare_result = self._aggregate_results(response_objs, raw_results, metadata)
             (
@@ -870,7 +962,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             raise RuntimeError(f"cannot publish GenRM rewards while cohort is {cohort.phase}")
         cohort.results = results_by_index
         cohort.phase = "completed"
-        cohort.terminal_at = time.monotonic()
+        self._record_terminal_cohort(cohort)
         cohort.evaluation_task = None
         for index, member in cohort.members.items():
             for waiter in member.waiters:
@@ -878,7 +970,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     waiter.set_result(results_by_index[index])
             # A tombstone only needs the digest and result. Do not retain
             # full response payloads for every completed training cohort.
-            member.body = None
+            member.response_obj = None
             member.waiters.clear()
         if cohort.group_id is None and self._verify_cohorts.get(prompt_key) is cohort:
             self._verify_cohorts.pop(prompt_key, None)
@@ -921,18 +1013,21 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cohort.phase = "failed"
         cohort.failure = message
         cohort.failure_kind = failure_kind
-        cohort.terminal_at = time.monotonic()
+        self._record_terminal_cohort(cohort)
         timeout_task = cohort.collection_timeout_task
         cohort.collection_timeout_task = None
         current_task = asyncio.current_task()
         if timeout_task is not None and timeout_task is not current_task:
             timeout_task.cancel()
+        evaluation_task = cohort.evaluation_task
         cohort.evaluation_task = None
+        if evaluation_task is not None and evaluation_task is not current_task:
+            evaluation_task.cancel()
         for member in cohort.members.values():
             for waiter in member.waiters:
                 if not waiter.done():
                     waiter.set_exception(CohortEvaluationError(message))
-            member.body = None
+            member.response_obj = None
             member.waiters.clear()
         # Keep failed legacy groups fenced too: delayed old members must not
         # join a replacement under the same key. Recovery needs an explicit ID.
@@ -955,67 +1050,113 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         participant = self.checkpoint_participant
         return participant is not None and any(participant.is_open(session) for session in cohort.member_sessions)
 
-    def _prune_terminal_cohorts(self) -> None:
-        """Bound process-local cohort tombstones and attempt watermarks.
+    def _record_terminal_cohort(self, cohort: _CohortState) -> None:
+        """Index one completed/failed group without retaining its prompt or response payloads."""
+        cohort.terminal_at = time.monotonic()
+        cohort.conversation_history = []
+        cohort.principle = None
+        cohort.baseline_response = None
+        # Successful legacy groups are removed immediately and need no tombstone.
+        if cohort.group_id is not None or cohort.phase == "failed":
+            self._terminal_cohorts[cohort.key] = cohort
+        watermark = self._latest_group_attempts.get(cohort.group_id)
+        if watermark is not None and watermark.latest_attempt == cohort.group_attempt:
+            self._idle_groups[cohort.group_id] = cohort.terminal_at
 
-        A finished cohort an open member session may still need is never dropped: it outlives
-        ``cohort_result_ttl_s``, and the count pass skips it. Only eviction candidates are checked for open
-        sessions, so the cost follows what is evicted or kept rather than everything retained.
+    def _prune_terminal_cohorts(self) -> None:
+        """Evict the oldest eligible records, stopping at the first retained deadline.
+
+        Active groups are absent from the idle order, so they keep their watermarks without being scanned.
+        A finished cohort an open member session may still need is kept, and so is its group's watermark, so the
+        group still refuses older attempts: either record moves to the back of its order and its retention restarts.
+        A kept record no longer counts toward ``max_terminal_cohorts``, so it cannot evict another group's record.
+        Each pass checks the longest-kept record of each order again and releases it once its sessions have closed.
+        Only eviction candidates and those two kept records are checked for open sessions.
         """
         now = time.monotonic()
-        # Once checked, a needed cohort stays needed for the rest of this pass.
-        needed: set[str] = set()
-        terminal_ttl_s = self.config.cohort_result_ttl_s
-        if terminal_ttl_s is not None:
-            for key, cohort in list(self._verify_cohorts.items()):
-                if cohort.terminal_at is None or now - cohort.terminal_at < terminal_ttl_s:
-                    continue
-                if self._needed_by_open_session(cohort):
-                    needed.add(key)
-                else:
-                    self._drop_cohort(key)
-
-        terminal = sorted(
-            (
-                (key, cohort)
-                for key, cohort in self._verify_cohorts.items()
-                if cohort.terminal_at is not None and key not in needed
-            ),
-            key=lambda item: item[1].terminal_at or 0.0,
-        )
-        excess = len(terminal) - self.config.max_terminal_cohorts
-        for key, cohort in terminal:
-            if excess <= 0:
+        ttl = self.config.cohort_result_ttl_s
+        limit = self.config.max_terminal_cohorts
+        if self._kept_cohorts:
+            key = next(iter(self._kept_cohorts))
+            if self._needed_by_open_session(self._terminal_cohorts[key]):
+                self._kept_cohorts.move_to_end(key)
+            else:
+                del self._kept_cohorts[key]
+        for _ in range(len(self._terminal_cohorts)):
+            key, cohort = next(iter(self._terminal_cohorts.items()))
+            assert cohort.terminal_at is not None  # Only _record_terminal_cohort adds entries.
+            expired = ttl is not None and now - cohort.terminal_at >= ttl
+            if not expired and len(self._terminal_cohorts) - len(self._kept_cohorts) <= limit:
                 break
             if self._needed_by_open_session(cohort):
+                cohort.terminal_at = now
+                self._terminal_cohorts.move_to_end(key)
+                self._kept_cohorts[key] = None
+                self._kept_cohorts.move_to_end(key)
                 continue
-            self._drop_cohort(key)
-            excess -= 1
+            self._kept_cohorts.pop(key, None)
+            self._terminal_cohorts.popitem(last=False)
+            if self._verify_cohorts.get(key) is cohort:
+                self._drop_cohort(key)
+                self._forget_unused_restored_watermark(cohort)
 
-        # A kept cohort keeps its group's watermark, so the group still refuses older attempts.
-        active_group_ids = {cohort.group_id for cohort in self._verify_cohorts.values() if cohort.group_id is not None}
-        if terminal_ttl_s is not None:
-            for group_id, watermark in list(self._latest_group_attempts.items()):
-                if group_id not in active_group_ids and now - watermark.updated_at >= terminal_ttl_s:
-                    self._latest_group_attempts.pop(group_id, None)
+        if self._kept_groups:
+            group_id = next(iter(self._kept_groups))
+            if self._group_needed_by_open_session(group_id):
+                self._kept_groups.move_to_end(group_id)
+            else:
+                del self._kept_groups[group_id]
+        for _ in range(len(self._idle_groups)):
+            group_id, idle_since = next(iter(self._idle_groups.items()))
+            expired = ttl is not None and now - idle_since >= ttl
+            # Active and kept groups must not consume the allowance for finished groups.
+            if not expired and len(self._idle_groups) - len(self._kept_groups) <= limit:
+                break
+            if self._group_needed_by_open_session(group_id):
+                self._idle_groups.move_to_end(group_id)
+                self._idle_groups[group_id] = now
+                self._kept_groups[group_id] = None
+                self._kept_groups.move_to_end(group_id)
+                continue
+            # Results have their own retention order and remain replayable while retained.
+            self._drop_watermark(group_id)
 
-        prunable_watermarks = sorted(
-            (
-                (group_id, watermark)
-                for group_id, watermark in self._latest_group_attempts.items()
-                if group_id not in active_group_ids
-            ),
-            key=lambda item: item[1].updated_at,
-        )
-        excess = len(self._latest_group_attempts) - self.config.max_terminal_cohorts
-        for group_id, _ in prunable_watermarks[: max(0, excess)]:
-            self._latest_group_attempts.pop(group_id, None)
+    def _group_needed_by_open_session(self, group_id: str) -> bool:
+        """Whether an open member session may still need the cohort of the group's latest attempt."""
+        latest = self._verify_cohorts.get(self._latest_group_attempts[group_id].cohort_key)
+        return latest is not None and self._needed_by_open_session(latest)
+
+    def _drop_watermark(self, group_id: str) -> None:
+        """Forget a group's attempt record with its place in the idle order and its restore mark."""
+        del self._latest_group_attempts[group_id]
+        self._restored_watermarks.discard(group_id)
+        self._end_idle_group(group_id)
+
+    def _end_idle_group(self, group_id: str) -> None:
+        """Take a group out of the idle order, as when its latest attempt starts a cohort or loses its watermark."""
+        self._idle_groups.pop(group_id, None)
+        self._kept_groups.pop(group_id, None)
+
+    def _forget_unused_restored_watermark(self, cohort: _CohortState) -> None:
+        """Drop the watermark a restore installed for a removed cohort when no verification has used it.
+
+        A retire removes a restored cohort nothing continued from, or pruning drops it first, since a retire marks
+        its sessions closed before it frees them. Its rollouts start over under the same attempt; a watermark left
+        behind would refuse them as a finished attempt whose result was evicted. Only the watermark naming this
+        cohort goes: a restore can install two attempts of one group, and an older one must not keep the newer one's.
+        """
+        group_id = cohort.group_id
+        if group_id in self._restored_watermarks and self._latest_group_attempts[group_id].cohort_key == cohort.key:
+            self._drop_watermark(group_id)
 
     def _drop_cohort(self, key: str) -> None:
-        """Remove a cohort and the member records that name it."""
+        """Remove a cohort, its retention entry, and the member records that name it."""
         cohort = self._verify_cohorts.pop(key, None)
         if cohort is None:
             return
+        if self._terminal_cohorts.get(key) is cohort:
+            del self._terminal_cohorts[key]
+            self._kept_cohorts.pop(key, None)
         for session_id in cohort.member_sessions:
             if self._session_members.get(session_id, (None,))[0] == key:
                 del self._session_members[session_id]
@@ -1055,7 +1196,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             group_attempt=cohort.group_attempt,
             rollout_index=rollout_index,
             response_digest=cohort.members[rollout_index].response_digest,
-            response_digest_scheme=RESPONSE_DIGEST_SCHEME,
+            response_digest_scheme=cohort.members[rollout_index].response_digest_scheme,
             **outcome,
         ).model_dump(mode="json", exclude_none=True)
 
@@ -1095,22 +1236,25 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 raise ValueError(f"session {session_id!r} names cohort {state.cohort_key!r} inconsistently")
             existing = cohort.members.get(state.rollout_index)
             if existing is not None and (
-                existing.response_digest != state.response_digest
+                (existing.response_digest, existing.response_digest_scheme)
+                != (state.response_digest, state.response_digest_scheme)
                 or cohort.results.get(state.rollout_index) != state.result
             ):
                 raise ValueError(
                     f"sessions disagree on rollout_index={state.rollout_index} of cohort {state.cohort_key!r}"
                 )
-            cohort.members[state.rollout_index] = _CohortMember(body=None, response_digest=state.response_digest)
+            cohort.members[state.rollout_index] = _CohortMember(
+                response_obj=None,
+                response_digest=state.response_digest,
+                response_digest_scheme=state.response_digest_scheme,
+            )
             if state.result is not None:
                 cohort.results[state.rollout_index] = state.result
             cohort.member_sessions.add(session_id)
             cohort.unreplayed_sessions.add(session_id)
         # Validated in full before anything is installed.
         self._session_members.update(session_members)
-        now = time.monotonic()
         for key, cohort in cohorts.items():
-            cohort.terminal_at = now
             self._verify_cohorts[key] = cohort
             assert cohort.group_id is not None
             watermark = self._latest_group_attempts.get(cohort.group_id)
@@ -1118,9 +1262,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 self._latest_group_attempts[cohort.group_id] = _GroupAttemptWatermark(
                     latest_attempt=cohort.group_attempt,
                     prompt_digest=cohort.prompt_digest,
-                    updated_at=now,
+                    cohort_key=key,
                 )
                 self._restored_watermarks.add(cohort.group_id)
+            # A restored result and its group's attempt record join the retention orders like any finished group.
+            self._record_terminal_cohort(cohort)
 
     async def retire_session_state(self, session_id: str) -> None:
         """Forget a retired or unclaimed session's member, and the restored cohort once nothing continues from it.
@@ -1147,12 +1293,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if cohort.members:
             return
         self._drop_cohort(cohort_key)
-        group_id = cohort.group_id
-        if group_id in self._restored_watermarks and not any(
-            other.group_id == group_id for other in self._verify_cohorts.values()
-        ):
-            self._restored_watermarks.discard(group_id)
-            self._latest_group_attempts.pop(group_id, None)
+        self._forget_unused_restored_watermark(cohort)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -1184,7 +1325,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self._verify_cohorts.clear()
+        self._terminal_cohorts.clear()
         self._latest_group_attempts.clear()
+        self._idle_groups.clear()
+        self._kept_cohorts.clear()
+        self._kept_groups.clear()
         self._session_members.clear()
         self._restored_watermarks.clear()
 
@@ -1196,7 +1341,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     ) -> str:
         """Return an attempt-scoped key so replacement cohorts cannot mix with old responses."""
         if body.group_id is not None:
-            return f"group_id::{body.group_id}::group_attempt::{body.group_attempt}"
+            return self._group_cohort_key(body.group_id, body.group_attempt)
 
         prompt_key = get_prompt_key_from_input(input_messages, principle)
         if body.task_index is not None:
@@ -1206,6 +1351,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         else:
             logical_key = prompt_key
         return f"{logical_key}::group_attempt::{body.group_attempt}"
+
+    @staticmethod
+    def _group_cohort_key(group_id: str, group_attempt: int) -> str:
+        return f"group_id::{group_id}::group_attempt::{group_attempt}"
 
     def _aggregate_results(
         self,

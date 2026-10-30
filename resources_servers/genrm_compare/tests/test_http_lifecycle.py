@@ -40,6 +40,7 @@ from nemo_gym.metrics import RewardProfiler
 from nemo_gym.server_runtime import BaseVerifyResponse
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
+from resources_servers.genrm_compare.tests.test_cohort_storage import training_member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
 
 
@@ -89,6 +90,8 @@ async def services(config, monkeypatch):
     config.num_rollouts_per_prompt = 4
     config.cohort_collection_timeout_s = 3
     config.cohort_evaluation_timeout_s = 3
+    # Real HTTP judge calls must not race the per-request deadline on a loaded runner.
+    config.judge_request_timeout_s = 2.0
     resource = GenRMCompareResourcesServer(config=config, server_client=client)
     state = SimpleNamespace(
         policy_calls=0,
@@ -191,6 +194,47 @@ async def run(services, index, *, group="group", attempt=0):
     return result.status, await result.json()
 
 
+async def test_conversion_failure_releases_http_peer_and_requires_new_attempt(services, monkeypatch):
+    async def verify(index, *, attempt=0):
+        payload = member(index, attempt=attempt).model_dump(mode="json", by_alias=True)
+        payload["response"]["output"] = [
+            {
+                "id": f"message-{index}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "4", "annotations": []}],
+            }
+        ]
+        result = await services.client.post(server_name="resource", url_path="/verify", json=payload)
+        return result.status, await result.json()
+
+    # These direct verify requests use fixed IDs, so fault injection targets one member.
+    original = services.resource._comparison_response
+    first = asyncio.create_task(verify(0))
+    await until(lambda: bool(services.resource._verify_cohorts))
+    cohort = next(iter(services.resource._verify_cohorts.values()))
+    assert list(cohort.members) == [0] and len(cohort.members[0].waiters) == 1
+
+    def fail_one(response):
+        if response.id == "answer-1":
+            raise ValueError("injected conversion failure")
+        return original(response)
+
+    monkeypatch.setattr(services.resource, "_comparison_response", fail_one)
+    status, body = await verify(1)
+    assert status == 503 and "injected conversion failure" in body["detail"]
+    peer_status, peer_body = await asyncio.wait_for(first, 0.5)
+    assert peer_status == 503 and "injected conversion failure" in peer_body["detail"]
+    assert cohort.phase == "failed" and all(not m.waiters for m in cohort.members.values())
+    assert services.judge_calls == 0
+    monkeypatch.setattr(services.resource, "_comparison_response", original)
+    assert (await verify(1))[0] == 503
+    results = await asyncio.gather(*(verify(i, attempt=1) for i in range(4)))
+    assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
+    assert services.judge_calls == 4
+
+
 async def test_incomplete_run_fails_without_reward(services):
     services.resource.config.cohort_collection_timeout_s = 0.05
     status, body = await run(services, 0)
@@ -276,7 +320,7 @@ async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, du
     requests[0].cancel()
     await asyncio.gather(requests[0], return_exceptions=True)
     await until(lambda: not old.members[0].waiters)
-    assert old.phase in ("collecting", "evaluating") and old.members[0].body is not None
+    assert old.phase in ("collecting", "evaluating") and old.members[0].response_obj is not None
     requests[0] = asyncio.create_task(verify(0))
     requests += [asyncio.create_task(verify(i)) for i in range(count, 4)]
     services.judge_release.set()
@@ -290,6 +334,7 @@ async def test_closed_judge_port_is_bounded_despite_transport_retries(services):
     sock.bind(("127.0.0.1", 0))
     # Keep the unlistening port reserved so another service cannot reuse it.
     services.client._server_base_urls["judge"] = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    services.resource.config.judge_request_timeout_s = 0.2
     try:
         started = time.monotonic()
         results = await asyncio.gather(*(run(services, i) for i in range(4)))
@@ -511,6 +556,7 @@ async def test_transient_http_failure_recovers_without_regenerating_answers(serv
 
 @pytest.mark.parametrize("recovers", [True, False])
 async def test_interrupted_judge_body_retries_without_regenerating_answers(services, recovers):
+    services.resource.config.cohort_evaluation_timeout_s = 10.0
     services.truncated_judge_responses = 1 if recovers else 100
     results = await asyncio.gather(*(run(services, i) for i in range(4)))
     assert services.policy_calls == 4
@@ -528,6 +574,7 @@ async def test_interrupted_judge_body_retries_without_regenerating_answers(servi
 @pytest.mark.parametrize("value", ["NaN", "Infinity"])
 @pytest.mark.parametrize("recovers", [False, True])
 async def test_nonfinite_judge_output_uses_parse_retries_over_http(services, value, recovers):
+    services.resource.config.cohort_evaluation_timeout_s = 10.0
     invalid = json.dumps({"score_1": value, "score_2": 2, "ranking": 1})
     services.judge_texts = [invalid] * (1 if recovers else 16)
     results = await asyncio.gather(*(run(services, i) for i in range(4)))
@@ -551,3 +598,30 @@ async def test_explicit_judge_failure_requires_new_shared_attempt_over_http(serv
         status == 200 and body["reward"] == 3.0 and "_ng_failure_class" not in body for status, body in recovered
     )
     assert services.judge_calls == calls + 4
+
+
+async def test_http_retry_rejects_changed_nonfinite_training_value(services):
+    payloads = [training_member(i).model_dump(mode="json", by_alias=True) for i in range(4)]
+    for payload in payloads:
+        payload["response"]["output"][1]["content"] = [{"type": "output_text", "text": "4", "annotations": []}]
+    payloads[0]["response"]["output"][1]["generation_log_probs"][0] = float("-inf")
+
+    async def verify(payload):
+        # External clients can send Infinity literals; Gym's normal JSON encoder normalizes them.
+        result = await services.client.post(
+            server_name="resource",
+            url_path="/verify",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        return result.status, await result.json()
+
+    results = await asyncio.gather(*(verify(payload) for payload in payloads))
+    assert all(status == 200 for status, _ in results)
+    calls = services.judge_calls
+    replay_status, replay = await verify(payloads[0])
+    assert replay_status == 200 and replay["reward"] == results[0][1]["reward"]
+    payloads[0]["response"]["output"][1]["generation_log_probs"][0] = float("inf")
+    status, _ = await verify(payloads[0])
+    assert status == 409
+    assert services.judge_calls == calls
