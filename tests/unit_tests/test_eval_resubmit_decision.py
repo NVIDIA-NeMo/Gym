@@ -288,7 +288,7 @@ def test_counts_as_zero_without_terminal_model_ownership_is_not_final(tmp_path, 
     assert not out.ok and out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
 
 
-@pytest.mark.parametrize("kind", ["model_context_limit", "model_transport_error", "policy_model_response_timeout"])
+@pytest.mark.parametrize("kind", ["model_context_limit", "model_transport_error", "model_policy_response_timeout"])
 def test_a_terminal_counts_as_zero_row_is_settled_as_rollout_collection_settles_it(
     tmp_path, fake_executor, kind
 ) -> None:

@@ -5,7 +5,7 @@ Simple Agent supports an explicit outcome policy for confirmed policy-model resp
 ```yaml
 outcome_policy:
   by_failure_kind:
-    policy_model_response_timeout: count_as_zero
+    model_policy_response_timeout: count_as_zero
 ```
 
 `fail` stops the rollout ungraded; `count_as_zero` stops it with an explicit zero. All three actions retain the same classified failure, IDs and causes. Classification requires every observed attempt of the final model operation to have timed out waiting for a response after a confirmed completed upload. Missing phase or attempt evidence, failed uploads, connection/pool timeouts and mixed failures do not qualify. Older reports without upload evidence therefore cannot activate this scoring rule. Model-request and episode budgets remain separate.

@@ -55,8 +55,8 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureEvent, FailureReport, SdkErrorDetails, TaskId
 from nemo_gym.failure_kinds import (
     AGENT_ROUTE_FAILED,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
-    POLICY_MODEL_RESPONSE_TIMEOUT,
 )
 from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.global_config import (
@@ -3318,7 +3318,7 @@ class TestFinalOnModelTimeout:
 
         assert (raised.value.boundary, raised.value.failure_kind, raised.value.operation) == (
             FailureBoundary.AGENT,
-            POLICY_MODEL_RESPONSE_TIMEOUT,
+            MODEL_POLICY_RESPONSE_TIMEOUT,
             POLICY_TIMEOUT_OPERATION,
         )
         # One policy call: the model server's attempts are its own, and nothing here adds one.
@@ -3338,7 +3338,7 @@ class TestFinalOnModelTimeout:
         server, server_client = _timeout_agent(final_on_model_timeout=enabled)
         policy_timeout = NgFailureEvent(
             boundary=FailureBoundary.AGENT,
-            failure_kind=POLICY_MODEL_RESPONSE_TIMEOUT,
+            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
             failure_reason="Policy model request timed out on every attempt",
             operation=POLICY_TIMEOUT_OPERATION,
         )
@@ -3366,7 +3366,7 @@ class TestFinalOnModelTimeout:
         assert row["_ng_failure_terminal"] is enabled
         assert row["_ng_failure_counts_as_zero"] is enabled
         assert "reward" not in row
-        assert row["failure_kind"] == POLICY_MODEL_RESPONSE_TIMEOUT
+        assert row["failure_kind"] == MODEL_POLICY_RESPONSE_TIMEOUT
         assert row["_ng_failure_id"] == policy_timeout.event_id
         assert row["_ng_failure_events"][policy_timeout.event_id] == report.events[policy_timeout.event_id].model_dump(
             mode="json"

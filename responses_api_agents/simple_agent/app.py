@@ -77,8 +77,8 @@ from nemo_gym.episode_types import EpisodeId, FailureBoundary
 from nemo_gym.exception_inspection import explicit_causes
 from nemo_gym.failure_kinds import (
     AGENT_RUN_ERROR,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
-    POLICY_MODEL_RESPONSE_TIMEOUT,
 )
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow, report_for_current_request
 from nemo_gym.health.timeouts import TimeoutEvent
@@ -247,10 +247,10 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
             supplied = supplied.model_dump(exclude_unset=True)
         policy = dict(supplied)
         rules = dict(policy.get("by_failure_kind") or {})
-        selected = rules.get(POLICY_MODEL_RESPONSE_TIMEOUT, policy.get("default_action"))
+        selected = rules.get(MODEL_POLICY_RESPONSE_TIMEOUT, policy.get("default_action"))
         if selected is not None and selected != action:
             raise ValueError("final_on_model_timeout conflicts with the explicit outcome_policy timeout action")
-        policy["by_failure_kind"] = rules | {POLICY_MODEL_RESPONSE_TIMEOUT: action}
+        policy["by_failure_kind"] = rules | {MODEL_POLICY_RESPONSE_TIMEOUT: action}
         value["outcome_policy"] = policy
         return value
 
@@ -306,7 +306,7 @@ def _policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None
         if (
             isinstance(cause, NgFailureEvent)
             and cause.boundary == FailureBoundary.AGENT
-            and cause.failure_kind == POLICY_MODEL_RESPONSE_TIMEOUT
+            and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT
             and cause.operation == POLICY_TIMEOUT_OPERATION
         ):
             return cause
@@ -574,7 +574,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             final = report.events[report.failure_id]
                             raise NgFailureEvent(
                                 boundary=FailureBoundary.AGENT,
-                                failure_kind=POLICY_MODEL_RESPONSE_TIMEOUT,
+                                failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
                                 failure_reason="Policy model request timed out on every attempt",
                                 operation=POLICY_TIMEOUT_OPERATION,
                                 operation_id=final.operation_id,

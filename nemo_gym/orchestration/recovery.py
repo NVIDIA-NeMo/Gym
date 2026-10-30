@@ -43,9 +43,9 @@ from pydantic import BaseModel, Field
 from nemo_gym.failure_kinds import (
     JUDGE_FAILED,
     MODEL_CONTEXT_LIMIT,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
-    POLICY_MODEL_RESPONSE_TIMEOUT,
     is_namespaced,
     is_registered,
 )
@@ -283,7 +283,7 @@ def decide_recovery(
                 MODEL_CONTEXT_LIMIT,
                 MODEL_REQUEST_ERROR,
                 MODEL_TRANSPORT_ERROR,
-                POLICY_MODEL_RESPONSE_TIMEOUT,
+                MODEL_POLICY_RESPONSE_TIMEOUT,
             }
             contradictory = any(
                 boundary not in (None, "model", "agent") or boundary == "agent" and operation != "agent.policy_request"
