@@ -399,10 +399,11 @@ async def run_verification(
     inputs: VerificationInputs,
     log_dir: Path,
     timeout_s: int | None,
+    assemble=assemble_workspace_files,
 ) -> VerificationResult:
     """Apply one patch, execute Pro's task scripts, and grade their JSON output."""
     sample = asdict(inputs)
-    files, entry_script = assemble_workspace_files(inputs.instance_id, None, inputs.patch, sample)
+    files, entry_script = assemble(inputs.instance_id, None, inputs.patch, sample)
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "patch.diff").write_text(files["patch.diff"], encoding="utf-8")
     (log_dir / "eval.sh").write_text(entry_script, encoding="utf-8")

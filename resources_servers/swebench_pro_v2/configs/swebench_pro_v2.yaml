@@ -1,0 +1,42 @@
+# Resources server for the SWE-bench Pro v2 split (scaleapi/SWE-bench_Pro-os, v2/).
+swebench_pro_v2_resources_server:
+  resources_servers:
+    swebench_pro_v2:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # Upstream v2 gives the agent and the verifier a 3000s budget each.
+      evaluation_timeout: 3000
+      verification_attempt_timeout: 3300
+      verification_total_timeout: 6600
+      # v2 images ship a sanitised git history, and each task's test.sh does its own repairs.
+      apply_anti_cheating: false
+      is_verifying_golden_patch: false
+      prefetch_go_modules: false
+      environment_repairs: []
+
+      # Upstream runs the agent offline except for the model endpoint. Set this for the
+      # OpenSandbox provider to reproduce that, e.g.
+      #   agent_network_policy:
+      #     defaultAction: deny
+      #     egress: [{action: allow, target: <model server host>}]
+      # It applies to the agent sandbox only; the verifier sandbox keeps network access.
+      agent_network_policy: null
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 4
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 4
+            memory_mib: 30720
+            disk_gib: 30
+        metadata:
+          benchmark: swebench-pro-v2
