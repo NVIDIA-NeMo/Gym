@@ -770,8 +770,12 @@ def _parse_session_token(
     return payload["sid"], None if allowed is None else frozenset(allowed)
 
 
-def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.CallToolResult:
+def to_call_tool_result(
+    payload: Any, *, output_schema: Optional[dict] = None, is_error: bool = False
+) -> types.CallToolResult:
     """Preserve text content and object-only structured content on both SDK versions.
+
+    ``is_error`` marks a result the agent should see as a failed call.
 
     Images a tool lists under ``tool_output_images`` leave the text and structured content and follow it as MCP
     image content, each after its label. A result with images carries no structured content unless the tool declares
@@ -793,7 +797,7 @@ def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.C
         if image.label:
             content.append(types.TextContent(type="text", text=image.label))
         content.append(types.ImageContent(type="image", data=image.data, mimeType=image.media_type))
-    return types.CallToolResult(content=content, structuredContent=structured, isError=False)
+    return types.CallToolResult(content=content, structuredContent=structured, isError=is_error)
 
 
 def _make_mcp_server(
@@ -900,15 +904,31 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
         except DirectDispatchError as exc:
             raise ValueError(f"HTTP {exc.status} from POST /{name}: {exc.detail}")
-        return _to_result(payload, output_schema=tool.tool.model_dump(by_alias=True).get("outputSchema"))
+        return to_call_tool_result(payload, output_schema=tool.tool.model_dump(by_alias=True).get("outputSchema"))
 
-    mcp_server = _make_mcp_server(server.config.name or type(server).__name__, list_tools, call_tool)
+    mount_mcp_endpoint(app, server.config.name or type(server).__name__, list_tools, call_tool)
+    return tools
+
+
+def mount_mcp_endpoint(
+    app: FastAPI,
+    server_name: str,
+    list_tools: Callable[[Optional[Request]], Awaitable[list[types.Tool]]],
+    call_tool: Callable[[Optional[Request], str, dict], Awaitable[types.CallToolResult]],
+) -> None:
+    """Serve ``list_tools`` and ``call_tool`` at ``/mcp`` on ``app``.
+
+    The endpoint is stateless Streamable HTTP with JSON responses, and runs within the app's lifespan. Each
+    handler receives the HTTP request that carried the MCP message (``None`` outside a request), so it can read
+    the caller's headers, such as a session token.
+    """
+    mcp_server = _make_mcp_server(server_name, list_tools, call_tool)
     manager = StreamableHTTPSessionManager(
         app=mcp_server,
         event_store=None,
         json_response=True,
         stateless=True,
-        # The agent reaches this endpoint server-to-server via the resources server's resolved host
+        # The agent reaches this endpoint server-to-server via the server's resolved host
         # (a routable IP/hostname on multi-node runs); enabling the SDK's Host/Origin allowlist would
         # mean enumerating every such host. DNS-rebinding protection defends browsers, which never
         # talk to this endpoint; disabling it is not what makes the endpoint safe.
@@ -940,4 +960,10 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
                 yield state
 
     app.router.lifespan_context = lifespan_wrapper
-    return tools
+
+
+# Serves the names this module had before a rename, such as _to_result, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)
