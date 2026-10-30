@@ -10,10 +10,10 @@ from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import EnvironmentServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, ToolCallObservation, TrajectoryRecord
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

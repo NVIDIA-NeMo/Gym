@@ -63,9 +63,9 @@ import orjson
 from nemo_gym._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, CheckpointMode, next_attempt
 from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
 from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.global_config import SERVER_TYPE_KEYS
 from nemo_gym.core.episode import EpisodeId
-from nemo_gym.server_utils import ServerClient
 
 
 LOGGER = logging.getLogger(__name__)

@@ -30,7 +30,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from pytest import fixture
 
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     TavilySearchRequest,
     TavilySearchResourcesServer,

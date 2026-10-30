@@ -27,6 +27,7 @@ import psutil
 import pytest
 import yaml
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -36,7 +37,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, ObservationGap
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.openclaw_agent.app import (
     OpenClawAgent,
     OpenClawAgentConfig,

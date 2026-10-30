@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.vibench.app import (
     PlanResult,
     VibenchResourcesServer,

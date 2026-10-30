@@ -66,6 +66,7 @@ jobs:
             nemo_gym/session_routing.py
             nemo_gym/server_utils.py
             nemo_gym/utils/server_process.py
+            nemo_gym/client/**
             nemo_gym/base_responses_api_agent.py
             nemo_gym/base_resources_server.py
             nemo_gym/mcp_auto_exposure.py
