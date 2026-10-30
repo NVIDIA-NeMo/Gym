@@ -1627,7 +1627,8 @@ class TestListEnvironments:
 
         assert "No environments found" in capsys.readouterr().out
 
-    def test_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
+    def test_json_output(self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path) -> None:
+        monkeypatch.chdir(tmp_path)
         self._mock_catalog(monkeypatch, overrides={"json": True}, entries=(self._ALPHA,))
 
         list_environments()
@@ -1644,8 +1645,25 @@ class TestListEnvironments:
                 "modality": "text",
                 "licensing": "Apache-2.0",
                 "lifecycle": "active",
+                "path": str(tmp_path.resolve() / "environments/alpha"),
+                "config_path": str(tmp_path.resolve() / "environments/alpha/config.yaml"),
+                "manifest_path": str(tmp_path.resolve() / "environments/alpha/manifest.yaml"),
             }
         ]
+
+    def test_json_output_without_manifest_has_null_manifest_path(
+        self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._mock_catalog(monkeypatch, overrides={"json": True}, entries=(self._BETA,))
+
+        list_environments()
+
+        [payload] = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "no-manifest"
+        assert payload["path"] == str(tmp_path.resolve() / "benchmarks/beta")
+        assert payload["config_path"] == str(tmp_path.resolve() / "benchmarks/beta/config.yaml")
+        assert payload["manifest_path"] is None
 
     def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"query": "alpha"})

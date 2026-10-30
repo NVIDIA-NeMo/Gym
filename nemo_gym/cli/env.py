@@ -1902,6 +1902,10 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "modality": entry.modality,
         "licensing": entry.licensing,
         "lifecycle": entry.lifecycle,
+        # Absolute, like the agent inspect view, so an entry found under any search root can be located.
+        "path": str(entry.path.resolve()),
+        "config_path": str(entry.config_path.resolve()),
+        "manifest_path": str(entry.manifest_path.resolve()) if entry.manifest_path else None,
     }
     if entry.status is None:
         payload.pop("status")
