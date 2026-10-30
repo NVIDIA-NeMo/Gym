@@ -75,10 +75,10 @@ def parameter_schema(param_type: str) -> Dict[str, Any]:
     types the same way; a ``Union`` is typed only when all members agree. Anything else (``Callable[...]``,
     ``Any``, an empty string) returns ``{}`` so the parameter stays untyped instead of being declared a string.
     """
-    text = (param_type or "").strip()
-    if not text:
+    parts = _split_top_level((param_type or "").strip())
+    if not parts:  # empty, or only separators and spaces (","): nothing to type
         return {}
-    head = _split_top_level(text)[0]
+    head = parts[0]
     if head.lower().endswith(" or none"):
         head = head[: -len(" or none")].strip()
     match = re.fullmatch(r"([A-Za-z_]+)\s*(?:\[(.*)\])?", head, flags=re.DOTALL)
@@ -143,7 +143,7 @@ def convert_tool_to_openai_format(tool: Dict[str, Any]) -> Dict[str, Any]:
             "required": ["ids"],
             "additionalProperties": False
         },
-        "strict": True
+        "strict": False
     }
     """
     openai_tool = {
