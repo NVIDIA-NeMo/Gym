@@ -709,7 +709,7 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
         # A task folder or `harbor:<dataset>` reference: prepare it, then run end to end.
-        from nemo_gym.data.tasks.harbor.cli import run_target
+        from nemo_gym.cli.eval import run_target
 
         run_target(args, overrides)
         return
@@ -907,14 +907,14 @@ def _dataset_init(args: argparse.Namespace, overrides: list[str]) -> None:
 
 
 def _dataset_validate(args: argparse.Namespace, overrides: list[str]) -> None:
-    from nemo_gym.data.tasks.harbor.cli import validate_target
+    from nemo_gym.cli.eval import validate_target
 
     validate_target(args, overrides)
 
 
 def _dataset_pull(args: argparse.Namespace, overrides: list[str]) -> None:
     """`gym dataset pull TARGET`: fetch a Harbor dataset into environments/harbor/ without preparing or running it."""
-    from nemo_gym.data.tasks.harbor.cli import pull_target
+    from nemo_gym.data.tasks.harbor.prepare import pull_target
 
     pull_target(args, overrides)
 

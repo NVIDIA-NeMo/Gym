@@ -14,13 +14,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from nemo_gym.cli.eval import COMPOSE_OVERLAY_KEY, compose_overlay_from_overrides
 from nemo_gym.data.tasks.harbor import image_configs
-from nemo_gym.data.tasks.harbor.cli import (
-    COMPOSE_OVERLAY_KEY,
-    compose_overlay_from_overrides,
-    prepare_target,
-    run_images,
-)
 from nemo_gym.data.tasks.harbor.compose_overlay import (
     RESET,
     ComposeOverlayError,
@@ -42,6 +37,7 @@ from nemo_gym.data.tasks.harbor.digest import context_digest
 from nemo_gym.data.tasks.harbor.dockerfile import RECORD_VERSION, OverlayRun
 from nemo_gym.data.tasks.harbor.image_configs import load_compose_document, record_compose_images
 from nemo_gym.data.tasks.harbor.models import HarborMCPServer
+from nemo_gym.data.tasks.harbor.prepare import prepare_target, run_images
 from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 from nemo_gym.data.tasks.harbor.registry import ImageConfigError
 from nemo_gym.data.tasks.harbor.task import load_task
