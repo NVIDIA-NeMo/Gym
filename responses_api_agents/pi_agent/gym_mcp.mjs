@@ -7,9 +7,9 @@ import { Writable } from "node:stream";
 // Errors this adapter raises itself. Their messages never carry response bodies, header values or full URLs.
 class GymMcpError extends Error {}
 
-// Pi's JSON mode replaces console.log and process.stdout.write with writers to stderr.
-// The stream's own write still reaches stdout, where Gym's runner records events, and
-// queues each line whole behind Pi's own output instead of splicing into it.
+// Pi's JSON mode points process.stdout.write, which console.log uses, at stderr. The stream's own write
+// still reaches stdout, where Gym's runner records events, as one whole line. It can pass lines Pi
+// queued earlier, so Gym reads these events by type.
 export function emitEvent(event, callback) {
   Writable.prototype.write.call(process.stdout, JSON.stringify(event) + "\n", callback);
 }
@@ -41,15 +41,24 @@ function originOf(url) {
 // A server marked `required: false` is skipped when its discovery fails; any other
 // failure registers no tools. A tool listed in any server's `terminal_tools` is a finish
 // tool: Pi ends the run after a turn whose calls were all successful finish calls. Each
-// listed tool must be offered. `emit` writes diagnostic events, and `replyCutOff` tells
-// whether the model's latest reply was cut off at the output limit.
+// listed tool must be offered. The names are matched without the server, so as for grant
+// names, an optional server offering a finish tool that another server offers is skipped,
+// and two required ones fail setup. `emit` writes diagnostic events, and `replyCutOff`
+// tells whether the model's latest reply was cut off at the output limit.
 export async function registerGymTools(pi, servers, { emit = emitEvent, replyCutOff = () => false } = {}) {
   const names = new Set(pi.getAllTools().map((tool) => tool.name));
-  const pending = [];
-  const offered = new Set();
+  const discovered = [];
   const enabled = Object.entries(servers).filter(([, server]) => server.enabled !== false);
   const terminal = new Set(enabled.flatMap(([, server]) => server.terminal_tools || []));
   const skipped = [];
+  const skip = (serverName, cause) => {
+    skipped.push(serverName);
+    try {
+      emit({ type: "ng_gym_mcp_server_skipped", server: serverName, error: cause });
+    } catch {
+      // A lost diagnostic must not fail a session that can run without this server.
+    }
+  };
   for (const [serverName, server] of enabled) {
     let tools, toolNames;
     try {
@@ -57,18 +66,28 @@ export async function registerGymTools(pi, servers, { emit = emitEvent, replyCut
     } catch (error) {
       const cause = `${describe(error)} at ${originOf(server.url)}`;
       if (server.required !== false) throw new GymMcpError(`${serverName}: ${cause}`);
-      skipped.push(serverName);
-      try {
-        emit({ type: "ng_gym_mcp_server_skipped", server: serverName, error: cause });
-      } catch {
-        // A lost diagnostic must not fail a session that can run without this server.
-      }
+      skip(serverName, cause);
       continue;
     }
     for (const tool of tools) names.add(tool.name);
-    for (const name of toolNames) offered.add(name);
-    pending.push(...tools);
+    const finishTools = toolNames.filter((name) => terminal.has(name));
+    discovered.push({ serverName, required: server.required !== false, tools, finishTools });
   }
+  // Another server's tool of the same name would end the run too.
+  const sharing = (entry) =>
+    discovered.filter((other) => other !== entry && other.finishTools.some((name) => entry.finishTools.includes(name)));
+  const kept = [];
+  for (const entry of discovered) {
+    const others = sharing(entry).map((other) => other.serverName);
+    if (entry.required || !others.length) kept.push(entry);
+    else skip(entry.serverName, `it shares finish tools with ${others.join(", ")}`);
+  }
+  const clashing = kept.filter((entry) => entry.required && sharing(entry).some((other) => other.required));
+  if (clashing.length) {
+    const clashed = clashing.map((entry) => entry.serverName).join(", ");
+    throw new GymMcpError(`The required Gym MCP servers ${clashed} offer the same finish tools`);
+  }
+  const offered = new Set(kept.flatMap((entry) => entry.finishTools));
   const missing = [...terminal].filter((name) => !offered.has(name));
   if (missing.length) {
     // Without its finish tool a run never ends on submission, so the server offering it is required.
@@ -76,7 +95,7 @@ export async function registerGymTools(pi, servers, { emit = emitEvent, replyCut
     throw new GymMcpError(`No Gym MCP server offers the finish tools ${missing.join(", ")}${note}`);
   }
   // A failed discovery must not leave a partially registered tool set.
-  for (const tool of pending) pi.registerTool(tool);
+  for (const entry of kept) for (const tool of entry.tools) pi.registerTool(tool);
 }
 
 async function discoverTools(serverName, server, registered, terminal, replyCutOff) {

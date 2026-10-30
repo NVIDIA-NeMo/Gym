@@ -29,6 +29,10 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 
 The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
 
+<Warning>
+This legacy `/run` path is deprecated and will be removed after the Environment Server migration. Do not build new benchmarks, agents, or configs on `opencode_sandboxed_agent`, `pi_sandboxed_agent`, or `hermes_sandboxed_agent`, or on the `/run` path of `terminus_2_sandboxed_agent` and `miniswe_sandboxed_agent`. Use a harness from the table above instead. Each of these agents logs a deprecation warning when it starts on this path. Episode sessions of `terminus_2_sandboxed_agent` and `miniswe_sandboxed_agent`, which [Harbor Tasks](/main/data/harbor-tasks) use, are not deprecated.
+</Warning>
+
 ### Kilo MCP and sandbox ownership
 
 Kilo's session adapter accepts remote MCP grants from Resources. Set the Environment Server's `resources_tool_transports: [mcp]` to expose Resources tools through MCP. Grant URLs and headers must be reachable and valid from the task sandbox. Required direct HTTP grants are still rejected; this does not make a recipe configured with `[direct_http]` compatible with Kilo.
@@ -229,6 +233,29 @@ Before you try a pairing, review the benchmark's session and tool contract and t
 To swap a component, change the imported configuration and its matching implementation block together. Keep task data and preparation in the benchmark declaration, and keep harness selection in the Environment Server's `agent_server` reference. The `--agent-type` shortcut for legacy agent-to-Resources bindings does not replace these edits. To compare agents on the same endpoint, keep the model and provider file unchanged. To compare models or providers, change that file in a separate experiment.
 
 For where the harness runs and who cleans up, including borrowed and agent-owned sandboxes and host execution, see [Select an execution mode](/main/agent-server/add-or-update-a-harness#select-an-execution-mode).
+
+### Run Codex on Terminal-Bench-Science
+
+[Terminal-Bench-Science v0.1](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md) ships a ready-made Codex profile, `terminal_bench_science/codex`, so you do not write the four files above. Unlike the Terminal Bench 2.1 adapters, its Resources Server is `terminal_bench_4`: it provisions each pinned task, lends the task sandbox to `codex_agent`, and grades in a separate offline verifier sandbox. The profile composes `single_agent_turn_legacy`, so it reads flat rows rather than a taskset. Like the other session paths, it is for evaluation only.
+
+Before you run it:
+
+- **Build the task images.** Upstream publishes none. Build each task's agent and verifier image, push them to a registry that your sandbox deployment can pull from, and pass them as a `tbsci_task_images` map or as `tbsci_agent_image` and `tbsci_verifier_image` templates. See [Images](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#images).
+- **Prepare the rows.** Each row carries the task's official instruction, read from the pinned package after its hashes are checked. The check needs `pathspec`, which Gym's own environment leaves out, so `gym eval prepare --benchmark terminal_bench_science/codex` runs it in the Resources Server's environment and sets that environment up first if needed, as [the README shows](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#codex-in-the-task-sandbox).
+- **Bind Gym to a reachable address.** Codex calls Gym's model server from inside the task sandbox, so pass `++default_host` with an address that the sandboxes can reach, as with `GYM_HOST` above.
+
+`codex_deepseek_flash.yaml` is the run configuration for the leaderboard's DeepSeek V4.1 Flash row, served by your own chat-completions server. Pass your images in a second `--config` file, here `tbsci-images.yaml`, that sets `tbsci_task_images`:
+
+```bash
+export POLICY_API_KEY=...  # any string if the server has no auth
+gym eval run --config benchmarks/terminal_bench_science/codex_deepseek_flash.yaml \
+  --config tbsci-images.yaml \
+  --split benchmark --model-url http://SERVER_HOST:PORT/v1 \
+  --output results/tbsci-deepseek/rollouts.jsonl --concurrency 8 \
+  ++default_host=$GYM_HOST
+```
+
+The profile runs one trial per task. The leaderboard's protocol is three trials per task, 210 in all: add `++num_repeats=3`. For the Codex defaults and the model server settings, see [Codex with DeepSeek V4.1 Flash](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#codex-with-deepseek-v41-flash).
 
 ## Resuming harness sessions
 

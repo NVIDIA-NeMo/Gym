@@ -28,11 +28,15 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxHandle, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.sandbox import (
+    ConnectableProvider,
+    SandboxHandle,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validate_source
 

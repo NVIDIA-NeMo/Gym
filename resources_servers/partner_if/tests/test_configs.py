@@ -10,7 +10,7 @@ import yaml
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
 from nemo_gym.server_utils import ServerClient
 
 

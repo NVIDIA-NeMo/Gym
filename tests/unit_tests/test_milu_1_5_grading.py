@@ -7,8 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from resources_servers.mcqa.app import (
     MCQAResourcesServer,

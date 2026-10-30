@@ -100,6 +100,41 @@ Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
 also yield null counts. Report parsing diagnostics identify the source file.
 The official reward and evaluation-completion rules remain unchanged.
 
+## Environment Server sessions (SandboxAccess)
+
+Harnesses that borrow a task sandbox through `SandboxAccess` (for example
+`codex_agent` behind `single_agent_turn` or `single_agent_turn_legacy`) use the
+shared resources-session protocol instead of the contract above, as
+[Terminal-Bench 2.1](../../benchmarks/terminal_bench_2_1/README.md) does:
+
+- `/seed_session` with a `ResourcesSeedSessionRequest` whose `task_data` is the task
+  row (`task_name`, `task_ref`, `dataset_ref`) provisions the task as above, then
+  returns `sandbox_access`: a direct connection through the top-level sandbox provider
+  block named by `sandbox_provider_ref` (it must describe the same provider as
+  `environment.sandbox_provider`), and the task's working directory as its user sees
+  it. Seeds are idempotent per `resources_session_id`; a changed request is rejected.
+- `/verify` with the task row, `responses_create_params`, and the agent's `response`
+  grades once, as above; the session cookie names the episode. Termination comes from
+  `response.status`: `completed`, `incomplete` (`timeout`, or `nonzero_exit` for
+  `max_output_tokens`), and `nonzero_exit` for any other status, such as the `failed`
+  response of an agent that died while its sandbox still runs (codex_agent's
+  `verify_after_agent_error`). Identical retries replay the verdict. A verify for a
+  closed or unknown session returns a masked sample (`mask_sample: true`, reward 0) with
+  `failure_kind: session_lost`, or `session_expired` past the seeded-session deadline.
+- `/close_session` fences the session first, so a seed still provisioning releases its
+  sandboxes instead of lending them (HTTP 409), even if the close's caller stops waiting.
+  It then waits for in-flight provisioning or grading, stops anything still running
+  without grading it (finishing even if the caller disconnects), and fences late seeds.
+  A sandbox that cannot be stopped fails the close and keeps the fence; a repeated close
+  retries the deletion, and the provider TTL bounds it. A completed close is remembered
+  for `session_close_retry_window_seconds` (default 300), so retried closes succeed and
+  late seeds are rejected; set it to cover the caller's retry horizon.
+
+The borrower runs as the sandbox's default user, so tasks that declare
+`agent.user` are rejected with HTTP 422, and the access carries no agent timeout:
+configure the harness timeout from the task's `agent.timeout_sec`. Split sandbox
+endpoints are not supported in this mode.
+
 ## Other pinned Harbor datasets
 
 `manifest_path` selects the pinned dataset. It defaults to Terminal-Bench 4.0; a relative

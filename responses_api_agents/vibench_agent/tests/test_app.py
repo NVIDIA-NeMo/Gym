@@ -285,7 +285,7 @@ class TestAggregateMetricsProxy:
 
         agent.server_client.post = fake_post
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
 

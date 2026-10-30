@@ -10,8 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ModelWrapValidator
 
 from environment_servers.swe_together.task import TaskData
 from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
 
