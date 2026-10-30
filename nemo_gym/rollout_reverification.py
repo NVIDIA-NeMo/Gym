@@ -625,6 +625,10 @@ _IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
+    if _is_judge_failure(pair.rollout) and isinstance(pair.rollout.get("model_patch"), str):
+        # This projection only carries the response, not a saved workspace patch. Do not silently
+        # grade another patch (for example the task's reference patch) or ask the agent for a new one.
+        raise ConfigError("reverify: saved model_patch replay is unsupported; retain the original patch and failure")
     response = _rollout_response(pair.rollout)
     task_input = pair.input.get("task_input")
     if not isinstance(task_input, dict):
