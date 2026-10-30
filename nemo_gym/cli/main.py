@@ -1595,6 +1595,13 @@ COMMANDS = {
                 "Materialized inputs JSONL fed to rollout collection.",
             ),
             _value_flag("rollouts", "rollouts_jsonl_fpath", "Rollouts JSONL produced by collection."),
+            _bool_flag(
+                "bayes-at-n",
+                "bayes_at_n",
+                "Also report each run's Bayes@N posterior mean and standard deviation of the benchmark's "
+                "mean success probability. Needs a complete collection whose questions all have the same "
+                "number of binary (0 or 1) reward trials.",
+            ),
         ),
     ),
     "eval submit": Command(
