@@ -5,6 +5,7 @@
 import ast
 import json
 import sys
+import warnings
 from pathlib import Path
 from typing import get_args
 
@@ -460,7 +461,9 @@ class TestSelfContainedAgentSchemaFallback:
         (agent_dir / "requirements.txt").write_text("")
         monkeypatch.chdir(tmp_path)
         agent = self._agent("tau2_without_schema", None)
-        assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # a found server without task_data.py is skipped silently
+            assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
 
     def test_agent_with_dangling_rs_reference_is_skipped(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "responses_api_agents" / "tau2"
@@ -884,6 +887,23 @@ class TestFindServerDirRejectsOutputOnlyDirs:
     def test_missing_server_is_none(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         assert find_server_dir("no_such_server_xyz") is None
+
+    # The markers are spelled out rather than taken from SERVER_DIR_MARKERS so that dropping one from the tuple
+    # fails here: requirements.txt and pyproject.toml are the CLI's server-dir rule, task_data.py and
+    # dataset_metrics.py are the modules the data tooling looks up.
+    @pytest.mark.parametrize("marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py"])
+    def test_a_directory_holding_only_that_marker_is_a_server_dir(self, tmp_path, monkeypatch, marker):
+        server_dir = tmp_path / "resources_servers" / "marker_only_rs"
+        server_dir.mkdir(parents=True)
+        (server_dir / marker).write_text("")
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("marker_only_rs") == server_dir
+
+    @pytest.mark.parametrize("marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py"])
+    def test_a_marker_that_is_a_directory_does_not_count(self, tmp_path, monkeypatch, marker):
+        (tmp_path / "resources_servers" / "marker_dir_rs" / marker).mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("marker_dir_rs") is None
 
     def test_unresolvable_schema_home_warns_and_skips(self, tmp_path, monkeypatch):
         from types import SimpleNamespace

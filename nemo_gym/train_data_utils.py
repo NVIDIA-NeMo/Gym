@@ -556,6 +556,19 @@ def _prepare_command(global_config: DictConfig, dataset: DatasetConfig) -> str:
     return "gym eval prepare --config <config path>"
 
 
+def _missing_server_dir_hint(impl_key: str, base_folder: str, instance_name: str) -> str:
+    """Why a schema home resolved to no server directory, and what to do about it.
+
+    A dangling ``resources_server`` reference never reaches this point (``_schema_home_for`` returns None for
+    it), so the directory that is missing is the implementation's own.
+    """
+    return (
+        f"no {base_folder}/{impl_key} directory holding one of {', '.join(SERVER_DIR_MARKERS)} under the "
+        f"component search roots. Check that `{impl_key}`, the implementation {instance_name} resolves to, has a "
+        "server directory, or add its root to the search roots (NEMO_GYM_EXTRA_ROOTS / --search-dir)."
+    )
+
+
 class TrainDataProcessor(BaseModel):
     # Every server instance of the run config, kept by `load_and_validate_server_instance_configs`. The
     # in-scope list it returns holds only dataset-bearing instances, but the schema that validates an
@@ -1165,10 +1178,8 @@ This could be due to a change in how metrics are calculated, leading to outdated
         if server_dir is None:
             # Say so: a schema home that resolves to no server directory used to switch the gate off silently.
             warnings.warn(
-                f"Skipping task_data validation for {d.jsonl_fpath}: no {base_folder}/{impl_key} directory "
-                f"holding one of {', '.join(SERVER_DIR_MARKERS)} under the component search roots. Check the "
-                f"resources_server reference of {c.name} in the config, or add the server's directory to the "
-                "search roots (NEMO_GYM_EXTRA_ROOTS / --search-dir).",
+                f"Skipping task_data validation for {d.jsonl_fpath}: "
+                + _missing_server_dir_hint(impl_key, base_folder, c.name),
                 stacklevel=2,
             )
             return None
@@ -1216,10 +1227,8 @@ This could be due to a change in how metrics are calculated, leading to outdated
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             warnings.warn(
-                f"Skipping the dataset metrics hook lookup for {c.name}: no {base_folder}/{impl_key} directory "
-                f"holding one of {', '.join(SERVER_DIR_MARKERS)} under the component search roots. Check the "
-                f"resources_server reference of {c.name} in the config, or add the server's directory to the "
-                "search roots (NEMO_GYM_EXTRA_ROOTS / --search-dir).",
+                f"Skipping the dataset metrics hook lookup for {c.name}: "
+                + _missing_server_dir_hint(impl_key, base_folder, c.name),
                 stacklevel=2,
             )
             return None
