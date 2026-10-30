@@ -2907,6 +2907,25 @@ def test_response_accepts_provider_specific_service_tier() -> None:
     assert response.service_tier == "on-demand"
 
 
+def test_chat_request_drops_cache_control_from_messages_and_content_parts() -> None:
+    from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+
+    params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+        {
+            "messages": [
+                {"role": "system", "content": "be brief", "cache_control": {"type": "ephemeral"}},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hi", "cache_control": {"type": "ephemeral"}}],
+                },
+            ]
+        }
+    )
+
+    assert params.messages[0] == {"role": "system", "content": "be brief"}
+    assert params.messages[1]["content"] == [{"type": "text", "text": "hi"}]
+
+
 def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> None:
     from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 
