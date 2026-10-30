@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -107,6 +108,33 @@ def _write_marker_atomically(marker: Path, run_id: str) -> None:
         temporary.replace(marker)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _artifact_version(artifacts: RunArtifacts) -> dict[str, Optional[str]]:
+    """Content identities for a run, independent of its writers, timestamps and directory location."""
+    version = {}
+    for name in (
+        "rollouts_jsonl_fpath",
+        "resolved_config_yaml_fpath",
+        "aggregate_metrics_json_fpath",
+        "failures_jsonl_fpath",
+        "materialized_inputs_jsonl_fpath",
+    ):
+        path = getattr(artifacts, name)
+        try:
+            with path.open("rb") as source:
+                before = os.fstat(source.fileno())
+                digest = hashlib.file_digest(source, "sha256").hexdigest()
+                after = os.fstat(source.fileno())
+            current = path.stat()
+        except FileNotFoundError:
+            version[name] = None
+            continue
+        identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise RuntimeError(f"Run artifact changed while reading: {path}")
+        version[name] = digest
+    return version
 
 
 def _upload_intent(config: DictConfig) -> UploadRolloutsConfigMixin:
@@ -366,8 +394,46 @@ class BaseExporter(Exporter):
         result rather than being swallowed the way live `export_*` calls are.
         """
         marker = artifacts.export_done_fpath(self.name)
-        if marker.exists():
-            return ExportResult.skipped(reason="already exported", run_id=marker.read_text().strip())
+        try:
+            version = _artifact_version(artifacts)
+            if marker.exists():
+                try:
+                    receipt = orjson.loads(marker.read_bytes())
+                except orjson.JSONDecodeError:
+                    receipt = None
+                if (
+                    not isinstance(receipt, dict)
+                    or type(receipt.get("version")) is not int
+                    or receipt["version"] != 1
+                    or not isinstance(receipt.get("run_id"), str)
+                    or not receipt["run_id"].strip()
+                    or type(receipt.get("uploaded_rollouts")) is not bool
+                    or not isinstance(receipt.get("artifacts"), dict)
+                    or receipt["artifacts"].keys() != version.keys()
+                    or any(
+                        digest is not None
+                        and (
+                            not isinstance(digest, str)
+                            or len(digest) != 64
+                            or any(c not in "0123456789abcdef" for c in digest)
+                        )
+                        for digest in receipt["artifacts"].values()
+                    )
+                ):
+                    return ExportResult.failed(
+                        f"Cannot verify the legacy or malformed export receipt {marker}; it is left unchanged and "
+                        "nothing was exported."
+                    )
+                if receipt["artifacts"] != version:
+                    # The receipt describes other contents. It is kept as found, and nothing is sent again.
+                    return ExportResult.failed(
+                        f"The export receipt {marker} does not match the current run artifacts; it is left "
+                        "unchanged and nothing was exported.",
+                        run_id=receipt["run_id"],
+                    )
+                return ExportResult.skipped(reason="already exported", run_id=receipt["run_id"])
+        except (OSError, RuntimeError) as exc:
+            return ExportResult.failed(f"Could not verify export artifacts: {exc}")
         # The rollouts file is only required below, when the rollouts are actually uploaded.
         unexportable = unexportable_reason(artifacts, rollouts_required=False)
         if unexportable is not None:
@@ -405,7 +471,16 @@ class BaseExporter(Exporter):
                     f"The {self.name} exporter did not report a run id: its setup() must call _record_run_id(). "
                     "The export is not marked as done."
                 )
-            _write_marker_atomically(marker, run_id)
+            if _artifact_version(artifacts) != version:
+                return ExportResult.failed(
+                    "Run artifacts changed during export; the backend may hold the earlier version, "
+                    "but the current run is not marked as exported.",
+                    run_id=run_id,
+                )
+            # What this export delivered: every call above returned, so the rollouts table was sent exactly when
+            # this export read them for upload. A reader can tell a whole-run receipt from one without rows.
+            receipt = {"version": 1, "run_id": run_id, "artifacts": version, "uploaded_rollouts": rollouts is not None}
+            _write_marker_atomically(marker, orjson.dumps(receipt).decode())
         except Exception as exc:
             logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)
             return ExportResult.failed(f"{type(exc).__name__}: {exc}")
