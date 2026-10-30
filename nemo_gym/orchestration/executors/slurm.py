@@ -42,6 +42,7 @@ from nemo_gym.orchestration.executors.otel import (
     validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.resume_script import (
+    BOUNDED_BUDGET_MARKER,
     KEEP_BUDGET_ENV,
     PROLOGUE_MARKER,
     RESUBMIT_ENV,
@@ -392,6 +393,9 @@ class SlurmExecutor(BaseExecutor):
                                 f"&& ! grep -qF -- {KEEP_BUDGET_ENV} job.sh; then "
                                 'fail "job.sh in $PWD predates budget-preserving recovery, so a resubmit would reset '
                                 'its spent retries, walltime and attempts; use a plain resubmit or submit again"; fi',
+                                f"if ! grep -qxF -- {shlex.quote(BOUNDED_BUDGET_MARKER)} job.sh; then "
+                                'fail "job.sh in $PWD predates bounded recovery budgets; stage a new job script '
+                                'before automatic recovery"; fi',
                                 f"export {KEEP_BUDGET_ENV}=1",
                             ]
                             if keep_budget

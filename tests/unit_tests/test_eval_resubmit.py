@@ -297,6 +297,8 @@ def _run_prologue(prologue: str, job_dir: Path, env: dict[str, str]) -> subproce
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / "sbatch").write_text('#!/bin/bash\necho "GYM_RESUBMIT=${GYM_RESUBMIT:-}" > follow_up_env\necho 7\n')
     (bin_dir / "sbatch").chmod(0o755)
+    (bin_dir / "scontrol").write_text('#!/bin/bash\necho "JobId=$SLURM_JOB_ID TimeLimit=00:30:00"\n')
+    (bin_dir / "scontrol").chmod(0o755)
     script = prologue + 'echo "_gym_resubmit=$_gym_resubmit"\n'
     return subprocess.run(
         ["bash", "-c", script],
@@ -793,7 +795,7 @@ def test_recover_resubmit_keeps_the_spent_retries_walltime_and_attempts(tmp_path
 
     assert out.dispatched == "resubmit" and out.job_id == "4242"
     args = _start_queued_job(script, resume, job_dir, slurm_bin)
-    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "3\n"
     assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
     # It resumes without `++resubmit=True`, which would start a fresh per-rollout attempt budget.
     assert args[-1] == "++resume_from_cache=True" and "++resubmit=True" not in args
@@ -935,3 +937,15 @@ def test_recovery_does_not_reconstruct_an_unknown_manual_budget_epoch(tmp_path, 
     out = recover(*_handle(job_dir))
     assert out.decision.action == "stop" and out.dispatched is None
     assert (job_dir / ".gym_accumulated_walltime").read_text() == "0\n"
+
+
+def test_recover_refuses_unbounded_saved_prologue_before_dispatch(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.executors.resume_script import BOUNDED_BUDGET_MARKER
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, _ = _resumable_run(tmp_path)
+    (job_dir / "job.sh").write_text(script.replace(BOUNDED_BUDGET_MARKER, ""))
+    with pytest.raises(RuntimeError, match="predates bounded recovery budgets"):
+        recover(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"

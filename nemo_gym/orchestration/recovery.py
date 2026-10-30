@@ -86,7 +86,7 @@ class RecoveryBudget(BaseModel):
 
     ``max_infra_retries`` and ``max_walltime_s`` come from the benchmark's saved ``resume_config``;
     ``infra_retries_used`` from ``.gym_infra_retries`` and ``walltime_used_s`` from ``.gym_accumulated_walltime``
-    (see ``resume_script``). The chain stops once the used retries exceed the cap, so one more is allowed while
+    (see ``resume_script``). The chain records admitted retries and allows another only while
     ``infra_retries_used < max_infra_retries``. ``None`` means the evidence is unavailable and stops the decision.
     """
 

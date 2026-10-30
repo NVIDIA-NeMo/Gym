@@ -70,7 +70,7 @@ def test_invalid_day_component_raises():
 def test_default_prologue_has_no_walltime_check():
     out = render_resume_prologue(ResumeConfig())
     assert "_gym_accumulated >=" not in out
-    assert "-gt 3" in out  # default max_retries
+    assert "-ge 3" in out  # default max_retries
 
 
 def test_prologue_with_max_walltime_adds_check():
@@ -80,7 +80,7 @@ def test_prologue_with_max_walltime_adds_check():
 
 def test_prologue_uses_custom_max_retries():
     out = render_resume_prologue(ResumeConfig(max_retries=9))
-    assert "-gt 9" in out
+    assert "-ge 9" in out
     assert "Infra retry limit (9)" in out
 
 
@@ -103,7 +103,8 @@ def test_rendered_prologue_is_valid_bash(resume, tmp_path):
 
 _FAKE_SACCT = """#!/bin/bash
 echo call >> "$FAKE_LOG_DIR/sacct_calls"
-if [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}"; else echo "${FAKE_STATE:-}"; fi
+if [[ "$*" == *State,ElapsedRaw* ]]; then echo "${FAKE_STATE:-}|${FAKE_ELAPSED:-}";
+elif [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}"; else echo "${FAKE_STATE:-}"; fi
 """
 _FAKE_SBATCH = """#!/bin/bash
 echo "$*" >> "$FAKE_LOG_DIR/sbatch_calls"
@@ -115,6 +116,24 @@ echo "999|${1#--dependency=}(unfulfilled)|$PWD" >> "$_pending"
 # A lost reply: the job exists, but sbatch reports a failure.
 if [[ -n "${FAKE_SBATCH_LOSES_REPLY:-}" ]]; then echo "sbatch: error: Socket timed out on send/recv operation"; exit 1; fi
 echo "Submitted batch job 999"
+"""
+_FAKE_SCONTROL = """#!/bin/bash
+echo "$*" >> "$FAKE_LOG_DIR/scontrol_calls"
+if [[ -n "${FAKE_SCONTROL_FAILS:-}" ]]; then exit 1; fi
+if [[ "$1" == show ]]; then
+    if [[ -e "$FAKE_LOG_DIR/time_limit" ]]; then
+        echo "JobId=$SLURM_JOB_ID TimeLimit=$(cat "$FAKE_LOG_DIR/time_limit")"
+    else
+        echo "JobId=$SLURM_JOB_ID TimeLimit=${FAKE_TIME_LIMIT:-04:00:00}"
+    fi
+elif [[ "$1" == update ]]; then
+    [[ "${FAKE_UPDATE_RESULT:-}" != failed ]] || exit 1
+    if [[ "${FAKE_UPDATE_RESULT:-}" == unknown ]]; then echo UNKNOWN > "$FAKE_LOG_DIR/time_limit"
+    elif [[ "${FAKE_UPDATE_RESULT:-}" != unchanged ]]; then
+        minutes=${3#TimeLimit=}
+        printf '%02d:%02d:00\\n' "$((minutes / 60))" "$((minutes % 60))" > "$FAKE_LOG_DIR/time_limit"
+    fi
+fi
 """
 _FAKE_SQUEUE = """#!/bin/bash
 if [[ -n "${FAKE_SQUEUE_FAILS:-}" ]]; then echo "squeue: error: Unable to contact slurm controller"; exit 1; fi
@@ -135,6 +154,11 @@ def _run_prologue(
     squeue_fails: bool = False,
     hidden_partition: bool = False,
     sbatch_loses_reply: bool = False,
+    elapsed: str = "60",
+    time_limit: str = "04:00:00",
+    scontrol_fails: bool = False,
+    keep_budget: bool = False,
+    update_result: str = "",
 ) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -142,6 +166,7 @@ def _run_prologue(
         ("sacct", _FAKE_SACCT),
         ("sbatch", _FAKE_SBATCH),
         ("squeue", _FAKE_SQUEUE),
+        ("scontrol", _FAKE_SCONTROL),
         ("sleep", "#!/bin/bash\n"),
     ):
         tool = bin_dir / name
@@ -155,7 +180,11 @@ def _run_prologue(
         "SLURM_JOB_ID": job_id,
         "FAKE_LOG_DIR": str(tmp_path),
         "FAKE_STATE": prev_state or "",
-        "FAKE_ELAPSED": "60" if prev_state else "",
+        "FAKE_ELAPSED": elapsed,
+        "FAKE_TIME_LIMIT": time_limit,
+        "FAKE_UPDATE_RESULT": update_result,
+        **({"FAKE_SCONTROL_FAILS": "1"} if scontrol_fails else {}),
+        **({"GYM_RESUBMIT": "1", "GYM_RESUBMIT_KEEP_BUDGET": "1"} if keep_budget else {}),
         **({"FAKE_SBATCH_FAILS": "1"} if sbatch_fails else {}),
         **({"FAKE_SQUEUE_FAILS": "1"} if squeue_fails else {}),
         **({"FAKE_HIDDEN_PARTITION": "1"} if hidden_partition else {}),
@@ -178,12 +207,12 @@ def test_max_retries_allows_exactly_that_many_retries(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-def test_empty_sacct_resumes_without_spending_a_retry(tmp_path):
+def test_empty_sacct_stops_without_spending_a_retry(tmp_path):
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=1), "")
 
-    assert result.returncode == 0, result.stdout
-    assert "REACHED_WORK" in result.stdout
-    assert "state unknown" in result.stdout
+    assert result.returncode == 1, result.stdout
+    assert "REACHED_WORK" not in result.stdout
+    assert "unknown" in result.stdout
     assert not (tmp_path / ".gym_infra_retries").exists()
     assert len((tmp_path / "sacct_calls").read_text().splitlines()) > 2
 
@@ -436,3 +465,130 @@ def test_a_follow_up_whose_sbatch_reply_was_lost_is_not_queued_again(tmp_path):
     assert "Failed to submit auto-resume follow-up" in failed.stdout
     assert "already queued: 999" in requeued.stdout
     assert len(_sbatch_calls(tmp_path)) == 1
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("state", ["FAILED", "PREEMPTED", "NODE_FAIL", "OUT_OF_MEMORY", "BOOT_FAIL", "DEADLINE"])
+def test_zero_retry_budget_never_reaches_work_after_failure(tmp_path, state):
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=0), state)
+    assert result.returncode == 1
+    assert "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert not (tmp_path / ".gym_infra_retries").exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("state", ["PREEMPTED", "NODE_FAIL"])
+def test_infrastructure_retry_is_spent_once_before_work(tmp_path, state):
+    resume = ResumeConfig(max_retries=1)
+    first = _run_prologue(tmp_path, resume, state)
+    assert first.returncode == 0 and "REACHED_WORK" in first.stdout
+    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
+    second = _run_prologue(tmp_path, resume, state, job_id="300")
+    assert second.returncode == 1 and "REACHED_WORK" not in second.stdout
+    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    "state,elapsed",
+    [
+        ("", "60"),
+        ("RUNNING", "60"),
+        ("UNRECOGNIZED", "60"),
+        ("FAILED", ""),
+        ("NODE_FAIL", "-1"),
+        ("TIMEOUT", "nan"),
+        ("FAILED", "1+2"),
+        ("FAILED", "60\nFAILED|60"),
+    ],
+)
+def test_unknown_accounting_cannot_run_or_change_counters(tmp_path, state, elapsed):
+    (tmp_path / ".gym_accumulated_walltime").write_text("600\n")
+    (tmp_path / ".gym_infra_retries").write_text("1\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="04:00:00"), state, elapsed=elapsed)
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert (tmp_path / ".gym_accumulated_walltime").read_text() == "600\n"
+    assert (tmp_path / ".gym_infra_retries").read_text() == "1\n"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("state", ["TIMEOUT", "FAILED", "PREEMPTED", "NODE_FAIL"])
+def test_remaining_walltime_shortens_four_hour_allocation(tmp_path, state):
+    (tmp_path / ".gym_accumulated_walltime").write_text("3600\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="04:00:00"), state, elapsed="3630")
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout
+    assert "update JobId=200 TimeLimit=119" in (tmp_path / "scontrol_calls").read_text()
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "7230"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("state", ["TIMEOUT", "FAILED", "PREEMPTED", "NODE_FAIL"])
+def test_all_failure_states_obey_exhausted_walltime(tmp_path, state):
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="00:01:00"), state)
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_remaining_walltime_never_increases_existing_allocation(tmp_path):
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="04:00:00"), "TIMEOUT", time_limit="00:30:00")
+    assert result.returncode == 0
+    assert "update" not in (tmp_path / "scontrol_calls").read_text()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("limit,failed", [("UNKNOWN", False), ("", True)])
+def test_unavailable_allocation_limit_stops_before_work(tmp_path, limit, failed):
+    result = _run_prologue(
+        tmp_path, ResumeConfig(max_walltime="04:00:00"), None, time_limit=limit, scontrol_fails=failed
+    )
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("counter", [".gym_accumulated_walltime", ".gym_infra_retries"])
+@pytest.mark.parametrize("value", ["", "-1", "nan", "1+2", "99999999999999999999999"])
+def test_malformed_stored_counter_stops_before_work(tmp_path, counter, value):
+    (tmp_path / counter).write_text(value)
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="04:00:00"), "FAILED")
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert (tmp_path / counter).read_text() == value
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_subminute_allowance_stops_instead_of_rounding_up(tmp_path):
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="00:01:30"), "TIMEOUT")
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_recover_start_spends_retry_and_preserves_remaining_walltime(tmp_path):
+    (tmp_path / ".gym_infra_retries").write_text("2\n")
+    (tmp_path / ".gym_accumulated_walltime").write_text("7200\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=3, max_walltime="04:00:00"), None, keep_budget=True)
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout
+    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "3"
+    assert (tmp_path / ".gym_accumulated_walltime").read_text() == "7200\n"
+    assert "update JobId=200 TimeLimit=120" in (tmp_path / "scontrol_calls").read_text()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("update_result", ["failed", "unknown", "unchanged"])
+def test_failed_or_unconfirmed_time_limit_shrink_stops_before_work(tmp_path, update_result):
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), "NODE_FAIL", update_result=update_result)
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert not (tmp_path / ".gym_infra_retries").exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("limit", ["UNLIMITED", "1-04:00:00"])
+def test_unlimited_or_multiday_allocation_is_capped(tmp_path, limit):
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), None, time_limit=limit)
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout
+    assert (tmp_path / "time_limit").read_text().strip() == "01:00:00"

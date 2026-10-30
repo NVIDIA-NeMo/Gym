@@ -43,6 +43,8 @@ RESUBMIT_ENV = "GYM_RESUBMIT"
 # Set to 1 with RESUBMIT_ENV by `gym eval resubmit --recover`: the job resumes and keeps the spent retry count,
 # walltime and per-rollout attempts, so recovery stays within the budget it read.
 KEEP_BUDGET_ENV = "GYM_RESUBMIT_KEEP_BUDGET"
+# Capability of the generated script, not evidence that a particular run completed.
+BOUNDED_BUDGET_MARKER = "# --- Bounded resume budgets v1 ---"
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -71,44 +73,72 @@ if [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" != 1 ]]; then
     rm -f "$_retry_file" "$_walltime_file"
 fi
 
+{bounded_budget_marker}
+# Counters are data, never shell arithmetic expressions. An absent counter denotes a fresh chain.
+_gym_accumulated=0
+_retries=0
+if [[ -e "$_walltime_file" ]]; then
+    _gym_accumulated=$(cat "$_walltime_file") || _gym_stop_incomplete "Cannot read stored walltime."
+fi
+if [[ -e "$_retry_file" ]]; then
+    _retries=$(cat "$_retry_file") || _gym_stop_incomplete "Cannot read stored retries."
+fi
+[[ "$_gym_accumulated" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_incomplete "Stored walltime is unknown or malformed."
+[[ "$_retries" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_incomplete "Stored retries are unknown or malformed."
+_gym_accumulated=$((10#$_gym_accumulated))
+_retries=$((10#$_retries))
+_gym_needs_retry=0
+
 if [[ "$_prev_slurm_job_id" != "" ]]; then
+    _accounting=""
     for _sacct_try in 1 2 3 4 5 6; do
-        _prev_state=$(sacct -j $_prev_slurm_job_id -P -n -o State | head -n 1)
-        [[ -n "$_prev_state" ]] && break
+        if _accounting=$(sacct -X -P -n -j "$_prev_slurm_job_id" --format=State,ElapsedRaw); then
+            [[ -n "$_accounting" && "$_accounting" != "|"* ]] && break
+        else
+            _accounting=""
+        fi
         sleep 10
     done
-    _prev_elapsed=$(sacct -j $_prev_slurm_job_id -P -n -o ElapsedRaw | head -n 1)
-    _prev_elapsed=${{_prev_elapsed:-0}}
-    _gym_accumulated=$(cat "$_walltime_file" 2>/dev/null || echo 0)
-    _gym_accumulated=$((_gym_accumulated + _prev_elapsed))
-    echo $_gym_accumulated > "$_walltime_file"
+    [[ "$_accounting" != *$'\n'* ]] || _gym_stop_incomplete "Previous job accounting has multiple rows."
+    IFS='|' read -r _prev_state _prev_elapsed _extra <<< "$_accounting"
+    _prev_state=${{_prev_state%% *}}
+    _prev_state=${{_prev_state%+}}
+    case "$_prev_state" in
+        COMPLETED)
+            echo "Previous job $_prev_slurm_job_id completed successfully. Exiting."
+            exit 0 ;;
+        CANCELLED)
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id was cancelled. Chain stopped with rollouts missing; resubmit to continue." ;;
+        TIMEOUT)
+            # Scheduler allocation timeout continues the planned segments. This is not a model timeout.
+            ;;
+        FAILED|PREEMPTED|NODE_FAIL|OUT_OF_MEMORY|BOOT_FAIL|DEADLINE)
+            _gym_needs_retry=1 ;;
+        *)
+            _gym_stop_incomplete "Previous job state is unknown or nonterminal; refusing to resume." ;;
+    esac
+    [[ -z "$_extra" && "$_prev_elapsed" =~ ^[0-9]{{1,15}}$ ]] || \
+        _gym_stop_incomplete "Previous job elapsed accounting is unknown or malformed."
+    _gym_accumulated=$((_gym_accumulated + 10#$_prev_elapsed))
+    echo "$_gym_accumulated" > "$_walltime_file" || _gym_stop_incomplete "Cannot preserve elapsed walltime."
+elif [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" == 1 ]]; then
+    # Recovery is another allocation, not a fresh allowance. A plain manual resubmit reset above is explicit.
+    _gym_needs_retry=1
+fi
 
-    if [[ -z "$_prev_state" ]]; then
-        # Accounting lag: the state is unknown, so resume without spending an infra retry.
-        echo "Previous job $_prev_slurm_job_id: state unknown (sacct returned nothing). Resuming..."
-    elif [[ $_prev_state == 'COMPLETED' ]]; then
-        echo "Previous job $_prev_slurm_job_id completed successfully. Exiting."
-        exit 0
-    elif [[ $_prev_state == CANCELLED* ]]; then
-        _gym_stop_incomplete "Previous job $_prev_slurm_job_id was cancelled. Chain stopped with rollouts missing; resubmit to continue."
-    elif [[ $_prev_state == 'TIMEOUT' || $_prev_state == 'PREEMPTED' || $_prev_state == 'NODE_FAIL' ]]; then
-        echo "Previous job $_prev_slurm_job_id: $_prev_state. Resuming..."
+if [[ "$_gym_needs_retry" == 1 && $_retries -ge {max_retries} ]]; then
+    _gym_stop_incomplete "Infra retry limit ({max_retries}) reached. Stopping."
+fi
 {max_walltime_check}
-    else
-        _retries=$(cat "$_retry_file" 2>/dev/null || echo 0)
-        _retries=$((_retries + 1))
-        echo $_retries > "$_retry_file"
-        if [[ $_retries -gt {max_retries} ]]; then
-            echo "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
-            exit 1
-        fi
-        echo "Previous job $_prev_slurm_job_id: $_prev_state. Infra retry $_retries/{max_retries}..."
-    fi
+if [[ "$_gym_needs_retry" == 1 ]]; then
+    _retries=$((_retries + 1))
+    echo "$_retries" > "$_retry_file" || _gym_stop_incomplete "Cannot preserve the spent retry."
+    echo "Infra retry $_retries/{max_retries}..."
 fi
 
 # This job continues the run, so an earlier stop no longer describes it.
 rm -f "$_incomplete_file"
-echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{job_chain_name}"
+echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{job_chain_name}" || _gym_stop_incomplete "Cannot record the allocation."
 # A requeued job keeps its job id and runs this script again. One follow-up per job id: the marker is a
 # claim on it, taken with an O_EXCL create (bash noclobber, not mkdir: uutils coreutils 0.10.0's mkdir tells
 # concurrent callers that both succeeded). A claim with no follow-up pending on this job was left by a shell
@@ -159,9 +189,37 @@ fi
 """
 
 _MAX_WALLTIME_CHECK_TEMPLATE = """\
-        if (( _gym_accumulated >= {seconds} )); then
-            _gym_stop_incomplete "Accumulated walltime (${{_gym_accumulated}}s) reached max_walltime cap ({raw} = {seconds}s). Chain stopped at the walltime cap with rollouts missing; resubmit to continue."
-        fi"""
+if (( _gym_accumulated >= {seconds} )); then
+    _gym_stop_incomplete "Accumulated walltime (${{_gym_accumulated}}s) reached max_walltime cap ({raw} = {seconds}s). Chain stopped at the walltime cap with rollouts missing; resubmit to continue."
+fi
+# Slurm rounds time limits up to minutes. Round the remaining allowance down instead, never granting extra time.
+_gym_remaining_minutes=$((({seconds} - _gym_accumulated) / 60))
+(( _gym_remaining_minutes > 0 )) || _gym_stop_incomplete "Less than one minute remains in the walltime budget."
+_gym_allocation_limit_seconds() {{
+    _gym_job_info=$(scontrol show job "$SLURM_JOB_ID" -o) || return 1
+    [[ "$_gym_job_info" =~ (^|[[:space:]])TimeLimit=([^[:space:]]+) ]] || return 1
+    _gym_limit=${{BASH_REMATCH[2]}}
+    if [[ "$_gym_limit" == UNLIMITED ]]; then
+        echo $((_gym_remaining_minutes * 60 + 1))
+    elif [[ "$_gym_limit" =~ ^(([0-9]{{1,8}})-)?([0-9]{{1,8}}):([0-5][0-9]):([0-5][0-9])$ ]]; then
+        _gym_days=${{BASH_REMATCH[2]:-0}}
+        echo $((10#$_gym_days * 86400 + 10#${{BASH_REMATCH[3]}} * 3600 + 10#${{BASH_REMATCH[4]}} * 60 + 10#${{BASH_REMATCH[5]}}))
+    else
+        return 1
+    fi
+}}
+_gym_limit_seconds=$(_gym_allocation_limit_seconds) || \
+    _gym_stop_incomplete "Current allocation time limit is unknown."
+if (( _gym_limit_seconds > _gym_remaining_minutes * 60 )); then
+    scontrol update JobId="$SLURM_JOB_ID" TimeLimit="$_gym_remaining_minutes" || \
+        _gym_stop_incomplete "Cannot enforce the remaining allocation walltime."
+    _gym_limit_seconds=$(_gym_allocation_limit_seconds) || \
+        _gym_stop_incomplete "Updated allocation time limit is unknown."
+    (( _gym_limit_seconds <= _gym_remaining_minutes * 60 )) || \
+        _gym_stop_incomplete "Updated allocation time limit exceeds the remaining budget."
+fi
+
+"""
 
 
 def _walltime_to_seconds(duration: str) -> int:
@@ -217,5 +275,6 @@ def render_resume_prologue(resume: ResumeConfig) -> str:
         resubmit_env=RESUBMIT_ENV,
         keep_budget_env=KEEP_BUDGET_ENV,
         max_retries=resume.max_retries,
+        bounded_budget_marker=BOUNDED_BUDGET_MARKER,
         max_walltime_check=max_walltime_check,
     )
