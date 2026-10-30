@@ -1348,6 +1348,42 @@ def test_assistant_message_plugin_hooks() -> None:
     )
 
 
+@mark.parametrize("ended,execution_failed", [(True, True), (False, True), (True, False)])
+async def test_mcp_check_after_execution_failure_preserves_only_ended_sandbox(tmp_path, ended, execution_failed):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.execution_failure_reward_zero = True
+    config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    check_error = RuntimeError("[SANDBOX::ENDED] Sandbox has ended (OOMKilled)" if ended else "connection reset")
+    sandbox = MagicMock(upload=AsyncMock(), download=AsyncMock())
+    run_result = (
+        RuntimeError("Sandbox ended (OOMKilled)")
+        if execution_failed
+        else SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None)
+    )
+    sandbox.exec = AsyncMock(side_effect=[run_result, check_error, check_error])
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"},
+        session={SESSION_ID_KEY: "session"},
+        state=SimpleNamespace(_ng_opencode_mcp={"search": {}}),
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    if not ended or not execution_failed:
+        with raises(RuntimeError, match="connection reset|SANDBOX::ENDED"):
+            await server.responses(request, body)
+        assert not server._sandbox_id_to_run_result
+        return
+    response = await server.responses(request, body)
+    assert response.output == []
+    result = server._sandbox_id_to_run_result["session"]
+    assert result["opencode_failed"] is True
+    assert result["opencode_export_found"] is False
+    assert result["opencode_error_type"] == "RuntimeError"
+
+
 def test_an_unreadable_part_leaves_tool_timing_unknown(tmp_path: Path) -> None:
     """The part may have been a tool call, so the tool history read is not complete."""
     from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations

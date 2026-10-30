@@ -909,9 +909,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
         if self.config.tool_servers:
-            mcp_check = await sandbox.exec(command="test ! -f /tmp/nemo-gym-mcp-setup-error", timeout_s=30)
-            if mcp_check.return_code != 0 or mcp_check.error_type:
-                raise RuntimeError("Required Gym MCP tools could not be initialized")
+            try:
+                mcp_check = await sandbox.exec(command="test ! -f /tmp/nemo-gym-mcp-setup-error", timeout_s=30)
+            except Exception as exc:
+                # Once execution has failed and the sandbox is gone, its MCP marker
+                # is unavailable too. Preserve that failed answer rather than
+                # aborting collection and resampling it on the next resume.
+                if not run_error_type or "[SANDBOX::ENDED]" not in str(exc):
+                    raise
+            else:
+                if mcp_check.return_code != 0 or mcp_check.error_type:
+                    raise RuntimeError("Required Gym MCP tools could not be initialized")
 
         export_fname = "export.json"
         # Kept outside the sandbox workdir on purpose: SWE-bench-style environments set the workdir
