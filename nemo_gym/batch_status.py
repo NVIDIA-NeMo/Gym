@@ -29,8 +29,8 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence
 import orjson
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.install_lock import (
+from nemo_gym.utils.install_lock import (
     adopt_recorded_install,
     async_install_lock,
     install_lock,

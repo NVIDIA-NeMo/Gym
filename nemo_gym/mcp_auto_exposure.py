@@ -105,7 +105,7 @@ from nemo_gym.base_resources_server import (
     mcp_session_token_payload,
     mcp_session_token_serializer,
 )
-from nemo_gym.rollout_correlation import current_episode_id
+from nemo_gym.core.episode import current_episode_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 

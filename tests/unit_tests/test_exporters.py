@@ -35,7 +35,8 @@ from pytest import MonkeyPatch
 import nemo_gym.exporters as exporters_module
 import nemo_gym.exporters.mlflow as mlflow_module
 import nemo_gym.exporters.wandb as wandb_module
-from nemo_gym.config_types import ExporterConfig, MLFlowConfig, WANDBConfig
+from nemo_gym.config.config_types import ExporterConfig, MLFlowConfig, WANDBConfig
+from nemo_gym.config.secret_utils import recursively_hide_secrets
 from nemo_gym.exporters import (
     export_metrics,
     export_rollouts,
@@ -47,7 +48,6 @@ from nemo_gym.exporters.base import BaseExporter
 from nemo_gym.exporters.mlflow import MLflowExporter, _flatten_config, _sanitize_key
 from nemo_gym.exporters.wandb import WandbExporter
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.secret_utils import recursively_hide_secrets
 
 
 class RecordingConfig(ExporterConfig):

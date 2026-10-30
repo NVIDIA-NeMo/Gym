@@ -30,7 +30,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -338,7 +338,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         sys.executable,
         # Found by module name rather than next to this file, because the script may live in another package.
         # The script itself runs without importing Gym.
-        importlib.util.find_spec("nemo_gym.cli._venv_setup").origin,
+        importlib.util.find_spec("nemo_gym.utils.venv_setup").origin,
         "--venv",
         str(venv_path),
         "--command",

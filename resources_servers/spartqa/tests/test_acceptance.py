@@ -34,7 +34,7 @@ import pytest
 import yaml
 from pytest import approx
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,

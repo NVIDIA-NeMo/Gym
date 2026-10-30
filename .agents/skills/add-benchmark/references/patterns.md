@@ -25,7 +25,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer, BaseResourcesServerConfig,
     BaseVerifyRequest, BaseVerifyResponse,
 )
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 class MyConfig(BaseResourcesServerConfig):
     pass
@@ -311,8 +311,8 @@ For benchmarks where the model gets error feedback and retries:
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import raise_for_status
 
 class MyAgentConfig(BaseResponsesAPIAgentConfig):

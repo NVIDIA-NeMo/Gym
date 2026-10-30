@@ -79,3 +79,21 @@ __all__ = [
     "telemetry_config_from_global_config",
     "trace_fn",
 ]
+
+# Public API
+from typing import TYPE_CHECKING
+
+from nemo_gym._public_api import lazy_exports
+
+
+if TYPE_CHECKING:
+    from nemo_gym.telemetry.resources_operations import resources_operation
+
+
+# What code outside the library, such as servers, imports from this package. Each name's submodule loads
+# on first use. Code inside nemo_gym imports the submodules directly.
+_PUBLIC_API = {
+    "resources_operation": "resources_operations",
+}
+__getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
+__all__ = sorted({*__all__, *_PUBLIC_API})

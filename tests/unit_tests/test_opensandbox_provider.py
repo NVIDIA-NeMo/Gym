@@ -111,7 +111,7 @@ async def test_session_execution_preserves_env_and_user(tmp_path, user):
     import os
     import shlex
 
-    from nemo_gym.sandbox import AsyncSandbox
+    from nemo_gym.sandbox.api import AsyncSandbox
 
     value = "spaces 'quotes' $HOME $(touch should-not-exist)\nsecond line"
     calls = []

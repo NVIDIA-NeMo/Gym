@@ -33,7 +33,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import get_global_config_dict
 from nemo_gym.reward_profile import (
     add_avg_sample_std_dev,
     compute_pass_majority_metrics,

@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from nemo_gym.failure_kinds import VERIFIER_ERROR
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.verifier_utils.sandbox_verification import RUNNER_FILE, SandboxVerificationError
 from resources_servers.competitive_coding_challenges.ccc_eval import _load_metadata_file
