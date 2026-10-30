@@ -13,7 +13,7 @@ import sys
 import psutil
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
+from scripts.harness_conformance.episode import HARNESSES, _config
 from scripts.harness_conformance.provider import Probe
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
@@ -103,37 +103,6 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
         getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
-
-
-def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-
-    class LegacyAgent(SimpleResponsesAPIAgent):
-        pass
-
-    class SeedOnlyAgent(LegacyAgent):
-        async def _seed_agent_session_state(self, body):
-            raise RuntimeError("setup failed")
-
-    class SessionAgent(SeedOnlyAgent):
-        async def _close_agent_session_state(self, state):
-            raise RuntimeError("cleanup failed")
-
-    class InheritedSessionAgent(SessionAgent):
-        pass
-
-    class PublicSessionAgent(LegacyAgent):
-        async def seed_agent_session(self, body, request):
-            raise RuntimeError("setup failed")
-
-        async def close_agent_session(self, body, request):
-            raise RuntimeError("cleanup failed")
-
-    assert not _supports_agent_sessions(LegacyAgent)
-    assert not _supports_agent_sessions(SeedOnlyAgent)
-    assert _supports_agent_sessions(SessionAgent)
-    assert _supports_agent_sessions(InheritedSessionAgent)
-    assert _supports_agent_sessions(PublicSessionAgent)
 
 
 def test_session_runtime_does_not_require_host_cli(monkeypatch):

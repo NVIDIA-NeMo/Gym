@@ -419,6 +419,20 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # With several workers, which worker claimed each agent_session_id (see nemo_gym.session_routing).
     _agent_session_claims: Optional[SessionClaims] = PrivateAttr(default=None)
 
+    @classmethod
+    def supports_agent_sessions(cls) -> bool:
+        """Whether the agent implements session seed and close, directly or by inheritance."""
+        # Every agent exposes the session routes, including ones whose handlers raise NotImplementedError.
+        # Check implementations, not route presence.
+        return all(
+            getattr(cls, handler) is not getattr(SimpleResponsesAPIAgent, handler)
+            or getattr(cls, hook) is not getattr(SimpleResponsesAPIAgent, hook)
+            for handler, hook in (
+                ("seed_agent_session", "_seed_agent_session_state"),
+                ("close_agent_session", "_close_agent_session_state"),
+            )
+        )
+
     def claimed_session_routing(self) -> dict[str, Any]:
         return {"kind": AGENT_SESSIONS, "agent_sessions": self}
 
