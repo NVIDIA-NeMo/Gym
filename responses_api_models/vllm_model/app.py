@@ -35,6 +35,8 @@ from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationE
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
 from nemo_gym.core import (
+    MODEL_SAMPLING_HEADER,
+    MODEL_SAMPLING_NULL,
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
     FailureHeader,
@@ -45,8 +47,10 @@ from nemo_gym.core import (
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
     current_rollout_id,
     failure_report_for,
+    model_call_sampling_config,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -938,6 +942,12 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _post_init(self) -> None:
         if self.config.sampling_overrides:
+            sampling_config = model_call_sampling_config(getattr(self.server_client, "global_config_dict", None))
+            if sampling_config is not None and self.config.name in sampling_config.required_model_servers:
+                raise ValueError(
+                    f"Model Server {self.config.name!r} serves an agent that the training framework trains, so it "
+                    "cannot set sampling_overrides: that agent samples with the framework's values."
+                )
             LOG.info(
                 "`%s` pins sampling on every request to the engine: %s",
                 self.config.name,
@@ -1093,6 +1103,13 @@ class VLLMModel(SimpleResponsesAPIModel):
         sampling is pinned.
         """
         if self.config.sampling_overrides:
+            if current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
+                raise ValueError(
+                    f"Model Server {self.config.name!r} sets sampling_overrides, but this call carries a training "
+                    "framework's values for an agent it trains, which must sample with them. Remove "
+                    "sampling_overrides from this Model Server, and give an untrained agent that needs a pin a Model "
+                    "Server of its own."
+                )
             body_dict.update(self.config.sampling_overrides)
         return body_dict
 
@@ -1632,11 +1649,15 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         execution["upstream_attempted"] = True
         context = current_capture_context()
-        transport_options = (
+        transport_options: dict[str, Any] = (
             {"_resend_after_disconnect": False}
             if context is not None and context.parent_resolution_mode == "source_history"
             else {}
         )
+        if current_model_sampling_segment() == MODEL_SAMPLING_NULL:
+            # A training framework's generation server holds every call to its training sampling, except the calls
+            # of agents it does not train, which keep their own.
+            transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
         try:
             try:
                 chat_completion_dict = await self._call_endpoint(

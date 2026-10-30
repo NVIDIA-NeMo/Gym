@@ -56,6 +56,11 @@ from nemo_gym.core.episode_context import (
     maybe_rollout_id_from_run_body,
     note_verifier_model_request,
 )
+from nemo_gym.core.model_call_sampling import (
+    current_model_sampling_segment,
+    model_sampling_path_segment,
+    with_model_sampling_segment,
+)
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.utils.server_process import (
@@ -245,6 +250,10 @@ class ServerClient(BaseModel):
                     VERIFIER_INVOCATION_HEADER: verifier_invocation_id,
                 }
 
+        if server_entry is not None and "responses_api_models" in server_entry:
+            # A model call made while handling a rollout carries its sampling segment, after any rollout prefix.
+            url_path = with_model_sampling_segment(url_path, current_model_sampling_segment())
+
         return await request(
             method=method,
             url=f"{base_url}{url_path}",
@@ -382,21 +391,32 @@ def trace_context_path_segment() -> str:
 
 
 def apply_rollout_prefix(
-    base_url: str, rollout_id: Optional[str], *, token_capture: bool = False, trace_context: bool = True
+    base_url: str,
+    rollout_id: Optional[str],
+    *,
+    token_capture: bool = False,
+    trace_context: bool = True,
+    model_sampling: Optional[str] = None,
 ) -> str:
-    """Append the rollout prefix and, while traces export, the current span's trace context to a model-server root URL.
+    """Append the rollout prefix, the current span's trace context while traces export, and the model sampling
+    segment to a model-server root URL.
 
     Every caller hands the result to a client Gym does not instrument (a harness in a sandbox, a
     third-party client library), which is why the trace context travels in the URL here; Gym's own
     clients send the ``traceparent`` header instead and use ``url_path_for_run``.
 
-    The span named is the one current when the URL is built, so pass ``trace_context=False`` for a
-    URL that is built once and reused across rollouts (a cached client): otherwise every later
-    rollout's calls would be parented to the first one's span.
+    The sampling segment is ``model_sampling`` when given, otherwise the current request's
+    (``nemo_gym.core.model_call_sampling``). It comes last, so the API path follows it.
+
+    The span and the sampling named are the ones current when the URL is built, so pass
+    ``trace_context=False`` for a URL that is built once and reused across rollouts (a cached
+    client): otherwise every later rollout's calls would be parented to the first one's span and
+    sampled with its values.
     """
     prefix = rollout_path_prefix(rollout_id, token_capture=token_capture) if rollout_id else ""
     if trace_context:
         prefix += trace_context_path_segment()
+        prefix += model_sampling_path_segment(model_sampling or current_model_sampling_segment())
     if not prefix:
         return base_url
     return base_url.rstrip("/") + prefix

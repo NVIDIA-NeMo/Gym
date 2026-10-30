@@ -24,6 +24,7 @@ from nemo_gym.client.server_client import (
     _TRACEPARENT_PATTERN,
 )
 from nemo_gym.config.config_types import (
+    MODEL_SAMPLING_PATH_SEGMENT,
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
     TRACE_CONTEXT_PATH_SEGMENT,
@@ -38,7 +39,8 @@ _ROLLOUT_PREFIX_RE = re.compile(rf"^{_ROLLOUT_PREFIX_PATTERN}(?=/|$)")
 
 
 _TRACE_CONTEXT_PATH_RE = re.compile(
-    rf"^(?P<head>(?:{_ROLLOUT_PREFIX_PATTERN})?)"
+    # A URL that a harness builds from an agent's prefix can carry the model sampling segment before the trace segment.
+    rf"^(?P<head>(?:{_ROLLOUT_PREFIX_PATTERN})?(?:/{re.escape(MODEL_SAMPLING_PATH_SEGMENT)}/[^/]+)?)"
     rf"/{re.escape(TRACE_CONTEXT_PATH_SEGMENT)}/(?P<traceparent>{_TRACEPARENT_PATTERN})(?P<rest>/.*)$"
 )
 
