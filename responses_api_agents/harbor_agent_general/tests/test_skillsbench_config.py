@@ -11,7 +11,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
-from nemo_gym.server_utils import entrypoint_ray_enabled
+from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
 from responses_api_agents.harbor_agent_general import app, skillsbench_app
 from responses_api_agents.harbor_agent_general.app import HarborRunRequest, temporary_worker_env
 from responses_api_agents.harbor_agent_general.skillsbench_app import (
