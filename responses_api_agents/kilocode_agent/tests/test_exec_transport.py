@@ -15,7 +15,7 @@ import pytest
 
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.rollout_observability import AgentInvocation
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.kilocode_agent.sandbox import KiloSandboxSession
 from responses_api_agents.kilocode_agent.tests.test_observability import database, family
 from responses_api_agents.kilocode_agent.tests.test_sandbox import seed

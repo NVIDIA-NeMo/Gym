@@ -12,11 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from typing import Any
 from unittest.mock import MagicMock
 
-from pytest import approx
+from pydantic import ValidationError
+from pytest import approx, mark, raises
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -61,13 +64,14 @@ def _make_response(text: str) -> NeMoGymResponse:
     )
 
 
-def _make_server(report_filtered_metrics: bool = True) -> HotpotQAQAResourcesServer:
+def _make_server(report_filtered_metrics: bool = True, **config_kwargs: Any) -> HotpotQAQAResourcesServer:
     config = HotpotQAQAResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
         name="",
         report_filtered_metrics=report_filtered_metrics,
+        **config_kwargs,
     )
     return HotpotQAQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -473,6 +477,67 @@ class TestVerify:
         )
         result = await server.verify(request)
         assert result.is_correct == approx(1.0)
+
+
+# (expected_answer, answer, is_correct_strict, answer_em). Hedged answers that
+# name a competing candidate or reject the ground truth pass the substring
+# match but not exact match.
+_HEDGED_ANSWER_CASES = [
+    ("blue", "blue", 1.0, 1.0),
+    ("blue", "red", 0.0, 0.0),
+    ("blue", "blue or red", 1.0, 0.0),
+    ("blue", "blue is wrong; red is correct", 1.0, 0.0),
+    ("yes", "yes", 1.0, 1.0),
+    ("yes", "no", 0.0, 0.0),
+    ("yes", "yes or no", 1.0, 0.0),
+]
+
+
+def _verify_request(expected_answer: str, answer: str) -> HotpotQAQAVerifyRequest:
+    return HotpotQAQAVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=_make_response(json.dumps({"answer": answer})),
+        expected_answer=expected_answer,
+    )
+
+
+class TestRewardMetric:
+    def test_default_is_is_correct_strict(self) -> None:
+        assert _make_server().config.reward_metric == "is_correct_strict"
+
+    @mark.parametrize("expected_answer,answer,strict,em", _HEDGED_ANSWER_CASES)
+    async def test_default_reward_is_is_correct_strict(
+        self, expected_answer: str, answer: str, strict: float, em: float
+    ) -> None:
+        result = await _make_server().verify(_verify_request(expected_answer, answer))
+        assert result.reward == approx(strict)
+        assert result.is_correct_strict == approx(strict)
+        assert result.answer_em == approx(em)
+
+    @mark.parametrize("expected_answer,answer,strict,em", _HEDGED_ANSWER_CASES)
+    async def test_answer_em_reward(self, expected_answer: str, answer: str, strict: float, em: float) -> None:
+        server = _make_server(reward_metric="answer_em")
+        result = await server.verify(_verify_request(expected_answer, answer))
+        assert result.reward == approx(em)
+        # The other scores are still reported unchanged.
+        assert result.is_correct_strict == approx(strict)
+        assert result.answer_em == approx(em)
+
+    @mark.parametrize("expected_answer,answer", [("Paris", "The capital is Paris"), ("five", "5")])
+    async def test_answer_em_rejects_what_only_substring_match_accepts(
+        self, expected_answer: str, answer: str
+    ) -> None:
+        # The trade-off documented in the README: exact match also scores a
+        # correct answer wrapped in a sentence, or given as a surface-form
+        # variant of the ground truth, as 0.0.
+        server = _make_server(reward_metric="answer_em")
+        result = await server.verify(_verify_request(expected_answer, answer))
+        assert result.is_correct_strict == approx(1.0)
+        assert result.reward == approx(0.0)
+
+    def test_invalid_reward_metric_rejected(self) -> None:
+        with raises(ValidationError, match="reward_metric"):
+            _make_server(reward_metric="exact_match")
 
 
 # ──────────────────────────────────────────────────────────

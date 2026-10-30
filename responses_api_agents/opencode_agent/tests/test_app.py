@@ -22,9 +22,8 @@ from uuid import uuid4
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import GlobalConfigDictParser
-from nemo_gym.openai_utils import (
+from nemo_gym.config import GlobalConfigDictParser, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

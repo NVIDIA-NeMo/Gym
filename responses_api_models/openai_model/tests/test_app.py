@@ -14,24 +14,28 @@
 # limitations under the License.
 import asyncio
 import json
+import socket
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
+import httpx
 import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from nemo_gym import server_utils
 from nemo_gym.base_responses_api_model import CaptureStore, _CaptureMiddleware
-from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
 )
+from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.openai_utils import PermanentEndpointError
 from nemo_gym.server_utils import ServerClient
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
@@ -539,6 +543,37 @@ class TestApp:
 
         assert await server.embeddings({"input": "hi"}) == {"data": []}
         assert server._client.create_embeddings.await_count == 2
+
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_reasoning_replayed_without_id_is_forwarded_without_id(self, stream: bool) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        called_args = {}
+
+        async def mock_create_response(**kwargs):
+            called_args.update(kwargs)
+            return {
+                "id": "resp_1",
+                "created_at": 0.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=mock_create_response)
+        reasoning = {"type": "reasoning", "summary": [], "encrypted_content": "opaque-content"}
+        body = {"input": [{"role": "user", "content": "hi", "type": "message"}, reasoning]}
+        if stream:
+            body["stream"] = True
+
+        res = client.post("/v1/responses", json=body)
+
+        assert res.status_code == 200
+        assert called_args["input"][1] == reasoning
 
     @pytest.mark.parametrize("replacement, expected_effort", [("minimal", "minimal"), ("low", "low"), (None, "none")])
     async def test_responses_reasoning_effort_none_replacement_is_configurable(
@@ -1217,3 +1252,79 @@ class TestApp:
             UpstreamRetryPolicy(
                 pre_request_jitter_seconds=pre_request_jitter_seconds,
             )
+
+
+class TestRefusedProviderConnection:
+    """A provider endpoint that refuses connections must fail the call, not retry it forever."""
+
+    @staticmethod
+    def _closed_port() -> int:
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            return listener.getsockname()[1]
+
+    @pytest.fixture
+    async def attempts(self, monkeypatch: MonkeyPatch):
+        """Route Gym's outbound requests through a real aiohttp session that records each attempt.
+
+        Past 10 attempts it fails the test, so a retry loop that never stops fails instead of hanging. `fail()`
+        raises a BaseException, which the retry loop's `except Exception` cannot catch.
+        """
+        attempts: list[str] = []
+        session = aiohttp.ClientSession()
+        send = session.request
+
+        async def request(method: str, url: str, **kwargs):
+            attempts.append(url)
+            if len(attempts) > 10:
+                pytest.fail("connection retry loop did not stop")
+            return await send(method, url, **kwargs)
+
+        session.request = request
+        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+        yield attempts
+        await session.close()
+
+    def _setup_server(self, port: int, **kwargs) -> SimpleModelServer:
+        config = SimpleModelServerConfig(
+            host="0.0.0.0",
+            port=8081,
+            openai_base_url=f"http://127.0.0.1:{port}/v1",
+            openai_api_key="dummy_key",  # pragma: allowlist secret
+            openai_model="dummy_model",
+            entrypoint="",
+            name="judge_model_server",
+            **kwargs,
+        )
+        return SimpleModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    @pytest.mark.parametrize("max_http_attempts", [3, 5])
+    async def test_refused_connection_stops_after_max_http_attempts(
+        self, attempts: list[str], max_http_attempts: int
+    ) -> None:
+        server = self._setup_server(self._closed_port(), max_http_attempts=max_http_attempts)
+
+        with pytest.raises(aiohttp.ClientConnectorError):
+            await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert len(attempts) == max_http_attempts
+
+    async def test_single_attempt_mode_still_makes_one_connection_attempt(self, attempts: list[str]) -> None:
+        server = self._setup_server(self._closed_port(), upstream_max_num_tries=1)
+
+        with pytest.raises(aiohttp.ClientConnectorError):
+            await server.responses(NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+        assert len(attempts) == 1
+
+    async def test_refused_connection_returns_server_error_with_the_cause(self, attempts: list[str]) -> None:
+        server = self._setup_server(self._closed_port())
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://judge") as client:
+            response = await client.post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 500
+        assert "ClientConnectorError" in response.text
+        assert len(attempts) == 3

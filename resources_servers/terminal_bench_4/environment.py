@@ -432,7 +432,8 @@ class Environment:
         return result
 
     async def stop(self):
-        if self._cleanup_task is None:
+        # Callers share a pending or successful teardown; a failed one is retried.
+        if self._cleanup_task is None or (self._cleanup_task.done() and not self.closed):
             self._cleanup_task = asyncio.create_task(self._stop())
         await asyncio.shield(self._cleanup_task)
 

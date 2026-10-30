@@ -60,7 +60,7 @@ from pathlib import Path
 
 import yaml
 
-from nemo_gym.global_config import AGENT_SESSION_AGENT_TYPES
+from nemo_gym.config import AGENT_SESSION_AGENT_TYPES
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -211,7 +211,7 @@ def load(path: Path) -> dict | None:
 def agent_references(server: dict) -> list[tuple[str, str]]:
     """Return each ``(field, agent)`` that one environment server's config references.
 
-    Matches `environment_server_agent_refs` in `nemo_gym/global_config.py`.
+    Matches `environment_server_agent_refs` in `nemo_gym/config/global_config.py`.
     """
     return [
         (field, value["name"])

@@ -21,7 +21,7 @@ import pytest
 
 from benchmarks.vision_arena_v1 import prepare as preparation
 from benchmarks.vision_arena_v1.build_validation import build_validation
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.arena.task_data import TaskData
 
 

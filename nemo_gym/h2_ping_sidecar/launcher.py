@@ -38,7 +38,7 @@ from uuid import uuid4
 from omegaconf import DictConfig, ListConfig, OmegaConf, open_dict
 from omegaconf.errors import OmegaConfBaseException
 
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     CACHE_DIR_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,

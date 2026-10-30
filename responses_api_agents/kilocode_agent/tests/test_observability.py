@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations, read_kilo_snapshot
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts

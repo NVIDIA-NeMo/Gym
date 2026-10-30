@@ -7,6 +7,9 @@ hotpotqa_qa:
       description: Short-answer QA with deterministic SQuAD-style + alternative-aware substring verification (HotpotQA closed-book).
       value: Improve closed-book multi-hop question-answering accuracy.
       report_filtered_metrics: true
+      # is_correct_strict (NeMo Skills substring match, for evaluation) or answer_em
+      # (exact match, recommended for training). See the README.
+      reward_metric: is_correct_strict
 
 hotpotqa_qa_simple_agent:
   responses_api_agents:

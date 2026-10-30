@@ -56,7 +56,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 

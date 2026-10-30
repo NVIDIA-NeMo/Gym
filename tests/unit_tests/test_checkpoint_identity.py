@@ -9,8 +9,7 @@ from pydantic import ValidationError
 
 import nemo_gym.server_utils
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.rollout_correlation import current_episode_id, rollout_context
+from nemo_gym.core.episode import EpisodeId, current_episode_id, rollout_context
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 
 
@@ -101,7 +100,7 @@ def test_a_bad_checkpoint_block_fails_when_the_client_is_built_not_on_every_requ
 
 
 def test_the_checkpoint_block_is_a_reserved_top_level_key() -> None:
-    from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+    from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 
     assert "checkpoint" in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
 
