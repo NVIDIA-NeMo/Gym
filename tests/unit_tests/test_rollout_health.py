@@ -3284,6 +3284,7 @@ def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: P
             "bench_resources": {"kind": "resources_servers", "implementation": "scicode"},
             "bench_environment": {"kind": "environment_servers", "implementation": "bench_env"},
         },
+        "mlflow": {"configured": False},
     }
 
 
@@ -3313,3 +3314,26 @@ def test_rows_are_counted_by_their_own_context_window_step_status(tmp_path: Path
     result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
     stats = json.loads(result.summary_path.read_text())["run"]["stats"]["model_call_errors"]
     assert stats["context_window_exceeded"] == {"true": 1, "false": 1, "absent": 2}
+
+
+@pytest.mark.parametrize(
+    ("names", "configured"),
+    [
+        ({"mlflow_tracking_uri": "https://t", "mlflow_experiment_name": "e", "mlflow_run_name": "r"}, True),
+        ({"mlflow_tracking_uri": "https://t", "mlflow_experiment_name": "e"}, False),
+        ({}, False),
+        ({"mlflow_tracking_uri": "${oc.env:URI}", "mlflow_experiment_name": "e", "mlflow_run_name": "r"}, None),
+        ({"mlflow_tracking_uri": 5, "mlflow_experiment_name": "e", "mlflow_run_name": "r"}, None),
+    ],
+)
+def test_run_provenance_reads_mlflow_configuration_from_names_only(tmp_path: Path, names: dict, configured) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    lines = "".join(f"{key}: {json.dumps(value)}\n" for key, value in names.items())
+    (tmp_path / "rollouts_resolved_config.yaml").write_text(lines + "mlflow_tracking_token: secret\n")
+    summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    assert summary["run"]["provenance"]["mlflow"] == {"configured": configured}
+    assert "secret" not in result_text(tmp_path)
+
+
+def result_text(root: Path) -> str:
+    return (root / "quality_summary.json").read_text()

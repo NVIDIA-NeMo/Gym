@@ -982,6 +982,33 @@ def _context_window_exceeded(record: Mapping[str, Any]) -> bool | None:
     return any(step["status"] == "context_window_exceeded" for step in steps)
 
 
+# The three MLflow name fields `MLFlowConfig.is_available` reads (its token check is not judged here).
+_MLFLOW_REQUIRED_NAMES = ("mlflow_tracking_uri", "mlflow_experiment_name", "mlflow_run_name")
+
+
+def _mlflow_configured(config: Mapping[str, Any]) -> bool | None:
+    """A names-only fact about the saved config snapshot: whether its three MLflow name fields are concrete.
+
+    True when all three are concrete strings, False when any is absent, null or empty, None when a value is
+    interpolated or not a string. It is not `MLFlowConfig.is_available` (the token, which the snapshot may mask, is
+    not judged) and says nothing about whether an exporter was activated, whether tracking was required or
+    disabled, or whether anything was delivered: overrides, resumes and post-run exports can differ from the
+    snapshot. No value is copied.
+    """
+    states = []
+    for key in _MLFLOW_REQUIRED_NAMES:
+        value = config.get(key)
+        if value is None or value == "":
+            states.append("missing")
+        elif isinstance(value, str) and value.strip() and "${" not in value:
+            states.append("set")
+        else:
+            states.append("unknown")
+    if "unknown" in states:
+        return None
+    return all(state == "set" for state in states)
+
+
 def run_provenance(rollout_path: Path) -> dict[str, Any]:
     """Facts about how the run was configured, read from the resolved config saved beside the rollouts.
 
@@ -1021,6 +1048,7 @@ def run_provenance(rollout_path: Path) -> dict[str, Any]:
         "resolved_config": "read",
         "route_failures_to_sidecar": _flag(config.get("route_failures_to_sidecar")),
         "servers": servers,
+        "mlflow": {"configured": _mlflow_configured(config)},
     }
 
 

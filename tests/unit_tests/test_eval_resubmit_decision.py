@@ -1246,3 +1246,29 @@ def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_
     # A context-window signal is never read as proven clipping: the trial gate stays unknown, not failed.
     assert health.startswith("response/trial health unknown")
     assert f"records context_window_exceeded {reported} (a signal" in health and "not proof" in health
+
+
+@pytest.mark.parametrize(
+    ("configured", "message"),
+    [
+        (True, "although the saved config snapshot names a tracking URI, experiment and run name"),
+        (False, "does not name all of the tracking URI, experiment and run name; exporter activation and whether"),
+        (None, "no MLflow run evidence: no live run id and no post-run export receipt"),
+        ("yes", "no MLflow run evidence: no live run id and no post-run export receipt"),
+    ],
+)
+def test_missing_mlflow_evidence_names_the_configuration_and_never_passes(tmp_path, configured, message) -> None:
+    job = gate_job(tmp_path, expected=100, final_zeros=0)
+    (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
+    path = job / "artifacts" / "quality_summary.json"
+    summary = json.loads(path.read_text())
+    summary["run"]["provenance"] = {"resolved_config": "read", "servers": {}, "mlflow": {"configured": configured}}
+    path.write_text(json.dumps(summary))
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status=None)
+    mlflow = [e for e in task["errors"] if "MLflow" in e]
+    assert d.action == RecoveryAction.NOOP and task["status"] == "FAILED" and len(mlflow) == 1
+    assert message in mlflow[0]

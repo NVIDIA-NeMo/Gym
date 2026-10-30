@@ -655,15 +655,19 @@ def quality_inputs(
     return fe_valid, fe_reasons, True, [counts]
 
 
-def mlflow_errors(local: Mapping[str, Any] | None, observed_status: str | None) -> list[str]:
+def mlflow_errors(
+    local: Mapping[str, Any] | None, observed_status: str | None, *, configured: bool | None = None
+) -> list[str]:
     """MLflow delivery errors from the collected exporter files and the server status the caller observed.
 
     ``local`` holds the live exporter's run id (``rollouts_mlflow_run_id``) and the post-run export receipt
     (``rollouts_mlflow_export_done``, checked against the current artifact digests). Only a current post-run receipt
     with an observed FINISHED passes. A live run is not accepted here: live uploads log failures and continue, so
     neither its run id nor FINISHED shows the configured payloads arrived. A live run beside a post-run export leaves
-    the observed status unbound. Whether tracking was configured is not read, so no evidence is an error, never a
-    run that needed none.
+    the observed status unbound. ``configured`` is the health report's `run.provenance.mlflow.configured`, a
+    names-only fact about the saved config snapshot (None when not reported); it only qualifies the message. No
+    evidence is always an error, never a run that needed none: exporter activation and whether tracking was required
+    or disabled are not recorded.
     """
     local = local or {}
     live, receipt = local.get("live_run_id"), local.get("receipt")
@@ -680,6 +684,18 @@ def mlflow_errors(local: Mapping[str, Any] | None, observed_status: str | None) 
     if live is None and receipt is None:
         if observed_status:
             return [f"MLflow status {observed_status!r} given for a run with no MLflow run id"]
+        if configured is True:
+            return [
+                "no MLflow run evidence: no live run id and no post-run export receipt, although the saved config "
+                "snapshot names a tracking URI, experiment and run name; exporter activation and whether tracking was "
+                "required are not recorded"
+            ]
+        if configured is False:
+            return [
+                "no MLflow run evidence: no live run id and no post-run export receipt, and the saved config snapshot "
+                "does not name all of the tracking URI, experiment and run name; exporter activation and whether "
+                "tracking was required or disabled are not recorded"
+            ]
         return ["no MLflow run evidence: no live run id and no post-run export receipt"]
     errors = []
     if live is not None and not live.strip():
@@ -910,7 +926,12 @@ def gate_summary_from_collected(
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:
         extra.append("the job chain stopped with rollouts missing (.gym_chain_incomplete)")
-    extra.extend(mlflow_errors(collected.mlflow, mlflow_status))
+    provenance = (collected.quality or {}).get("provenance")
+    mlflow_facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
+    configured = mlflow_facts.get("configured") if isinstance(mlflow_facts, dict) else None
+    extra.extend(
+        mlflow_errors(collected.mlflow, mlflow_status, configured=configured if isinstance(configured, bool) else None)
+    )
     if extra:
         task["errors"] = task["errors"] + extra
         if task["status"] == "SUCCESS":
