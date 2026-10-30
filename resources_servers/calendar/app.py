@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import FastAPI
 from utils import grade_assistant_response
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

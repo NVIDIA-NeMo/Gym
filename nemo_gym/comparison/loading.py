@@ -35,7 +35,7 @@ from nemo_gym.config.global_config import (
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
 )
-from nemo_gym.metrics_config import Stat
+from nemo_gym.metrics.metrics_config import Stat
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 from nemo_gym.utils.text import did_you_mean
 
@@ -107,7 +107,7 @@ def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
 
 def _compute_repeat_metrics(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Add repeat metrics to one legacy aggregate entry."""
-    from nemo_gym.reward_profile import compute_aggregate_metrics
+    from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 
     computed = compute_aggregate_metrics(
         [info for group in entry.get("group_level_metrics", []) for info in group.get(ROLLOUT_INFOS_KEY_NAME, [])]

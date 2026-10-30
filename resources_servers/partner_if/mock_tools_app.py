@@ -25,8 +25,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import Field, JsonValue, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     ClosedResourcesSessionRecords,
+    MCPTool,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -34,9 +37,6 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.mcp_auto_exposure import MCPTool
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.partner_if.app import (

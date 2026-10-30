@@ -24,7 +24,6 @@ import pytest
 from pydantic import ValidationError
 from pytest import approx
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -33,6 +32,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.verification import JudgeError, judge_failsafe
 from nemo_gym.verification import judge as judge_module
 from resources_servers.beam.app import (

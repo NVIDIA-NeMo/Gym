@@ -18,7 +18,7 @@ from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
 from nemo_gym.base_responses_api_agent import AgentSessionSetupError
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent
 from responses_api_agents.kilocode_agent.tests.test_sandbox import APP, TEXT, TRANSPORT, receipt, seed, state

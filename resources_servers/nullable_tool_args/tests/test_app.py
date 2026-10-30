@@ -17,9 +17,9 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.nullable_tool_args.app import (
