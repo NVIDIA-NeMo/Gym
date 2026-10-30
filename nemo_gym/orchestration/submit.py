@@ -75,8 +75,9 @@ def recover(
     chain's stored budget; ``decide_recovery`` picks one action, which runs here: ``noop`` dispatches nothing;
     ``reverify`` re-judges saved answers through the executor (never the policy) or reports that the executor cannot;
     ``resubmit`` queues the run with the existing ``resubmit`` keeping its spent budget (retries, walltime and
-    per-rollout attempts), and its Gym resume runs only missing and retryable identities; ``stop`` dispatches nothing and says why. Every outcome carries the Day-0 gate task entry, where
-    response/trial health is judged only against ``max_unhealthy_fraction``. Plain ``resubmit`` is unchanged.
+    per-rollout attempts), and its Gym resume runs only missing and retryable identities; ``stop`` dispatches nothing and says why. Every outcome carries the Day-0 gate task entry: per-rollout
+    health is judged against ``max_unhealthy_fraction`` and reported in its warnings, ModelOpt response/trial health
+    stays unknown, and MLflow delivery is checked by ``mlflow_errors``. Plain ``resubmit`` is unchanged.
     """
     record = load_submission_record(gym_job_id)
     executor_cls = _EXECUTORS_BY_NAME.get(record.executor)

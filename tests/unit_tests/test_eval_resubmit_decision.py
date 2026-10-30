@@ -18,6 +18,7 @@ The job dirs here are injected fixtures in the layout rollout collection and the
 evidence. The collector is the real ``COLLECT_SCRIPT``, run as the executor runs it on a login node.
 """
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -373,9 +374,28 @@ def collect_with_score(job_dir: Path, key: str) -> CollectedEvidence:
 def complete_job(tmp_path: Path) -> Path:
     job = write_job_dir(tmp_path / "job", n=4, results=[ident(t, reward=1.0) for t in range(4)], failures=[])
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 0.75}}))
-    (job / "artifacts" / "rollouts_mlflow_run_id").write_text("run")
-    (job / "artifacts" / "rollouts_mlflow_export_done").write_text("")
+    write_postrun_receipt(job)
     return job
+
+
+RECEIPT_FILES = {
+    "rollouts_jsonl_fpath": "rollouts.jsonl",
+    "resolved_config_yaml_fpath": "rollouts_resolved_config.yaml",
+    "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
+    "failures_jsonl_fpath": "rollouts_failures.jsonl",
+    "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl",
+}
+
+
+def artifact_digests(job: Path) -> dict:
+    files = {key: job / "artifacts" / name for key, name in RECEIPT_FILES.items()}
+    return {key: hashlib.sha256(f.read_bytes()).hexdigest() if f.exists() else None for key, f in files.items()}
+
+
+def write_postrun_receipt(job: Path, run_id: str = "postrun-run") -> None:
+    """The version-1 receipt a content-bound post-run export writes: its backend run id and the artifact digests."""
+    receipt = {"version": 1, "run_id": run_id, "artifacts": artifact_digests(job)}
+    (job / "artifacts" / "rollouts_mlflow_export_done").write_text(json.dumps(receipt))
 
 
 GOOD_VERDICTS = {"healthy": 4, "unhealthy": 0, "unobserved": 0}
@@ -526,8 +546,7 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
             }
         )
     )
-    (job / "artifacts" / "rollouts_mlflow_run_id").write_text("run")
-    (job / "artifacts" / "rollouts_mlflow_export_done").write_text("")
+    write_postrun_receipt(job)
     fake_executor.job_dir = job
     code, out = run_cli(
         [
@@ -592,42 +611,16 @@ def test_live_scheduler_job_is_running_not_success_or_failure(tmp_path, fake_exe
     assert out.gate_task["status"] == "RUNNING" and fake_executor.calls == ["decide"] and not out.ok
 
 
-def test_mlflow_run_without_finished_export_blocks_acceptance(tmp_path, fake_executor) -> None:
-    job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
-    (job / "artifacts" / "rollouts_mlflow_run_id").write_text("run")
-    (job / "artifacts" / "quality_summary.json").write_text(
-        json.dumps(
-            {
-                "run": {
-                    "artifacts": {
-                        "expected": 1,
-                        "missing": 0,
-                        "healthy": True,
-                        "unhealthy_reasons": [],
-                        "partial": False,
-                    },
-                    "verdicts": {"healthy": 1, "unhealthy": 0, "unobserved": 0},
-                }
-            }
-        )
+def test_a_live_mlflow_run_is_unverified_delivery_not_an_unfinished_export(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = mlflow_job(tmp_path, mode="live")
+    out = submit.recover(
+        "gym-job-o", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02, mlflow_status="FINISHED"
     )
-    (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 1.0}}))
-    fake_executor.job_dir = job
-    out = submit.recover("gym-job-o", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02)
     assert out.decision.action == RecoveryAction.NOOP and out.dispatched is None
-    assert out.gate_task["status"] == "FAILED" and any("MLflow" in e for e in out.gate_task["errors"])
-    (job / "artifacts" / "rollouts_mlflow_export_done").write_text("")
-    unobserved = submit.recover("gym-job-o2", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02)
-    assert unobserved.gate_task["status"] == "FAILED"
-    done = submit.recover(
-        "gym-job-o3",
-        "bench",
-        score_key=["agent", "mean/reward"],
-        max_unhealthy_fraction=0.02,
-        mlflow_status="FINISHED",
-    )
-    assert done.gate_task["status"] == "FAILED" and done.gate_task["errors"] == [
-        "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
+    mlflow = [e for e in out.gate_task["errors"] if "MLflow" in e]
+    assert out.gate_task["status"] == "FAILED" and mlflow == [
+        "MLflow live run live-run: configured payload delivery is not verified (live uploads log failures and "
+        "continue), so live acceptance is unsupported"
     ]
 
 
@@ -653,11 +646,9 @@ def test_stopped_incomplete_chain_is_named_in_the_gate_errors(tmp_path, fake_exe
     assert any("chain stopped" in e for e in out.gate_task["errors"])
 
 
-def mlflow_job(tmp_path: Path, *, marker: bool) -> Path:
+def mlflow_job(tmp_path: Path, *, mode: str) -> Path:
+    """A finished run whose MLflow files are the ones each producer leaves (or a damaged version of them)."""
     job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
-    (job / "artifacts" / "rollouts_mlflow_run_id").write_text("run")
-    if marker:
-        (job / "artifacts" / "rollouts_mlflow_export_done").write_text("")
     (job / "artifacts" / "quality_summary.json").write_text(
         json.dumps(
             {
@@ -675,42 +666,74 @@ def mlflow_job(tmp_path: Path, *, marker: bool) -> Path:
         )
     )
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 1.0}}))
+    if mode in ("live", "both"):
+        # MLflowExporter.setup records the run it opened; teardown sets its status and writes nothing else.
+        (job / "artifacts" / "rollouts_mlflow_run_id").write_text("live-run")
+    if mode in ("postrun", "both", "stale"):
+        write_postrun_receipt(job)
+    if mode == "stale":
+        (job / "artifacts" / "rollouts.jsonl").write_text(json.dumps(ident(0, reward=0.0)) + "\n")
+    if mode in ("version-true", "blank-run-id"):
+        write_postrun_receipt(job, run_id=" " if mode == "blank-run-id" else "postrun-run")
+        receipt_path = job / "artifacts" / "rollouts_mlflow_export_done"
+        receipt = json.loads(receipt_path.read_text())
+        if mode == "version-true":
+            receipt["version"] = True
+        receipt_path.write_text(json.dumps(receipt))
+    if mode == "run-id-marker":
+        (job / "artifacts" / "rollouts_mlflow_export_done").write_text("postrun-run")
+    if mode == "empty-marker":
+        (job / "artifacts" / "rollouts_mlflow_export_done").write_text("")
     return job
 
 
+HEALTH_UNKNOWN = "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
+
+
 @pytest.mark.parametrize(
-    ("marker", "status", "accepted"),
+    ("mode", "status", "mlflow"),
     [
-        (True, "FINISHED", True),
-        (True, "FAILED", False),
-        (True, None, False),
-        (True, "RUNNING", False),
-        (False, "FINISHED", False),
+        ("postrun", "FINISHED", []),
+        ("postrun", "FAILED", ["MLflow run status FAILED"]),
+        ("postrun", None, ["MLflow terminal status not observed"]),
+        ("postrun", "RUNNING", ["MLflow run status RUNNING"]),
+        (
+            "stale",
+            "FINISHED",
+            ["MLflow post-run export receipt of run postrun-run does not match the current artifacts"],
+        ),
+        ("empty-marker", "FINISHED", ["MLflow post-run export receipt is malformed or not a version-1 receipt"]),
+        ("version-true", "FINISHED", ["MLflow post-run export receipt is malformed or not a version-1 receipt"]),
+        ("blank-run-id", "FINISHED", ["MLflow post-run export receipt is malformed or not a version-1 receipt"]),
+        (
+            "run-id-marker",
+            "FINISHED",
+            [
+                "MLflow post-run export marker of run postrun-run has no artifact digests, so the exported content "
+                "is not verified"
+            ],
+        ),
+        (
+            "both",
+            "FINISHED",
+            ["MLflow live run live-run and a post-run export both exist: the observed status names neither"],
+        ),
+        ("none", None, ["no MLflow run evidence: no live run id and no post-run export receipt"]),
     ],
 )
-def test_mlflow_acceptance_needs_the_export_marker_and_an_observed_finished_status(
-    tmp_path, fake_executor, marker, status, accepted
-) -> None:
-    fake_executor.job_dir = mlflow_job(tmp_path, marker=marker)
+def test_mlflow_delivery_follows_the_producer_of_its_evidence(tmp_path, fake_executor, mode, status, mlflow) -> None:
+    fake_executor.job_dir = mlflow_job(tmp_path, mode=mode)
     out = submit.recover(
         "gym-job-r", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02, mlflow_status=status
     )
     assert out.dispatched is None and fake_executor.calls == ["decide"]
-    # No case accepts: response/trial health has no producer. Only MLflow-valid cases have no MLflow error.
-    assert out.gate_task["status"] == "FAILED"
-    assert (
-        out.gate_task["errors"]
-        == [
-            "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
-        ]
-    ) is accepted
-    assert out.mlflow == {"local": {"run_id_present": True, "export_done": marker}, "observed_status": status}
+    # No case accepts: response/trial health has no producer. Only a current post-run receipt with FINISHED has no
+    # MLflow error.
+    assert out.gate_task["status"] == "FAILED" and out.gate_task["errors"] == [HEALTH_UNKNOWN] + mlflow
 
 
 def test_mlflow_status_for_a_run_without_an_mlflow_id_is_contradictory(tmp_path, fake_executor) -> None:
-    job = mlflow_job(tmp_path, marker=True)
-    (job / "artifacts" / "rollouts_mlflow_run_id").unlink()
-    fake_executor.job_dir = job
+    fake_executor.job_dir = mlflow_job(tmp_path, mode="none")
     out = submit.recover(
         "gym-job-s", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02, mlflow_status="FINISHED"
     )
@@ -718,7 +741,7 @@ def test_mlflow_status_for_a_run_without_an_mlflow_id_is_contradictory(tmp_path,
 
 
 def test_cli_passes_the_observed_mlflow_status(tmp_path, fake_executor, capsys) -> None:
-    fake_executor.job_dir = mlflow_job(tmp_path, marker=True)
+    fake_executor.job_dir = mlflow_job(tmp_path, mode="postrun")
     code, out = run_cli(
         [
             "eval",
@@ -932,12 +955,14 @@ def test_absent_mlflow_evidence_never_passes(tmp_path) -> None:
 
     job = complete_job(tmp_path)
     write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
-    (job / "artifacts" / "rollouts_mlflow_run_id").unlink()
     (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02)
-    assert task["status"] == "FAILED" and "no MLflow run evidence" in task["errors"]
+    assert (
+        task["status"] == "FAILED"
+        and "no MLflow run evidence: no live run id and no post-run export receipt" in (task["errors"])
+    )
 
 
 def test_an_interrupted_row_with_failure_events_restarts_like_rollout_collection(tmp_path, fake_executor) -> None:
@@ -1008,3 +1033,44 @@ def test_malformed_health_facts_are_unknown_never_clean(field, value) -> None:
     assert health_check_facts(good) == []
     facts = health_check_facts(good | {field: value})
     assert len(facts) == 1 and "unknown" in facts[0]
+
+
+def test_the_receipt_fixture_matches_the_content_bound_producer(tmp_path) -> None:
+    base = pytest.importorskip("nemo_gym.exporters.base")
+    if not hasattr(base, "_artifact_version"):
+        pytest.skip("this producer writes a run-id-only post-run marker")
+    from nemo_gym.run_artifacts import RunArtifacts
+
+    job = complete_job(tmp_path)
+    artifacts = RunArtifacts(rollouts_jsonl_fpath=job / "artifacts" / "rollouts.jsonl")
+    assert artifact_digests(job) == base._artifact_version(artifacts)
+
+
+@pytest.mark.parametrize(
+    "local",
+    [
+        {"live_run_id": None, "receipt": False},
+        {"live_run_id": None, "receipt": "unexpected"},
+        {"live_run_id": False, "receipt": None},
+        {"live_run_id": None, "receipt": {"current": True, "run_id": ""}},
+        {"live_run_id": None, "receipt": {"current": True}},
+        {"live_run_id": 7, "receipt": None},
+        {"live_run_id": None, "receipt": {"run_id": 5, "current": True}},
+        {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": "yes"}},
+        {"live_run_id": None, "receipt": {"run_id": "postrun-run"}},
+        {"live_run_id": None, "receipt": ["postrun-run"]},
+        {"live_run_id": "  ", "receipt": None},
+    ],
+)
+def test_malformed_mlflow_evidence_never_passes(local) -> None:
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    assert mlflow_errors(local, "FINISHED")
+
+
+def test_a_current_post_run_receipt_with_finished_is_the_only_mlflow_pass() -> None:
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    assert (
+        mlflow_errors({"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True}}, "FINISHED") == []
+    )

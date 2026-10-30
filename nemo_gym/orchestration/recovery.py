@@ -358,7 +358,7 @@ def decide_recovery(
 # Run on the cluster over the executor's SSH connection: prints ONE JSON object with identity, failure and cause
 # fields only (never answers or prompts), and the job chain's own budget files. argv[1] is the job dir.
 COLLECT_SCRIPT = r"""
-import json, math, os, sys
+import hashlib, json, math, os, sys
 d = sys.argv[1]
 a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
@@ -396,8 +396,44 @@ try:
 except (OSError, ValueError):
     offset = 0
 chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
-mlflow = {"run_id_present": os.path.exists(os.path.join(a, "rollouts_mlflow_run_id")),
-          "export_done": os.path.exists(os.path.join(a, "rollouts_mlflow_export_done"))}
+def sha256(path):
+    if not os.path.exists(path):
+        return None
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+# The live exporter's run id file, and the post-run export receipt checked against the same files as its version.
+RECEIPT_FILES = {"rollouts_jsonl_fpath": "rollouts.jsonl", "resolved_config_yaml_fpath": "rollouts_resolved_config.yaml",
+                 "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
+                 "failures_jsonl_fpath": "rollouts_failures.jsonl",
+                 "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl"}
+mlflow = {"live_run_id": None, "receipt": None}
+try:
+    mlflow["live_run_id"] = open(os.path.join(a, "rollouts_mlflow_run_id")).read().strip()
+except OSError:
+    pass
+if os.path.exists(os.path.join(a, "rollouts_mlflow_export_done")):
+    try:
+        text = open(os.path.join(a, "rollouts_mlflow_export_done")).read()
+    except OSError:
+        text = ""
+    try:
+        receipt = json.loads(text)
+    except ValueError:
+        receipt = None
+    if (isinstance(receipt, dict) and type(receipt.get("version")) is int and receipt["version"] == 1
+            and isinstance(receipt.get("run_id"), str) and receipt["run_id"].strip()
+            and isinstance(receipt.get("artifacts"), dict)
+            and set(receipt["artifacts"]) == set(RECEIPT_FILES)):
+        current = {k: sha256(os.path.join(a, n)) for k, n in RECEIPT_FILES.items()}
+        mlflow["receipt"] = {"run_id": receipt["run_id"], "current": receipt["artifacts"] == current}
+    elif not isinstance(receipt, (dict, list)) and len(text.split()) == 1:
+        # A marker that names only the backend run: it carries no digests to check the artifacts against.
+        mlflow["receipt"] = {"run_id": text.strip(), "current": None}
+    else:
+        mlflow["receipt"] = "malformed"
 quality = None
 try:
     run = json.load(open(os.path.join(a, "quality_summary.json")))["run"]
@@ -439,7 +475,7 @@ class CollectedEvidence(BaseModel):
     chain_incomplete: bool = False
     quality: dict[str, Any] | None = None
     score: float | None = None
-    mlflow: dict[str, bool] | None = None
+    mlflow: dict[str, Any] | None = None
 
 
 def decide_from_collected(
@@ -609,20 +645,53 @@ def quality_inputs(
     return fe_valid, fe_reasons, True, [counts]
 
 
-def mlflow_errors(local: dict[str, bool] | None, observed_status: str | None) -> list[str]:
-    """MLflow evidence: the local run-id and export-done files, and the tracking server's status as the caller observed it.
+def mlflow_errors(local: Mapping[str, Any] | None, observed_status: str | None) -> list[str]:
+    """MLflow delivery errors from the collected exporter files and the server status the caller observed.
 
-    The files say a run exists and finished exporting; only the server knows its terminal status, so it is an input,
-    never inferred. With a run, acceptance needs the export marker and an observed FINISHED; FINISHED alone accepts
-    nothing, and FAILED, any other status or no observation is an error. A status for a run with no id contradicts.
+    ``local`` holds the live exporter's run id (``rollouts_mlflow_run_id``) and the post-run export receipt
+    (``rollouts_mlflow_export_done``, checked against the current artifact digests). Only a current post-run receipt
+    with an observed FINISHED passes. A live run is not accepted here: live uploads log failures and continue, so
+    neither its run id nor FINISHED shows the configured payloads arrived. A live run beside a post-run export leaves
+    the observed status unbound. Whether tracking was configured is not read, so no evidence is an error, never a
+    run that needed none.
     """
     local = local or {}
-    if not local.get("run_id_present"):
-        # No MLflow evidence is unknown, never a pass; a status without a run contradicts.
+    live, receipt = local.get("live_run_id"), local.get("receipt")
+    if live is not None and not isinstance(live, str):
+        return [f"MLflow live run id evidence is malformed: {live!r}"]
+    if receipt not in (None, "malformed") and not (
+        isinstance(receipt, dict)
+        and isinstance(receipt.get("run_id"), str)
+        and receipt["run_id"].strip()
+        and "current" in receipt
+        and (receipt["current"] is None or type(receipt["current"]) is bool)
+    ):
+        return [f"MLflow post-run export evidence has an unknown shape: {receipt!r}"]
+    if live is None and receipt is None:
         if observed_status:
             return [f"MLflow status {observed_status!r} given for a run with no MLflow run id"]
-        return ["no MLflow run evidence"]
-    errors = [] if local.get("export_done") else ["MLflow run exists but its export did not finish"]
+        return ["no MLflow run evidence: no live run id and no post-run export receipt"]
+    errors = []
+    if live is not None and not live.strip():
+        errors.append("MLflow live run id file is empty")
+    if receipt == "malformed":
+        errors.append("MLflow post-run export receipt is malformed or not a version-1 receipt")
+    elif isinstance(receipt, dict) and receipt.get("current") is None:
+        errors.append(
+            f"MLflow post-run export marker of run {receipt.get('run_id')} has no artifact digests, so the exported "
+            "content is not verified"
+        )
+    elif isinstance(receipt, dict) and receipt.get("current") is not True:
+        errors.append(
+            f"MLflow post-run export receipt of run {receipt.get('run_id')} does not match the current artifacts"
+        )
+    if live and receipt is not None:
+        errors.append(f"MLflow live run {live} and a post-run export both exist: the observed status names neither")
+    elif live is not None and live.strip():
+        errors.append(
+            f"MLflow live run {live}: configured payload delivery is not verified (live uploads log failures and "
+            "continue), so live acceptance is unsupported"
+        )
     if observed_status is None:
         errors.append("MLflow terminal status not observed")
     elif observed_status != "FINISHED":
