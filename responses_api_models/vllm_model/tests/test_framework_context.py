@@ -17,13 +17,13 @@ from fastapi.testclient import TestClient
 import nemo_gym.base_responses_api_model
 import nemo_gym.client.server_client
 import nemo_gym.server_utils
-from nemo_gym._checkpoint.control import CheckpointRequest
 from nemo_gym.base_responses_api_model import _CaptureMiddleware, _reconstruct_streamed_response
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
+from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER
 from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
 from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture

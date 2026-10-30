@@ -29,9 +29,8 @@ from fastapi.testclient import TestClient
 from lcb_integration.testing_util import MockStdinWithBuffer
 from pydantic import ValidationError
 
-from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.client import ServerClient
-from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponse
 from nemo_gym.verification import SandboxVerificationError
 

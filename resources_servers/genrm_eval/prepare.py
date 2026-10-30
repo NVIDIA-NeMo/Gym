@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any, TextIO
 
-from nemo_gym.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime import BaseRunRequest
 
 
 # Shared by benchmark preparation scripts to build Gym evaluation inputs.

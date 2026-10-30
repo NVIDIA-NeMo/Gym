@@ -7,7 +7,7 @@ Gym excludes masked (unscorable) rollouts from these rates and reports them unde
 
 from typing import Any
 
-from nemo_gym.reward_profile import (
+from nemo_gym.metrics import (
     AggregateMetricsMixin,
     compute_pass_majority_metrics,
     compute_subset_metrics,

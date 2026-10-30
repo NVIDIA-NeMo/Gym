@@ -47,16 +47,16 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import FastAPI
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import get_response_json
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.client import get_response_json
-from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
 LOG = logging.getLogger(__name__)

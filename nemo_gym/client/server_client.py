@@ -30,7 +30,6 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 from requests.exceptions import ConnectionError
 
-from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.client.http_client import (
     GlobalAIOHTTPAsyncClientConfig,
     is_global_aiohttp_client_setup,
@@ -56,6 +55,7 @@ from nemo_gym.core.episode import (
     current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
 )
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.utils.server_process import (
     _has_injected_global_config_env,
