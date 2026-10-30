@@ -2031,3 +2031,138 @@ def test_mcqa_trial_operations_with_unsupported_provenance_are_unproven_not_rais
         materialized=[row], results=[row], failures=[], quality={"source_matches": True, "provenance": provenance}
     )
     assert recovery._bounded_mcqa_trial_operations(decision, collected) is False
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "verifier_saved",
+        "verifier_missing",
+        "verifier_malformed",
+        "infra_before_answer",
+        "infra_unselected_verifier",
+        "infra_unselected_model",
+        "model_operation_budget_unknown",
+    ],
+)
+def test_collector_projection_preserves_verification_stop_without_regenerating(tmp_path, case):
+    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.rollout_collection import _agent_request_failure_row, _collection_failure_report
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    verifier = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="verifier_error",
+        failure_reason="verification failed",
+        operation="verify",
+        operation_id="verify-1",
+    )
+    if case.startswith("verifier"):
+        failure = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind="agent_route_failed",
+            failure_reason="agent verification failed",
+            operation="agent.run",
+        )
+        failure.__cause__ = verifier
+        status = 500
+    elif case == "model_operation_budget_unknown":
+        failure = NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason="model request failed",
+            operation="model_request",
+            operation_id="model-operation-1",
+            attempt_id="model-attempt-2",
+            http_status=503,
+        )
+        status = 500
+    else:
+        failure, status = TimeoutError("dispatch timed out"), None
+    row = _agent_request_failure_row(failure, status)
+    row = FailureReportRow.merged_into(row, _collection_failure_report(failure, row["_ng_failure_class"], {}))
+    row.update(ident(0, _ng_attempt_index=0, _ng_failure_max_attempts=3))
+    if case == "verifier_saved":
+        row["ng_trajectory"] = {
+            "invocations": [
+                {
+                    "invocation_id": "root",
+                    "status": "completed",
+                    "conversation": [{"role": "assistant", "content": "retained-secret-answer"}],
+                }
+            ],
+            "turns": [
+                {
+                    "invocation_id": "root",
+                    "answer": [
+                        {
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": "retained-secret-answer"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    elif case == "verifier_malformed":
+        row["ng_trajectory"] = "unreadable"
+    elif case == "infra_unselected_verifier":
+        # Recovered observations elsewhere in the report cannot replace the selected dispatch cause.
+        row["_ng_failure_events"]["observed-verifier"] = {
+            "event_id": "observed-verifier",
+            "boundary": "resources_server",
+            "operation": "verify",
+            "failure_kind": "verifier_error",
+        }
+    elif case == "infra_unselected_model":
+        row["_ng_failure_events"]["observed-model"] = {
+            "event_id": "observed-model",
+            "boundary": "model",
+            "operation": "model_request",
+            "failure_kind": "model_request_error",
+            "operation_id": "recovered-operation",
+        }
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row], retries=0, walltime=0)
+    before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (job / "artifacts").iterdir()}
+    collected = collect(job)
+    projected = collected.failures[0]
+    assert projected["_ng_failure_id"] == row["_ng_failure_id"]
+    assert projected["_ng_failure_events"] == row["_ng_failure_events"]
+    assert "retained-secret-answer" not in collected.model_dump_json()
+    assert "ng_trajectory" not in projected and "response" not in projected and "reward" not in projected
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
+    assert decision.action == (
+        RecoveryAction.STOP
+        if case.startswith("verifier") or case == "model_operation_budget_unknown"
+        else RecoveryAction.RESUBMIT
+    )
+    assert decision.evidence[0].attempts == 1 and decision.evidence[0].max_attempts == 3
+    assert before == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (job / "artifacts").iterdir()}
+
+
+@pytest.mark.parametrize("saved", [True, False])
+def test_projected_judge_answer_keeps_its_supported_reverification_path(tmp_path, saved):
+    row = ident(0, _ng_failure_class="judge_failed", failure_kind="judge_failed", _ng_failure_max_attempts=3)
+    if saved:
+        row["response"] = SAVED_ANSWER
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row], retries=0, walltime=0)
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
+    assert decision.action == (RecoveryAction.REVERIFY if saved else RecoveryAction.STOP)
+    assert collected.failures[0]["_ng_collected_saved_answer"] is saved
+
+
+def test_projected_explicit_final_model_zero_stays_settled(tmp_path):
+    row = ident(
+        0,
+        failure_kind="model_context_limit",
+        _ng_failure_counts_as_zero=True,
+        _ng_failure_terminal=True,
+        _ng_failure_max_attempts=3,
+    )
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row], retries=0, walltime=0)
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
+    assert decision.action == RecoveryAction.NOOP
+    assert decision.counts["model_final"] == 1

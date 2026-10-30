@@ -259,3 +259,101 @@ def test_an_unregistered_or_unselected_event_kind_stays_unknown() -> None:
     ):
         d = decide_recovery(materialized=inventory(1), results=[], failures=[row], budget=OK_BUDGET)
         assert d.counts.get(IdentityState.UNKNOWN) == 1 and d.action == RecoveryAction.STOP
+
+
+def _verifier_failure_after_answer(
+    *, attempt: int = 0, terminal: bool = False, trajectory: object = "answered"
+) -> dict:
+    # The saved shape of a rollout whose agent answered and whose verification then failed: no top-level kind or
+    # response, a completed agent trajectory, and the selected chain dispatch -> agent route -> verify.
+    events = {
+        "e0": {
+            "event_id": "e0",
+            "boundary": "collection",
+            "failure_kind": "collection_dispatch_failed",
+            "operation": "collection.run",
+            "cause_id": "e1",
+        },
+        "e1": {
+            "event_id": "e1",
+            "boundary": "agent",
+            "failure_kind": "agent_route_failed",
+            "operation": "agent.route",
+            "cause_id": "e2",
+        },
+        "e2": {
+            "event_id": "e2",
+            "boundary": "resources_server",
+            "failure_kind": "verifier_error",
+            "operation": "verify",
+            "cause_id": None,
+        },
+    }
+    row = ident(
+        0,
+        _ng_attempt_index=attempt,
+        _ng_failure_terminal=terminal,
+        _ng_failure_max_attempts=3,
+        _ng_failure_id="e0",
+        _ng_failure_events=events,
+    )
+    if trajectory == "answered":
+        row["ng_trajectory"] = {
+            "invocations": [{"invocation_id": "root", "status": "completed"}],
+            "turns": [
+                {
+                    "invocation_id": "root",
+                    "answer": [
+                        {
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": "saved answer"}],
+                        }
+                    ],
+                }
+            ],
+        }
+    elif trajectory is not None:
+        row["ng_trajectory"] = trajectory
+    return row
+
+
+def test_a_failed_verification_after_an_agent_answer_stops_instead_of_a_new_model_chance() -> None:
+    for trajectory in ("answered", None, "malformed"):
+        row = _verifier_failure_after_answer(trajectory=trajectory)
+        d = decide_recovery(materialized=inventory(1), results=[], failures=[row], budget=OK_BUDGET)
+        assert d.counts.get(IdentityState.UNKNOWN) == 1 and d.action == RecoveryAction.STOP
+        assert d.counts.get(IdentityState.RETRYABLE) is None
+
+
+def test_terminal_and_exhausted_verification_failures_keep_their_state() -> None:
+    terminal = _verifier_failure_after_answer(terminal=True)
+    d = decide_recovery(materialized=inventory(1), results=[], failures=[terminal], budget=OK_BUDGET)
+    assert d.counts.get(IdentityState.TERMINAL) == 1
+    spent = [_verifier_failure_after_answer(attempt=a) for a in range(3)]
+    d = decide_recovery(materialized=inventory(1), results=[], failures=spent, budget=OK_BUDGET)
+    assert d.action == RecoveryAction.STOP and d.counts.get(IdentityState.RETRYABLE) is None
+
+
+def test_an_explicit_fail_policy_still_stops_a_failed_verification_as_settled() -> None:
+    from nemo_gym.agent_outcome import OutcomeAction
+    from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
+
+    policy = RecoveryOutcomePolicyConfig(by_failure_kind={"collection_dispatch_failed": OutcomeAction.FAIL})
+    d = decide_recovery(
+        materialized=inventory(1),
+        results=[],
+        failures=[_verifier_failure_after_answer()],
+        budget=OK_BUDGET,
+        outcome_policy=policy,
+    )
+    assert d.counts.get(IdentityState.TERMINAL) == 1 and d.action == RecoveryAction.STOP
+
+
+def test_an_infrastructure_failure_before_any_answer_still_retries_within_its_budget() -> None:
+    first = _selected_event_failure(kind="collection_dispatch_failed", selected=True)
+    d = decide_recovery(materialized=inventory(1), results=[], failures=[first], budget=OK_BUDGET)
+    assert d.counts.get(IdentityState.RETRYABLE) == 1 and d.action == RecoveryAction.RESUBMIT
+    spent = [dict(first, _ng_attempt_index=a) for a in range(3)]
+    d = decide_recovery(materialized=inventory(1), results=[], failures=spent, budget=OK_BUDGET)
+    assert d.counts.get(IdentityState.EXHAUSTED) == 1

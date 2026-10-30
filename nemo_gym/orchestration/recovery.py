@@ -50,6 +50,7 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.server_runtime.episode_types import FailureBoundary
 
 
 TASK_INDEX = "_ng_task_index"
@@ -249,6 +250,18 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
     return chain or None
 
 
+def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
+    """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
+    chain = _cause_chain(row) or []
+    return any(
+        boundary == FailureBoundary.RESOURCES_SERVER and operation == "verify" for boundary, operation, *_ in chain
+    ) or (
+        bool(chain)
+        and chain[0][0] == FailureBoundary.COLLECTION
+        and any(boundary == FailureBoundary.MODEL for boundary, *_ in chain)
+    )
+
+
 def decide_recovery(
     *,
     materialized: Iterable[Mapping[str, Any]],
@@ -397,8 +410,10 @@ def decide_recovery(
             # Unrestricted resume would still retry this nonterminal saved row.
             policy_stopped = True
             state = IdentityState.TERMINAL
-        elif action == OutcomeAction.VERIFY:
-            # Only a judge failure has a re-verification path; this failure has none, so nobody can act on it.
+        elif action == OutcomeAction.VERIFY or _policy_replay_is_unsupported(last):
+            # Only a judge failure has a supported saved-answer path. A failed verification can retain a finished
+            # agent answer, so replay must not generate another. For collection-wrapped model failures, the sidecar projection
+            # has no durable model-operation budget accounting: replay must not silently replenish that budget.
             state = IdentityState.UNKNOWN
         elif len(rows) < cap:
             state = IdentityState.RETRYABLE
