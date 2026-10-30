@@ -701,8 +701,15 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         score_key = getattr(args, "score_key", None)
         if score_key is not None:
             score_key = json.loads(score_key)
-            if not isinstance(score_key, list) or not score_key or not all(isinstance(k, str) for k in score_key):
-                args._parser.error('--score-key must be a JSON list of metric keys, e.g. \'["agent", "mean/reward"]\'')
+            if (
+                not isinstance(score_key, list)
+                or not score_key
+                or not all(isinstance(k, str) or (type(k) is int and k >= 0) for k in score_key)
+            ):
+                args._parser.error(
+                    "--score-key must be a JSON list of object keys and non-negative array indices, "
+                    'e.g. \'[0, "agent_metrics", "mean/reward"]\''
+                )
         if (
             score_key is not None
             or getattr(args, "max_unhealthy_fraction", None) is not None

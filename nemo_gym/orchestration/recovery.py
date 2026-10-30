@@ -434,7 +434,8 @@ if os.path.exists(os.path.join(a, "rollouts_mlflow_export_done")):
             and isinstance(receipt.get("artifacts"), dict)
             and set(receipt["artifacts"]) == set(RECEIPT_FILES)):
         current = {k: sha256(os.path.join(a, n)) for k, n in RECEIPT_FILES.items()}
-        mlflow["receipt"] = {"run_id": receipt["run_id"], "current": receipt["artifacts"] == current}
+        mlflow["receipt"] = {"run_id": receipt["run_id"], "current": receipt["artifacts"] == current,
+                             "uploaded_rollouts": receipt.get("uploaded_rollouts")}
     elif not isinstance(receipt, (dict, list)) and len(text.split()) == 1:
         # A marker that names only the backend run: it carries no digests to check the artifacts against.
         mlflow["receipt"] = {"run_id": text.strip(), "current": None}
@@ -458,7 +459,13 @@ if len(sys.argv) > 2:
     try:
         value = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json")))
         for part in json.loads(sys.argv[2]):  # the metric path as a JSON list: keys may contain "/"
-            value = value[part]
+            # A string key into an object, a non-negative integer index into an array; anything else reads nothing.
+            if isinstance(value, dict) and isinstance(part, str):
+                value = value[part]
+            elif isinstance(value, list) and type(part) is int and 0 <= part < len(value):
+                value = value[part]
+            else:
+                raise KeyError(part)
         score = value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
@@ -734,6 +741,18 @@ def mlflow_errors(
         errors.append(
             f"MLflow live run {live}: configured payload delivery is not verified (live uploads log failures and "
             "continue), so live acceptance is unsupported"
+        )
+    if isinstance(receipt, dict) and receipt.get("current") is True and receipt.get("uploaded_rollouts") is not True:
+        # The receipt hashes the local files whatever the export uploaded; only its own record of the rollouts upload
+        # says the backend run holds them. An older receipt without it, or an export that skipped them, is not delivery.
+        scope = receipt.get("uploaded_rollouts")
+        errors.append(
+            f"MLflow post-run export receipt of run {receipt.get('run_id')} "
+            + (
+                "records that the rollouts were not uploaded"
+                if scope is False
+                else "does not record whether the rollouts were uploaded"
+            )
         )
     if isinstance(receipt, dict) and not live and observed_status is not None:
         bound = receipt.get("run_id")

@@ -47,7 +47,7 @@ class BaseExecutor(ABC):
         """
 
     def recovery_evidence(
-        self, record: SubmissionRecord, benchmark: str, *, score_key: list[str] | None = None
+        self, record: SubmissionRecord, benchmark: str, *, score_key: list[str | int] | None = None
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Decide from the run's persisted evidence, and return what was collected; without a collector, stop."""
         return self.recovery_decision(record, benchmark), None

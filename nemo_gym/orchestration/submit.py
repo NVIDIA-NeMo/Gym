@@ -65,7 +65,7 @@ def recover(
     gym_job_id: str,
     benchmark: str,
     *,
-    score_key: list[str] | None = None,
+    score_key: list[str | int] | None = None,
     max_unhealthy_fraction: float | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,

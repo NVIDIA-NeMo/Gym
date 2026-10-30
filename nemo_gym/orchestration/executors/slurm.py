@@ -245,7 +245,7 @@ class SlurmExecutor(BaseExecutor):
         return record
 
     def recovery_evidence(
-        self, record: SubmissionRecord, benchmark: str, *, score_key: list[str] | None = None
+        self, record: SubmissionRecord, benchmark: str, *, score_key: list[str | int] | None = None
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH."""
         job_dir = Path(record.benchmark_job(benchmark).job_dir)

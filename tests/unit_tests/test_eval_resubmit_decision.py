@@ -409,7 +409,7 @@ def artifact_digests(job: Path) -> dict:
 
 def write_postrun_receipt(job: Path, run_id: str = "postrun-run") -> None:
     """The version-1 receipt a content-bound post-run export writes: its backend run id and the artifact digests."""
-    receipt = {"version": 1, "run_id": run_id, "artifacts": artifact_digests(job)}
+    receipt = {"version": 1, "run_id": run_id, "artifacts": artifact_digests(job), "uploaded_rollouts": True}
     (job / "artifacts" / "rollouts_mlflow_export_done").write_text(json.dumps(receipt))
 
 
@@ -1089,7 +1089,7 @@ def test_a_current_post_run_receipt_with_finished_is_the_only_mlflow_pass() -> N
 
     assert (
         mlflow_errors(
-            {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True}},
+            {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True, "uploaded_rollouts": True}},
             "FINISHED",
             observed_run_id="postrun-run",
         )
@@ -1300,7 +1300,7 @@ def test_missing_mlflow_evidence_names_the_configuration_and_never_passes(tmp_pa
 def test_a_finished_status_counts_only_for_the_receipt_s_own_run(observed_run_id, message) -> None:
     from nemo_gym.orchestration.recovery import mlflow_errors
 
-    local = {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True}}
+    local = {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True, "uploaded_rollouts": True}}
     assert mlflow_errors(local, "FINISHED", observed_run_id=observed_run_id) == [message]
 
 
@@ -1319,8 +1319,94 @@ def test_a_post_run_receipt_beside_an_earlier_live_run_is_bound_only_by_its_own_
 ) -> None:
     from nemo_gym.orchestration.recovery import mlflow_errors
 
-    local = {"live_run_id": "live-old", "receipt": {"run_id": "postrun-run", "current": True}}
+    local = {
+        "live_run_id": "live-old",
+        "receipt": {"run_id": "postrun-run", "current": True, "uploaded_rollouts": True},
+    }
     errors = mlflow_errors(local, status, observed_run_id=observed_run_id)
     assert (errors == []) is accepted
     stale = {"live_run_id": "live-old", "receipt": {"run_id": "postrun-run", "current": False}}
     assert mlflow_errors(stale, "FINISHED", observed_run_id="postrun-run")
+
+
+def aggregate_list_job(tmp_path: Path) -> Path:
+    """A finished run whose aggregate metrics file has the producer's shape: a list of per-agent entries."""
+    job = complete_job(tmp_path)
+    entries = [{"agent_ref": {"name": "agent"}, "agent_metrics": {"mean/reward": 0.75}, "key_metrics": {}}]
+    (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps(entries))
+    write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
+    write_postrun_receipt(job)
+    return job
+
+
+@pytest.mark.parametrize(
+    ("score_key", "score"),
+    [
+        ('[0, "agent_metrics", "mean/reward"]', 0.75),
+        ('[1, "agent_metrics", "mean/reward"]', None),
+        ('["0", "agent_metrics", "mean/reward"]', None),
+        ('[0, "agent_metrics", 0]', None),
+    ],
+)
+def test_cli_recover_reads_a_score_path_into_the_aggregate_list(tmp_path, fake_executor, capsys, score_key, score):
+    fake_executor.job_dir = aggregate_list_job(tmp_path)
+    code, out = run_cli(
+        [
+            "eval",
+            "resubmit",
+            "gym-job-k",
+            "bench",
+            "--recover",
+            "--score-key",
+            score_key,
+            "--max-unhealthy-fraction",
+            "0.02",
+            "--mlflow-status",
+            "FINISHED",
+            "--mlflow-run-id",
+            "postrun-run",
+        ],
+        capsys,
+    )
+    assert code == 0 and out["dispatched"] is None and fake_executor.calls == ["decide"]
+    assert out["gate_task"]["score"] == score and out["gate_task"]["status"] == "FAILED"
+    if score is None:
+        assert "score unavailable: no requested metric was read" in out["gate_task"]["errors"]
+
+
+def test_cli_recover_still_reads_a_string_key_path(tmp_path, fake_executor, capsys) -> None:
+    fake_executor.job_dir = complete_job(tmp_path)
+    code, out = run_cli(
+        ["eval", "resubmit", "gym-job-k", "bench", "--recover", "--score-key", '["agent", "mean/reward"]'], capsys
+    )
+    assert code == 0 and out["gate_task"]["score"] == 0.75 and fake_executor.calls == ["decide"]
+
+
+@pytest.mark.parametrize("score_key", ["[true, 0]", '[-1, "agent_metrics"]', "[0.5]", "[]", '{"a": 0}'])
+def test_cli_recover_refuses_a_malformed_score_path_before_reading_anything(fake_executor, score_key) -> None:
+    from nemo_gym.cli.main import main
+
+    saved = sys.argv
+    sys.argv = ["gym", "eval", "resubmit", "gym-job-k", "bench", "--recover", "--score-key", score_key]
+    try:
+        with pytest.raises(SystemExit) as exc:
+            main()
+    finally:
+        sys.argv = saved
+    assert exc.value.code == 2 and fake_executor.calls == []
+
+
+@pytest.mark.parametrize(
+    ("scope", "message"),
+    [
+        (False, "records that the rollouts were not uploaded"),
+        (None, "does not record whether the rollouts were uploaded"),
+        ("yes", "does not record whether the rollouts were uploaded"),
+    ],
+)
+def test_a_receipt_without_an_uploaded_rollouts_record_is_not_delivery(scope, message) -> None:
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    receipt = {"run_id": "postrun-run", "current": True, "uploaded_rollouts": scope}
+    errors = mlflow_errors({"live_run_id": None, "receipt": receipt}, "FINISHED", observed_run_id="postrun-run")
+    assert len(errors) == 1 and message in errors[0]
