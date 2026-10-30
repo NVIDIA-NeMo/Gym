@@ -1302,6 +1302,48 @@ def test_reconstruct_chat_sse():
     assert resp["usage"]["total_tokens"] == 8
 
 
+@pytest.mark.parametrize("signature", ["s", "gym-unsigned", ""])
+def test_reconstruct_anthropic_sse_keeps_thinking_signature(signature):
+    from nemo_gym.anthropic_converter import AnthropicConverter
+    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
+
+    content = [
+        {"type": "thinking", "thinking": "let me think", "signature": signature},
+        {"type": "text", "text": "ok"},
+        {"type": "tool_use", "id": "t1", "name": "calc", "input": {"x": 1}},
+    ]
+    message = {
+        "id": "msg_1",
+        "role": "assistant",
+        "model": "m",
+        "content": content,
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 17, "output_tokens": 7},
+    }
+    raw = "".join(AnthropicConverter().anthropic_response_to_sse(message)).encode()
+    resp = _reconstruct_streamed_response(raw, "messages")
+    assert resp["content"] == content
+
+
+def test_reconstruct_anthropic_sse_joins_signature_fragments():
+    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
+
+    raw = b"".join(
+        _sse(e["type"], e)
+        for e in [
+            {"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "usage": {"input_tokens": 1}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "hm"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "a"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "b"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_stop"},
+        ]
+    )
+    resp = _reconstruct_streamed_response(raw, "messages")
+    assert resp["content"] == [{"type": "thinking", "thinking": "hm", "signature": "ab"}]
+
+
 def test_reconstruct_responses_sse_uses_terminal_envelope():
     from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 

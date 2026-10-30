@@ -1351,6 +1351,8 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
             elif dtype == "thinking_delta":
                 block["type"] = block.get("type") or "thinking"
                 block["thinking"] = (block.get("thinking") or "") + (delta.get("thinking") or "")
+            elif dtype == "signature_delta":
+                block["signature"] = (block.get("signature") or "") + (delta.get("signature") or "")
             elif dtype == "input_json_delta":
                 tool_json[idx] = tool_json.get(idx, "") + (delta.get("partial_json") or "")
         elif etype == "message_delta":

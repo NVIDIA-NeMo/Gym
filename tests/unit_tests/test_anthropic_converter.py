@@ -26,6 +26,7 @@ from anthropic.types import Message
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.responses_converter import ResponsesConverter
 
 
 PNG_DATA_URL = "data:image/png;base64,aGVsbG8="  # "hello"
@@ -202,6 +203,37 @@ class TestAnthropicRequestToResponses:
         assert item.type == "reasoning"
         assert item.summary[0].text == "hmm"
         assert item.encrypted_content == "sig-1"
+
+    def _replay(self, thinking_block: dict) -> NeMoGymResponseCreateParamsNonStreaming:
+        return _converter().anthropic_request_to_responses(
+            {
+                "max_tokens": 10,
+                "messages": [
+                    {"role": "user", "content": "q"},
+                    {"role": "assistant", "content": [thinking_block, {"type": "text", "text": "ok"}]},
+                    {"role": "user", "content": "next"},
+                ],
+            }
+        )
+
+    def test_placeholder_signature_is_dropped_on_replay(self, monkeypatch) -> None:
+        # The placeholder never reached the model, so replay must not forward it as opaque reasoning, which the
+        # Chat Completions conversion behind vLLM rejects.
+        monkeypatch.setattr("nemo_gym.anthropic_converter._PLACEHOLDER_SIGNATURE", "gym-unsigned")
+        params = self._replay({"type": "thinking", "thinking": "step", "signature": "gym-unsigned"})
+        reasoning = params.input[1]
+        assert reasoning.type == "reasoning"
+        assert reasoning.summary[0].text == "step"
+        assert reasoning.encrypted_content is None
+        chat = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(params)
+        assistant = [m for m in chat.messages if m["role"] == "assistant"]
+        assert len(assistant) == 1
+        assert "step" in assistant[0]["content"] and assistant[0]["content"].endswith("ok")
+
+    def test_real_signature_survives_replay_with_placeholder_set(self, monkeypatch) -> None:
+        monkeypatch.setattr("nemo_gym.anthropic_converter._PLACEHOLDER_SIGNATURE", "gym-unsigned")
+        params = self._replay({"type": "thinking", "thinking": "step", "signature": "sig-1"})
+        assert params.input[1].encrypted_content == "sig-1"
 
     def test_tools_and_tool_choice_variants(self) -> None:
         conv = _converter()
@@ -384,6 +416,19 @@ class TestResponsesToAnthropicResponse:
         out = conv.responses_to_anthropic_response(resp, model="m")
         assert out["content"][0] == {"type": "thinking", "thinking": "step", "signature": ""}
 
+    def test_reasoning_without_signature_uses_placeholder(self, monkeypatch) -> None:
+        # A placeholder keeps clients from replaying unsigned thinking as text.
+        monkeypatch.setattr("nemo_gym.anthropic_converter._PLACEHOLDER_SIGNATURE", "gym-unsigned")
+        conv, resp = self._response_from_anthropic(
+            {
+                "content": [{"type": "thinking", "thinking": "step"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+        out = conv.responses_to_anthropic_response(resp, model="m")
+        assert out["content"][0] == {"type": "thinking", "thinking": "step", "signature": "gym-unsigned"}
+
     def test_output_validates_as_anthropic_message(self) -> None:
         # Regression guard: the builder must emit an object the Anthropic SDK accepts as a Message
         # (this is what the internal Message.model_validate enforces on every response).
@@ -484,6 +529,39 @@ class TestAnthropicResponseToSSE:
         )
         delta_events = [d for t, d in events if t == "content_block_delta"]
         assert delta_events[0]["delta"] == {"type": "thinking_delta", "thinking": "ponder"}
+
+    def test_thinking_block_streams_signature(self) -> None:
+        events = self._events(
+            {
+                "id": "msg_1",
+                "role": "assistant",
+                "model": "m",
+                "content": [{"type": "thinking", "thinking": "ponder", "signature": "s"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+        start = next(d for t, d in events if t == "content_block_start")
+        assert start["content_block"] == {"type": "thinking", "thinking": "", "signature": ""}
+        deltas = [d["delta"] for t, d in events if t == "content_block_delta"]
+        assert deltas == [
+            {"type": "thinking_delta", "thinking": "ponder"},
+            {"type": "signature_delta", "signature": "s"},
+        ]
+
+    def test_unsigned_thinking_block_streams_no_signature_delta(self) -> None:
+        events = self._events(
+            {
+                "id": "msg_1",
+                "role": "assistant",
+                "model": "m",
+                "content": [{"type": "thinking", "thinking": "ponder", "signature": ""}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+        deltas = [d["delta"] for t, d in events if t == "content_block_delta"]
+        assert deltas == [{"type": "thinking_delta", "thinking": "ponder"}]
 
     def test_unsupported_block_for_sse_raises(self) -> None:
         import pytest
