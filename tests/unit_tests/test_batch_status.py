@@ -504,3 +504,155 @@ class TestBatchStatusTracker:
         assert tracker.write_status([], [], force=True)
         assert tracker.write_status(rows, [])
         assert not tracker.write_status(rows, [])
+
+
+def test_run_status_needs_no_manifest_or_uniform_repeat_policy(tmp_path: Path) -> None:
+    from nemo_gym.batch_status import RunStatusTracker
+
+    rows = [materialized_row("a", "", 0, 0), materialized_row("a", "", 0, 1), materialized_row("b", "", 1, 0)]
+    tracker = RunStatusTracker(tmp_path / "batch_status.json", rows)
+    failures = [rows[1] | {"_ng_failure_class": "judge_failed"}, rows[1] | {"_ng_failure_class": "agent_run_error"}]
+    assert tracker.write_status([], [], force=True)
+    assert tracker.write_status([rows[0]], failures)
+    assert not tracker.write_status([rows[0]], failures)
+    status = orjson.loads(tracker.status_fpath.read_bytes())
+    assert status["members"]["a"] == {
+        "expected_rollout_count": 2,
+        "completed_rollout_count": 1,
+        "remaining_rollout_count": 1,
+        "failures_by_class": {"agent_run_error": 1},
+        "aggregation_status": "pending",
+    }
+    assert status["members"]["b"]["remaining_rollout_count"] == 1
+    tracker.write_status(rows, failures, aggregation_deferred=True, force=True)
+    status = orjson.loads(tracker.status_fpath.read_bytes())
+    assert status["members"]["a"]["failures_by_class"] == {}
+    assert status["members"]["a"]["remaining_rollout_count"] == 0
+    assert status["members"]["a"]["aggregation_status"] == "deferred"
+
+
+def test_review_run_status_warns_once_and_disables_on_unexpected_identity(tmp_path, caplog) -> None:
+    from nemo_gym.batch_status import RunStatusTracker
+
+    rows = [materialized_row("server", "", 0, 0)]
+    tracker = RunStatusTracker(tmp_path / "status.json", iter(rows))
+    stale = [materialized_row("real_agent", "", 0, 0)]
+    assert not tracker.write_status(stale, [], force=True)
+    assert not tracker.write_status(stale, [], force=True)
+    assert caplog.text.count("Run status disabled") == 1
+
+
+def test_review_run_status_does_not_rescan_completed_rows(tmp_path, monkeypatch) -> None:
+    from nemo_gym.batch_status import RunStatusTracker
+
+    rows = [materialized_row("a", "", 0, repeat) for repeat in range(20)]
+    tracker = RunStatusTracker(tmp_path / "status.json", rows)
+    original = tracker._validated_rollout_identity
+    seen = []
+
+    def validate(row, **kwargs):
+        seen.append(row)
+        return original(row, **kwargs)
+
+    monkeypatch.setattr(tracker, "_validated_rollout_identity", validate)
+    assert tracker.write_status(rows[:10], [], force=True)
+    assert tracker.write_status(rows, [], force=True)
+    assert len(seen) == 20
+
+
+def test_disabled_run_status_replaces_previous_counts_once(tmp_path, monkeypatch) -> None:
+    import nemo_gym.batch_status as batch_status
+
+    rows = [materialized_row("server", "", 0, 0)]
+    tracker = batch_status.RunStatusTracker(tmp_path / "status.json", rows)
+    assert tracker.write_status([], [], force=True)
+    old = orjson.loads(tracker.status_fpath.read_bytes())
+    writes = []
+    original = batch_status._atomic_write_json
+
+    def write(path, payload):
+        writes.append(payload)
+        original(path, payload)
+
+    monkeypatch.setattr(batch_status, "_atomic_write_json", write)
+    assert not tracker.write_status([materialized_row("real_agent", "", 0, 0)], [], force=True)
+    status = orjson.loads(tracker.status_fpath.read_bytes())
+    assert status["tracking"] == "disabled"
+    assert status["reason"] == "ConfigError"
+    assert status["updated_at"] >= old["updated_at"]
+    assert not status["members"]
+    assert not tracker.write_status([], [], force=True)
+    assert len(writes) == 1
+
+
+def test_disabled_run_status_write_failure_stays_best_effort(tmp_path, monkeypatch, caplog) -> None:
+    import nemo_gym.batch_status as batch_status
+
+    tracker = batch_status.RunStatusTracker(tmp_path / "status.json", [])
+    writes = []
+
+    def cannot_write(path, payload):
+        writes.append(payload)
+        raise OSError("private path")
+
+    monkeypatch.setattr(batch_status, "_atomic_write_json", cannot_write)
+    assert not tracker.write_status([], [], force=True)
+    assert not tracker.write_status([], [], force=True)
+    assert len(writes) == 2  # The initial write and one attempt to save the disabled state.
+    assert writes[-1]["tracking"] == "disabled"
+    assert caplog.text.count("Run status disabled") == 1
+    assert "private path" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("later_row", "failures_left"),
+    [
+        pytest.param({"_ng_omitted_rollout": True}, {}, id="an interrupted retry hides the older failure"),
+        pytest.param(
+            {"_ng_omitted_rollout": True, "_ng_dispatch_drained": True},
+            {"judge_failed": 1},
+            id="a never-started retry leaves it",
+        ),
+    ],
+)
+def test_run_status_follows_the_latest_execution_like_the_health_check(
+    tmp_path: Path, later_row: dict, failures_left: dict
+) -> None:
+    from nemo_gym.batch_status import RunStatusTracker
+
+    rows = [materialized_row("a", "", 0, 0)]
+    tracker = RunStatusTracker(tmp_path / "status.json", rows)
+    failures = [
+        rows[0] | {"_ng_failure_class": "judge_failed"},
+        rows[0] | {"_ng_failure_class": "kill_shaped"} | later_row,
+    ]
+
+    tracker.write_status([], failures, force=True)
+
+    assert orjson.loads(tracker.status_fpath.read_bytes())["members"]["a"]["failures_by_class"] == failures_left
+
+
+@pytest.mark.parametrize(
+    ("later_row", "failures_left"),
+    [
+        pytest.param({"_ng_omitted_rollout": True}, {}, id="an interrupted retry hides the older failure"),
+        pytest.param(
+            {"_ng_omitted_rollout": True, "_ng_dispatch_drained": True},
+            {"judge_failed": 1},
+            id="a never-started retry leaves it",
+        ),
+    ],
+)
+def test_manifest_status_follows_the_latest_execution_too(
+    tmp_path: Path, later_row: dict, failures_left: dict
+) -> None:
+    rows = [materialized_row("alpha", "alpha_source", 0, 0)]
+    tracker = BatchStatusTracker(write_manifest(tmp_path / "batch_manifest.json", rows), rows)
+    failures = [
+        rows[0] | {"_ng_failure_class": "judge_failed"},
+        rows[0] | {"_ng_failure_class": "kill_shaped"} | later_row,
+    ]
+
+    members = tracker.build_status([], failures)["members"]
+
+    assert members["alpha"]["failures_by_class"] == failures_left

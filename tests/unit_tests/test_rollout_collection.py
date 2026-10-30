@@ -12378,3 +12378,332 @@ def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(with_
     # Do not repair conflicting ownership silently: the checker must still see both claims.
     assert [ref.model_call_id for ref in trajectory.invocations[0].model_calls] == call_ids
     assert trajectory.verifier_invocations[0].model_calls[0].model_dump(exclude_none=True) == judge_ref
+
+
+@pytest.mark.parametrize("retain_results", [False, True])
+async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(
+    tmp_path: Path, empty_global_config: MagicMock, retain_results: bool
+) -> None:
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(
+        b"".join(
+            orjson.dumps({"agent_ref": {"name": "a"}, "responses_create_params": {"input": []}, "x": index}) + b"\n"
+            for index in range(2)
+        )
+    )
+    output = tmp_path / "rollouts.jsonl"
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(output),
+        disable_aggregation=True,
+        upload_rollouts=False,
+        retain_results_in_memory=retain_results,
+    )
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            status = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())
+            assert status["members"]["a"]["expected_rollout_count"] == 2
+            futures = []
+            for row in examples:
+                future = Future()
+                result = {"response": {}, "reward": 1.0}
+                if row["x"] == 1 and not config.resume_from_cache:
+                    result[NG_FAILURE_CLASS_KEY] = AGENT_RUN_ERROR_FAILURE_CLASS
+                future.set_result(_CompletedRollout(row=row, result=result, rollout_latency_ms=None))
+                futures.append(future)
+            return futures
+
+    await Helper().run_from_config(config)
+    member = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())["members"]["a"]
+    assert member["completed_rollout_count"] == member["remaining_rollout_count"] == 1
+    assert member["failures_by_class"] == {AGENT_RUN_ERROR_FAILURE_CLASS: 1}
+    assert member["aggregation_status"] == "deferred"
+
+    config.resume_from_cache = True
+    await Helper().run_from_config(config)
+    member = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())["members"]["a"]
+    assert member["expected_rollout_count"] == member["completed_rollout_count"] == 2
+    assert member["remaining_rollout_count"] == 0
+    assert member["failures_by_class"] == {}
+
+
+@pytest.mark.parametrize("mismatch", ["resume", "native_result"])
+async def test_review_run_status_identity_errors_do_not_abort_collection(
+    tmp_path, empty_global_config, mismatch, caplog
+):
+    if mismatch == "native_result":
+        empty_global_config.return_value = OmegaConf.create({"server": {"environment_servers": {"native": {}}}})
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(b'{"agent_ref":{"name":"a"},"responses_create_params":{"input":[]}}\n')
+    output = tmp_path / "rollouts.jsonl"
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(output),
+        disable_aggregation=True,
+        upload_rollouts=False,
+        retain_results_in_memory=False,
+    )
+
+    class Helper(RolloutCollectionHelper):
+        def _preprocess_rows_from_config(self, config):
+            rows = super()._preprocess_rows_from_config(config)
+            if mismatch == "native_result":
+                for row in rows:
+                    row.pop(AGENT_REF_KEY_NAME)
+                    row[NG_ENVIRONMENT_SERVER_KEY] = "server"
+            return rows
+
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            futures = []
+            for row in examples:
+                future = Future()
+                result = {"reward": 1.0}
+                if mismatch == "native_result":
+                    result[AGENT_REF_KEY_NAME] = {"name": "real_agent"}
+                future.set_result(_CompletedRollout(row=row, result=result, rollout_latency_ms=None))
+                futures.append(future)
+            return futures
+
+    if mismatch == "resume":
+        await Helper().run_from_config(config)
+        with output.open("ab") as results:
+            results.write(
+                orjson.dumps(
+                    {
+                        TASK_INDEX_KEY_NAME: 999,
+                        ROLLOUT_INDEX_KEY_NAME: 0,
+                        AGENT_REF_KEY_NAME: {"name": "a"},
+                        "reward": 1.0,
+                    }
+                )
+                + b"\n"
+            )
+        config.resume_from_cache = True
+    await Helper().run_from_config(config)
+    assert output.is_file()
+    assert caplog.text.count("Run status disabled") == 1
+
+
+async def test_review_run_status_keeps_payloads_out_and_uses_separate_output_names(
+    tmp_path, empty_global_config, monkeypatch
+):
+    from nemo_gym.batch_status import RunStatusTracker
+
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(
+        b"".join(
+            orjson.dumps({"agent_ref": {"name": "a"}, "responses_create_params": {"input": "x" * 1000}, "x": index})
+            + b"\n"
+            for index in range(2)
+        )
+    )
+    compact_rows = []
+
+    class Tracker(RunStatusTracker):
+        def __init__(self, path, rows):
+            assert not isinstance(rows, list)
+
+            def compact():
+                for row in rows:
+                    assert "responses_create_params" not in row
+                    compact_rows.append(row)
+                    yield row
+
+            super().__init__(path, compact())
+
+    monkeypatch.setattr(nemo_gym.rollout_collection, "RunStatusTracker", Tracker)
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            futures = []
+            for row in examples:
+                future = Future()
+                future.set_result(_CompletedRollout(row=row, result={"reward": 1.0}, rollout_latency_ms=None))
+                futures.append(future)
+            return futures
+
+    for stem, limit in (("math", 1), ("gsm8k", 2)):
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(tmp_path / f"{stem}.jsonl"),
+            limit=limit,
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+        await Helper().run_from_config(config)
+        config.resume_from_cache = True
+        await Helper().run_from_config(config)
+    assert len(compact_rows) == 6
+    for stem, expected in (("math", 1), ("gsm8k", 2)):
+        status = orjson.loads((tmp_path / f"{stem}_batch_status.json").read_bytes())
+        assert status["members"]["a"]["expected_rollout_count"] == expected
+        assert status["members"]["a"]["completed_rollout_count"] == expected
+
+
+async def test_fresh_run_clears_old_status_before_tracker_construction(tmp_path, empty_global_config, monkeypatch):
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(b'{"agent_ref":{"name":"a"},"responses_create_params":{"input":[]}}\n')
+    output = tmp_path / "rollouts.jsonl"
+    status_path = tmp_path / "rollouts_batch_status.json"
+    status_path.write_bytes(b'{"updated_at":"old-run","members":{"old":{}}}')
+    previous_status_exists = []
+
+    def tracker(path, rows):
+        previous_status_exists.append(path.exists())
+        raise ValueError("private configuration")
+
+    monkeypatch.setattr(nemo_gym.rollout_collection, "RunStatusTracker", tracker)
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            future = Future()
+            future.set_result(_CompletedRollout(row=examples[0], result={"reward": 1.0}, rollout_latency_ms=None))
+            return [future]
+
+    await Helper().run_from_config(
+        RolloutCollectionConfig(
+            input_jsonl_fpath=str(source),
+            output_jsonl_fpath=str(output),
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+    )
+    assert previous_status_exists == [False]
+    status = orjson.loads(status_path.read_bytes())
+    assert status["tracking"] == "disabled"
+    assert status["reason"] == "ValueError"
+    assert status["updated_at"] != "old-run"
+    assert "private configuration" not in status_path.read_text()
+    assert orjson.loads(output.read_bytes())["reward"] == 1.0
+
+
+class TestRunStatusFiles:
+    def test_resume_reads_the_latest_started_attempt_without_its_payload(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import _latest_status_failure_rows
+
+        sidecar = tmp_path / "rollouts_failures.jsonl"
+        rows = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "judge_failed",
+                "big": "x" * 100,
+            },
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "kill_shaped",
+                NG_OMITTED_ROLLOUT_KEY: True,
+            },
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "agent_run_error",
+                "big": "y" * 100,
+            },
+            {
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                NG_FAILURE_CLASS_KEY: "cancelled",
+                NG_OMITTED_ROLLOUT_KEY: True,
+                NG_DISPATCH_DRAINED_KEY: True,
+            },
+        ]
+        sidecar.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        refs = {(0, 0): {"name": "a"}, (1, 0): {"name": "a"}}
+
+        latest = sorted(_latest_status_failure_rows(sidecar, refs), key=lambda row: row[TASK_INDEX_KEY_NAME])
+
+        assert [row[NG_FAILURE_CLASS_KEY] for row in latest] == ["kill_shaped", "agent_run_error"]
+        assert latest[0][NG_OMITTED_ROLLOUT_KEY] is True
+        assert all("big" not in row for row in latest)
+
+    @pytest.mark.parametrize(
+        ("metrics", "expected"),
+        [
+            pytest.param([{"agent_ref": {"name": "a"}, "mean/reward": 1.0}], "complete", id="aggregated"),
+            pytest.param(None, "error", id="aggregation failed"),
+        ],
+    )
+    def test_aggregation_marks_each_shard_status_and_keeps_its_counts(
+        self, tmp_path: Path, metrics: list | None, expected: str
+    ) -> None:
+        from nemo_gym.rollout_collection import _refresh_shard_status_aggregation
+
+        shard = tmp_path / "rollouts-rs0.jsonl"
+        status_fpath = tmp_path / "rollouts-rs0_batch_status.json"
+        member = {"expected_rollout_count": 2, "completed_rollout_count": 2, "aggregation_status": "deferred"}
+        status_fpath.write_bytes(orjson.dumps({"tracking": "enabled", "members": {"a": member}}))
+        metrics_fpath = None
+        if metrics is not None:
+            metrics_fpath = tmp_path / "rollouts_aggregate_metrics.json"
+            metrics_fpath.write_bytes(orjson.dumps(metrics))
+
+        _refresh_shard_status_aggregation([str(shard)], metrics_fpath)
+
+        refreshed = orjson.loads(status_fpath.read_bytes())["members"]["a"]
+        assert refreshed == {**member, "aggregation_status": expected}
+        assert not (tmp_path / "rollouts_batch_status.json").exists(), "the merged output gets no status of its own"
+
+    def test_an_unwritable_shard_status_never_fails_the_aggregation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import nemo_gym.rollout_collection as rollout_collection
+
+        shards = [tmp_path / "rollouts-rs0.jsonl", tmp_path / "rollouts-rs1.jsonl"]
+        for shard in shards:
+            member = {"expected_rollout_count": 1, "aggregation_status": "deferred"}
+            (tmp_path / f"{shard.stem}_batch_status.json").write_bytes(
+                orjson.dumps({"tracking": "enabled", "members": {"a": member}})
+            )
+        real_write = rollout_collection._atomic_write_json
+
+        def write(path, payload):
+            if "rs0" in path.name:
+                raise PermissionError("read-only")
+            real_write(path, payload)
+
+        monkeypatch.setattr(rollout_collection, "_atomic_write_json", write)
+
+        rollout_collection._refresh_shard_status_aggregation([str(shard) for shard in shards], None)
+
+        assert "Could not update the run status" in caplog.text
+        second = orjson.loads((tmp_path / "rollouts-rs1_batch_status.json").read_bytes())
+        assert second["members"]["a"]["aggregation_status"] == "error"
+
+
+async def test_run_status_keeps_results_persisted_inside_the_throttle_when_the_run_fails(
+    tmp_path: Path, empty_global_config: MagicMock
+) -> None:
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(
+        b"".join(
+            orjson.dumps({"agent_ref": {"name": "a"}, "responses_create_params": {"input": []}, "x": index}) + b"\n"
+            for index in range(3)
+        )
+    )
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+        disable_aggregation=True,
+        upload_rollouts=False,
+    )
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            futures = []
+            for row in examples:
+                future = Future()
+                if row["x"] == 2:
+                    future.set_exception(RuntimeError("the cluster went away"))
+                else:
+                    future.set_result(_CompletedRollout(row=row, result={"reward": 1.0}, rollout_latency_ms=None))
+                futures.append(future)
+            return futures
+
+    with pytest.raises(RuntimeError, match="the cluster went away"):
+        await Helper().run_from_config(config)
+
+    member = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())["members"]["a"]
+    assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (2, 1)

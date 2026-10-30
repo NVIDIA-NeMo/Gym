@@ -957,3 +957,57 @@ def compare() -> None:  # pragma: no cover
     for table in render_key_metrics_tables(result):
         print_rich_table(table)
     print("\n".join(summary_lines(result, written)))
+
+
+def eval_status(target: str, *, json_output: bool = False) -> None:
+    """Print saved progress for a run directory or a locally indexed Gym job ID.
+
+    Submitted job artifacts must be visible on the current filesystem. This command
+    reads saved progress and does not contact a scheduler or a remote host.
+    """
+    from nemo_gym.batch_status import BATCH_STATUS_FNAME
+    from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord, local_index_dir
+
+    def status_files(directory: Path) -> list[Path]:
+        return sorted({*directory.glob("*_batch_status.json"), *directory.glob(BATCH_STATUS_FNAME)})
+
+    path = Path(target)
+    if not path.is_dir() and (path.exists() or "/" in target or "\\" in target):
+        raise NotADirectoryError(f"Run directory expected: {target}")
+    record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
+    files = status_files(path) if path.is_dir() else []
+    if files:
+        statuses = {str(file): json.loads(file.read_text()) for file in files}
+    elif record_path.is_file():
+        record = SubmissionRecord.load(json.loads(record_path.read_text()))
+        statuses = {}
+        for benchmark in record.benchmarks:
+            directory = Path(benchmark.job_dir) / "artifacts"
+            files = status_files(directory)
+            if not files:
+                statuses[benchmark.benchmark] = {"status": "unavailable", "path": str(directory)}
+            for file in files:
+                name = benchmark.benchmark if len(files) == 1 else f"{benchmark.benchmark}/{file.name}"
+                statuses[name] = json.loads(file.read_text())
+    else:
+        raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
+    if json_output:
+        print(json.dumps(statuses))
+        return
+    for name, status in statuses.items():
+        print(f"{name}:")
+        if "members" not in status:
+            print(f"  Status unavailable: {status['path']}")
+            continue
+        print(f"  updated_at: {status.get('updated_at', 'unknown')}; tracking: {status.get('tracking', 'enabled')}")
+        if status.get("tracking") == "disabled":
+            print(f"  reason: {status.get('reason', 'unknown')}")
+            continue
+        for agent, member in status["members"].items():
+            print(
+                f"  {agent}: {member['completed_rollout_count']} completed, "
+                f"{member['remaining_rollout_count']} remaining; "
+                f"expected: {member.get('expected_rollout_count', 'unknown')}; "
+                f"aggregation: {member.get('aggregation_status', 'unknown')}; "
+                f"failures by class: {json.dumps(member['failures_by_class'], sort_keys=True)}"
+            )

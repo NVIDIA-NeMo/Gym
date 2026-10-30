@@ -2093,3 +2093,87 @@ def test_eval_run_task_selection_flags_need_a_target(monkeypatch, capsys, serve,
         main()
     assert exc.value.code == 2
     assert "--only-tasks and --exclude-tasks apply to a task TARGET" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("as_job_id", [False, True])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_eval_status_reads_saved_progress(tmp_path, monkeypatch, capsys, as_job_id, json_output):
+    from nemo_gym.orchestration import jobs
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    status = {
+        "schema_version": "1",
+        "members": {
+            "a": {"completed_rollout_count": 2, "remaining_rollout_count": 1, "failures_by_class": {"judge_failed": 1}}
+        },
+    }
+    (artifacts / "batch_status.json").write_text(json.dumps(status))
+    target = str(artifacts)
+    if as_job_id:
+        monkeypatch.setattr(jobs, "local_index_dir", lambda: tmp_path)
+        target = "gym-job-test"
+        record = jobs.SubmissionRecord(
+            gym_job_id=target,
+            gym_version="test",
+            submitted_at="now",
+            run_dir=str(tmp_path),
+            cluster="local",
+            executor="local",
+            submitted_by="test",
+            benchmarks=[jobs.BenchmarkJob(benchmark="benchmark", job_dir=str(tmp_path), job_id="123")],
+        )
+        (tmp_path / f"{target}.json").write_text(record.dumps())
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", target, *(["--json"] if json_output else [])])
+    cli_main.main()
+    output = capsys.readouterr().out
+    if json_output:
+        assert list(json.loads(output).values()) == [status]
+    else:
+        assert "2 completed, 1 remaining" in output
+        assert '"judge_failed": 1' in output
+
+
+def test_eval_status_missing_artifact_is_actionable(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(tmp_path)])
+    with pytest.raises(SystemExit) as error:
+        cli_main.main()
+    assert error.value.code == 2
+    assert "No batch_status.json or Gym job record found" in capsys.readouterr().err
+
+
+def test_review_eval_status_lists_stem_files_and_expected_aggregation(tmp_path, monkeypatch, capsys):
+    member = {
+        "expected_rollout_count": 3,
+        "completed_rollout_count": 2,
+        "remaining_rollout_count": 1,
+        "failures_by_class": {},
+        "aggregation_status": "deferred",
+    }
+    for stem in ("math", "gsm8k"):
+        (tmp_path / f"{stem}_batch_status.json").write_text(json.dumps({"members": {stem: member}}))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(tmp_path)])
+    cli_main.main()
+    output = capsys.readouterr().out
+    assert "math_batch_status.json" in output and "gsm8k_batch_status.json" in output
+    assert "expected: 3" in output and "aggregation: deferred" in output
+
+
+def test_review_eval_status_rejects_a_file_as_a_run_directory(tmp_path, monkeypatch, capsys):
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text("")
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(path)])
+    with pytest.raises(SystemExit):
+        cli_main.main()
+    assert "Run directory expected" in capsys.readouterr().err
+
+
+def test_eval_status_prints_disabled_tracking_and_update_time(tmp_path, monkeypatch, capsys) -> None:
+    status = {"tracking": "disabled", "reason": "ConfigError", "updated_at": "2026-10-16T12:34:56Z", "members": {}}
+    (tmp_path / "run_batch_status.json").write_text(json.dumps(status))
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(tmp_path)])
+    cli_main.main()
+    output = capsys.readouterr().out
+    assert "tracking: disabled" in output
+    assert "ConfigError" in output
+    assert "2026-10-16T12:34:56Z" in output

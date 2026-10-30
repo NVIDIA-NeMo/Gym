@@ -58,6 +58,7 @@ gym eval run                  # collate data, start servers, and collect rollout
 gym eval submit               # submit a benchmark job to Slurm
 gym eval aggregate            # merge sharded rollout results
 gym eval export               # export a finished run (default exporter: atif)
+gym eval status               # show saved run progress
 gym eval health-check         # verify rollout artifact quality for an existing run
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
@@ -1084,6 +1085,37 @@ gym eval export evalrdl \
 ```
 
 See the [trajectory capability matrix](/reference/trajectory-capabilities#atif-export) for the initial conversion boundary.
+
+### `gym eval status`
+
+Read saved progress for a run directory or a Gym job ID from `gym eval submit`:
+
+```bash
+gym eval status results/my-run
+gym eval status gym-job-20261016T120000Z-abcdef --json
+```
+
+Collection without a batch manifest writes `<output-stem>_batch_status.json` next to its output JSONL
+(for example, `gsm8k_batch_status.json`). Manifest-backed runs retain `batch_status.json`.
+The directory command lists every stem-derived status file and the legacy `batch_status.json` when present. Progress is
+written at initialization, on the first durable result, at most every five seconds thereafter,
+and at completion. Counts report completed and remaining rollouts and the
+latest outstanding failures by class. A successful retry clears its earlier failure from
+these counts. Failed rollouts remain in the remaining count because they have no successful result.
+
+`--json` prints a mapping from each status-file path or submitted benchmark name to its saved status.
+Human-readable output includes the expected count, aggregation status, update time, and tracking state. File targets or path-like
+targets that are not directories produce a run-directory error rather than a job-ID lookup.
+Gym job IDs use the local submission index; submitted artifacts must be mounted or copied to
+the paths recorded in the submission. Missing submitted artifacts are shown as unavailable.
+The command reads files without contacting a scheduler or remote host.
+
+For runs without a manifest, status is best-effort: inconsistent resume identities or native result
+identities warn once and disable status reporting while collection continues. Gym tries once to write
+`tracking: "disabled"`, the exception type as `reason`, and `updated_at`, replacing unreliable counts.
+Fresh runs clear their output stem's previous status before initializing the tracker. Manifest-backed runs
+retain strict validation. Resume loading retains compact identities rather than full input payloads,
+and general-run progress counters update incrementally as results arrive.
 
 ### `gym eval health-check`
 

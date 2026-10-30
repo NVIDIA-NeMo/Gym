@@ -790,6 +790,20 @@ ONLY_TASKS = Flag(
 )
 
 
+def _eval_status(args: argparse.Namespace, overrides: list[str]) -> None:
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if args.json:
+        expected_overrides.append("+json=true")
+    if overrides != expected_overrides:
+        args._parser.error("status does not accept Hydra overrides")
+    from nemo_gym.cli.eval import eval_status
+
+    try:
+        eval_status(args.run, json_output=args.json)
+    except (OSError, ValueError) as exc:
+        args._parser.error(str(exc))
+
+
 def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     expected_overrides = ["+verbose=true"] if args.verbose else []
     if args.json:
@@ -1445,6 +1459,11 @@ COMMANDS = {
                 "Run health limit for final (not retried) failures, as a share of expected rollouts (default: no limit).",
             ),
         ),
+    ),
+    "eval status": Command(
+        target=_eval_status,
+        summary="Show saved progress for a run directory or Gym job ID.",
+        flags=(Flag(register=lambda p: p.add_argument("run", metavar="RUN_DIR_OR_JOB_ID")), JSON),
     ),
     "eval health-check": Command(
         target=_eval_health_check,
