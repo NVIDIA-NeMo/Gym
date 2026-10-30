@@ -73,7 +73,7 @@ provisioning the remaining images.
 | Section | Important fields |
 | --- | --- |
 | `connection` | SDK credentials, hosted or gateway URLs, headers, proxy, and control-plane `request_timeout_s`. |
-| `create` | Default template/mapping, sandbox `timeout_s`, `secure`, `allow_internet_access`, and `strict_resources`. |
+| `create` | Default template/mapping, sandbox `timeout_s`, `secure`, `allow_internet_access`, `strict_resources`, and the `idle_policy` with its `idle_timeout_s`. |
 | `exec` | Fallback command timeout, default user, stream-open request timeout, background execution, and reconnect attempts. |
 | `operations` | Retry count and exponential-backoff delays for safe, retryable operations. |
 
@@ -127,6 +127,16 @@ suitable E2B template prepared through E2B tooling.
 - Serialized handles contain the E2B sandbox ID so another process can reconnect through a
   separately configured `E2BProvider`. E2B's public connect operation may extend a
   near-expiry sandbox to its SDK-default connection lifetime (300 seconds in E2B 2.36).
+- With `create.idle_policy: pause`, a sandbox that no request has touched for
+  `create.idle_timeout_s` is paused and resumed before the next request, with its original
+  lifetime. Requests in flight are never cut off. A failed resume makes `exec` return code 125
+  with `error_type="sandbox"`, and the next request retries. An `endpoint()` or `serialize()`
+  keeps the sandbox running from then on, because that traffic bypasses the provider.
+- With `create.idle_policy: suspend`, an idle sandbox is snapshotted and killed instead, and the
+  next request creates a sandbox from the snapshot wherever the backend places it, then deletes the
+  snapshot. The Gym handle keeps its ID while the E2B sandbox behind it changes. A failed restore
+  keeps the snapshot for the next request. Closing the sandbox or the provider deletes leftover
+  snapshots; a process that dies while sandboxes are suspended leaves theirs behind.
 
 ## Security and Isolation
 

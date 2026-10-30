@@ -63,6 +63,8 @@ sandbox:
       secure: true
       allow_internet_access: true
       strict_resources: false
+      idle_policy: never
+      idle_timeout_s: 1.0
     exec:
       default_timeout_s: 180.0
       user: null
@@ -169,6 +171,73 @@ already closed, and clears the local handle only after confirmed cleanup. Serial
 carry the E2B sandbox ID for reconnection through another configured provider instance. E2B's
 public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
 (300 seconds in E2B 2.36).
+
+## Pause and Resume
+
+The E2B provider supports the public async and sync sandbox lifecycle methods:
+
+```python
+from nemo_gym.sandbox import SandboxStatus
+
+await sandbox.pause()
+assert await sandbox.status() == SandboxStatus.PAUSED
+await sandbox.resume()
+result = await sandbox.exec("cat /tmp/checkpoint.txt")
+```
+
+For the synchronous `Sandbox`, call the same methods without `await`. Pause uses
+E2B's default memory-preserving snapshot. Resume connects to the same sandbox ID
+and refreshes the SDK handle so subsequent commands and file operations use the
+resumed connection. E2B's default connect timeout applies on resume (300 seconds
+in E2B 2.36), rather than the original creation TTL.
+
+Status reads the control plane without waking the guest. The provider does not
+retry failed pause/resume calls; a timeout or transport failure can leave the
+remote state unknown. Check status before retrying. Closing a paused sandbox
+still deletes it. This capability requires a service that implements E2B's public
+pause/connect endpoints.
+
+### Idle Sandboxes
+
+An agent's sandbox sits idle while the agent waits on its model. With `create.idle_policy: pause`,
+the provider pauses a sandbox that no request has touched for `create.idle_timeout_s` seconds since
+its creation or its last request, and resumes it before the next request:
+
+```yaml
+sandbox:
+  e2b:
+    create:
+      idle_policy: pause
+      idle_timeout_s: 1.0
+```
+
+- A paused sandbox holds no CPU or memory on the backend. Each idle period costs one pause and one
+  resume, which the agent sees as added latency on its next command.
+- The sandbox resumes on the node that paused it, with the lifetime it was created with.
+- A request in flight is never cut off. The idle timer restarts with every request, and an explicit
+  `pause()` waits for requests in flight to finish.
+- If a resume fails, `exec` returns `return_code` 125 with `error_type="sandbox"`, and the next
+  request tries again.
+- Traffic that bypasses the provider would find the sandbox paused, so opening an `endpoint()` or
+  calling `serialize()` keeps that sandbox running from then on.
+
+With `create.idle_policy: suspend`, the provider instead snapshots an idle sandbox to the backend's
+durable storage (E2B's `create_snapshot`) and kills it. The next request creates a sandbox from the
+snapshot and deletes the snapshot. Memory, files and running processes come back as far as the
+backend's snapshots keep them.
+
+- The restored sandbox runs wherever the backend places a new sandbox, so it need not be the node
+  that ran it before. With a gateway that schedules creates across nodes, such as AgentENV's, the
+  sandbox's state moves between nodes.
+- The Gym handle keeps its ID, while the E2B sandbox behind it changes on every restore.
+- Each idle period costs a snapshot, a kill and a create, so suspend suits idle periods that are long
+  compared with those operations. The backend must support snapshots.
+- If a restore fails, for example because the backend has no capacity, `exec` returns `return_code`
+  125 with `error_type="sandbox"`, the snapshot is kept, and the next request tries again.
+- Closing a suspended sandbox deletes its snapshot, and so does closing the provider. A process that
+  dies while a sandbox is suspended leaves its snapshot in the backend's storage.
+
+The default, `never`, leaves sandboxes running until they are closed.
 
 ## Security and Isolation
 
