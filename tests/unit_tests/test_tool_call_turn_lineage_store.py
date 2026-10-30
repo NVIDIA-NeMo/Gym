@@ -264,6 +264,41 @@ def test_placeholder_keeps_the_served_turn_key_and_other_renames_do_not() -> Non
     assert tool_call_turn_fingerprint(renamed) != tool_call_turn_fingerprint(served)
 
 
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("Invalid", '{"tool": "Read", "error": "unavailable"}'),
+        ("invalid_tool", '{"tool": "Read", "error": "unavailable"}'),
+        ("invalid", '["Read", "unavailable"]'),
+        ("invalid", "not json"),
+        ("invalid", '{"tool": 1, "error": "unavailable"}'),
+        ("invalid", '{"tool": "", "error": "unavailable"}'),
+        ("invalid", '{"tool": "Read", "error": 1}'),
+    ],
+)
+def test_only_the_exact_placeholder_shape_keeps_the_served_turn_key(name: str, arguments: str) -> None:
+    served = _turn()
+    echoed = deepcopy(served)
+    echoed[2] = {**echoed[2], "name": name, "arguments": arguments}
+    assert tool_call_turn_fingerprint(echoed) != tool_call_turn_fingerprint(served)
+
+
+def test_placeholder_in_a_chat_tool_call_keeps_the_served_turn_key() -> None:
+    # OpenCode sends Chat Completions requests, where a call is nested in the assistant message's tool_calls.
+    def chat_turn(name: str, arguments: str) -> list[dict]:
+        call = {"id": "call-1", "type": "function", "function": {"name": name, "arguments": arguments}}
+        return [{"role": "assistant", "content": None, "tool_calls": [call]}]
+
+    served = chat_turn("Read", '{"filePath": "/app/notes.md"}')
+    echoed = chat_turn(
+        "invalid", json.dumps({"tool": "Read", "error": "Model tried to call unavailable tool 'Read'."})
+    )
+    renamed = chat_turn("Write", '{"filePath": "/app/notes.md"}')
+    assert tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(echoed) == tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(renamed) != tool_call_turn_fingerprint(served)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("version", [0, FINGERPRINT_VERSION - 1, FINGERPRINT_VERSION + 1])
 async def test_incompatible_versions_do_not_resolve_then_refresh_current_rows(stores, version) -> None:

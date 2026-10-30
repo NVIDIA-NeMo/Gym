@@ -22,6 +22,7 @@ single-chain policy. An unconfirmed declaration masks the rollout instead.
 """
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -400,6 +401,35 @@ def test_a_mutated_echo_matches_nothing():
     response = _response([_assistant_item("final answer [redacted]")])
     att = resolve_terminal(entries, response)
     assert not att.attributed and "no_content_match" in att.reason
+
+
+@pytest.mark.parametrize(("served_tool", "attributed"), [("exec_command", True), ("apply_patch", False)])
+def test_tool_id_reading_counts_an_unavailable_tool_placeholder_under_its_served_name(served_tool, attributed):
+    # A transcript can end on a call OpenCode echoes as its `invalid` tool because it does not offer the tool the
+    # model called. The tool-ID reading matches it to the served call it names, and only to that one.
+    a = _entry("a", [1, 2], [3], text="plan")
+    b = _tool_call_entry("b", [1, 2, 3, 4], [5], "chatcmpl-tool-b")
+    placeholder = {
+        "type": "function_call",
+        "call_id": "chatcmpl-tool-b",
+        "name": "invalid",
+        "arguments": json.dumps(
+            {"tool": served_tool, "error": f"Model tried to call unavailable tool '{served_tool}'."}
+        ),
+        "status": "completed",
+    }
+    response = {
+        "output": [
+            _assistant_item("plan"),
+            {"type": "function_call_output", "call_id": "earlier", "output": "ok"},
+            placeholder,
+        ]
+    }
+    verdict = resolve_terminal([a, b], response)
+    if attributed:
+        assert (verdict.model_call_id, verdict.method) == ("b", "content_tool_ids")
+    else:
+        assert not verdict.attributed and "no_content_match" in verdict.reason
 
 
 def test_no_response_object_abstains():
