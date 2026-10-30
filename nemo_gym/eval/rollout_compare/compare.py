@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from typing import Any, Optional
 
-from nemo_gym.rollout_compare.join import (
+from nemo_gym.eval.rollout_compare.join import (
     _join_sides,
     _match_plain_to_keyed,
     detect_task_key,
@@ -34,8 +34,8 @@ from nemo_gym.rollout_compare.join import (
     has_keyed_rows,
     tasksets_of,
 )
-from nemo_gym.rollout_compare.rows import mask_reason, summarize_side
-from nemo_gym.rollout_compare.schema import (
+from nemo_gym.eval.rollout_compare.rows import mask_reason, summarize_side
+from nemo_gym.eval.rollout_compare.schema import (
     TASK_KEY_CANDIDATES,
     Category,
     CompareInputError,

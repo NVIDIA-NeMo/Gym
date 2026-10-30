@@ -30,10 +30,10 @@ from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
 import nemo_gym.artifacts.exporters.wandb as wandb_module
-import nemo_gym.rollout_reverification as reverification_module
+import nemo_gym.eval.rollout_reverification as reverification_module
 import nemo_gym.rollouts.rollout_collection as collection_module
 from nemo_gym.artifacts.exporters import export_rollouts, get_exporters, setup_exporters, teardown_exporters
-from nemo_gym.rollout_reverification import OutputPaths
+from nemo_gym.eval.rollout_reverification import OutputPaths
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 
 
@@ -266,7 +266,7 @@ class TestReverificationStartOver:
             getattr(paths, name).write_text('{"_ng_task_index": 0, "_ng_rollout_index": 0}\n')
         before = {p: p.read_bytes() for p in (paths.output, paths.failures) if p.exists()}
         exporter = MagicMock()
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", lambda: [exporter])
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", lambda: [exporter])
         config = reverification_module.RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath="in.jsonl",
             rollouts_jsonl_fpath="rollouts.jsonl",

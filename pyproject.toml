@@ -866,7 +866,7 @@ layers = [
     # environment/
     "nemo_gym.agent_registry : nemo_gym.benchmarks : nemo_gym.deliverables : nemo_gym.discovery : nemo_gym.environment : nemo_gym.model_registry : nemo_gym.registry : nemo_gym.resources_server_registry",
     # eval/
-    "nemo_gym.comparison : nemo_gym.eval_plan : nemo_gym.rollout_compare : nemo_gym.rollout_reverification",
+    "nemo_gym.eval",
     # orchestration/
     "nemo_gym.orchestration",
     # rollouts/

@@ -27,8 +27,8 @@ import math
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym.rollout_compare.rows import _finite_reward_of
-from nemo_gym.rollout_compare.schema import (
+from nemo_gym.eval.rollout_compare.rows import _finite_reward_of
+from nemo_gym.eval.rollout_compare.schema import (
     EMBEDDED_VERIFIER_FIELDS,
     VERIFIER_STDOUT_FILENAME,
     CompareResult,

@@ -13,7 +13,7 @@ from yaml import safe_load
 import nemo_gym.config.global_config
 from nemo_gym.cli.eval import plan_benchmark
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.eval_plan import (
+from nemo_gym.eval.eval_plan import (
     EvalPlan,
     PlanBenchmark,
     PlanGym,
