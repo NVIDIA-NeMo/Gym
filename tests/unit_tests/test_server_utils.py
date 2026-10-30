@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 import logging
 import multiprocessing
 import os
@@ -791,6 +792,21 @@ class TestServerUtils:
         with raises(ValueError, match="_max_num_tries must be at least 1"):
             await nemo_gym.server_utils.request("POST", "https://example.test", _max_num_tries=attempt_cap)
         client.request.assert_not_awaited()
+
+    @mark.parametrize(
+        ("value", "encoded"),
+        [(2**70, str(2**70)), ("\ud83d", '"\\ud83d"')],
+    )
+    async def test_request_sends_a_json_body_orjson_rejects(
+        self, monkeypatch: MonkeyPatch, value: object, encoded: str
+    ) -> None:
+        client = self._mock_global_client(monkeypatch, ClientOSError(), failures=0)
+        body = {"name": "f", "arguments": {"value": value, "note": "ü"}}
+        await nemo_gym.server_utils.request("POST", "https://example.test", json=body)
+        sent = client.request.call_args.kwargs
+        assert sent["data"] == ('{"name":"f","arguments":{"value":%s,"note":"\\u00fc"}}' % encoded).encode("utf-8")
+        assert json.loads(sent["data"]) == body
+        assert sent["headers"]["Content-Type"] == "application/json"
 
     @mark.parametrize("tracing_enabled", [False, True])
     async def test_explicit_transport_attempt_cap_counts_mixed_errors(
