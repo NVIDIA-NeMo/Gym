@@ -43,7 +43,6 @@ from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import MAX_DISCOVERY_DEPTH, iter_task_folders, load_task
 from tests.unit_tests.test_harbor_tasks import (  # noqa: F401  (fixtures)
     commit_repo,
-    fake_registry,
     registry_dataset,
     registry_repo,
     write_task,
@@ -1029,7 +1028,7 @@ class TestTrainingMetadataKeys:
         return folder
 
     def test_keys_parse_and_leave_tasks_alone(self, tmp_path):
-        from nemo_gym.config_types import Domain
+        from nemo_gym.config.config_types import Domain
 
         folder = self.write(
             tmp_path,

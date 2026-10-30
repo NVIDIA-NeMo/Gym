@@ -10,17 +10,16 @@ from typing import Any, ClassVar
 
 from pydantic import Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
 from resources_servers.sciknoweval.grading import grade_task, parse_judgement
 from resources_servers.sciknoweval.task_data import TaskData
 from resources_servers.sciknoweval.verifier_fixture import create_server

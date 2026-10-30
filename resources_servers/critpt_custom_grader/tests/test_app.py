@@ -16,10 +16,11 @@ from fastapi.exceptions import RequestValidationError
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym import failure_kinds, server_utils
-from nemo_gym.config_types import DatasetConfig, ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
-from nemo_gym.server_metadata import visit_resources_server
-from nemo_gym.server_utils import ServerClient
+from nemo_gym import server_utils
+from nemo_gym.client import ServerClient
+from nemo_gym.config import DatasetConfig, visit_resources_server
+from nemo_gym.config.config_types import ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
+from nemo_gym.core import failure_kinds
 from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader import task_data as task_schema
@@ -411,7 +412,7 @@ async def test_agentic_seed_cookie_identifies_the_typed_execution_session(make_s
 
 @pytest.mark.asyncio
 async def test_agentic_close_uses_typed_id_without_cookie(make_server):
-    from nemo_gym.base_resources_server import ResourcesCloseSessionResponse
+    from nemo_gym.server_runtime import ResourcesCloseSessionResponse
 
     server, app, _ = make_server(answer_source="finish_tool")
     sessions = MagicMock()
@@ -491,7 +492,7 @@ def probing_server(provider, *, startup_probe=True, **spec_fields):
 
 @pytest.mark.asyncio
 async def test_stock_agent_defaults_tool_choice_auto_with_empty_tools_are_accepted(make_server):
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
     server, app, fake = make_server()
     request = payload()

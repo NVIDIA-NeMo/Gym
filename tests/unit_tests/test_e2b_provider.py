@@ -26,11 +26,11 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.package_info import __version__ as nemo_gym_version
-from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.e2b import provider as e2b_provider
 from nemo_gym.sandbox.providers.e2b.provider import _API_PARAM_KEYS, E2BCreateError, E2BProvider
@@ -283,10 +283,9 @@ async def test_runtime_loader_routes_e2b_httpx_through_global_aiohttp(
 ) -> None:
     import httpx
 
-    from nemo_gym import server_utils
     from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
     if configured:
         monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
     else:

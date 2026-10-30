@@ -9,14 +9,14 @@ import math
 import os
 import shlex
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path, PurePosixPath
 from string import Formatter
 from time import monotonic
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, PositiveFloat, model_validator
+from pydantic import Field, PositiveFloat, PositiveInt, model_validator
 
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -115,6 +115,10 @@ class EnvironmentConfig(Settings):
     verifier_resources_from_agent: bool = False
     # Short task name -> verifier timeout (seconds) replacing the package's [verifier].timeout_sec.
     verifier_timeout_overrides: dict[str, PositiveFloat] = Field(default_factory=dict)
+    # Raises a role's disk limit (ephemeral-storage) to at least this many GiB; the declared
+    # storage_mb stays its request. Docker, where Harbor runs, enforces no storage limit, while
+    # OpenSandbox evicts the whole sandbox once it writes past its limit.
+    sandbox_min_disk_gib: PositiveInt | None = None
 
     def verifier_timeout_sec(self, task: Task) -> float:
         return self.verifier_timeout_overrides.get(task.name.split("/")[-1], task.config.verifier.timeout_sec)
@@ -243,15 +247,22 @@ class Environment:
             options["run_args"] = [*([run_args] if isinstance(run_args, str) else run_args), "--network", "none"]
         elif settings.network_mode == "no-network":
             options["network_policy"] = {"defaultAction": "deny", "egress": []}
+        resources = SandboxResources(
+            cpu=settings.cpus,
+            memory_mib=settings.memory_mb,
+            disk_gib=math.ceil(settings.storage_mb / 1024) if settings.storage_mb else None,
+            gpu=settings.gpus or None,
+            gpu_type=settings.gpu_types[0] if settings.gpu_types and config.sandbox_request_gpu_type else None,
+        )
+        # A role without storage_mb has no disk limit, so there is nothing to raise.
+        if resources.disk_gib is not None and resources.disk_gib < (config.sandbox_min_disk_gib or 0):
+            if options.get("resource_requests") == "limits":
+                # Reserve only the declared disk on the node; the higher limit is headroom.
+                options["resource_requests"] = {k: v for k, v in asdict(resources).items() if v is not None}
+            resources = replace(resources, disk_gib=config.sandbox_min_disk_gib)
         return SandboxSpec(
             image=rewrite_image(self.image, config.image_rewrites),
-            resources=SandboxResources(
-                cpu=settings.cpus,
-                memory_mib=settings.memory_mb,
-                disk_gib=math.ceil(settings.storage_mb / 1024) if settings.storage_mb else None,
-                gpu=settings.gpus or None,
-                gpu_type=settings.gpu_types[0] if settings.gpu_types and config.sandbox_request_gpu_type else None,
-            ),
+            resources=resources,
             ttl_s=config.sandbox_ttl_s,
             ready_timeout_s=config.sandbox_ready_timeout_s,
             workdir=config.workdir,
@@ -432,7 +443,8 @@ class Environment:
         return result
 
     async def stop(self):
-        if self._cleanup_task is None:
+        # Callers share a pending or successful teardown; a failed one is retried.
+        if self._cleanup_task is None or (self._cleanup_task.done() and not self.closed):
             self._cleanup_task = asyncio.create_task(self._stop())
         await asyncio.shield(self._cleanup_task)
 

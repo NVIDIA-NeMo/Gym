@@ -5,9 +5,9 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 
 
 class SessionRequest(BaseModel):
@@ -69,6 +69,32 @@ class TerminalBench4RunRequest(BaseRunRequest):
     rollout_id: str = Field(min_length=1, max_length=256)
     client_session_id: str | None = Field(default=None, min_length=1, max_length=256)
     artifact_directory: str | None = Field(default=None, min_length=1)
+
+
+class TaskIdentity(BaseModel):
+    """The pinned package a task row names; Environment Server seeds carry it in ``task_data``."""
+
+    task_name: str
+    task_ref: str
+    dataset_ref: str
+
+
+class ResourcesSessionVerifyRequest(BaseVerifyRequest, TaskIdentity):
+    """Environment Server verification: the task row plus the agent's response.
+
+    The resources-session cookie, not a field, names the episode. The agent has already been
+    closed, so the request carries no termination; it is derived from ``response.status``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def not_a_tb4_session_request(cls, data: Any) -> Any:
+        # TB4's own verification names its TB4 session; keep such bodies off this path.
+        if isinstance(data, dict) and "session_id" in data:
+            raise ValueError("A request with session_id is a TB4 session verification")
+        return data
 
 
 class SeedSessionResponse(SessionRequest):

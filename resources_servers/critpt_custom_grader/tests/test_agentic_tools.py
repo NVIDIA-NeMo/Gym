@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSessionConflictError,
     ResourcesSessionLostError,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
 
 
 class DirectoryProvider:

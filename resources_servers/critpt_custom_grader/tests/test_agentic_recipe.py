@@ -10,9 +10,8 @@ from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from nemo_gym.benchmarks import BenchmarkConfig
-from nemo_gym.config_types import BenchmarkDatasetConfig
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config import BenchmarkDatasetConfig, GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.task_data import normalize_task_fields
 from nemo_gym.train_data_utils import TrainDataProcessor

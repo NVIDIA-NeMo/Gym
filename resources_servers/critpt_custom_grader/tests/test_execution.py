@@ -16,7 +16,7 @@ from unittest.mock import Mock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym import failure_kinds
+from nemo_gym.core import failure_kinds
 from resources_servers.critpt_custom_grader import execution, reference_cache, runner, sandbox_domain, task_data
 from resources_servers.critpt_custom_grader.execution import (
     DOMAINS,
@@ -2069,7 +2069,7 @@ def answer_exec(provider, prefix, answer):
 
     ``answer`` is an exception to raise, a coroutine function to await, or ``(stdout, return_code, error_type)``.
     """
-    from nemo_gym.sandbox.providers.base import SandboxExecResult
+    from nemo_gym.sandbox import SandboxExecResult
 
     scripted = provider.exec
 
@@ -2116,7 +2116,7 @@ async def test_probe_refuses_root_missing_dependency_and_create_failure():
     with pytest.raises(execution.RuntimeProbeError) as info:
         await execution.probe_runtime(ScriptedProvider({"imports_ok": False}), make_spec(), make_policy())
     assert info.value.category == "interpreter_missing_dependency"
-    from nemo_gym.sandbox.providers.base import SandboxCreateError
+    from nemo_gym.sandbox import SandboxCreateError
 
     with pytest.raises(execution.RuntimeProbeError) as info:
         await execution.probe_runtime(

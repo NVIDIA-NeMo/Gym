@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.critpt_custom_grader.app import CritPtCustomGraderConfig, CritPtCustomGraderServer
 from resources_servers.critpt_custom_grader.execution import Grader, build_compare_job, build_run_job
 from resources_servers.critpt_custom_grader.reference_cache import ReferenceCache

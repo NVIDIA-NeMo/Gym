@@ -8,13 +8,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import ClientResponseError
 
 from environment_servers.swe_together import app, evaluation
 from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnvironmentServer, memory_mib
 from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest, UserTurn, episode_response
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage
+from nemo_gym.core.episode import current_verifier_invocation_id
 from nemo_gym.rollout_collection import _episode_record
 
 
@@ -124,6 +126,29 @@ async def test_simulator_one_call_even_on_noop_text(tmp_path):
     result = await server(tmp_path)._next_user_turn(value, activation())
     assert result.synthetic and result.responses_create_params.input[0].content == "continue"
     assert llm.call.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_simulator_turn_artifact_keeps_upstream_status(tmp_path):
+    value, llm = state(tmp_path, [])
+    upstream = ClientResponseError(
+        SimpleNamespace(real_url="https://model.example/v1/chat/completions"),
+        (),
+        status=408,
+        message="gateway timeout",
+    )
+    upstream.response_content = b"provider request timed out"
+
+    llm.call.side_effect = upstream
+    with pytest.raises(RuntimeError, match="User simulator request failed"):
+        await server(tmp_path)._next_user_turn(value, activation())
+
+    artifact = json.loads((tmp_path / "turn-0-simulator.json").read_text())
+    detail = artifact["error_detail"]
+    assert detail["message"] == "User simulator request failed"
+    assert detail["cause"].startswith("ClientResponseError: 408")
+    assert detail["status_code"] == 408
+    assert detail["body"] == "provider request timed out"
 
 
 @pytest.mark.asyncio
@@ -241,6 +266,200 @@ async def test_refusal_preserves_semantic_outcome_and_close_before_verdict(
     assert (tmp_path / "judge-close.json").exists()
 
 
+ABSENT = SimpleNamespace(return_code=1, error_type=None)
+
+
+async def run_closed_judge(
+    tmp_path, monkeypatch, *, status, error_type, verdict_text=None, probe=ABSENT, evidence=None
+):
+    monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex="test"))
+    monkeypatch.setattr(evaluation, "stage_judge", AsyncMock(return_value="judge"))
+    monkeypatch.setattr(evaluation, "raise_for_status", AsyncMock())
+    root = {"kind": "agent_invocation", "invocation_id": "root", "status": status, "error_type": error_type}
+    child = {
+        "kind": "agent_invocation",
+        "invocation_id": "sub",
+        "parent_invocation_id": "root",
+        "error_type": "refusal",
+    }
+    close = {
+        "agent_session_id": "judge-test",
+        "agent_observations": {"source": "claude_code", "records": [child, root]},
+        "cleanup_confirmed": True,
+    }
+    transcript = {"status": status, "output": [{"type": "message", "content": []}]}
+    monkeypatch.setattr(evaluation, "get_response_json", AsyncMock(side_effect=[{}, transcript, close]))
+    reader = (
+        AsyncMock(return_value=verdict_text) if verdict_text else AsyncMock(side_effect=OSError("download failed"))
+    )
+    monkeypatch.setattr(evaluation, "read_text", reader)
+    (tmp_path / "canonical_goals.json").write_text(json.dumps({"completeness_goals": [{"id": "goal", "weight": 1}]}))
+    req = request()
+    return await evaluation.run_judge(
+        client=SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(cookies={}))),
+        agent=SimpleNamespace(name="judge"),
+        sandbox=SimpleNamespace(
+            serialize=AsyncMock(return_value={}),
+            exec=AsyncMock(side_effect=probe) if isinstance(probe, Exception) else AsyncMock(return_value=probe),
+        ),
+        provider="sandbox",
+        task_dir=tmp_path,
+        patch="patch",
+        workdir="/workspace",
+        episode=req.episode_id,
+        task_id=req.task.task_id,
+        timeout=100,
+        cookies={},
+        artifact_dir=tmp_path,
+        evidence={} if evidence is None else evidence,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "error_type", "cause"),
+    [
+        ("failed", "refusal", "judge_refused"),  # 66-0, 75-0, 75-1: model stop_reason refusal
+        ("incomplete", "error_max_turns", "judge_turn_limit"),  # 91-0: 50 turns, no verdict.json
+        ("incomplete", "timeout", "judge_timeout"),
+        ("completed", None, "judge_no_verdict"),
+    ],
+)
+async def test_missing_verdict_names_the_judge_stop_cause(tmp_path, monkeypatch, status, error_type, cause):
+    with pytest.raises(evaluation.JudgeMeasurementError, match="no readable verdict") as failure:
+        await run_closed_judge(tmp_path, monkeypatch, status=status, error_type=error_type)
+    assert failure.value.cause == cause
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "probe",
+    [
+        SimpleNamespace(return_code=0, error_type=None),  # verdict.json exists, so the download failed
+        SimpleNamespace(return_code=124, error_type="timeout"),  # the sandbox could not answer
+        OSError("sandbox gone"),
+    ],
+)
+async def test_unconfirmed_missing_verdict_is_a_transfer_failure(tmp_path, monkeypatch, probe):
+    # A refused judge with an unreadable verdict is not called a refusal unless the file is confirmed absent.
+    evidence = {}
+    with pytest.raises(evaluation.JudgeMeasurementError, match="read=OSError: download failed") as failure:
+        await run_closed_judge(
+            tmp_path, monkeypatch, status="failed", error_type="refusal", probe=probe, evidence=evidence
+        )
+    assert failure.value.cause == "judge_verdict_transfer_failed"
+    assert evidence["judge_verdict_probe"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["{not json", "[]", json.dumps({"goal_results": [{"id": "other", "met": True}]})])
+async def test_invalid_verdict_is_masked_and_raw_text_kept(tmp_path, monkeypatch, raw):
+    with pytest.raises(evaluation.JudgeMeasurementError) as failure:
+        await run_closed_judge(tmp_path, monkeypatch, status="completed", error_type=None, verdict_text=raw)
+    assert failure.value.cause == "judge_verdict_invalid"
+    assert (tmp_path / "judge-verdict-raw.json").read_text() == raw
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("patch", "error", "expected"),
+    [
+        ("x" * 100, evaluation.JudgeMeasurementError("submission_timeout", "freeze timed out"), "submission_timeout"),
+        ("x" * 100, RuntimeError("unexpected"), "judge_error"),
+        ("x" * 100, TimeoutError("provider poll deadline"), "judge_error"),
+        ("short", None, None),
+    ],
+)
+async def test_verify_keeps_judge_failure_cause_apart_from_valid_zero(tmp_path, monkeypatch, patch, error, expected):
+    value, _ = state(tmp_path, [])
+    value.snapshots = SimpleNamespace(capture=AsyncMock(), final_patch=patch, baseline=[])
+    environment = server(tmp_path)
+    environment.server_client = SimpleNamespace()
+    monkeypatch.setattr(SWETEnvironmentServer, "_new_sandbox", AsyncMock())
+    monkeypatch.setattr(app, "replicate_submission", AsyncMock(side_effect=error))
+    monkeypatch.setattr(app, "interaction_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(app, "AuxiliaryModel", lambda *args, **kwargs: SimpleNamespace(calls=[]))
+    initial = app.NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "task"}])
+    result = await environment._verify(value, initial, [activation()])
+    assert result.get("judge_failure_cause") == expected
+    if expected is None:
+        # The upstream short-patch rule is a measured zero, not a missing measurement.
+        assert result["judge_score"] == 0.0 and not result.get("mask_sample")
+    else:
+        assert result["mask_sample"] is True and result["judge_score"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_path", ["/v1/agent_sessions", "/ng-rollout/one-judge-test/v1/responses"])
+@pytest.mark.parametrize("close_failure", [None, "unconfirmed", "request_error"])
+async def test_verify_preserves_primary_judge_error_and_transport_classification(
+    tmp_path, monkeypatch, failed_path, close_failure
+):
+    from aiohttp import ClientConnectionError
+
+    from environment_servers.swe_together.tests.test_judge_errors import (
+        CLOSE,
+        CONFIRMED,
+        UNCONFIRMED,
+        http_error,
+        run_judge,
+    )
+
+    value, _ = state(tmp_path, [])
+    value.snapshots = SimpleNamespace(capture=AsyncMock(), final_patch="x" * 100, baseline=[])
+    environment = server(tmp_path)
+    environment.server_client = SimpleNamespace()
+    primary = http_error(500)
+    value.task_metadata = {"judge_timeout": 100}
+    failures = {failed_path: primary}
+    if close_failure == "request_error":
+        failures[CLOSE] = ClientConnectionError("close lost")
+    run, calls, evidence = await run_judge(
+        tmp_path, monkeypatch, failures=failures, close=CONFIRMED if close_failure is None else UNCONFIRMED
+    )
+
+    async def grade(**kwargs):
+        try:
+            await run
+        except Exception as error:
+            assert error is primary
+            raise
+        finally:
+            kwargs["evidence"].update(evidence)
+
+    monkeypatch.setattr(app, "run_judge", grade)
+    monkeypatch.setattr(SWETEnvironmentServer, "_new_sandbox", AsyncMock())
+    monkeypatch.setattr(app, "replicate_submission", AsyncMock(return_value={}))
+    monkeypatch.setattr(app, "interaction_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(app, "AuxiliaryModel", lambda *args, **kwargs: SimpleNamespace(calls=[]))
+    initial = app.NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "task"}])
+    result = await environment._verify(value, initial, [activation()])
+    assert calls[-1] == CLOSE
+    assert result["mask_sample"] is True and result["judge_score"] is None
+    assert result["judge_failure_cause"] == "judge_transport_error"
+    assert result["failure_reason"] == f"ClientResponseError: {primary}"
+    assert ("judge_close_error" in result) is (close_failure is not None)
+
+
+@pytest.mark.asyncio
+async def test_verify_names_grading_timeout_only_when_its_own_deadline_expires(tmp_path, monkeypatch):
+    value, _ = state(tmp_path, [])
+    value.snapshots = SimpleNamespace(capture=AsyncMock(), final_patch="x" * 100, baseline=[])
+    environment = server(tmp_path, grading_timeout_seconds=0.05)
+    environment.server_client = SimpleNamespace()
+
+    async def slow_transfer(*args, **kwargs):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_new_sandbox", AsyncMock())
+    monkeypatch.setattr(app, "replicate_submission", slow_transfer)
+    monkeypatch.setattr(app, "interaction_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(app, "AuxiliaryModel", lambda *args, **kwargs: SimpleNamespace(calls=[]))
+    initial = app.NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "task"}])
+    result = await environment._verify(value, initial, [activation()])
+    assert result["judge_failure_cause"] == "grading_timeout" and result["mask_sample"] is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure_phase", ["request", "response_body"])
 async def test_saved_judge_verdict_survives_lost_response(tmp_path, monkeypatch, failure_phase):
@@ -302,8 +521,55 @@ async def test_webserver_lifespan_closes_runtime_helper(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("activation_error", [False, True])
-async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, monkeypatch, activation_error):
+async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path, monkeypatch):
+    policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.1"}]}
+    environment = server(
+        tmp_path,
+        dependency_proxy_url="http://10.0.0.3:3128",
+        sandbox_config={
+            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed"},
+            "provider_options": {"network_policy": policy},
+        },
+        judge_sandbox_config={"metadata": {}},
+    )
+    environment.server_client = SimpleNamespace(global_config_dict={})
+    specs = {}
+
+    class Sandbox:
+        def __init__(self, provider):
+            pass
+
+        async def start(self, spec):
+            specs[spec.metadata["role"]] = spec
+
+        async def exec(self, command, **kwargs):
+            return SimpleNamespace(return_code=0, error_type=None)
+
+    monkeypatch.setattr(app, "AsyncSandbox", Sandbox)
+    monkeypatch.setattr(app, "resolve_provider_config", lambda *_: object())
+    monkeypatch.setattr(app, "install_trust_bundle", AsyncMock())
+    episode = Episode(request(), request().task.task_input.task_data, tmp_path, tmp_path)
+    episode.task_metadata = {"environment": {"memory": "4G"}}
+    episode.runtime = SimpleNamespace(
+        metadata=lambda: {"placement": "shared"}, mount_options=lambda *_: {"volumes": []}
+    )
+    episode.dependency_access = SimpleNamespace(
+        certificate=AsyncMock(return_value="cert"), sandbox_settings=lambda token, policy, cert: (policy, {}, {})
+    )
+    await environment._new_sandbox(episode)
+    await environment._new_sandbox(episode, judge=True)
+    candidate, judge = specs["candidate"].metadata, specs["judge"].metadata
+    assert candidate["nemo.nvidia.com/oom-kill"] == "process"
+    assert candidate["placement"] == "shared" and judge["placement"] == "shared"
+    assert "nemo.nvidia.com/oom-kill" not in judge
+    assert specs["candidate"].resources.memory_mib == 4096
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activation_error,receipt_missing", [(False, False), (True, False), (False, True)])
+async def test_local_lifecycle_closes_candidate_before_verification(
+    tmp_path, monkeypatch, activation_error, receipt_missing
+):
     environment = server(tmp_path)
     order = []
     sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
@@ -334,16 +600,58 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
 
     async def verify(self, value, initial, activations):
+        assert current_verifier_invocation_id().startswith("verify-")
         assert order[-1] == "agent close"
         order.append("verify")
-        return {
+        model = {"type": "responses_api_models", "name": "judge-model"}
+        (tmp_path / "explicit-child.capture.jsonl").write_text(
+            json.dumps(
+                {
+                    "model_call_id": "judge-call",
+                    "model_ref": model,
+                    "status_code": 200,
+                    "request": {"messages": []},
+                    "response": {"id": "judge-response", "content": []},
+                }
+            )
+            + "\n"
+        )
+        verification = {
             "responses_create_params": initial,
             "response": activations[-1].response,
             "reward": 1,
             "judge_score": 1,
             "task_id": "task",
             "evaluation_completed": True,
+            "judge_capture_episode": "explicit-child",
+            "judge_close": {
+                "agent_session_id": "judge-session",
+                "cleanup_confirmed": True,
+                "agent_observations": {
+                    "source": "claude_code",
+                    "records": [
+                        {
+                            "kind": "agent_invocation",
+                            "invocation_id": "judge-invocation",
+                            "status": "completed",
+                            "model_calls": [{"model_ref": model, "response_id": "judge-response"}],
+                        }
+                    ],
+                },
+            },
         }
+        if receipt_missing:
+            verification.pop("judge_close")
+            verification.update(
+                reward=0,
+                judge_score=0,
+                mask_sample=True,
+                evaluation_completed=False,
+                judge_close_error="connection lost",
+                failure_kind=app.JUDGE_FAILED,
+                failure_reason="Judge cleanup was not confirmed",
+            )
+        return verification
 
     async def post(name, path, *, json, cookies, headers=None, _control=False):
         if path == "/v1/agent_sessions":
@@ -383,7 +691,13 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         return response.payload
 
     monkeypatch.setattr(app, "get_response_json", payload)
-    environment.server_client = SimpleNamespace(post=post)
+    environment.server_client = SimpleNamespace(
+        post=post,
+        global_config_dict={
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        },
+    )
     req = request()
     result = await environment.run_request(req)
     collected = _episode_record(result.model_dump(mode="json"))
@@ -405,8 +719,16 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         assert collected["ng_trajectory"]["rollout_id"] == "one"
         assert (tmp_path / "one" / "candidate-agent-close.json").exists()
         return
-    assert result.result and result.result.reward == 1
-    assert collected["reward"] == 1
+    assert result.result and result.result.reward == (0 if receipt_missing else 1)
+    assert collected["reward"] == (0 if receipt_missing else 1)
+    if receipt_missing:
+        assert collected["mask_sample"] is True and collected["evaluation_completed"] is False
+        assert not collected["ng_trajectory"]["verifier_invocations"]
+        assert "judge_receipt_unavailable" in {gap["code"] for gap in collected["ng_trajectory"]["gaps"]}
+    else:
+        assert collected["ng_trajectory"]["verifier_invocations"][0]["invocation_id"] == "judge-invocation"
+    assert collected["ng_trajectory"]["model_calls"][0]["model_call_id"] == "judge-call"
+    assert (tmp_path / "one" / "judge-model-calls.json").exists()
     assert result.result.ng_agent_close.trajectory.task_id == "task"
     assert result.result.ng_trajectory.rollout_id == "one"
     assert collected["ng_trajectory"]["rollout_id"] == "one"
@@ -538,3 +860,20 @@ async def test_setup_failures_preserve_retry_classification_and_evidence(tmp_pat
     assert result.failure.dependency_error["message"] == str(error)
     saved = json.loads((tmp_path / "one" / "failure.json").read_text())
     assert saved["failure_reason"].endswith(str(error))
+
+
+async def test_wrapped_simulator_failure_keeps_upstream_status_in_failure(tmp_path, monkeypatch):
+    from aiohttp import ClientResponseError
+
+    url = "http://127.0.0.1:1/ng-rollout/one/v1/chat/completions"
+    request_info = SimpleNamespace(url=url, real_url=url, method="POST", headers={})
+    upstream = ClientResponseError(request_info=request_info, history=(), status=408, message="Request Timeout")
+    upstream.response_content = b'{"error":{"message":"litellm.Timeout: Timeout passed=360.0"}}'
+    error = RuntimeError("User simulator request failed")
+    error.__cause__ = upstream
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", AsyncMock(side_effect=error))
+    result = await server(tmp_path).run_request(request())
+    saved = json.loads((tmp_path / "one" / "failure.json").read_text())["dependency_error"]
+    assert saved == result.failure.dependency_error
+    assert saved["status_code"] == 408 and "Timeout passed=360.0" in saved["body"]
+    assert saved["cause"].startswith("ClientResponseError: 408")

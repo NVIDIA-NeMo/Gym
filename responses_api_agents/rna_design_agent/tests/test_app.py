@@ -26,9 +26,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.rna_design_agent import prepare
 from responses_api_agents.rna_design_agent.app import (
     RnaDesignAgent,
@@ -175,7 +175,7 @@ class TestWorkerPython:
         assert "RNA_WORKER_PYTHON" not in caplog.text
 
     def test_the_shipped_config_leaves_it_to_the_environment(self) -> None:
-        text = (AGENT_DIR.parents[1] / "environments" / "rna_design" / "config_agent.yaml").read_text()
+        text = (AGENT_DIR.parents[1] / "environments" / "rna_design" / "custom_agent.yaml").read_text()
         assert "worker_python: ${oc.env:RNA_WORKER_PYTHON,null}" in text
 
 

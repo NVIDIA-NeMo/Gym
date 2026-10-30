@@ -316,7 +316,7 @@ class HarborTaskStepVerifier(HarborPhaseSettings):
 
 class HarborTaskStep(HarborSettings):
     """One ``[[steps]]`` entry of ``task.toml`` (Harbor's ``StepConfig``): a step of the task, which the task
-    author defines and grades, not a step of a trajectory (``nemo_gym.atif_v1_7.AtifStep``).
+    author defines and grades, not a step of a trajectory (``nemo_gym.trajectory.atif_v1_7.AtifStep``).
 
     The loader pairs it with its ``steps/<name>/`` folder into a ``HarborTurn``, as ``HarborTaskConfig`` pairs
     with its folder into a ``HarborTask``. The step has its own instruction (``steps/<name>/instruction.md``)

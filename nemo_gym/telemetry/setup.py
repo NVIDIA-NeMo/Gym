@@ -82,7 +82,7 @@ _OTEL_FALLBACK_PREFIX = "NEMO_LENS"
 _SERVICE_NAME_ENV = "OTEL_SERVICE_NAME"
 
 #: Top-level key of the telemetry block in a Gym config. Registered in
-#: ``nemo_gym.global_config.NEMO_GYM_RESERVED_TOP_LEVEL_KEYS`` so the config parser does
+#: ``nemo_gym.config.global_config.NEMO_GYM_RESERVED_TOP_LEVEL_KEYS`` so the config parser does
 #: not mistake it for a server instance definition.
 TELEMETRY_KEY_NAME = "telemetry"
 
@@ -452,7 +452,7 @@ def _sdk_tracer_provider_installed() -> bool:
 def rollout_span_attributes() -> dict[str, str]:
     """The correlation attribute Gym's endpoint spans carry, for spans opened by code that does not
     know about rollouts (the sandbox API). Empty outside a rollout context."""
-    from nemo_gym.rollout_correlation import current_rollout_id
+    from nemo_gym.core.episode import current_rollout_id
 
     rollout_id = current_rollout_id()
     return {"nemo.gym.rollout.id": rollout_id} if rollout_id else {}

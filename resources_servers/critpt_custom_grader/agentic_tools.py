@@ -15,7 +15,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.sandbox import AsyncSandbox, SandboxConfig, SandboxSpec, create_provider
+from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -24,11 +26,6 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionFence,
     ResourcesSessionLostError,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.config import SandboxConfig
-from nemo_gym.sandbox.providers.base import SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
 
 
 LOGGER = logging.getLogger(__name__)
