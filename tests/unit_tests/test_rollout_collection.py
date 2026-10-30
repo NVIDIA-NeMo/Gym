@@ -13103,3 +13103,225 @@ class TestResumeTerminalGateUsesTheLatestAttempt:
         output = Path(config.output_jsonl_fpath)
         output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rerun))
         assert RolloutCollectionHelper()._load_from_cache(config)[0] == []
+
+
+async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budgets(
+    tmp_path,
+    monkeypatch,
+    empty_global_config,
+):
+    """Actual loopback timeout producer, legacy /run executor, Collection writer and bounded resume.
+
+    The endpoint is a scripted CPU fixture, not a model evaluation. The same classified failure is reused for
+    all actions; the transport adapters deliver its report without replacing it with normalized health data.
+    """
+    import aiohttp
+    import httpx
+    from fastapi import FastAPI, Request, Response
+
+    from nemo_gym.agent_outcome import OutcomeAction
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.failure_kinds import POLICY_MODEL_RESPONSE_TIMEOUT
+    from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
+    from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
+
+    connections = []
+    hits = 0
+
+    async def never_answer(reader, writer):
+        nonlocal hits
+        hits += 1
+        connections.append(writer)
+        await reader.read()
+        writer.close()
+
+    listener = await asyncio.start_server(never_answer, "127.0.0.1", 0)
+    port = listener.sockets[0].getsockname()[1]
+    session = aiohttp.ClientSession()
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+    monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
+    model = NeMoGymAsyncOpenAI(
+        api_key="test",
+        base_url=f"http://127.0.0.1:{port}",
+        max_connection_retries=2,
+        max_http_attempts=2,
+        request_timeout_seconds=0.04,
+    )
+    try:
+        with RequestFailureLog.capture() as log:
+            with pytest.raises(TimeoutError) as timeout:
+                await model._request(
+                    method="POST", url=f"http://127.0.0.1:{port}/responses", json={"input": "fixture"}
+                )
+            upstream = log.reply_report(timeout.value)
+    finally:
+        await session.close()
+        listener.close()
+        await listener.wait_closed()
+        for writer in connections:
+            writer.close()
+    assert hits == 2 and len(upstream.events) == 2
+    assert all(e.request_upload_complete is True and e.attempt_id and e.operation_id for e in upstream.events.values())
+
+    def reply(report=None):
+        response = MagicMock(
+            status=500 if report else 200,
+            ok=not report,
+            cookies={},
+            headers=FailureHeader.encode(report) if report else {},
+        )
+        response.read = AsyncMock(return_value=b"{}")
+        response.content.read = AsyncMock(return_value=b"controlled failure")
+        if report:
+            error = http_error(500)
+            error.request_info.headers = {}
+            error.headers = response.headers
+            response.raise_for_status = MagicMock(side_effect=error)
+        else:
+            response.raise_for_status = MagicMock()
+        return response
+
+    def config(action):
+        return SimpleAgentConfig(
+            host="127.0.0.1",
+            port=8000,
+            entrypoint="",
+            name="my_agent",
+            model_server={"type": "responses_api_models", "name": "model"},
+            resources_server={"type": "resources_servers", "name": "resources"},
+            outcome_policy={"by_failure_kind": {POLICY_MODEL_RESPONSE_TIMEOUT: action}},
+        )
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": False}
+    client.post = AsyncMock(return_value=reply(upstream))
+    agent = SimpleAgent(config=config(OutcomeAction.RETRY), server_client=client)
+    with pytest.raises(NgFailureEvent) as classified:
+        await agent.responses(
+            MagicMock(session={}, path_params={}, cookies={}),
+            Response(),
+            NeMoGymResponseCreateParamsNonStreaming(input="fixture"),
+        )
+    assert client.post.await_count == 1  # The model's two attempts did not become another agent model call.
+    failure = classified.value
+    assert failure.boundary == FailureBoundary.AGENT and failure.failure_kind == POLICY_MODEL_RESPONSE_TIMEOUT
+    report = failure_report_for(failure).merged(upstream)
+    facts = {k: v.model_dump(mode="json") for k, v in report.events.items()}
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    async def wire_endpoint(request):
+        if request.path == "/seed_session":
+            return web.json_response({})
+        assert request.path.endswith("/v1/responses")
+        return web.Response(status=500, text="controlled failure", headers=FailureHeader.encode(report))
+
+    app = web.Application()
+    app.router.add_post("/{tail:.*}", wire_endpoint)
+    wire_server = TestServer(app)
+    await wire_server.start_server()
+    wire_session = aiohttp.ClientSession()
+    monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: wire_session)
+    # Use the actual SimpleServer HTTP middleware: its request capture retains recovered remote attempts.
+    run_app = FastAPI()
+    agent.setup_exception_middleware(run_app)
+
+    @run_app.post("/run")
+    async def run_endpoint(request: Request, body: SimpleAgentRunRequest):
+        return await agent.run(request, body)
+
+    run_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=run_app), base_url="http://agent")
+    try:
+        for action in [OutcomeAction.RETRY, OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO]:
+            agent.config = config(action)
+
+            async def agent_post(*, url_path, **kwargs):
+                payload = kwargs.get("json")
+                if isinstance(payload, NeMoGymResponseCreateParamsNonStreaming):
+                    payload = payload.model_dump(mode="json")
+                return await nemo_gym.server_utils.request(
+                    method="POST",
+                    url=str(wire_server.make_url(url_path)),
+                    json=payload,
+                    _max_num_tries=1,
+                )
+
+            client.post = AsyncMock(side_effect=agent_post)
+            calls = 0
+            aggregate_rows = []
+
+            async def collect_post(server_name, url_path, json, **kwargs):
+                nonlocal calls
+                if url_path == "/run":
+                    if json.get("control") == "healthy":
+                        return FakeResponse(200, {"reward": 1.0, "response": {"usage": {}}})
+                    calls += 1
+                    result = await run_client.post("/run", json=json)
+                    assert result.status_code == 200
+                    forwarded = FakeResponse(200, result.json())
+                    forwarded.headers = result.headers
+                    return forwarded
+                aggregate_rows.extend(dict(r) for r in json.verify_responses)
+                return FakeResponse(200, compute_aggregate_metrics(json.verify_responses).model_dump())
+
+            install_fake_server_client(monkeypatch, AsyncMock(side_effect=collect_post))
+            case = tmp_path / action.value
+            case.mkdir()
+            inputs = case / "input.jsonl"
+            inputs.write_text(
+                "".join(
+                    orjson.dumps(
+                        {
+                            "responses_create_params": {"input": "fixture"},
+                            "agent_ref": {"name": "my_agent"},
+                            "control": control,
+                        }
+                    ).decode()
+                    + "\n"
+                    for control in ["healthy", "timeout"]
+                )
+            )
+            cfg = RolloutCollectionConfig(
+                input_jsonl_fpath=str(inputs), output_jsonl_fpath=str(case / "output.jsonl"), disable_health_check=True
+            )
+            await RolloutCollectionHelper().run_from_config(cfg)
+            assert (
+                calls == 1 and client.post.await_count == 2
+            )  # Seed + one loop, no action-dependent immediate model retry.
+            rows = [
+                orjson.loads(line)
+                for line in _failures_path_for(Path(cfg.output_jsonl_fpath)).read_bytes().splitlines()
+            ]
+            assert len(rows) == 1
+            row = rows[0]
+            assert row["_ng_failure_id"] == report.failure_id
+            assert row["_ng_failure_events"] == facts
+            assert row[NG_TERMINAL_KEY] is (action != OutcomeAction.RETRY)
+            assert row[NG_FAILURE_COUNTS_AS_ZERO_KEY] is (action == OutcomeAction.COUNT_AS_ZERO)
+            assert row.get(ATTEMPT_INDEX_KEY_NAME, 0) == 0
+            assert "reward" not in row
+            assert sorted(r["reward"] for r in aggregate_rows) == (
+                [0.0, 1.0] if action == OutcomeAction.COUNT_AS_ZERO else [1.0]
+            )
+            # Resume must spend the next episode attempt only for RETRY; then exhaustion prevents another dispatch.
+            cfg.resume_from_cache = True
+            await RolloutCollectionHelper().run_from_config(cfg)
+            assert calls == (2 if action == OutcomeAction.RETRY else 1)
+            await RolloutCollectionHelper().run_from_config(cfg)
+            assert calls == (2 if action == OutcomeAction.RETRY else 1)
+            if action == OutcomeAction.RETRY:
+                rows = [
+                    orjson.loads(line)
+                    for line in _failures_path_for(Path(cfg.output_jsonl_fpath)).read_bytes().splitlines()
+                ]
+                assert [r.get(ATTEMPT_INDEX_KEY_NAME, 0) for r in rows] == [0, 1]
+                assert all(r["_ng_failure_events"] == facts for r in rows)
+    finally:
+        await run_client.aclose()
+        await wire_session.close()
+        await wire_server.close()
+    assert hits == 2  # All episode-policy decisions reused the original classified model operation.

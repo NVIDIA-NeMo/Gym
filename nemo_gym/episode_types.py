@@ -136,6 +136,7 @@ class FailureEvent(BaseModel):
     attempt_id: str | None = Field(default=None, max_length=128)
     stage: FailureStage | None = None
     http_status: int | None = Field(default=None, ge=100, le=599)
+    request_upload_complete: bool | None = Field(default=None, strict=True)
     foreign_error: SdkErrorDetails | None = None
     cause_id: str | None = Field(default=None, max_length=128)
 

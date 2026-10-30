@@ -35,6 +35,7 @@ _EVENT_FIELDS = (
     "attempt_id",
     "stage",
     "http_status",
+    "request_upload_complete",
     "foreign_error",
 )
 
@@ -60,6 +61,7 @@ class NgFailureEvent(Exception):
         failure_kind: str,
         failure_reason: str,
         http_status: int | None = None,
+        request_upload_complete: bool | None = None,
         foreign_error: SdkErrorDetails | None = None,
         event_id: str | None = None,
         operation: str | None = None,
@@ -74,6 +76,7 @@ class NgFailureEvent(Exception):
             failure_kind=require_failure_kind(failure_kind),
             failure_reason=failure_reason,
             http_status=http_status,
+            request_upload_complete=request_upload_complete,
             foreign_error=foreign_error,
             event_id=event_id,
             operation=operation,

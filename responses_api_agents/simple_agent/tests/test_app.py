@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock, call
+from uuid import uuid4
 
 import httpx
 import orjson
@@ -52,7 +53,11 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
 )
 from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureEvent, FailureReport, SdkErrorDetails, TaskId
-from nemo_gym.failure_kinds import AGENT_ROUTE_FAILED, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import (
+    AGENT_ROUTE_FAILED,
+    MODEL_REQUEST_ERROR,
+    POLICY_MODEL_RESPONSE_TIMEOUT,
+)
 from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -3191,6 +3196,8 @@ def _model_attempt(outcome: str, *, operation_id: str = "final-call") -> Failure
         operation="model_request",
         operation_id=operation_id,
         http_status=http_status,
+        attempt_id=uuid4().hex,
+        request_upload_complete=True if outcome == "response_timeout" else None,
         foreign_error=SdkErrorDetails(exception_type=exception_type, message="") if exception_type else None,
     )
 
@@ -3222,7 +3229,12 @@ def _failed_reply(report: FailureReport) -> MagicMock:
 
 def _timeout_agent(**config) -> tuple[SimpleAgent, MagicMock]:
     server, server_client = _make_agent(False)
-    return type(server)(config=server.config.model_copy(update=config), server_client=server_client), server_client
+    return type(server)(
+        config=SimpleAgentConfig.model_validate(
+            server.config.model_dump(exclude={"outcome_policy"}, exclude_none=True) | config
+        ),
+        server_client=server_client,
+    ), server_client
 
 
 class TestFinalOnModelTimeout:
@@ -3272,21 +3284,43 @@ class TestFinalOnModelTimeout:
 
         assert _policy_request_timed_out(error) is False
 
+    @pytest.mark.parametrize(
+        "missing", ["upload", "attempt", "operation", "unknown-peer-operation", "duplicate-attempt"]
+    )
+    def test_missing_or_ambiguous_attempt_evidence_cannot_qualify(self, missing):
+        report = _timed_out_report()
+        events = list(report.events.values())
+        target = events[0]
+        update = {
+            "upload": {"request_upload_complete": None},
+            "attempt": {"attempt_id": None},
+            "operation": {"operation_id": None},
+            "unknown-peer-operation": {"operation_id": None},
+            "duplicate-attempt": {"attempt_id": events[-1].attempt_id},
+        }[missing]
+        # A missing operation identifier on a peer cannot silently remove that attempt from the final operation.
+        if missing == "operation":
+            target = events[-1]
+        changed = target.model_copy(update=update)
+        altered = report.model_copy(update={"events": report.events | {changed.event_id: changed}})
+        assert not _policy_request_timed_out(_failed_reply(altered).raise_for_status.side_effect)
+
     @pytest.mark.parametrize("enabled", [True, False])
-    async def test_a_policy_timeout_becomes_an_agent_failure_only_when_enabled(self, enabled: bool) -> None:
+    async def test_a_policy_timeout_is_classified_independently_of_the_compatibility_policy(
+        self, enabled: bool
+    ) -> None:
         server, server_client = _timeout_agent(final_on_model_timeout=enabled)
         server_client.post = AsyncMock(return_value=_failed_reply(_timed_out_report()))
         request = MagicMock(session={}, path_params={}, cookies={})
 
-        with pytest.raises(NgFailureEvent if enabled else ClientResponseError) as raised:
+        with pytest.raises(NgFailureEvent) as raised:
             await server.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="question"))
 
-        if enabled:
-            assert (raised.value.boundary, raised.value.failure_kind, raised.value.operation) == (
-                FailureBoundary.AGENT,
-                MODEL_TRANSPORT_ERROR,
-                POLICY_TIMEOUT_OPERATION,
-            )
+        assert (raised.value.boundary, raised.value.failure_kind, raised.value.operation) == (
+            FailureBoundary.AGENT,
+            POLICY_MODEL_RESPONSE_TIMEOUT,
+            POLICY_TIMEOUT_OPERATION,
+        )
         # One policy call: the model server's attempts are its own, and nothing here adds one.
         assert server_client.post.await_count == 1
 
@@ -3304,7 +3338,7 @@ class TestFinalOnModelTimeout:
         server, server_client = _timeout_agent(final_on_model_timeout=enabled)
         policy_timeout = NgFailureEvent(
             boundary=FailureBoundary.AGENT,
-            failure_kind=MODEL_TRANSPORT_ERROR,
+            failure_kind=POLICY_MODEL_RESPONSE_TIMEOUT,
             failure_reason="Policy model request timed out on every attempt",
             operation=POLICY_TIMEOUT_OPERATION,
         )
@@ -3326,29 +3360,18 @@ class TestFinalOnModelTimeout:
         server_client.post = AsyncMock(side_effect=post)
         body = SimpleAgentRunRequest.model_validate({"responses_create_params": {"input": "question"}})
 
-        if not enabled:
-            with pytest.raises(ClientResponseError):
-                await server.run(MagicMock(cookies={}), body)
-            return
-        reply = await server.run(MagicMock(cookies={}), body)
-
-        row = json.loads(reply.body)
-        assert reply.status_code == 200
-        assert {key: row[key] for key in ("_ng_failure_class", "_ng_failure_terminal", "failure_kind")} == {
-            "_ng_failure_class": "agent_run_error",
-            "_ng_failure_terminal": True,
-            "failure_kind": "model_transport_error",
-        }
-        # The metrics count it as 0 on its own, without count_failure_classes_as_zero.
-        assert row["_ng_failure_counts_as_zero"] is True
+        response = await server.run(MagicMock(cookies={}), body)
+        assert isinstance(response, JSONResponse)
+        row = json.loads(response.body)
+        assert row["_ng_failure_terminal"] is enabled
+        assert row["_ng_failure_counts_as_zero"] is enabled
         assert "reward" not in row
-        [timeout] = row["timeouts"]
-        assert (timeout["event_id"], timeout["limit"], timeout["enforcer"]) == (
-            policy_timeout.event_id,
-            "model_request",
-            "model",
+        assert row["failure_kind"] == POLICY_MODEL_RESPONSE_TIMEOUT
+        assert row["_ng_failure_id"] == policy_timeout.event_id
+        assert row["_ng_failure_events"][policy_timeout.event_id] == report.events[policy_timeout.event_id].model_dump(
+            mode="json"
         )
-        assert policy_timeout.event_id in row["_ng_failure_events"]
+        assert server_client.post.await_count == 2
 
     async def test_run_keeps_other_policy_failures_retryable(self) -> None:
         server, server_client = _timeout_agent(final_on_model_timeout=True)

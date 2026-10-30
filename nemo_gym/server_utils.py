@@ -51,6 +51,7 @@ from aiohttp import (
     ClientTimeout,
     DummyCookieJar,
     ServerDisconnectedError,
+    UploadTracker,
 )
 from aiohttp.client import _RequestOptions
 from anyio import create_task_group
@@ -601,7 +602,7 @@ async def request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
-    _on_transport_failure: Callable[[Exception], None] | None = None,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -698,7 +699,7 @@ async def _traced_request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
-    _on_transport_failure: Callable[[Exception], None] | None = None,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -804,6 +805,18 @@ def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> 
     )
 
 
+def _request_upload_complete(upload: UploadTracker | None) -> bool | None:
+    """Whether the one observed HTTP attempt finished sending its body, including EOF.
+
+    Pending/cancelled state or an unobserved aiohttp resend is unknown; it cannot qualify a response timeout.
+    """
+    if upload is None or upload.attempts != 1 or not upload.upload_complete.done():
+        return None
+    if upload.upload_complete.cancelled():
+        return None
+    return upload.upload_complete.exception() is None
+
+
 async def _request_with_retries(
     method: str,
     url: str,
@@ -813,7 +826,7 @@ async def _request_with_retries(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
-    _on_transport_failure: Callable[[Exception], None] | None = None,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -828,8 +841,13 @@ async def _request_with_retries(
         while True:
             if _max_num_tries is not None:
                 explicit_tries += 1
+            # A tracker belongs to exactly one request. Do not reuse a completed upload across retries.
+            upload = UploadTracker() if _on_transport_failure is not None else None
+            attempt_kwargs = dict(kwargs)
+            if upload is not None:
+                attempt_kwargs["upload_tracker"] = upload
             try:
-                response = await client.request(method=method, url=url, **kwargs)
+                response = await client.request(method=method, url=url, **attempt_kwargs)
                 if (
                     _read_body
                     and _resend_after_disconnect
@@ -843,7 +861,7 @@ async def _request_with_retries(
                 return response
             except ServerDisconnectedError as error:
                 if _on_transport_failure is not None:
-                    _on_transport_failure(error)
+                    _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect:
                     raise
                 global _NUM_SERVER_DISCONNECTED_ERROR
@@ -865,7 +883,7 @@ async def _request_with_retries(
                 await asyncio.sleep(0.5)
             except ClientOSError as error:
                 if _on_transport_failure is not None:
-                    _on_transport_failure(error)
+                    _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
                     raise
                 global _NUM_CLIENT_OS_ERROR
@@ -886,7 +904,7 @@ async def _request_with_retries(
                 await asyncio.sleep(0.5)
             except Exception as e:
                 if _on_transport_failure is not None:
-                    _on_transport_failure(e)
+                    _on_transport_failure(e, _request_upload_complete(upload))
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
                 if not _resend_after_disconnect:
