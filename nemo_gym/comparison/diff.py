@@ -30,8 +30,8 @@ from nemo_gym.comparison.schema import (
     MetricValue,
     TaskFlip,
 )
-from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import (
     REWARD_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,

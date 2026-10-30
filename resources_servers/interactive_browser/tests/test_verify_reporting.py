@@ -27,8 +27,7 @@ from app import (
     _SessionState,
 )
 
-from nemo_gym.failure_kinds import SESSION_LOST
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import SESSION_LOST, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 

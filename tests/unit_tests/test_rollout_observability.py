@@ -4,7 +4,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.observability.model_calls import ModelCallRecord
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -16,7 +16,7 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryModelCall,
     TrajectoryRecord,
-    join_model_call_observations,
+    join_agent_model_calls,
 )
 
 
@@ -147,7 +147,7 @@ def test_join_model_calls_resolves_exact_references_and_reports_unowned_calls() 
         ModelCallRecord(model_call_id="call-2", model_ref=model_ref, call_index=1),
     ]
 
-    joined = join_model_call_observations(bundle, calls)
+    joined = join_agent_model_calls(bundle, calls)
 
     [invocation] = [record for record in joined.records if isinstance(record, AgentInvocation)]
     [joined_call] = invocation.model_calls
@@ -172,8 +172,8 @@ def test_join_model_calls_uses_exact_client_session_ownership() -> None:
         ModelCallRecord(model_call_id="call-unknown", client_session_id="unknown", call_index=2),
     ]
 
-    joined = join_model_call_observations(bundle, calls)
-    joined_again = join_model_call_observations(joined, calls)
+    joined = join_agent_model_calls(bundle, calls)
+    joined_again = join_agent_model_calls(joined, calls)
 
     assert all(not invocation.model_calls for invocation in bundle.records)
     assert joined_again.model_dump() == joined.model_dump()
@@ -190,8 +190,8 @@ def test_client_session_association_does_not_mutate_or_retain_phantom_calls() ->
     first = [ModelCallRecord(model_call_id="first", client_session_id="root", call_index=0)]
     second = [ModelCallRecord(model_call_id="second", client_session_id="root", call_index=0)]
 
-    first_result = join_model_call_observations(bundle, first)
-    second_result = join_model_call_observations(bundle, second)
+    first_result = join_agent_model_calls(bundle, first)
+    second_result = join_agent_model_calls(bundle, second)
 
     assert not bundle.records[0].model_calls
     assert [reference.model_call_id for reference in first_result.records[0].model_calls] == ["first"]
@@ -202,7 +202,7 @@ def test_client_session_association_skips_calls_without_a_session_id() -> None:
     bundle = AgentObservationBundle(source="test", records=[AgentInvocation(invocation_id="")])
     calls = [ModelCallRecord(model_call_id="unowned", call_index=0)]
 
-    joined = join_model_call_observations(bundle, calls)
+    joined = join_agent_model_calls(bundle, calls)
 
     assert not joined.records[0].model_calls
     assert [gap.detail for gap in joined.gaps if gap.code == "model_call_ownership_unavailable"] == [
@@ -231,7 +231,7 @@ def test_client_session_association_deduplicates_existing_exact_references() -> 
         )
     ]
 
-    associated = join_model_call_observations(bundle, calls)
+    associated = join_agent_model_calls(bundle, calls)
 
     assert len(associated.records[0].model_calls) == 1
 
@@ -243,7 +243,7 @@ def test_client_session_association_scales_to_long_rollouts() -> None:
         for index in range(2_000)
     ]
 
-    associated = join_model_call_observations(bundle, calls)
+    associated = join_agent_model_calls(bundle, calls)
 
     assert len(associated.records[0].model_calls) == len(calls)
 
@@ -264,7 +264,7 @@ def test_join_model_calls_does_not_guess_ambiguous_response_ids() -> None:
         ModelCallRecord(model_call_id="call-2", response_id="resp-1", model_ref=model_ref, call_index=1),
     ]
 
-    joined = join_model_call_observations(bundle, calls)
+    joined = join_agent_model_calls(bundle, calls)
 
     [invocation] = [record for record in joined.records if isinstance(record, AgentInvocation)]
     assert invocation.model_calls[0].model_call_id is None
@@ -306,8 +306,8 @@ def test_join_model_calls_reports_conflicting_and_unmatched_references() -> None
         )
     ]
 
-    joined = join_model_call_observations(bundle, calls)
-    joined_again = join_model_call_observations(joined, calls)
+    joined = join_agent_model_calls(bundle, calls)
+    joined_again = join_agent_model_calls(joined, calls)
 
     assert joined_again.model_dump() == joined.model_dump()
     assert {gap.code for gap in joined.gaps} == {
@@ -360,7 +360,7 @@ def test_join_model_calls_resolves_compaction_boundaries() -> None:
         ),
     ]
 
-    joined = join_model_call_observations(bundle, calls)
+    joined = join_agent_model_calls(bundle, calls)
     [compaction] = [record for record in joined.records if isinstance(record, ContextCompactionObservation)]
 
     assert compaction.before_model_call.model_call_id == "call-before"
@@ -390,7 +390,7 @@ def test_join_model_calls_rejects_cross_invocation_compaction_ownership() -> Non
         ModelCallRecord(model_call_id="call-unowned", response_id="unowned", model_ref=model_ref, call_index=1),
     ]
 
-    joined = join_model_call_observations(bundle, calls)
+    joined = join_agent_model_calls(bundle, calls)
     compaction = next(record for record in joined.records if isinstance(record, ContextCompactionObservation))
 
     assert compaction.before_model_call.model_call_id is None

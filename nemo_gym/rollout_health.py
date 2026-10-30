@@ -52,6 +52,7 @@ from nemo_gym.health.timeouts import read_rollout_timing, summarize_timeouts
 from nemo_gym.health.types import (
     CALL_BINDING_INPUTS,
     QUALITY_SUMMARY_FILENAME,
+    QUALITY_SUMMARY_SOURCES_KEY,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
     ROLLOUT_VERDICTS_FILENAME,
@@ -70,7 +71,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
+from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -653,6 +654,15 @@ def _sort_key(digest: RolloutDigest) -> tuple[tuple[int, Any], ...]:
     return part(digest.task_index), part(digest.rollout_index), part(digest.stage_index)
 
 
+def _report_sources(paths: Sequence[Path], report_dir: Path) -> list[str]:
+    """The rollouts files a report was computed from, relative to the folder it is written in
+    (``run.<QUALITY_SUMMARY_SOURCES_KEY>``): the reports keep one name per folder whatever the rollouts file is
+    called, so a reader with several runs' rollouts in one folder can tell whose they are. Only the directories are
+    resolved, as :func:`_aggregated_shards` does, so a shard keeps its own name."""
+    base = report_dir.resolve()
+    return [Path(os.path.relpath(path.parent.resolve() / path.name, base)).as_posix() for path in paths]
+
+
 def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output_dir: Path) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / QUALITY_SUMMARY_FILENAME
@@ -703,8 +713,8 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
         return
     # Lazy: the capture store pulls in the model-server stack, which health workers do not need.
     from nemo_gym.base_responses_api_model import _PENDING_SUFFIX, CaptureStore
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
     from nemo_gym.observability.model_calls import read_available_model_call_records
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     listings = []
     for directory in capture_dirs:
@@ -839,6 +849,7 @@ def run_health_checks(
     summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)
     summary["run"]["findings"] = [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings]
     report_dir = output_dir or paths[0].parent
+    summary["run"][QUALITY_SUMMARY_SOURCES_KEY] = _report_sources(paths, report_dir)
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
     return HealthCheckResult(
         summary=summary,
@@ -884,6 +895,7 @@ def write_provisional_summary(
         "artifacts": artifacts,
         "issues": {_RUN_FAILURES_CHECK: len(run_findings)},
         "findings": [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings],
+        QUALITY_SUMMARY_SOURCES_KEY: _report_sources([rollout_path], rollout_path.parent),
     }
     summary_path.write_bytes(orjson.dumps({"run": run}, option=orjson.OPT_INDENT_2))
     (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)

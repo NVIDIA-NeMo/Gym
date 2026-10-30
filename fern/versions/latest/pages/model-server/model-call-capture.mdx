@@ -245,7 +245,7 @@ includes a gap to show the complete shape. The `gaps` field is omitted when ther
 reported by the provider; a `null` value means unknown, not zero. For example, Anthropic does not
 report reasoning-token usage, so `tokens_reasoning` is `null` for that dialect.
 
-After successful [`ng_trajectory`](/main/reference/trajectory-capabilities) projection, attached calls
+After successful [`ng_trajectory`](/main/observability/rollout-evidence#which-artifact-to-read) projection, attached calls
 omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads
 remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
 `multimodal_history_redacted` gap omit payload copies from `ng_trajectory`.
@@ -433,7 +433,7 @@ also emit `ng_agent_observations`; `rollout_collection` exact-joins the availabl
 See [Rollout evidence](/main/observability/rollout-evidence) for the full pipeline, exact correlation
 rules, payload retention, agent observations, gaps, and performance summaries. Agent-side coverage
 varies by producer and execution path; the
-[trajectory capability matrix](/main/reference/trajectory-capabilities) shows measured harness checks.
+[harness conformance results](/main/observability/harness-conformance#results) show measured harness checks.
 
 ## Framework-owned media staging
 

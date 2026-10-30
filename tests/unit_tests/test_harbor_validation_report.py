@@ -150,7 +150,7 @@ class TestValidationRows:
         assert _validation_rows(path) == [self.record("a")]
 
     def test_bytes_that_are_not_utf8_inside_the_file_are_reported_by_line(self, tmp_path):
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
         from nemo_gym.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"
@@ -166,7 +166,7 @@ class TestValidationRows:
         assert _validation_rows(path) == [self.record("a"), self.record("b")]
 
     def test_a_damaged_interior_record_is_reported_by_line(self, tmp_path):
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
         from nemo_gym.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"

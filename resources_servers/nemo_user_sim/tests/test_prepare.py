@@ -12,7 +12,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from environments.nemo_user_sim import prepare as prepare_module
-from nemo_gym.config_types import DatasetConfig
+from nemo_gym.config import DatasetConfig
 from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.task_data import TaskData
@@ -49,6 +49,12 @@ def test_environment_config_declares_generated_validation_split() -> None:
     assert validation.jsonl_fpath == "environments/nemo_user_sim/data/nemo_user_sim.jsonl"
     assert validation.prepare_script == Path("environments/nemo_user_sim/prepare.py")
     assert validation.taskset == "nemo_user_sim:validation"
+
+
+def test_user_model_has_no_default_endpoint() -> None:
+    resources_config = OmegaConf.load(REPOSITORY_ROOT / "resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml")
+    for key in ("user_model_base_url", "user_model_api_key", "user_model_name"):
+        assert OmegaConf.is_missing(resources_config, key), key
 
 
 def test_usersim_revision_pins_are_aligned() -> None:

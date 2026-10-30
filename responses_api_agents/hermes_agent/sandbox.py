@@ -15,9 +15,9 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.agent_utils.uv_bootstrap import DEFAULT_UV_CACHE_DIR, uv_for_sandbox
 from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox import read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ class HermesSandboxSession(AgentSessionState):
         session in this sandbox is reused.
         """
         check = await self.session.sandbox.exec(
-            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent, mcp'",
+            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent; from mcp.client.streamable_http import streamablehttp_client'",
             cwd=self.session.workdir,
             timeout_s=120,
         )
@@ -114,7 +114,7 @@ class HermesSandboxSession(AgentSessionState):
         install = await self.session.sandbox.exec(
             f"chmod 755 {quote(_SANDBOX_UV)} && rm -rf {venv} && "
             f"{quote(_SANDBOX_UV)} venv {venv} --python 3.13 && "
-            f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} {quote(_HERMES_REQUIREMENT)}",
+            f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} {quote(_HERMES_REQUIREMENT)} 'mcp>=1.28.1,<2'",
             cwd=self.session.workdir,
             timeout_s=timeout,
         )
@@ -173,7 +173,6 @@ class HermesSandboxSession(AgentSessionState):
                 f"{self.session.session_dir}/input.json",
                 f"{self.session.session_dir}/output.json",
             ],
-            python=_SANDBOX_PYTHON,
         )
 
     async def collect_artifacts(self) -> dict[str, JsonValue]:

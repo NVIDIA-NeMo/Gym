@@ -5,7 +5,7 @@
 
 from typing import Any, Mapping
 
-from nemo_gym.openai_utils import TOKEN_METADATA_FIELDS
+from nemo_gym.core.responses_api_types import TOKEN_METADATA_FIELDS
 from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
 
 

@@ -9,8 +9,7 @@ from shlex import quote
 from uuid import uuid4
 
 from environment_servers.swe_together.diff_protocol import _strip_junk, truncate_diff_for_user_sim
-from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox import AsyncSandbox, read_text, upload_text
 
 
 @dataclass

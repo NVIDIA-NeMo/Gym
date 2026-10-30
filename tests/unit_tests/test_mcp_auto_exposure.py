@@ -26,7 +26,8 @@ import json
 import logging
 import subprocess
 import sys
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import MagicMock
@@ -58,7 +59,12 @@ from nemo_gym.mcp_auto_exposure import (  # noqa: E402
     install_auto_exposure,
     maybe_auto_expose,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, SimpleServer  # noqa: E402
+from nemo_gym.server_utils import (  # noqa: E402
+    SESSION_ID_KEY,
+    ClientDisconnectCancellationMiddleware,
+    ServerClient,
+    SimpleServer,
+)
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -591,6 +597,73 @@ def test_refuses_custom_middleware():
         install_auto_exposure(server, app)
 
 
+def test_refuses_custom_middleware_class():
+    server = _server()
+    app = server.setup_webserver()
+
+    class AuditMiddleware:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            await self.app(scope, receive, send)
+
+    app.add_middleware(AuditMiddleware)
+    with pytest.raises(ValueError, match="AuditMiddleware"):
+        install_auto_exposure(server, app)
+
+
+def test_refuses_a_subclass_of_marked_gym_middleware():
+    # The subclass adds behaviour that direct dispatch would skip, so the parent's marker does not cover it.
+    server = _server()
+    app = server.setup_webserver()
+
+    class AuditingCancellation(ClientDisconnectCancellationMiddleware):
+        async def __call__(self, scope, receive, send):
+            await super().__call__(scope, receive, send)
+
+    app.add_middleware(AuditingCancellation)
+    with pytest.raises(ValueError, match="AuditingCancellation"):
+        install_auto_exposure(server, app)
+
+
+def test_accepts_the_exception_and_cancellation_middleware():
+    # run_webserver adds these two after the gate runs. They must still pass it, in case that order changes.
+    server = _server()
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    server.setup_cancellation_middleware(app)
+    installed = [m.kwargs.get("dispatch", m.cls) for m in app.user_middleware]
+    assert any(getattr(m, "__name__", "") == "exception_handling_middleware" for m in installed)
+    assert ClientDisconnectCancellationMiddleware in installed
+    install_auto_exposure(server, app)
+
+
+def test_middleware_marked_as_skipped_on_direct_dispatch_is_accepted_wherever_it_is_defined():
+    # Gym's own middleware is recognized by its marker, not by the module that defines it.
+    # Moving it to another module keeps it accepted.
+    server = _server()
+    app = server.setup_webserver()
+
+    async def relocated(request, call_next):
+        return await call_next(request)
+
+    relocated.skipped_on_direct_mcp_dispatch = True
+    app.middleware("http")(relocated)
+
+    class RelocatedMiddleware:
+        skipped_on_direct_mcp_dispatch = True
+
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            await self.app(scope, receive, send)
+
+    app.add_middleware(RelocatedMiddleware)
+    install_auto_exposure(server, app)
+
+
 def test_refuses_dependency_injection_handler():
     server = _server()
     app = server.setup_webserver()
@@ -704,7 +777,7 @@ def test_undispatchable_route_keeps_typed_schema_in_harvested_list():
             return app
 
         def mcp_tools(self, harvested, catchall):
-            harvested_schemas.update({t.name: t.tool.inputSchema for t in harvested})
+            harvested_schemas.update({t.name: t.tool.model_dump(by_alias=True)["inputSchema"] for t in harvested})
             return [t for t in harvested if t.name not in ("end_session", "gated")]
 
     server = _server(DroppedTyped, "excl")
@@ -956,3 +1029,161 @@ def test_normalize_tool_name_without_server_name_strips_first_namespace():
     # with a server name, only that server's prefix is stripped
     assert normalize_tool_name("mcp__store__append", "store") == "append"
     assert normalize_tool_name("mcp__other__append", "store") == "mcp__other__append"
+
+
+@pytest.mark.parametrize("payload", [{"answer": 42}, [1, 2], "hello", 7, None])
+def test_result_content_and_structured_content(payload):
+    class Results(Store):
+        def setup_webserver(self):
+            app = super().setup_webserver()
+
+            @app.post("/result")
+            async def result():
+                return payload
+
+            return app
+
+    with _mcp(Results) as (client, token):
+        result = _call(client, "result", {}, token)
+        assert result.get("isError") is not True
+        text = result["content"][0]["text"]
+        assert (text if isinstance(payload, str) else json.loads(text)) == payload
+        assert result.get("structuredContent") == (payload if isinstance(payload, dict) else None)
+
+
+@pytest.mark.parametrize("payload", [{"answer": 42}, {"answer": "wrong"}, "not an object"])
+def test_output_schema_validation_is_preserved(payload):
+    class OutputSchema(Store):
+        def setup_webserver(self):
+            app = super().setup_webserver()
+
+            @app.post("/result")
+            async def result():
+                return payload
+
+            return app
+
+        def mcp_tools(self, harvested, catchall):
+            tools = super().mcp_tools(harvested, catchall)
+            for tool in tools:
+                if tool.name == "result":
+                    data = tool.tool.model_dump(by_alias=True)
+                    data["outputSchema"] = {
+                        "type": "object",
+                        "properties": {"answer": {"type": "integer"}},
+                        "required": ["answer"],
+                    }
+                    tool.tool = type(tool.tool).model_validate(data)
+            return tools
+
+    with _mcp(OutputSchema) as (client, token):
+        result = _call(client, "result", {}, token)
+        if payload == {"answer": 42}:
+            assert result.get("isError") is not True
+            assert result["structuredContent"] == payload
+        else:
+            assert result["isError"] is True
+            assert "Output validation error:" in result["content"][0]["text"]
+
+
+def test_omitted_arguments_and_pydantic_coercion():
+    class Coercing(Store):
+        def setup_webserver(self):
+            app = super().setup_webserver()
+
+            @app.post("/coerce")
+            async def coerce(body: CountBody):
+                return {"count": body.count}
+
+            return app
+
+    with _mcp(Coercing) as (client, token):
+        result = _rpc(client, "tools/call", {"name": "raw_step"}, token)["result"]
+        assert result["structuredContent"] == {"echo": {}}
+        # Gym delegates input validation/coercion to Pydantic, not SDK JSON Schema validation.
+        result = _call(client, "coerce", {"count": "42"}, token)
+        assert result["structuredContent"] == {"count": 42}
+
+
+class CountBody(BaseModel):
+    count: int
+
+
+def test_concurrent_calls_use_each_requests_signed_session():
+    with _mcp(SessionScoped) as (client, _):
+        tokens = [
+            client.post("/seed_session", json={"allowed_tools": names}).json()["mcp"]["headers"][TOKEN_HEADER]
+            for names in (["append"], ["raw_step"])
+        ]
+
+        def run(index):
+            token = tokens[index % 2]
+            expected = "append" if index % 2 == 0 else "raw_step"
+            assert [tool["name"] for tool in _list(client, token)] == [expected]
+            allowed = _call(client, expected, {"value": str(index)}, token)
+            assert allowed.get("isError") is not True
+            denied = _call(client, "raw_step" if expected == "append" else "append", {}, token)
+            assert denied["isError"] is True
+            assert "not allowed" in denied["content"][0]["text"]
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(run, range(12)))
+
+
+def test_original_lifespan_state_and_shutdown_are_preserved():
+    events = []
+    server = _server()
+    app = server.setup_webserver()
+
+    @asynccontextmanager
+    async def lifespan(app):
+        events.append("start")
+        try:
+            yield {"marker": "original lifespan"}
+        finally:
+            events.append("stop")
+
+    app.router.lifespan_context = lifespan
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        assert client.app_state["marker"] == "original lifespan"
+        assert events == ["start"]
+        token = _seed(client)
+        _handshake(client)
+        assert _call(client, "raw_step", {}, token)["structuredContent"] == {"echo": {}}
+    assert events == ["start", "stop"]
+
+
+async def test_sdk_client_discovers_and_calls_over_streamable_http():
+    from importlib.metadata import version
+
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    # Exercise each SDK's real HTTP transport against the ASGI app without a network listener.
+    # MCP 2 uses httpx2; MCP 1 uses httpx. These clients are test-only.
+    if version("mcp").startswith("2."):
+        import httpx2 as http_client_module
+    else:
+        import httpx as http_client_module
+
+    server = _server(SessionScoped)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    async with app.router.lifespan_context(app):
+        async with http_client_module.AsyncClient(
+            transport=http_client_module.ASGITransport(app=app), base_url="http://testserver"
+        ) as http_client:
+            seeded = await http_client.post("/seed_session", json={"allowed_tools": ["append"]})
+            http_client.headers[TOKEN_HEADER] = seeded.json()["mcp"]["headers"][TOKEN_HEADER]
+            async with streamable_http_client("http://testserver/mcp", http_client=http_client) as streams:
+                async with ClientSession(streams[0], streams[1]) as session:
+                    await session.initialize()
+                    listed = await session.list_tools()
+                    assert [tool.name for tool in listed.tools] == ["append"]
+                    result = (await session.call_tool("append", {"value": "sdk"})).model_dump(by_alias=True)
+                    assert result["structuredContent"] == {"values": ["sdk"]}
+                    assert result["isError"] is False
+                    denied = (await session.call_tool("raw_step", {})).model_dump(by_alias=True)
+                    assert denied["isError"] is True
+                    assert "not allowed" in denied["content"][0]["text"]

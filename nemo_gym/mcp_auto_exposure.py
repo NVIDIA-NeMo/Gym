@@ -71,12 +71,14 @@ import inspect
 import json
 import logging
 import re
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import UnionType
 from typing import Any, Callable, Optional, Union, get_args, get_origin, get_type_hints
 from uuid import uuid4
 
+import jsonschema
 import mcp.types as types
 from aiohttp import ClientResponseError
 from fastapi import FastAPI, Request
@@ -103,7 +105,7 @@ from nemo_gym.base_resources_server import (
     mcp_session_token_payload,
     mcp_session_token_serializer,
 )
-from nemo_gym.rollout_correlation import current_episode_id
+from nemo_gym.core.episode import current_episode_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -125,8 +127,10 @@ _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Path-template params from the public route.path string ("/{tool_name}", "/items/{id:int}").
 _PATH_PARAM_RE = re.compile(r"{([^}:]+)(?::[^}]*)?}")
 
-# Gym's function-based middleware (add_session_id + exception middleware); SessionMiddleware is matched by class name.
-_GYM_MIDDLEWARE_MODULES = frozenset({"nemo_gym.server_utils"})
+# Set to True on Gym middleware, a class or a function, that direct MCP dispatch may skip.
+# Matching by attribute rather than by module name keeps the check right when the middleware moves to another module.
+# A server's own middleware must not set it.
+SKIPPED_ON_DIRECT_MCP_DISPATCH = "skipped_on_direct_mcp_dispatch"
 
 
 # ==================================================================================================
@@ -447,14 +451,13 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
         cls = m.cls
         if f"{cls.__module__}.{cls.__name__}" == "starlette.middleware.sessions.SessionMiddleware":
             continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
-        if f"{cls.__module__}.{cls.__name__}" == "nemo_gym.rollout_correlation.RolloutContextMiddleware":
-            continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
-        if f"{cls.__module__}.{cls.__name__}" == ("nemo_gym.server_utils.ClientDisconnectCancellationMiddleware"):
-            continue  # Direct MCP dispatch has no client connection to monitor.
+        # Only the class's own marker counts: a subclass that overrides __call__ adds behaviour dispatch would skip.
+        if vars(cls).get(SKIPPED_ON_DIRECT_MCP_DISPATCH, False):
+            continue  # Gym's rollout prefix and client disconnect middleware; see their definitions.
         if getattr(cls, "applies_to_mcp_requests", False):
             continue  # It does its job on the /mcp request as a whole (for example, checkpoint admission).
         dispatch = m.kwargs.get("dispatch")
-        if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
+        if dispatch is not None and getattr(dispatch, SKIPPED_ON_DIRECT_MCP_DISPATCH, False):
             continue  # Gym's add_session_id / exception middleware
         custom_middleware.append(f"{cls.__module__}.{cls.__name__}")
     if custom_middleware:
@@ -756,13 +759,57 @@ def _parse_session_token(
     return payload["sid"], None if allowed is None else frozenset(allowed)
 
 
-def _to_result(payload: Any):
-    """Per the SDK's call_tool contract, a ``(content, structuredContent)`` tuple populates both
-    CallToolResult fields while a bare content list leaves structuredContent unset — and only a JSON
-    object maps to structuredContent."""
+def _to_result(payload: Any, *, output_schema: Optional[dict] = None) -> types.CallToolResult:
+    """Preserve text content and object-only structured content on both SDK versions."""
+    structured = payload if isinstance(payload, dict) else None
+    if output_schema is not None:
+        if structured is None:
+            raise ValueError("Output validation error: outputSchema defined but no structured output returned")
+        try:
+            jsonschema.validate(instance=structured, schema=output_schema)
+        except jsonschema.ValidationError as exc:
+            raise ValueError(f"Output validation error: {exc.message}") from exc
     text = payload if isinstance(payload, str) else JSONResponse(payload).body.decode("utf-8")
-    content = [types.TextContent(type="text", text=text)]
-    return (content, payload) if isinstance(payload, dict) else content
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=text)], structuredContent=structured, isError=False
+    )
+
+
+def _make_mcp_server(
+    name: str,
+    list_tools: Callable[[Optional[Request]], Awaitable[list[types.Tool]]],
+    call_tool: Callable[[Optional[Request], str, dict], Awaitable[types.CallToolResult]],
+) -> _LowLevelMCPServer:
+    """Adapt only SDK registration and request context; Gym dispatch stays version independent."""
+    if "on_list_tools" in inspect.signature(_LowLevelMCPServer).parameters:
+        from mcp.server.context import ServerRequestContext
+
+        async def on_list_tools(
+            ctx: ServerRequestContext, params: Optional[types.PaginatedRequestParams]
+        ) -> types.ListToolsResult:
+            return types.ListToolsResult(tools=await list_tools(ctx.request))
+
+        async def on_call_tool(ctx: ServerRequestContext, params: types.CallToolRequestParams) -> types.CallToolResult:
+            try:
+                return await call_tool(ctx.request, params.name, params.arguments or {})
+            except Exception as exc:
+                # MCP 1's call_tool decorator performs this translation. MCP 2's low-level
+                # callbacks otherwise turn tool failures into JSON-RPC protocol errors.
+                return types.CallToolResult(content=[types.TextContent(type="text", text=str(exc))], isError=True)
+
+        return _LowLevelMCPServer(name, on_list_tools=on_list_tools, on_call_tool=on_call_tool)
+
+    mcp_server = _LowLevelMCPServer(name)
+
+    @mcp_server.list_tools()
+    async def legacy_list_tools() -> list[types.Tool]:
+        return await list_tools(mcp_server.request_context.request)
+
+    @mcp_server.call_tool(validate_input=False)
+    async def legacy_call_tool(name: str, arguments: dict) -> types.CallToolResult:
+        return await call_tool(mcp_server.request_context.request, name, arguments)
+
+    return mcp_server
 
 
 def session_token_serializer(server: Any) -> URLSafeSerializer:
@@ -805,22 +852,15 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
     _wrap_seed_session(app, mint_metadata)
     _wrap_verify(app, server)
 
-    mcp_server = _LowLevelMCPServer(server.config.name or type(server).__name__)
-
-    # mcp_server.request_context is a contextvar the SDK populates only while one of the handlers
-    # below is on the stack — exactly when session_claims runs, which is why it stays local.
-    def session_claims(required: bool = True) -> tuple[Optional[str], Optional[frozenset]]:
-        ctx_request = mcp_server.request_context.request  # the POST /mcp starlette Request
+    def session_claims(ctx_request: Optional[Request], *, required: bool) -> tuple[Optional[str], Optional[frozenset]]:
         token = ctx_request.headers.get(NEMO_GYM_MCP_SESSION_TOKEN_HEADER) if ctx_request is not None else None
         return _parse_session_token(serializer, token, required)
 
-    @mcp_server.list_tools()
-    async def list_tools() -> list[types.Tool]:
-        _, allowed = session_claims(required=False)
+    async def list_tools(ctx_request: Optional[Request]) -> list[types.Tool]:
+        _, allowed = session_claims(ctx_request, required=False)
         return [t.tool for t in tools.values() if allowed is None or t.name in allowed]
 
-    @mcp_server.call_tool(validate_input=False)
-    async def call_tool(name: str, arguments: dict):
+    async def call_tool(ctx_request: Optional[Request], name: str, arguments: dict) -> types.CallToolResult:
         tool = tools.get(name)
         if tool is None:
             # Models hallucinate tool names, so answer the miss cheaply with a plain isError result
@@ -832,15 +872,16 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
                 ],
                 isError=True,
             )
-        session_id, allowed = session_claims(required=True)
+        session_id, allowed = session_claims(ctx_request, required=True)
         if allowed is not None and name not in allowed:
             raise ValueError(f"Tool {name!r} is not allowed for this session.")
         try:
             payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
         except DirectDispatchError as exc:
             raise ValueError(f"HTTP {exc.status} from POST /{name}: {exc.detail}")
-        return _to_result(payload)
+        return _to_result(payload, output_schema=tool.tool.model_dump(by_alias=True).get("outputSchema"))
 
+    mcp_server = _make_mcp_server(server.config.name or type(server).__name__, list_tools, call_tool)
     manager = StreamableHTTPSessionManager(
         app=mcp_server,
         event_store=None,

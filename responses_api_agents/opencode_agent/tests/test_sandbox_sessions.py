@@ -5,6 +5,7 @@ import asyncio
 import json
 import shlex
 import sqlite3
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,12 +19,11 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
-from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
+from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -92,10 +92,21 @@ def rejected_events(*, after_work: bool = False) -> str:
     return json.dumps(export)
 
 
+def read_params(text: str) -> dict:
+    """Source runner PARAMS with bash, as the sandbox runner does."""
+    script = 'source /dev/stdin; printf "%s\\0" "$cwd" "$stdin" "$setup" "${#command[@]}" "${command[@]}" "${env[@]}"'
+    fields = subprocess.run(["bash", "-c", script], input=text, capture_output=True, text=True, check=True).stdout
+    cwd, stdin, setup, count, *rest = fields.split("\0")[:-1]
+    count = int(count)
+    env = dict(item.split("=", 1) for item in rest[count:])
+    return {"cwd": cwd, "stdin": stdin, "setup": setup, "command": rest[:count], "env": env}
+
+
 class Sandbox:
     def __init__(self):
         self.sandbox_id = "provider-sandbox-id"
         self.files = {}
+        self.snapshots = []
         self.result = {
             "return_code": 0,
             "timed_out": False,
@@ -122,8 +133,10 @@ class Sandbox:
         raise AssertionError("This provider supports exec only; no PTY API")
 
     async def run_exec(self, command, **kwargs):
-        if "--receipt" in command and "process_supervisor" in command:
+        if "--receipt" in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
+        if "opencode.db-wal" in command:
+            return SimpleNamespace(return_code=0, stdout="opencode.db\n", stderr="", error_type=None)
         if "stop.request" in command:
             await self.request_stop()
         return self.exec.return_value
@@ -132,15 +145,30 @@ class Sandbox:
         self.files[destination] = Path(source).read_text()
 
     async def download(self, source, destination):
+        if source.endswith("/opencode.db") and source not in self.files:
+            Path(destination).write_bytes(b"")
+            return
         Path(destination).write_text(self.files[source])
 
+    def params(self, directory=None):
+        """The PARAMS and prompt staged for the runner in ``directory`` (default: the last launch)."""
+        params = read_params(self.files[f"{directory or self.directory}/params.sh"])
+        params["prompt"] = self.files[params["stdin"]]
+        return params
+
+    def snapshot(self, database, directory, *, harness_session_id, previous_message_ids):
+        """Stand in for the SQLite export (see test_snapshot.py): the staged export, the copied database."""
+        self.snapshots.append({"harness_session_id": harness_session_id, "previous_message_ids": previous_message_ids})
+        (directory / "export.json").write_text(self.files[f"{self.directory}/export.json"])
+        if database.stat().st_size:  # an empty database stands for a failed observation copy
+            (directory / "observations.db").write_bytes(database.read_bytes())
+
     async def create(self, **kwargs):
-        payload_path = next(path for path in self.files if path.endswith("/input.json"))
-        payload = json.loads(self.files[payload_path])
-        assert payload["cwd"] == getattr(self, "expected_workdir", "/app")
+        runner_params = next(arg for arg in shlex.split(kwargs["command"]) if arg.endswith("/params.sh"))
+        self.directory = runner_params.removesuffix("/params.sh")
+        assert self.params()["cwd"] == getattr(self, "expected_workdir", "/app")
         assert kwargs["cwd"] == getattr(self, "expected_workdir", "/app")
-        assert "/sandbox_runner " in kwargs["command"] and "/bin/gym-runner" in kwargs["command"]
-        self.directory = payload["directory"]
+        assert "/harness_runner.sh " in kwargs["command"]
         self.started.set()
         if not self.blocked:
             self.exited.set()
@@ -196,6 +224,7 @@ def setup():
         patch(f"{module}.get_global_config_dict", return_value={}),
         patch(f"{module}.create_provider"),
         patch(f"{module}.AsyncSandbox.connect", AsyncMock(return_value=sandbox)),
+        patch("responses_api_agents.opencode_agent.sandbox.snapshot", sandbox.snapshot),
     ):
         agent = OpenCodeAgent(config=config, server_client=client)
         yield agent, sandbox
@@ -265,7 +294,7 @@ def capture_observations(sandbox, tmp_path):
     original = sandbox.download
 
     async def download(source, destination):
-        if source.endswith("/observations.db"):
+        if source.endswith("/opencode.db"):
             Path(destination).write_bytes(database.read_bytes())
         else:
             await original(source, destination)
@@ -294,7 +323,7 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
             "message",
         ]
         assert body["usage"]["total_tokens"] == 16
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = sandbox.params()
         assert payload["prompt"] == "Fix the code"
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
@@ -425,6 +454,50 @@ async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):
     assert invocation.conversation[-1].content[0].text == "Fixed"
 
 
+async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, tmp_path):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    export = json.loads(sandbox.events)
+    export["messages"][-1]["parts"].append(
+        {
+            "type": "tool",
+            "callID": "running-shell",
+            "tool": "bash",
+            "state": {"status": "running", "input": {"command": "sleep 60"}, "metadata": {"output": "started"}},
+        }
+    )
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+
+    async def stop_requested():
+        # The process supervisor reports a requested stop as a forced exit, not as a timeout.
+        sandbox.result["return_code"] = 241
+        sandbox.exited.set()
+        await asyncio.sleep(0)
+
+    sandbox.request_stop.side_effect = stop_requested
+    request, session_id, task = await activate(agent, sandbox)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    records = closed.agent_observations.records
+    agent_sandbox = next(record for record in records if record.kind == "sandbox")
+    assert (agent_sandbox.outcome, agent_sandbox.error_type, agent_sandbox.exit_code) == (
+        "cancelled",
+        "cancelled",
+        241,
+    )
+    tools = {record.tool_call_id: record for record in records if record.kind == "tool_call"}
+    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("cancelled", "invocation_cancelled")
+    assert tools["tool-1"].status != "cancelled"
+    invocation = next(record for record in records if record.kind == "agent_invocation")
+    assert {"type": "function_call_output", "call_id": "running-shell", "output": "started"}.items() <= next(
+        item.model_dump()
+        for item in invocation.conversation
+        if getattr(item, "call_id", None) == "running-shell" and item.type == "function_call_output"
+    ).items()
+
+
 async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
@@ -471,7 +544,7 @@ def test_instructions_and_text_parts_reach_opencode(setup):
             },
         )
         assert result.status_code == 200, result.text
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = sandbox.params()
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert sandbox.files[config["instructions"][0]] == "outer\n\nsystem"
         assert payload["prompt"] == "task"
@@ -1071,35 +1144,40 @@ async def test_adapter_workdir_overlap_is_rejected_before_connection(setup, work
     sandbox.exec.assert_not_awaited()
 
 
-async def test_resolved_workdir_check_runs_before_session_files_are_created(setup, tmp_path):
-    import shlex
-    import subprocess
-    import sys
-
-    agent, sandbox = setup
-    await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
-    command = shlex.split(sandbox.exec.await_args_list[0].args[0])
-    script = command[command.index("-I") + 2]
+@pytest.mark.parametrize(
+    ("workdir", "runtime", "overlaps"),
+    [
+        ("task", "runtime", True),  # a symlink to the session root
+        ("sessions/nested", "runtime", True),
+        ("repo", "link/runtime", True),  # a missing root resolved through a symlinked parent
+        ("repo", "runtime", False),
+        ("repo/../repo", "runtime", False),
+    ],
+)
+def test_resolved_workdir_check_runs_before_session_files_are_created(tmp_path, workdir, runtime, overlaps):
     sessions = tmp_path / "sessions"
-    sessions.mkdir()
-    workdir = tmp_path / "task"
-    workdir.symlink_to(sessions, target_is_directory=True)
-    rejected = subprocess.run(
-        [sys.executable, "-I", "-c", script, str(workdir), str(sessions), str(tmp_path / "runtime")],
-        capture_output=True,
-        text=True,
-    )
-    assert rejected.returncode != 0
-    assert "overlaps the task workdir" in rejected.stderr
-    ordinary = tmp_path / "repo"
-    ordinary.mkdir()
-    accepted = subprocess.run(
-        [sys.executable, "-I", "-c", script, str(ordinary), str(sessions), str(tmp_path / "runtime")],
-        capture_output=True,
-        text=True,
-    )
-    assert accepted.returncode == 0, accepted.stderr
-    assert list(sessions.iterdir()) == []
+    (sessions / "nested").mkdir(parents=True)
+    (tmp_path / "task").symlink_to(sessions, target_is_directory=True)
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "repo", target_is_directory=True)
+    session = sessions / "session"
+    command = _sandbox_prepare_command(str(tmp_path / workdir), str(session), str(tmp_path / runtime))
+    result = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True)
+    if overlaps:
+        assert result.returncode != 0
+        assert "overlaps the task workdir" in result.stderr
+        assert not session.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert session.is_dir()
+
+
+def test_missing_workdir_is_rejected(tmp_path):
+    command = _sandbox_prepare_command(str(tmp_path / "missing"), str(tmp_path / "s/session"), str(tmp_path / "r"))
+    result = subprocess.run(["/bin/sh", "-c", command], capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "OpenCode task workdir is missing" in result.stderr
+    assert not (tmp_path / "s").exists()
 
 
 def test_close_response_cookie_blocks_legacy_run(setup):
@@ -1429,11 +1507,11 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, tmp_path
         await agent.seed_agent_session(request, body)
         state = agent._session_records[body.agent_session_id].state
         directory = state.session.session_dir
-        assert f"{directory}/process_supervisor" not in sandbox.files
+        assert f"{directory}/process_supervisor.sh" not in sandbox.files
         sandbox.blocked = True
         task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
         await asyncio.wait_for(sandbox.started.wait(), 2)
-        assert f"{directory}/process_supervisor" in sandbox.files
+        assert f"{directory}/process_supervisor.sh" in sandbox.files
 
         async def release():
             assert state.session.cleanup["cleanup_confirmed"] is True
@@ -1737,7 +1815,6 @@ async def test_reported_native_error_is_bounded_without_losing_classification(se
 def test_explicit_native_model_and_runtime_paths_are_passed_to_the_harness(setup):
     agent, sandbox = setup
     agent.config.sandbox_model_id = "gpt-5.5"
-    agent.config.sandbox_python_executable = "/runtime/python/bin/python3"
     agent.config.sandbox_path_prefix = ["/runtime/bin"]
     agent.config.sandbox_executable_path = "/runtime/bin/opencode"
     agent.config.sandbox_executable_sha256 = "1" * 64
@@ -1745,9 +1822,10 @@ def test_explicit_native_model_and_runtime_paths_are_passed_to_the_harness(setup
         assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix code"})
         assert result.status_code == 200, result.text
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
-        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        params = sandbox.params()
+        config = json.loads(params["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["model"] == config["small_model"] == "nemo_gym/gpt-5.5"
         assert set(config["provider"]["nemo_gym"]["models"]) == {"gpt-5.5"}
         assert config["provider"]["nemo_gym"]["models"]["gpt-5.5"]["reasoning"] is True
-        assert payload["path_prefix"] == ["/runtime/bin"]
+        # The runner puts the preinstalled runtime first and keeps the image PATH after it.
+        assert params["setup"].endswith("PATH=/runtime/bin:$PATH\n")

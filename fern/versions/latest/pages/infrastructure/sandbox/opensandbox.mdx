@@ -198,6 +198,7 @@ Supported options are:
 | Option | Purpose |
 | --- | --- |
 | `image_auth` | Registry username and password passed to the OpenSandbox SDK for private image pulls. |
+| `network_policy` | The sandbox's egress policy, passed to the OpenSandbox SDK `NetworkPolicy` at create (see Network Policy). |
 | `platform` | Mapping passed to the OpenSandbox SDK `PlatformSpec`, such as `os` and `arch`. |
 | `snapshot_id` | OpenSandbox snapshot ID to create from instead of only an image. |
 | `volumes` | List of mappings passed to the OpenSandbox SDK `Volume` model. |
@@ -205,6 +206,28 @@ Supported options are:
 | `extensions` | String map passed to OpenSandbox create extensions. |
 
 Unknown provider option keys raise `ValueError`; values with the wrong type raise `TypeError`. This catches config drift before a sandbox allocation is attempted.
+
+## Network Policy
+
+`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.sandbox.agent_tools` builds one from endpoint URLs; the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
+
+```yaml
+sandbox_spec:
+  provider_options:
+    network_policy:
+      defaultAction: deny
+      egress:
+        - { action: allow, target: pypi.org }
+        - { action: allow, target: "*.nvidia.com" }
+```
+
+What the control plane does with it, verified live with the OpenSandbox 0.1.15 SDK against an OpenSandbox deployment (October 2026). The probes read neither the control plane's own version nor its egress enforcement mode, `dns` or `dns+nft`, which is a server setting (see [OpenSandbox Best Practices](/infrastructure/sandbox/opensandbox-best-practices)). Confirm that setting separately; a connection timeout alone does not identify the enforcement layer:
+
+- A sandbox created without a `network_policy` has no egress sidecar: it is unrestricted, and its policy can neither be read nor changed afterwards (the egress endpoints answer 502).
+- A sandbox created with a policy keeps its `defaultAction` for life. The SDK's `patch_egress_rules` and `delete_egress_rules` change the rules of a running sandbox and the change is enforced within seconds, but no call changes `defaultAction`, and `*` is not a catch-all target: a `deny *` rule under `defaultAction: allow` blocks nothing, and an `allow *` rule under `deny` opens nothing.
+- Under `defaultAction: deny`, name resolution failed and a connection to a raw IP timed out on the deployment probed. The probes did not establish which layer caused the timeout: `dns` filters name resolution only, so a hard-coded IP bypasses the policy and a `no-network` phase is weaker there, while `dns+nft` additionally enforces at the IP layer; confirm which mode your cluster runs before relying on it. An `allow` rule for a host name, a `*.domain` wildcard or an IP literal opened exactly that target.
+
+A public sandbox therefore cannot be switched to a restricted policy once it runs. A workload with a restricted phase creates that phase's sandbox restricted: the Harbor environment server applies a task's `[verifier].network_mode` to the separate verifier's own sandbox at creation (see the Harbor environment server README), which restricts that sandbox for its whole life, image entrypoint and artifact staging included, where Harbor restricts only the verify call itself; and a harness that needs a restricted agent sandbox passes the policy at create as the sandboxed agents do.
 
 ## Relevant SandboxSpec Fields
 
@@ -218,7 +241,7 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 | `metadata` | Passed to OpenSandbox create after provider-specific normalization. |
 | `resources` | Mapped to OpenSandbox resource quantities. |
 | `entrypoint` | Passed to OpenSandbox create when set. |
-| `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
+| `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `network_policy`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
 
 ## Resource Mapping
 
@@ -328,7 +351,7 @@ The neutral `user` argument to `exec()` maps onto OpenSandbox command options:
 | Integer uid | Pass the uid through the OpenSandbox command options. |
 | Other string | Wrap the command with `su -s /bin/sh -c ... <user>`. |
 
-Command failures return `SandboxExecResult` with the command's exit code. If OpenSandbox reports an execution error without an exit code, the provider returns code `125` with `error_type="sandbox"`.
+Command failures return `SandboxExecResult` with the command's exit code. If OpenSandbox reports an execution error without an exit code, the provider returns code `125` with `error_type="sandbox"`. execd kills a command that reaches its `timeout_s` and reports it only as a signal death (exit code `-1`, `signal: killed`), so the provider returns code `124` with `error_type="timeout"` when a command killed by a signal ran for its whole timeout. A command killed earlier, for example by the OOM killer, keeps exit code `-1`.
 
 The provider's `create.image_pull_policy` defaults to `IfNotPresent`. Valid values are `Always`, `IfNotPresent`, and `Never`. The resolved policy is written into OpenSandbox create extensions as both `imagePullPolicy` and `opensandbox.extensions.image-pull-policy` unless those keys are already present in `provider_options.extensions`.
 

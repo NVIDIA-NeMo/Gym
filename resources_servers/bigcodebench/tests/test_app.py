@@ -14,7 +14,7 @@ from app import (
 from code_extraction import preprocess_code_completion
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

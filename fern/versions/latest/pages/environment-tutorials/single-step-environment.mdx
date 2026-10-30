@@ -196,6 +196,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verifier_fixture import VerifierFixture
 
 
@@ -260,6 +261,9 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     MyWeatherToolResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MyWeatherToolResourcesServer.run_webserver()  # noqa: F401
 ```
 
 Most of this should look familiar from the generated file. The important pieces to keep are `REVERIFY_MODE`, the separate `MyWeatherToolVerifier` mixin, and `VERIFIER_FIXTURE`. Together, they keep scoring independent of the web server and connect it to the generated test cases.

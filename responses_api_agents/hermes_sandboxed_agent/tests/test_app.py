@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import shlex
 import shutil
 import sys
@@ -12,10 +13,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.agent_utils.process_supervisor import DEFAULT_CLEANUP_TIMEOUT
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agent_utils.supervisor_client import DEFAULT_CLEANUP_TIMEOUT
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from responses_api_agents.hermes_sandboxed_agent import app
 from responses_api_agents.hermes_sandboxed_agent.app import (
     MAX_OUTPUT_BYTES,
     HermesSandboxedAgent,
@@ -42,6 +45,21 @@ def agent(tmp_path):
         ),
         server_client=MagicMock(spec=ServerClient),
     )
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_only_the_main_process_logs_the_deprecation_once(agent, caplog, monkeypatch, worker):
+    """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+    app._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            HermesSandboxedAgent(config=agent.config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == app.__name__]
+    assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
+    for phrase in ("hermes_sandboxed_agent", "legacy /run", "Use hermes_agent", "hermes_agent/README.md"):
+        assert phrase in app.DEPRECATION_WARNING
 
 
 def test_input_preserves_system_and_history():
@@ -231,10 +249,10 @@ async def test_runner_request_has_no_gold_and_runs_outside_repo(agent, monkeypat
     assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
         "request.json",
         "runner.py",
-        "process_supervisor.py",
+        "process_supervisor.sh",
     }
     command_args = shlex.split(command)
-    assert any(arg.endswith("/process_supervisor.py") for arg in command_args)
+    assert any(arg.endswith("/process_supervisor.sh") for arg in command_args)
     assert float(command_args[command_args.index("--timeout") + 1]) == agent.config.sandbox_timeout
     assert launch.kwargs["timeout_s"] > agent.config.sandbox_timeout + 3 * DEFAULT_CLEANUP_TIMEOUT
     assert launch.kwargs["cwd"].startswith("/tmp/nemo-hermes-")

@@ -64,7 +64,7 @@ Refer to the [`gym eval` CLI reference](/main/reference/cli-commands#gym-eval-he
 Health checks read each rollout record and its standard `ng_trajectory` attachment. `ng_trajectory` combines the agent turns,
 model-call evidence, explicit model-call references, and observation gaps produced during collection. Refer to the
 [rollout-evidence guide](/main/observability/rollout-evidence) for the complete source and projection model, the
-[trajectory capability matrix](/main/reference/trajectory-capabilities) for measured harness conformance and
+[harness conformance results](/main/observability/harness-conformance#results) for measured harness conformance and
 [model-call capture](/main/model-server/model-call-capture) for collection configuration.
 
 The integrity checks do not reopen raw model-call capture files, inspect `ng_model_call_capture`, or reconstruct turns from an
@@ -227,6 +227,7 @@ This abridged example omits the other check-coverage entries and zero-valued iss
 {
   "run": {
     "ignored_checks": [],
+    "rollouts": ["rollouts.jsonl"],
     "artifacts": {
       "records": 100,
       "captures": 98,
@@ -281,6 +282,10 @@ This abridged example omits the other check-coverage entries and zero-valued iss
 
 `run.issues` counts individual findings, not distinct affected rollouts or tasks. It contains every registered check ID, including
 IDs whose count is zero. `run.artifacts.coverage` reports how often each check was evaluated, unobserved, or explicitly ignored.
+
+`run.rollouts` names the rollout file(s) the report was computed from, relative to the report's own folder (the shards, for a
+file `gym eval aggregate` merged). The two reports keep one name per folder whatever the rollout file is called, so this says
+whose they are when several runs write to one folder; the Harbor run summary links a report only when it names that run's file.
 
 `run.artifacts.captures` counts rollout trajectories that contain model-call evidence; the integrity checks do not count or
 reopen raw capture files. Raw statistics under `run.stats` describe all model calls stored in `ng_trajectory`, including

@@ -150,7 +150,7 @@ def _make_server(**kwargs):
 def test_local_model_benchmark_resolves_without_backend_url(monkeypatch):
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
     name = "Qwen3-30B-A3B-Instruct-2507-ngram-specdec"
