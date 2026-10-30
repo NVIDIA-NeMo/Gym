@@ -20,9 +20,9 @@ from nemo_gym.base_environment_server import (
     BaseEnvironmentServerConfig,
     CleanupContext,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 

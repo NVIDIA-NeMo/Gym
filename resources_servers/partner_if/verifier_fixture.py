@@ -4,7 +4,7 @@
 
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 def create_fixture_server(server_class: type, config_class: type, **config: object):

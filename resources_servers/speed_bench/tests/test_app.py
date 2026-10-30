@@ -40,7 +40,7 @@ from app import (
     _weighted_delta_average,
 )
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -16,12 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.atif_export import ExportAtifConfig
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.exporters import load_run_exporter_class
 from nemo_gym.exporters.atif import AtifExporter
 from nemo_gym.exporters.base import ExportResult, ExportState
 from nemo_gym.run_artifacts import RunArtifacts
+from nemo_gym.trajectory.atif_export import ExportAtifConfig
 
 
 def test_export_result_constructors() -> None:
