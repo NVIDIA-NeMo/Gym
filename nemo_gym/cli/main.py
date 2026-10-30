@@ -708,10 +708,12 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             ):
                 args._parser.error(
                     "--score-key must be a JSON list of object keys and non-negative array indices, "
-                    'e.g. \'[0, "agent_metrics", "mean/reward"]\''
+                    'e.g. \'["agent_metrics", "mean/reward"]\''
                 )
         if (
             score_key is not None
+            or getattr(args, "score_agent", None) is not None
+            or getattr(args, "score_environment", None) is not None
             or getattr(args, "max_unhealthy_fraction", None) is not None
             or getattr(args, "mlflow_status", None) is not None
             or getattr(args, "mlflow_run_id", None) is not None
@@ -722,6 +724,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 args.gym_job_id,
                 args.benchmark,
                 score_key=score_key,
+                score_agent=getattr(args, "score_agent", None),
+                score_environment=getattr(args, "score_environment", None),
                 max_unhealthy_fraction=getattr(args, "max_unhealthy_fraction", None),
                 mlflow_status=getattr(args, "mlflow_status", None),
                 mlflow_run_id=getattr(args, "mlflow_run_id", None),
@@ -1690,8 +1694,22 @@ COMMANDS = {
                 register=lambda p: p.add_argument(
                     "--score-key",
                     metavar="JSON",
-                    help="With --recover: the canonical metric's path in rollouts_aggregate_metrics.json, as a JSON list.",
+                    help="With --recover: the metric path within the selected aggregate entry, as a JSON list; lists require an identity selector.",
                 ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--score-agent",
+                    metavar="NAME",
+                    help="With --recover: select exactly one aggregate entry by agent_ref.name.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--score-environment",
+                    metavar="NAME",
+                    help="With --recover: select by _ng_environment_server; combine with --score-agent if needed.",
+                )
             ),
             Flag(
                 register=lambda p: p.add_argument(

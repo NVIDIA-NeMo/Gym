@@ -15,6 +15,7 @@
 
 import getpass
 import json
+import math
 import os
 import re
 import shlex
@@ -61,6 +62,7 @@ from nemo_gym.orchestration.recovery import (
     CollectedEvidence,
     RecoveryAction,
     RecoveryDecision,
+    accounted_chain_walltime,
     decide_from_collected,
 )
 
@@ -245,7 +247,13 @@ class SlurmExecutor(BaseExecutor):
         return record
 
     def recovery_evidence(
-        self, record: SubmissionRecord, benchmark: str, *, score_key: list[str | int] | None = None
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        score_key: list[str | int] | None = None,
+        score_agent: str | None = None,
+        score_environment: str | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH."""
         job_dir = Path(record.benchmark_job(benchmark).job_dir)
@@ -262,11 +270,28 @@ class SlurmExecutor(BaseExecutor):
                     evidence=[],
                 )
                 return stop, None
-            args = [shlex.quote(str(job_dir))] + ([shlex.quote(json.dumps(score_key))] if score_key else [])
+            selector = {k: v for k, v in (("agent", score_agent), ("environment", score_environment)) if v is not None}
+            args = [shlex.quote(str(job_dir))]
+            if score_key:
+                args += [shlex.quote(json.dumps(score_key)), shlex.quote(json.dumps(selector))]
             collected = CollectedEvidence.model_validate_json(
                 conn.run([f"python3 -c {shlex.quote(COLLECT_SCRIPT)} {' '.join(args)}"])
             )
             workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
+            if resume.max_walltime is not None and collected.job_chain and str(job_dir) not in workdirs:
+                try:
+                    chain = ",".join(collected.job_chain)
+                    accounting = conn.run(
+                        [f"sacct -n -P -X -j {shlex.quote(chain)} --format=JobIDRaw,State,ElapsedRaw"]
+                    )
+                    collected.accounted_walltime_s = accounted_chain_walltime(
+                        collected.job_chain,
+                        accounting,
+                        stored_walltime_s=collected.walltime_used_s or 0,
+                    )
+                except (RuntimeError, OSError, ValueError):
+                    # Unavailable accounting cannot grant fresh walltime.
+                    collected.accounted_walltime_s = None
         decision = decide_from_collected(
             collected,
             max_infra_retries=resume.max_retries,
@@ -279,7 +304,14 @@ class SlurmExecutor(BaseExecutor):
         """The decision of ``recovery_evidence`` without a score key."""
         return self.recovery_evidence(record, benchmark)[0]
 
-    def resubmit(self, record: SubmissionRecord, benchmark: str, *, keep_budget: bool = False) -> BenchmarkJob:
+    def resubmit(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        keep_budget: bool = False,
+        accounted_walltime_s: float | None = None,
+    ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
         With ``keep_budget`` (``--recover``) the job keeps the spent retry count, walltime and per-rollout attempts;
@@ -303,6 +335,25 @@ class SlurmExecutor(BaseExecutor):
                 collector_update = [
                     f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
                 ]
+            budget_update = []
+            if keep_budget and accounted_walltime_s is not None:
+                # This is terminal accounting of the complete recorded chain, not a new allowance.
+                if not math.isfinite(accounted_walltime_s) or accounted_walltime_s < 0:
+                    raise ValueError("accounted walltime must be finite and non-negative")
+                resume = config.driver.benchmarks[benchmark].resume_config
+                cap = _walltime_to_seconds(resume.max_walltime) if resume and resume.max_walltime else None
+                update = (
+                    "import math, os\nfrom pathlib import Path\n"
+                    "p=Path('.gym_accumulated_walltime')\n"
+                    "old=float(p.read_text()) if p.exists() else 0\n"
+                    "if not math.isfinite(old) or old < 0: raise ValueError('malformed walltime counter')\n"
+                    f"total=max(old, {accounted_walltime_s!r})\n"
+                    f"cap={cap!r}\n"
+                    "if cap is not None and total >= cap: raise ValueError('walltime budget exhausted')\n"
+                    "p.with_suffix('.tmp').write_text(str(int(total) if total.is_integer() else total)+'\\n')\n"
+                    "os.replace(p.with_suffix('.tmp'), p)\n"
+                )
+                budget_update = [f"python3 -c {shlex.quote(update)} || fail 'cannot preserve accounted walltime'"]
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
             # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
             results = _parse_sbatch_results(
@@ -346,6 +397,7 @@ class SlurmExecutor(BaseExecutor):
                             if keep_budget
                             else []
                         ),
+                        *budget_update,
                         f"export {RESUBMIT_ENV}=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
                     ]

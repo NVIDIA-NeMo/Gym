@@ -167,7 +167,7 @@ class FakeExecutor:
     live = False
     supports_reverify = True
 
-    def recovery_evidence(self, record, benchmark, *, score_key=None):
+    def recovery_evidence(self, record, benchmark, *, score_key=None, score_agent=None, score_environment=None):
         FakeExecutor.calls.append("decide")
         out = subprocess.run(
             [
@@ -175,7 +175,20 @@ class FakeExecutor:
                 "-c",
                 COLLECT_SCRIPT,
                 str(FakeExecutor.job_dir),
-                *([json.dumps(score_key)] if score_key else []),
+                *(
+                    [
+                        json.dumps(score_key),
+                        json.dumps(
+                            {
+                                k: v
+                                for k, v in (("agent", score_agent), ("environment", score_environment))
+                                if v is not None
+                            }
+                        ),
+                    ]
+                    if score_key
+                    else []
+                ),
             ],
             capture_output=True,
             text=True,
@@ -193,7 +206,7 @@ class FakeExecutor:
         FakeExecutor.calls.append("reverify")
         return RecoveryOutcome(decision=decision, ok=True, dispatched="reverify")
 
-    def resubmit(self, record, benchmark, *, keep_budget=False):
+    def resubmit(self, record, benchmark, *, keep_budget=False, accounted_walltime_s=None):
         FakeExecutor.calls.append("resubmit" if keep_budget else "resubmit-resetting-budget")
         return type("Job", (), {"job_id": "4242"})()
 
@@ -275,11 +288,11 @@ def test_counts_as_zero_without_terminal_model_ownership_is_not_final(tmp_path, 
     assert not out.ok and out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
 
 
-@pytest.mark.parametrize("kind", ["provider_unavailable", "model_transport_error", None])
+@pytest.mark.parametrize("kind", ["model_context_limit", "model_transport_error", "policy_model_response_timeout"])
 def test_a_terminal_counts_as_zero_row_is_settled_as_rollout_collection_settles_it(
     tmp_path, fake_executor, kind
 ) -> None:
-    # The producer's flag and finality decide, as in _final_zero_failure_rows; no label list overrides them.
+    # Explicit finality and model ownership are both required; the companion negative controls reject other owners.
     row = ident(1, _ng_failure_counts_as_zero=True, _ng_failure_terminal=True, failure_kind=kind)
     fake_executor.job_dir = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[row])
     out = submit.recover("gym-job-c3", "bench")
@@ -295,7 +308,7 @@ def test_recover_queues_missing_and_retryable_work_once_through_the_existing_res
     assert fake_executor.calls == ["decide", "resubmit"]
 
 
-def test_recover_with_judge_failures_and_missing_work_queues_the_resume_and_leaves_rejudgment_to_it(
+def test_recover_with_judge_failures_and_missing_work_stops_until_saved_answer_recovery_is_supported(
     tmp_path, fake_executor
 ) -> None:
     fake_executor.job_dir = write_job_dir(
@@ -306,7 +319,7 @@ def test_recover_with_judge_failures_and_missing_work_queues_the_resume_and_leav
         retries=0,
     )
     out = submit.recover("gym-job-d2", "bench")
-    assert out.dispatched == "resubmit" and fake_executor.calls == ["decide", "resubmit"]
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
     assert out.decision.identities["judge_recoverable"] == [(1, 0)] and out.decision.identities["missing"] == [(2, 0)]
 
 
@@ -344,7 +357,7 @@ def test_gate_summary_never_equates_scored_with_expected_by_dropping_failures(tm
     )
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
     t = gate_task_summary(d, score=0.25, fe_valid=True, fe_reasons=[], health_passed=True, health_reasons=[])
-    assert (t["expected_samples"], t["scored_samples"], t["status"]) == (4, 1, "RESUMING")
+    assert (t["expected_samples"], t["scored_samples"], t["status"]) == (4, 1, "FAILED")
     assert any("judge failures" in e for e in t["errors"]) and any("no row" in e for e in t["errors"])
 
 
@@ -367,6 +380,7 @@ def test_gate_summary_complete_run_succeeds_and_keeps_model_zeros_as_warnings(tm
 
 def write_quality(job: Path, *, expected, healthy, verdicts, partial=False, reasons=()) -> None:
     run = {
+        "rollouts": ["rollouts.jsonl"],
         "artifacts": {
             "expected": expected,
             "missing": 0,
@@ -549,6 +563,7 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
         json.dumps(
             {
                 "run": {
+                    "rollouts": ["rollouts.jsonl"],
                     "artifacts": {
                         "expected": 2,
                         "missing": 0,
@@ -668,6 +683,7 @@ def mlflow_job(tmp_path: Path, *, mode: str) -> Path:
         json.dumps(
             {
                 "run": {
+                    "rollouts": ["rollouts.jsonl"],
                     "artifacts": {
                         "expected": 1,
                         "missing": 0,
@@ -787,8 +803,8 @@ def test_cli_passes_the_observed_mlflow_status(tmp_path, fake_executor, capsys) 
         ({}, ["11", "12"], False, RecoveryAction.RESUBMIT),
         ({}, ["11", "12"], True, RecoveryAction.STOP),
         ({".gym_accumulated_walltime": "x"}, ["11", "12"], True, RecoveryAction.STOP),
-        ({}, ["11"], True, RecoveryAction.RESUBMIT),
-        ({".gym_accumulated_walltime": "3600"}, ["11", "12"], True, RecoveryAction.RESUBMIT),
+        ({}, ["11"], True, RecoveryAction.STOP),
+        ({".gym_accumulated_walltime": "3600"}, ["11", "12"], True, RecoveryAction.STOP),
     ],
 )
 def test_a_lost_or_malformed_budget_counter_stops_and_is_never_reset(tmp_path, files, chain, capped, action) -> None:
@@ -893,7 +909,12 @@ def unrouted(task: int) -> dict:
 
 
 def interrupted(task: int) -> dict:
-    return {"_ng_task_index": task, "_ng_rollout_index": 0, "_ng_omitted_rollout": True}
+    return {
+        "_ng_task_index": task,
+        "_ng_rollout_index": 0,
+        "_ng_omitted_rollout": True,
+        "_ng_failure_class": "kill_shaped",
+    }
 
 
 def test_sidecar_judge_failure_is_reverified_never_resubmitted(tmp_path, fake_executor) -> None:
@@ -979,9 +1000,8 @@ def test_absent_mlflow_evidence_never_passes(tmp_path) -> None:
     )
 
 
-def test_an_interrupted_row_with_failure_events_restarts_like_rollout_collection(tmp_path, fake_executor) -> None:
-    # Rollout collection (_latest_failure_rows, _load_from_cache) treats any latest interrupted row as missing and
-    # runs the input again, whatever events it carries; recovery selects the same input.
+def test_an_omitted_agent_error_without_interruption_class_stops(tmp_path, fake_executor) -> None:
+    # An omitted adapter outcome is not an interruption merely because it carries the omission flag.
     row = interrupted(1) | {
         "_ng_failure_class": "agent_run_error",
         "_ng_failure_id": "f",
@@ -991,8 +1011,8 @@ def test_an_interrupted_row_with_failure_events_restarts_like_rollout_collection
         tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[row], retries=0
     )
     out = submit.recover("gym-job-z", "bench")
-    assert out.decision.identities["missing"] == [(1, 0)] and "unknown" not in out.decision.identities
-    assert fake_executor.calls == ["decide", "resubmit"]
+    assert out.decision.identities["unknown"] == [(1, 0)] and "missing" not in out.decision.identities
+    assert out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
 
 
 def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path) -> None:
@@ -1342,7 +1362,7 @@ def aggregate_list_job(tmp_path: Path) -> Path:
 @pytest.mark.parametrize(
     ("score_key", "score"),
     [
-        ('[0, "agent_metrics", "mean/reward"]', 0.75),
+        ('[0, "agent_metrics", "mean/reward"]', None),
         ('[1, "agent_metrics", "mean/reward"]', None),
         ('["0", "agent_metrics", "mean/reward"]', None),
         ('[0, "agent_metrics", 0]', None),
@@ -1410,3 +1430,265 @@ def test_a_receipt_without_an_uploaded_rollouts_record_is_not_delivery(scope, me
     receipt = {"run_id": "postrun-run", "current": True, "uploaded_rollouts": scope}
     errors = mlflow_errors({"live_run_id": None, "receipt": receipt}, "FINISHED", observed_run_id="postrun-run")
     assert len(errors) == 1 and message in errors[0]
+
+
+# These controls execute the published collector and dispatch boundary on synthetic saved directories.
+def test_review_mixed_judge_sidecar_never_replays_the_answer(tmp_path, fake_executor):
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job",
+        n=2,
+        results=[],
+        failures=[ident(0, _ng_failure_class="judge_failed", failure_kind="judge_failed")],
+    )
+    out = submit.recover("review", "bench")
+    assert out.decision.action == RecoveryAction.STOP
+    assert fake_executor.calls == ["decide"]
+    assert out.decision.identities["judge_recoverable"] == [(0, 0)]
+
+
+def test_review_absent_results_stops_with_inventory_and_final_zero_preserved(tmp_path):
+    job = write_job_dir(
+        tmp_path / "job",
+        n=2,
+        results=[],
+        failures=[
+            ident(0, failure_kind="model_context_limit", _ng_failure_terminal=True, _ng_failure_counts_as_zero=True)
+        ],
+    )
+    (job / "artifacts" / "rollouts.jsonl").unlink()
+    out = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert out.action == RecoveryAction.STOP and out.expected == 2
+    assert out.identities["model_final"] == [(0, 0)]
+
+
+@pytest.mark.parametrize("stored", [None, 10])
+def test_review_last_allocation_walltime_cannot_be_assumed_accounted(tmp_path, stored):
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[], chain=["101"], walltime=stored)
+    out = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=100, live_job=False)
+    assert out.action == RecoveryAction.STOP
+
+
+@pytest.mark.parametrize("name", ["rollouts.jsonl", "rollouts_failures.jsonl"])
+@pytest.mark.parametrize("tail", [b'{"_ng_task_index":', b'{"x":"\xe2\x82'])
+def test_review_truncated_last_row_is_read_only(tmp_path, name, tail):
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=0.0)], failures=[ident(1, **INFRA)])
+    path = job / "artifacts" / name
+    path.write_bytes(path.read_bytes() + tail)
+    before = path.read_bytes()
+    got = collect(job)
+    assert got.results == [ident(0, reward=0.0)]
+    assert len(got.failures) == 1
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", [None, "unregistered", "provider_unavailable"])
+def test_review_unknown_or_provider_zero_is_not_model_final(tmp_path, kind):
+    job = write_job_dir(
+        tmp_path / "job",
+        n=1,
+        results=[],
+        failures=[ident(0, failure_kind=kind, _ng_failure_terminal=True, _ng_failure_counts_as_zero=True)],
+    )
+    out = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert out.action == RecoveryAction.STOP and out.identities.get("model_final") is None
+
+
+def test_review_unsupported_omitted_sidecar_is_not_missing_or_zero(tmp_path):
+    job = write_job_dir(
+        tmp_path / "job",
+        n=1,
+        results=[],
+        failures=[
+            ident(
+                0,
+                failure_kind="model_context_limit",
+                _ng_omitted_rollout=True,
+                _ng_failure_terminal=True,
+                _ng_failure_counts_as_zero=True,
+            )
+        ],
+    )
+    out = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert out.action == RecoveryAction.STOP and out.identities == {"unknown": [(0, 0)]}
+
+
+@pytest.mark.parametrize("fraction", [float("nan"), float("inf"), True, -0.1, 1.1])
+def test_review_invalid_criterion_cannot_dispatch(tmp_path, fake_executor, fraction):
+    fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=[], failures=[])
+    with pytest.raises(ValueError, match="criterion"):
+        submit.recover("review", "bench", max_unhealthy_fraction=fraction)
+    assert fake_executor.calls == []
+
+
+def test_review_boolean_expected_count_is_not_one(tmp_path):
+    from nemo_gym.orchestration.recovery import quality_inputs
+
+    job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
+    write_quality(job, expected=True, healthy=True, verdicts={"healthy": 1, "unhealthy": 0, "unobserved": 0})
+    got = collect(job)
+    decision = decide_from_collected(got, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert quality_inputs(decision, got, max_unhealthy_fraction=0.02)[0] is not True
+
+
+def test_review_unsupported_reverify_reports_failed_not_resuming(tmp_path, fake_executor):
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=1, results=[ident(0, _ng_failure_class="judge_failed")], failures=[]
+    )
+    fake_executor.supports_reverify = False
+    out = submit.recover("review", "bench")
+    assert out.dispatched is None and out.gate_task["status"] == "FAILED"
+
+
+@pytest.mark.parametrize("sources", [["other.jsonl"], ["rollouts.jsonl", "other.jsonl"], None])
+def test_review_quality_from_another_rollout_is_not_accepted(tmp_path, sources):
+    from nemo_gym.orchestration.recovery import quality_inputs
+
+    job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
+    write_quality(job, expected=1, healthy=True, verdicts={"healthy": 1, "unhealthy": 0, "unobserved": 0})
+    path = job / "artifacts" / "quality_summary.json"
+    payload = json.loads(path.read_text())
+    payload["run"]["rollouts"] = sources
+    path.write_text(json.dumps(payload))
+    got = collect(job)
+    decision = decide_from_collected(got, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    fe, _, health, _ = quality_inputs(decision, got, max_unhealthy_fraction=0.02)
+    assert fe is not True and health is not True
+
+
+@pytest.mark.parametrize("order", [False, True])
+@pytest.mark.parametrize(
+    "selectors,expected",
+    [
+        (["--score-agent", "first"], 0.0),
+        (["--score-environment", "env-b"], 0.75),
+        (["--score-agent", "first", "--score-environment", "env-a"], 0.0),
+        (["--score-agent", "absent"], None),
+    ],
+)
+def test_review_cli_selects_stable_aggregate_identity(tmp_path, fake_executor, capsys, order, selectors, expected):
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=0.0), ident(1, reward=1.0)], failures=[]
+    )
+    rows = [
+        {"agent_ref": {"name": "first"}, "_ng_environment_server": "env-a", "agent_metrics": {"mean/reward": 0.0}},
+        {"agent_ref": {"name": "second"}, "_ng_environment_server": "env-b", "agent_metrics": {"mean/reward": 0.75}},
+    ]
+    path = fake_executor.job_dir / "artifacts" / "rollouts_aggregate_metrics.json"
+    path.write_text(json.dumps(list(reversed(rows)) if order else rows))
+    before = path.read_bytes()
+    code, out = run_cli(
+        [
+            "eval",
+            "resubmit",
+            "review",
+            "bench",
+            "--recover",
+            *selectors,
+            "--score-key",
+            '["agent_metrics", "mean/reward"]',
+        ],
+        capsys,
+    )
+    assert code == 0 and out["gate_task"]["score"] == expected
+    assert out["dispatched"] is None and fake_executor.calls == ["decide"]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("metric", [None, True, float("nan"), float("inf")])
+def test_review_identity_does_not_make_invalid_metrics_valid(tmp_path, fake_executor, metric):
+    fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=0.0)], failures=[])
+    (fake_executor.job_dir / "artifacts" / "rollouts_aggregate_metrics.json").write_text(
+        json.dumps([{"agent_ref": {"name": "a"}, "agent_metrics": {"mean/reward": metric}}])
+    )
+    out = submit.recover("review", "bench", score_agent="a", score_key=["agent_metrics", "mean/reward"])
+    assert out.gate_task["score"] is None and out.dispatched is None
+
+
+def test_review_duplicate_agent_needs_environment_and_duplicate_pair_rejects(tmp_path, fake_executor):
+    fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=0.0)], failures=[])
+    path = fake_executor.job_dir / "artifacts" / "rollouts_aggregate_metrics.json"
+    rows = [
+        {"agent_ref": {"name": "a"}, "_ng_environment_server": env, "agent_metrics": {"mean/reward": score}}
+        for env, score in (("x", 0.0), ("y", 1.0))
+    ]
+    path.write_text(json.dumps(rows))
+    kwargs = {"score_agent": "a", "score_key": ["agent_metrics", "mean/reward"]}
+    assert submit.recover("review", "bench", **kwargs).gate_task["score"] is None
+    assert submit.recover("review", "bench", score_environment="x", **kwargs).gate_task["score"] == 0.0
+    path.write_text(json.dumps(rows + [rows[0]]))
+    assert submit.recover("review", "bench", score_environment="x", **kwargs).gate_task["score"] is None
+
+
+@pytest.mark.parametrize(
+    "accounting,expected",
+    [
+        ("101|COMPLETED|10\n102|FAILED|20\n", 30.0),
+        ("101|CANCELLED by 12|10\n102|TIMEOUT|20\n", 30.0),
+        ("101|COMPLETED|10\n", None),
+        ("101|COMPLETED|10\n102|RUNNING|20\n", None),
+        ("101|COMPLETED|10\n102|FAILED|-1\n", None),
+        ("101|COMPLETED|10\n101|FAILED|20\n", None),
+        ("101|COMPLETED|10\n103|FAILED|20\n", None),
+        ("101||10\n102|FAILED|20\n", None),
+        ("", None),
+    ],
+)
+def test_review_walltime_requires_all_terminal_allocations(accounting, expected):
+    from nemo_gym.orchestration.recovery import accounted_chain_walltime
+
+    assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=10) == expected
+
+
+@pytest.mark.parametrize("elapsed,action", [(99, "resubmit"), (100, "stop"), (101, "stop")])
+def test_review_verified_last_allocation_debits_the_same_cap(tmp_path, elapsed, action):
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[], chain=["101"], walltime=10)
+    got = collect(job).model_copy(update={"accounted_walltime_s": elapsed})
+    before = (job / ".gym_accumulated_walltime").read_bytes()
+    out = decide_from_collected(got, max_infra_retries=3, max_walltime_s=100, live_job=False)
+    assert out.action == action and (job / ".gym_accumulated_walltime").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "name,contents",
+    [
+        ("rollouts.jsonl", b'{"broken":\n'),
+        ("rollouts.jsonl", b'{"broken":\n{"_ng_task_index":0,"_ng_rollout_index":0,"reward":1}\n'),
+        ("rollouts_materialized_inputs.jsonl", b'{"broken":'),
+    ],
+)
+def test_review_corruption_outside_an_unterminated_result_tail_is_rejected(tmp_path, name, contents):
+    job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
+    path = job / "artifacts" / name
+    path.write_bytes(contents)
+    with pytest.raises(subprocess.CalledProcessError):
+        collect(job)
+    assert path.read_bytes() == contents
+
+
+def test_review_valid_unterminated_row_is_retained(tmp_path):
+    job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=0.0)], failures=[])
+    path = job / "artifacts" / "rollouts.jsonl"
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))
+    assert collect(job).results == [ident(0, reward=0.0)]
+
+
+@pytest.mark.parametrize("boundary", ["judge", "provider", "infrastructure"])
+def test_review_contradictory_zero_cause_never_settles_model_failure(tmp_path, boundary):
+    row = ident(
+        0,
+        failure_kind="model_transport_error",
+        _ng_failure_terminal=True,
+        _ng_failure_counts_as_zero=True,
+        _ng_failure_events={"cause": {"boundary": boundary}},
+    )
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row])
+    out = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert out.action == "stop" and "model_final" not in out.identities
+
+
+def test_review_an_ambiguous_manual_reset_epoch_stays_unknown():
+    from nemo_gym.orchestration.recovery import accounted_chain_walltime
+
+    accounting = "101|COMPLETED|10\n102|FAILED|20\n"
+    assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=0) is None
+    assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=30) == 30

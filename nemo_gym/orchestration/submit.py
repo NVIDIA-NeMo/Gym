@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 from nemo_gym.decorators import experimental
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
@@ -66,6 +68,8 @@ def recover(
     benchmark: str,
     *,
     score_key: list[str | int] | None = None,
+    score_agent: str | None = None,
+    score_environment: str | None = None,
     max_unhealthy_fraction: float | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
@@ -80,12 +84,30 @@ def recover(
     health is judged against ``max_unhealthy_fraction`` and reported in its warnings, ModelOpt response/trial health
     stays unknown, and MLflow delivery is checked by ``mlflow_errors``. Plain ``resubmit`` is unchanged.
     """
+    if max_unhealthy_fraction is not None and (
+        isinstance(max_unhealthy_fraction, bool)
+        or not isinstance(max_unhealthy_fraction, (int, float))
+        or not math.isfinite(max_unhealthy_fraction)
+        or not 0 < max_unhealthy_fraction <= 1
+    ):
+        raise ValueError("invalid response-health criterion: expected a finite number in (0, 1]")
+    for selector in (score_agent, score_environment):
+        if selector is not None and (not isinstance(selector, str) or not selector):
+            raise ValueError("score identity selectors must be nonempty strings")
+    if (score_agent is not None or score_environment is not None) and not score_key:
+        raise ValueError("score identity selectors require a metric path")
     record = load_submission_record(gym_job_id)
     executor_cls = _EXECUTORS_BY_NAME.get(record.executor)
     if executor_cls is None:
         raise ValueError(f"Submission {gym_job_id} was made by unknown executor {record.executor!r}.")
     executor = executor_cls()
-    decision, collected = executor.recovery_evidence(record, benchmark, score_key=score_key)
+    decision, collected = executor.recovery_evidence(
+        record,
+        benchmark,
+        score_key=score_key,
+        score_agent=score_agent,
+        score_environment=score_environment,
+    )
     gate_task = (
         gate_summary_from_collected(
             decision,
@@ -113,9 +135,20 @@ def recover(
         return RecoveryOutcome(decision=decision, ok=True, dispatched=None, gate_task=gate_task, mlflow=mlflow)
     if decision.action == RecoveryAction.REVERIFY:
         outcome = executor.reverify_judge_failures(record, benchmark, decision)
+        if not outcome.ok or outcome.dispatched is None:
+            gate_task = {
+                **gate_task,
+                "status": "FAILED",
+                "errors": [*gate_task["errors"], outcome.unsupported or "saved-answer rejudgment was not dispatched"],
+            }
         return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow})
     if decision.action == RecoveryAction.RESUBMIT:
-        job = executor.resubmit(record, benchmark, keep_budget=True)
+        job = executor.resubmit(
+            record,
+            benchmark,
+            keep_budget=True,
+            accounted_walltime_s=collected.accounted_walltime_s if collected is not None else None,
+        )
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow
         )

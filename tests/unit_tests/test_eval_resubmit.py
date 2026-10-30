@@ -119,7 +119,9 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (bin_dir / "sbatch").write_text(
         '#!/bin/bash\necho "$PWD" > "$(dirname "$0")/cwd"\nenv > "$(dirname "$0")/env"\necho 4242\n'
     )
-    for stub in ("squeue", "sbatch"):
+    (bin_dir / "sacct").write_text('#!/bin/bash\ncat "$(dirname "$0")/accounting"\n')
+    (bin_dir / "accounting").write_text("100|FAILED|7200\n101|FAILED|60\n")
+    for stub in ("squeue", "sbatch", "sacct"):
         (bin_dir / stub).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
@@ -792,7 +794,7 @@ def test_recover_resubmit_keeps_the_spent_retries_walltime_and_attempts(tmp_path
     assert out.dispatched == "resubmit" and out.job_id == "4242"
     args = _start_queued_job(script, resume, job_dir, slurm_bin)
     assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
-    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7200\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
     # It resumes without `++resubmit=True`, which would start a fresh per-rollout attempt budget.
     assert args[-1] == "++resume_from_cache=True" and "++resubmit=True" not in args
     # The follow-up the prologue queues is an ordinary hop.
@@ -892,3 +894,44 @@ def test_recover_queues_a_mixed_run_and_the_resume_runs_only_the_eligible_identi
     assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
     assert out.decision.identities["missing"] == [(2, 0)] and out.decision.identities["exhausted"] == [(1, 0)]
     assert _core_pending(job_dir, monkeypatch, cap=2) == [(2, 0)]
+
+
+@pytest.mark.parametrize(
+    "accounting",
+    [
+        "",
+        "100|FAILED|7200\n",
+        "100|FAILED|7200\n101|RUNNING|60\n",
+        "100|FAILED|7200\n101|FAILED|50400\n",
+    ],
+)
+def test_recovery_never_queues_unaccounted_or_exhausted_chain(tmp_path, slurm_bin, accounting):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (slurm_bin / "accounting").write_text(accounting)
+    before = (job_dir / ".gym_accumulated_walltime").read_bytes()
+    out = recover(*_handle(job_dir))
+    assert out.decision.action == "stop" and out.dispatched is None
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / ".gym_accumulated_walltime").read_bytes() == before
+
+
+def test_recovery_does_not_recount_the_last_allocation_when_it_is_already_stored(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (job_dir / ".gym_accumulated_walltime").write_text("7260\n")
+    out = recover(*_handle(job_dir))
+    assert out.dispatched == "resubmit"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
+
+
+def test_recovery_does_not_reconstruct_an_unknown_manual_budget_epoch(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (job_dir / ".gym_accumulated_walltime").write_text("0\n")
+    out = recover(*_handle(job_dir))
+    assert out.decision.action == "stop" and out.dispatched is None
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "0\n"

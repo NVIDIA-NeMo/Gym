@@ -47,7 +47,13 @@ class BaseExecutor(ABC):
         """
 
     def recovery_evidence(
-        self, record: SubmissionRecord, benchmark: str, *, score_key: list[str | int] | None = None
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        score_key: list[str | int] | None = None,
+        score_agent: str | None = None,
+        score_environment: str | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Decide from the run's persisted evidence, and return what was collected; without a collector, stop."""
         return self.recovery_decision(record, benchmark), None
@@ -76,7 +82,14 @@ class BaseExecutor(ABC):
         )
 
     @abstractmethod
-    def resubmit(self, record: SubmissionRecord, benchmark: str, *, keep_budget: bool = False) -> BenchmarkJob:
+    def resubmit(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        keep_budget: bool = False,
+        accounted_walltime_s: float | None = None,
+    ) -> BenchmarkJob:
         """Queue `benchmark` of `record` again, in place, and return its updated entry.
 
         ``keep_budget`` (used by recovery) keeps the run's spent retry, walltime and attempt budget instead of

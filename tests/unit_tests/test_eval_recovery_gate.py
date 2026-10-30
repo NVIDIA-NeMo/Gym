@@ -170,7 +170,7 @@ def test_mixed_cache_keeps_every_class_apart() -> None:
         "terminal": 1,
         "missing": 1,
     }
-    assert d.action == RecoveryAction.RESUBMIT and not d.complete
+    assert d.action == RecoveryAction.STOP and not d.complete
     assert sum(d.counts.values()) == d.expected == 6
 
 
@@ -228,6 +228,6 @@ def test_the_decision_reads_saved_files_without_changing_a_byte(tmp_path: Path) 
     d = decide_recovery(
         materialized=loaded["materialized"], results=loaded["results"], failures=loaded["failures"], budget=OK_BUDGET
     )
-    assert d.action == RecoveryAction.RESUBMIT
+    assert d.action == RecoveryAction.STOP
     assert {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in paths.items()} == before
     assert loaded["results"][1]["response"] == {"output_text": "saved answer 1"}

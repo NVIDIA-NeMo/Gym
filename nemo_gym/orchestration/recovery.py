@@ -40,7 +40,15 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from nemo_gym.failure_kinds import JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_kinds import (
+    JUDGE_FAILED,
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    POLICY_MODEL_RESPONSE_TIMEOUT,
+    is_namespaced,
+    is_registered,
+)
 
 
 TASK_INDEX = "_ng_task_index"
@@ -240,7 +248,7 @@ def decide_recovery(
             )
             continue
         standing = [row for row in sidecar.get(identity, []) if not is_non_superseding_rollout_row(row)]
-        if not standing or is_omitted_rollout_row(standing[-1]):
+        if not standing:
             # No attempt ran, or the latest one was interrupted: the input restarts.
             evidence.append(IdentityEvidence(identity=identity, state=IdentityState.MISSING))
             continue
@@ -251,14 +259,41 @@ def decide_recovery(
             if (row.get("_line") if isinstance(row.get("_line"), int) else index) >= resubmit_offset
         ]
         kind = last.get("failure_kind")
+        if is_omitted_rollout_row(last):
+            # Only a recorded interruption restarts its input. An adapter's omitted outcome is not a result.
+            interrupted = last.get(FAILURE_CLASS) == "kill_shaped"
+            state = IdentityState.MISSING if interrupted else IdentityState.UNKNOWN
+            evidence.append(
+                IdentityEvidence(
+                    identity=identity,
+                    state=state,
+                    failure_kind=kind,
+                    failure_id=last.get(FAILURE_ID),
+                    events=_events(last),
+                )
+            )
+            continue
         cap = last.get(MAX_ATTEMPTS) if isinstance(last.get(MAX_ATTEMPTS), int) else default_max_attempts
         if last.get(FAILURE_CLASS) == JUDGE_FAILED:
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = IdentityState.JUDGE_RECOVERABLE
         elif last.get(COUNTS_AS_ZERO) is True:
-            # Settled exactly as rollout collection settles it (_final_zero_failure_rows): marked by its producer and
-            # final. A counts-as-zero row that is not final contradicts itself, so nobody owns it.
-            state = IdentityState.MODEL_FINAL if is_terminal_failure(last) else IdentityState.UNKNOWN
+            # Explicit scoring is required, but cannot make an unowned or infrastructure failure a model zero.
+            model_kind = kind in {
+                MODEL_CONTEXT_LIMIT,
+                MODEL_REQUEST_ERROR,
+                MODEL_TRANSPORT_ERROR,
+                POLICY_MODEL_RESPONSE_TIMEOUT,
+            }
+            contradictory = any(
+                boundary not in (None, "model", "agent") or boundary == "agent" and operation != "agent.policy_request"
+                for boundary, operation, *_ in _events(last)
+            )
+            state = (
+                IdentityState.MODEL_FINAL
+                if model_kind and is_terminal_failure(last) and not contradictory
+                else IdentityState.UNKNOWN
+            )
         elif not _known_kind(kind):
             state = IdentityState.UNKNOWN
         elif last.get(TERMINAL) is True:
@@ -338,6 +373,11 @@ def decide_recovery(
                 "resume would run nothing; the run is not complete",
             )
         return decision(RecoveryAction.NOOP, "every identity is scored or a final model failure")
+    if counts.get(IdentityState.JUDGE_RECOVERABLE):
+        return decision(
+            RecoveryAction.STOP,
+            "saved judge answers and policy work need separate recovery; mixed recovery is unsupported",
+        )
     if budget.live_job is None or budget.max_infra_retries is None or budget.infra_retries_used is None:
         return decision(
             RecoveryAction.STOP, "the job chain or scheduler state is unavailable, so the budget is unknown"
@@ -380,7 +420,13 @@ def rows(name, skip=0):
         for i, line in enumerate(fh):
             if i < skip or not line.strip():
                 continue
-            r = json.loads(line)
+            try:
+                r = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Binary iteration gives an unterminated line only at EOF; inventory must always be intact.
+                if name != "rollouts_materialized_inputs.jsonl" and not line.endswith(b"\n"):
+                    break
+                raise
             if name == "rollouts_failures.jsonl":
                 r["_line"] = i
             out.append({k: r[k] for k in KEEP if k in r})
@@ -445,7 +491,10 @@ quality = None
 try:
     run = json.load(open(os.path.join(a, "quality_summary.json")))["run"]
     acc = run.get("artifacts") or {}
-    quality = {"artifacts": {k: acc.get(k) for k in ("expected", "missing", "healthy", "unhealthy_reasons", "partial")},
+    sources = run.get("rollouts")
+    source_matches = (isinstance(sources, list) and len(sources) == 1 and isinstance(sources[0], str)
+                      and os.path.abspath(os.path.join(a, sources[0])) == os.path.abspath(os.path.join(a, "rollouts.jsonl")))
+    quality = {"source_matches": source_matches, "rollouts": sources, "artifacts": {k: acc.get(k) for k in ("expected", "missing", "healthy", "unhealthy_reasons", "partial")},
                "verdicts": run.get("verdicts"), "issues": run.get("issues"), "coverage": acc.get("coverage"),
                "ignored_checks": run.get("ignored_checks"), "responses": (run.get("stats") or {}).get("responses"),
                "provenance": run.get("provenance"),
@@ -458,6 +507,20 @@ score = None
 if len(sys.argv) > 2:
     try:
         value = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json")))
+        selector = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
+        if isinstance(value, list):
+            if not selector or any(k not in ("agent", "environment") or not isinstance(v, str) or not v
+                                   for k, v in selector.items()):
+                raise ValueError("aggregate lists require a stable agent or environment selector")
+            matches = [r for r in value if isinstance(r, dict)
+                       and ("agent" not in selector or isinstance(r.get("agent_ref"), dict)
+                            and r["agent_ref"].get("name") == selector["agent"])
+                       and ("environment" not in selector or r.get("_ng_environment_server") == selector["environment"])]
+            if len(matches) != 1:
+                raise ValueError("aggregate identity is absent or ambiguous")
+            value = matches[0]
+        elif selector:
+            raise ValueError("identity selectors require producer aggregate entries")
         for part in json.loads(sys.argv[2]):  # the metric path as a JSON list: keys may contain "/"
             # A string key into an object, a non-negative integer index into an array; anything else reads nothing.
             if isinstance(value, dict) and isinstance(part, str):
@@ -490,6 +553,7 @@ class CollectedEvidence(BaseModel):
     walltime_state: str = "absent"
     job_chain: list[str] = Field(default_factory=list)
     chain_incomplete: bool = False
+    accounted_walltime_s: float | None = None
     quality: dict[str, Any] | None = None
     score: float | None = None
     mlflow: dict[str, Any] | None = None
@@ -506,9 +570,21 @@ def decide_from_collected(
     # resume_script creates .gym_infra_retries on the first infra retry, so its absence means none ran; it adds every
     # previous hop to .gym_accumulated_walltime, so after a follow-up hop that file must exist. Malformed is unknown.
     retries = {"absent": 0, "ok": collected.infra_retries_used}.get(collected.infra_retries_state)
-    if collected.walltime_state == "ok":
+    # The prologue's counter covers predecessors, not necessarily the last allocation. A nonempty chain
+    # therefore also needs terminal scheduler accounting for every recorded allocation.
+    accounted = collected.accounted_walltime_s
+    if collected.job_chain:
+        walltime = (
+            max(accounted, collected.walltime_used_s or 0)
+            if accounted is not None
+            and math.isfinite(accounted)
+            and accounted >= 0
+            and collected.walltime_state in ("absent", "ok")
+            else None
+        )
+    elif collected.walltime_state == "ok":
         walltime = collected.walltime_used_s
-    elif collected.walltime_state == "absent" and len(collected.job_chain) <= 1:
+    elif collected.walltime_state == "absent":
         walltime = 0.0
     else:
         walltime = None
@@ -530,13 +606,66 @@ def decide_from_collected(
             identities={},
             evidence=[],
         )
-    return decide_recovery(
+    decision = decide_recovery(
         materialized=collected.materialized,
         results=collected.results or [],
         failures=collected.failures,
         budget=budget,
         resubmit_offset=collected.resubmit_offset,
     )
+    if collected.results is None and not decision.scheduler_live:
+        return decision.model_copy(
+            update={
+                "action": RecoveryAction.STOP,
+                "reason": "the results file is absent; collection cannot safely resume its saved history",
+            }
+        )
+    return decision
+
+
+def accounted_chain_walltime(
+    job_chain: list[str],
+    accounting: str,
+    *,
+    stored_walltime_s: float = 0,
+) -> float | None:
+    """Elapsed seconds of all recorded allocations, only when each has one terminal accounting row."""
+    terminal = {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY",
+        "NODE_FAIL",
+        "BOOT_FAIL",
+        "DEADLINE",
+        "PREEMPTED",
+    }
+    if not job_chain or len(set(job_chain)) != len(job_chain):
+        return None
+    elapsed: dict[str, int] = {}
+    for line in accounting.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 3:
+            return None
+        job_id, state, seconds = parts
+        if (
+            job_id not in job_chain
+            or job_id in elapsed
+            or (state.split()[0].rstrip("+") if state.split() else "") not in terminal
+        ):
+            return None
+        if not seconds.isdecimal():
+            return None
+        elapsed[job_id] = int(seconds)
+    if set(elapsed) != set(job_chain):
+        return None
+    total = sum(elapsed.values())
+    # The prologue records predecessors. A stopped guard may already have accounted for the last job too.
+    # Other values cannot identify the budget epoch (e.g. an intentional manual reset in an old chain).
+    if stored_walltime_s not in (total - elapsed[job_chain[-1]], total):
+        return None
+    return float(total)
 
 
 def gate_task_summary(
@@ -622,12 +751,19 @@ def quality_inputs(
     quality = collected.quality
     if quality is None:
         return None, ["no quality_summary.json"], None, ["no quality_summary.json"]
+    if quality.get("source_matches") is not True:
+        reason = "quality summary is not bound to this run's sole rollouts.jsonl source"
+        return None, [reason], None, [reason]
     artifacts = quality.get("artifacts") or {}
     fe_reasons = [str(r) for r in artifacts.get("unhealthy_reasons") or []]
     fe_valid = artifacts.get("healthy") if isinstance(artifacts.get("healthy"), bool) else None
     if artifacts.get("partial"):
         fe_valid, fe_reasons = None, fe_reasons + ["partial summary: per-record checks not evaluated"]
-    if artifacts.get("expected") != decision.expected:
+    if (
+        type(artifacts.get("expected")) is not int
+        or artifacts["expected"] < 0
+        or artifacts["expected"] != decision.expected
+    ):
         fe_valid = None if fe_valid is None else False
         fe_reasons.append(f"summary counts {artifacts.get('expected')} expected, inventory {decision.expected}")
     verdicts = quality.get("verdicts")
@@ -945,7 +1081,10 @@ def gate_summary_from_collected(
     trial_passed, trial_reason = trial_health(decision)
     if trial_passed is None and decision.complete:
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
-    response_passed, response_reason = response_health(decision, collected.quality)
+    bound_quality = (
+        collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
+    )
+    response_passed, response_reason = response_health(decision, bound_quality)
     gates = [(response_passed, response_reason), (trial_passed, trial_reason)]
     if any(passed is False for passed, _ in gates):
         health = False
