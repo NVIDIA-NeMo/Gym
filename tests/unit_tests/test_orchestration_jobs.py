@@ -44,6 +44,7 @@ from nemo_gym.orchestration.jobs import (
     SubmissionRecord,
     SubmissionStatus,
     installed_gym_commit,
+    list_submissions,
     local_index_dir,
     new_gym_job_id,
 )
@@ -539,3 +540,54 @@ def test_a_job_info_says_why_the_config_is_missing_and_survives_json():
     assert restored == info
     assert restored.config is None
     assert restored.benchmarks[0].job_ids == ["12345", "12400"]
+
+
+def test_observed_statuses_do_not_share_their_job_ids():
+    first = ObservedStatus(state=JobState.RUNNING)
+    first.job_ids.append("12345")
+
+    assert ObservedStatus(state=JobState.RUNNING).job_ids == []
+
+
+# --- The local index -----------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def index(tmp_path: Path, monkeypatch: MonkeyPatch) -> Path:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    return local_index_dir()
+
+
+def _indexed(gym_job_id: str, submitted_at: str) -> SubmissionRecord:
+    record = _record(gym_job_id=gym_job_id, submitted_at=submitted_at)
+    record.write_local_index()
+    return record
+
+
+def test_the_index_lists_the_newest_submissions_first_and_at_most_the_limit(index):
+    for gym_job_id, submitted_at in [
+        ("b", "2026-10-02T00:00:00Z"),
+        ("c", "2026-10-03T00:00:00Z"),
+        ("a", "2026-10-01T00:00:00Z"),
+    ]:
+        _indexed(gym_job_id, submitted_at)
+
+    assert [r.gym_job_id for r in list_submissions()] == ["c", "b", "a"]
+    assert [r.gym_job_id for r in list_submissions(limit=2)] == ["c", "b"]
+
+
+def test_a_machine_that_never_submitted_has_an_empty_index(index):
+    assert not index.exists()
+    assert list_submissions() == []
+
+
+def test_a_file_that_is_not_a_readable_record_is_skipped_with_a_warning_and_the_rest_still_list(index, caplog):
+    _indexed("good", "2026-10-01T00:00:00Z")
+    (index / "broken.json").write_text("{not json")
+    (index / "from-the-future.json").write_text(json.dumps({**json.loads(_record().dumps()), "schema_version": 99}))
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
+        listed = list_submissions()
+
+    assert [r.gym_job_id for r in listed] == ["good"]
+    assert "broken.json" in caplog.text and "from-the-future.json" in caplog.text
