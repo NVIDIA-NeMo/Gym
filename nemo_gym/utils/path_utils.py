@@ -85,6 +85,11 @@ def task_selection_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_stem(output_fpath.stem + "_task_selection").with_suffix(".json")
 
 
+def server_logs_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_server_logs.json`: where the run's server logs are."""
+    return output_fpath.with_stem(output_fpath.stem + "_server_logs").with_suffix(".json")
+
+
 def resolved_config_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_resolved_config.yaml`."""
     return output_fpath.with_stem(output_fpath.stem + "_resolved_config").with_suffix(".yaml")
