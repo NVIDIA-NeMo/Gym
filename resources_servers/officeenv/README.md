@@ -206,6 +206,34 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.
 
+### Tools, commands or endpoints
+
+The row's exposure decides how the harness reaches the apps (`SANDBOX_SURFACES`); the world,
+the checks and the reward are the same for all three:
+
+- `tools`: one MCP tool per op, as above; the episode's MCP token admits its row's tools;
+- `cli`: one command per app in the sandbox, `<app> <command> [--parameter=value ...]`, with
+  `<app> --help` and `<app> <command> --help`, read as OfficeEnv's CLI exposure reads a command
+  line. The seed writes `sandbox/app_command.sh` (POSIX sh and curl, without its comments) to
+  `/usr/local/lib/company-cli/app` and links it as `/usr/local/bin/<app>` for each connected app.
+  A command sends its arguments to `POST /v1/cli` with the episode's token and prints the result
+  on stdout (exit 0) or the app's error on stderr (exit 1). The MCP token admits no tool, so a
+  harness with nothing but a shell runs these rows (`resources_tool_transports: []`). A call to
+  `/v1/cli` that does not come from an app's command (its `<app>-cli/1.0` User-Agent) is refused
+  with a pointer to the command, and counted;
+- `api_search`: the MCP tools `api_search` and `api_fetch` find and document endpoints, with each
+  endpoint's HTTP path and the curl command that calls it, and the harness calls
+  `POST /v1/<app>/<op>` with the op's parameters as a JSON object. An endpoint answers with the
+  app's JSON, or with its error under the error's HTTP status.
+
+The file API and the content kept out of the conversation (downloads saved, pasted uploads
+refused, Gmail's attachments by path) serve every surface: a command's `--help` and `api_fetch`'s
+documentation describe the ops that move content as they behave here, as the tools' descriptions
+do. The workspace's `README.md` is written for the episode's surface, and
+`sandbox_config.mcp_tool_prefix` names the MCP tools in it as the harness lists them (`company_`
+for Pi). `/verify` adds `sandbox_commands`, `sandbox_commands_refused` and
+`sandbox_endpoint_calls`.
+
 Rows come from OfficeEnv's sandbox example tasks: `sandbox/prepare_rows.py` writes
 `data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its five sandbox tasks). A
 row holds a system and a user message and the TaskSpec, and no tool list, since the harness takes
@@ -229,7 +257,8 @@ A sandbox can reach this server, so sandbox mode guards it:
 - seeding, closing, verification, `GET /officeenv/apps` and the tool routes answer only callers
   from this node and from `trusted_networks` (CIDR, empty by default), and others as routes that
   do not exist (404); no generated docs (`/openapi.json`, `/docs`) are served. Sandboxes keep the
-  MCP endpoint and the file API, whose tokens name their episode. When Gym's other servers call
+  MCP endpoint, the file API and their surface's routes (`/v1/cli`, `/v1/<app>/<op>`), whose
+  tokens name their episode. When Gym's other servers call
   this one from other nodes, list their network in `trusted_networks`;
 - session cookies and MCP tokens are signed with a secret drawn when the server starts
   (`get_session_secret`), not with Gym's default key, which anyone can derive from the server's

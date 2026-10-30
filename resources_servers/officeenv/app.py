@@ -22,7 +22,7 @@ With ``expose_tools_over_mcp: true``, Gym's MCP endpoint serves every tool of Of
 ``tools`` exposure under its tool name, and each episode's token admits only that episode's tools.
 MCP clients read the tool definitions from that endpoint rather than from the row, so a seed whose
 tools differ from those definitions (a row in the ``api_search``, ``cli`` or ``mcp`` exposure, or
-with another tool-name separator) is refused.
+with another tool-name separator) is refused, but for a sandboxed episode's surfaces below.
 
 A row may name its TaskSpec's large strings by SHA-256 instead of carrying them (OfficeEnv's
 artifact references, ``officeenv.artifacts``). The stores in ``artifacts_dirs`` (such as a
@@ -43,12 +43,20 @@ API command that sends the file instead. Gmail's attachments move through the wo
 ``get_attachment`` saves one there, and a message or draft attaches a workspace file by its path
 (``{"path": ...}``), which the server reads from the sandbox before the call runs.
 
+A sandboxed episode's row exposure decides how its harness reaches the apps (``SANDBOX_SURFACES``):
+one MCP tool per op (``tools``); one command per app in the sandbox (``cli``: ``slack post-message
+--channel=...``, which sends its arguments to ``/v1/cli``), with no MCP tools, so any harness with a
+shell and curl runs it; or ``api_search`` and ``api_fetch`` over MCP, which find endpoints the
+harness calls with curl at ``/v1/<app>/<op>``. The file API, the content kept out of the
+conversation and the workspace guide serve every surface.
+
 What a sandbox reads of this server names a company's API, never the environment behind it or Gym:
 the variables, routes, guide, answers and session cookie (``get_session_cookie_name``), and with the
 config's ``mcp_server_name`` and ``mcp_bearer_token`` the MCP endpoint too. A sandbox can reach this
 server, so sandbox mode guards it: seeding, closing, verification, the app catalog and the tool
 routes answer callers other than this node and ``trusted_networks`` as routes that do not exist
-(404), which leaves sandboxes the MCP endpoint and the file API, and no generated docs are served;
+(404), which leaves sandboxes the MCP endpoint, the file API and their surface's routes, and no
+generated docs are served;
 and session cookies and MCP tokens are signed with a per-process secret (``get_session_secret``)
 instead of Gym's key, which anyone can derive from the server's name. With
 ``sandbox_config.block_internet`` a sandbox reaches nothing else: OpenSandbox's egress policy refuses
@@ -69,12 +77,13 @@ import json
 import logging
 import os
 import posixpath
+import re
 import shlex
 import socket
 import stat
 import tempfile
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from functools import cache
@@ -171,6 +180,12 @@ class OfficeEnvSandboxConfig(SandboxConfig):
         "this many bytes, is refused with the file API command that sends the file. Gmail's attachments too: "
         "get_attachment saves one in the workspace, and a message or draft attaches a workspace file by its path. "
         "None answers and takes content in full, as without a sandbox",
+    )
+    mcp_tool_prefix: str = Field(
+        default="",
+        description="How the harness names this server's MCP tools, for the workspace guide: Pi lists them as "
+        "'<mcp_server_name>_<tool>', Hermes as 'mcp_<mcp_server_name>_<tool>', Codex as "
+        "'mcp__<mcp_server_name>__<tool>'",
     )
 
     @model_validator(mode="after")
@@ -356,17 +371,50 @@ FILE_APPS: dict[str, FileApp] = {
 }
 
 # What a sandbox reads of this server names a company's API, never the environment behind it or Gym: the variables
-# that name the episode's file API, its route, and the guide.
+# that name the episode's API, its routes, and the guide.
 API_URL_ENV, API_TOKEN_ENV = "COMPANY_API_URL", "COMPANY_API_TOKEN"
-FILES_ROUTE = "/v1/files"
+API_PREFIX = "/v1"
+FILES_ROUTE = f"{API_PREFIX}/files"
+CLI_ROUTE = f"{API_PREFIX}/cli"
 GUIDE_NAME = "README.md"
 
-FILES_GUIDE = f"""# Company apps
+# How a sandboxed episode reaches its apps, by the row's exposure: one MCP tool per op (`tools`), one command per app
+# (`cli`, through CLI_ROUTE), or endpoints found over MCP and called with curl (`api_search`, through
+# /v1/<app>/<op>). Grading reads the apps' final state, so it is the same for all three.
+SANDBOX_SURFACES = ("tools", "cli", "api_search")
 
-The company's apps are your tools, one per operation of an app. File content moves between this
-workspace and the file apps over HTTP, without going through the conversation, byte for byte: text
-files (CSV, TSV, JSON, Markdown) and binary ones (XLSX workbooks, PDFs, images) alike. <app> is
-{{codes}}.
+SURFACE_GUIDES = {
+    "tools": """The company's apps ({apps}) are your tools, one per operation of an app
+({prefix}<app>_<operation>). Call them like any other tool.""",
+    "cli": """The company's apps are commands here, one per connected app: {apps}.
+
+    <app> <command> [--parameter=value ...]   # e.g. slack post-message --channel='#sales' --text='Ready to review'
+    <app> --help                              # the app's commands
+    <app> <command> --help                    # a command's parameters, with examples
+
+A command prints its result as JSON and exits 0, or prints the app's error on stderr and exits 1.
+Arrays and objects go as JSON under their own flag (--data='[{{"range":"A1","values":[["x"]]}}]');
+--flag=null sends null, and a JSON-quoted value stays text (--value='"false"').""",
+    "api_search": f"""The company's apps ({{apps}}) are an HTTP API. Find an endpoint with your {{prefix}}api_search
+tool, read its parameters with your {{prefix}}api_fetch tool (it gives the exact command), and call it:
+
+    curl -sS -X POST "${API_URL_ENV}{API_PREFIX}/<app>/<operation>" \\
+      -H "Authorization: Bearer ${API_TOKEN_ENV}" -H 'Content-Type: application/json' \\
+      -d '<the parameters as a JSON object>'
+
+An endpoint answers with the app's JSON; a call that fails answers with the app's error and an
+HTTP error status.""",
+}
+FIND_FILES = {"tools": "the apps' tools", "cli": "the apps' commands", "api_search": "the apps' endpoints"}
+GET_ATTACHMENT = {
+    "tools": "{prefix}gmail_get_attachment",
+    "cli": "gmail get-attachment",
+    "api_search": "the gmail.get_attachment endpoint",
+}
+
+FILES_GUIDE = f"""File content moves between this workspace and the file apps over HTTP, without going through the
+conversation, byte for byte: text files (CSV, TSV, JSON, Markdown) and binary ones (XLSX workbooks,
+PDFs, images) alike. <app> is {{codes}}.
 
     # download a file's content
     curl -sf -H "Authorization: Bearer ${API_TOKEN_ENV}" \\
@@ -382,16 +430,16 @@ files (CSV, TSV, JSON, Markdown) and binary ones (XLSX workbooks, PDFs, images) 
 
 The file name's extension sets the file type (.csv, .xlsx, .pdf, ...).
 {{notes}}
-Find file and folder ids with the apps' tools (list or search files). Uploads are limited to
+Find file and folder ids with {{find}} (list or search files). Uploads are limited to
 {MAX_UPLOAD_BYTES // 1_000_000} MB. A request that fails returns the app's error as JSON.
 """
 
-CONTENT_GUIDE = """Downloading a file with the apps' tools saves it in this workspace (the answer's savedTo):
+CONTENT_GUIDE = """Downloading a file with {find} saves it in this workspace (the answer's savedTo):
 
 {folders}
 
 The answer also carries the content only for a text file of at most {limit} bytes. An upload with
-the apps' tools takes pasted content only as text of at most {limit} bytes: send any other file
+{find} takes pasted content only as text of at most {limit} bytes: send any other file
 with the commands above.
 """
 
@@ -401,30 +449,38 @@ workspace file by its path, as the attachment {{"path": "{workdir}/totals.xlsx"}
 file unless you give a filename); pasted attachment content is taken only as text of at most {limit}
 bytes.
 """
-GET_ATTACHMENT = "Gmail's get_attachment tool"
 
 
 def workspace_guide(
-    content_limit: int | None = DEFAULT_INLINE_FILE_BYTES, apps: tuple[str, ...] = (), *, workdir: str = "/workspace"
+    content_limit: int | None = DEFAULT_INLINE_FILE_BYTES,
+    apps: tuple[str, ...] = (),
+    *,
+    surface: str = "tools",
+    prefix: str = "",
+    workdir: str = "/workspace",
 ) -> str:
-    """The workspace guide for an episode that connects ``apps``: how files move between the workspace and its file
-    apps (those of ``apps`` in FILE_APPS, all of them for an episode that connects none), where downloads land when
-    file content stays out of the conversation (``content_limit``, see ContentInWorkspace; None: it does not), and
-    then, for an episode that connects Gmail, how its attachments move too."""
+    """The workspace's README.md for an episode that connects ``apps``: how its apps are reached (``surface``, and
+    ``prefix``, how the harness names this server's MCP tools), how files move between the workspace and its file apps
+    (those of ``apps`` in FILE_APPS, all of them for an episode that connects none), where downloads land when file
+    content stays out of the conversation (``content_limit``, see ContentInWorkspace; None: it does not), and then,
+    for an episode that connects Gmail, how its attachments move too."""
+    intro = SURFACE_GUIDES[surface].format(apps=", ".join(apps), prefix=prefix)
     names = [app for app in FILE_APPS if app in apps] or list(FILE_APPS)
     shown = [FILE_APPS[app] for app in names]
-    guide = FILES_GUIDE.format(
+    find = FIND_FILES[surface]
+    files = FILES_GUIDE.format(
         codes=", ".join(f"{app} ({FILE_APPS[app].label})" for app in names),
         notes="".join(f"{spec.label}: {spec.note}.\n" for spec in shown),
+        find=find,
     )
-    if content_limit is None:
-        return guide
-    width = max(len(f"{spec.folder}/<file id>/<name>") for spec in shown) + 3
-    folders = "\n".join(f"    {f'{spec.folder}/<file id>/<name>':<{width}}{spec.label}" for spec in shown)
-    guide += "\n" + CONTENT_GUIDE.format(folders=folders, limit=content_limit)
-    if "gmail" in apps:
-        guide += "\n" + MAIL_GUIDE.format(get=GET_ATTACHMENT, workdir=workdir, limit=content_limit)
-    return guide
+    if content_limit is not None:
+        width = max(len(f"{spec.folder}/<file id>/<name>") for spec in shown) + 3
+        folders = "\n".join(f"    {f'{spec.folder}/<file id>/<name>':<{width}}{spec.label}" for spec in shown)
+        files += "\n" + CONTENT_GUIDE.format(find=find, folders=folders, limit=content_limit)
+        if "gmail" in apps:
+            get = GET_ATTACHMENT[surface].format(prefix=prefix)
+            files += "\n" + MAIL_GUIDE.format(get=get, workdir=workdir, limit=content_limit)
+    return f"# Company apps\n\n{intro}\n\n{files}"
 
 
 # The file apps' ops that answer a file's content, and those that take content to store. In a sandboxed episode the
@@ -580,6 +636,172 @@ def content_schema(
         if isinstance(properties.get(param), Mapping):
             properties[param] = {**properties[param], "description": text.format(limit=limit, workdir=workdir)}
     return {**schema, "properties": properties}
+
+
+def example_attachments(items: Any, *, workdir: str = "/workspace") -> Any:
+    """An example's attachments as a sandboxed episode sends them: one that names a file without its content names
+    the workspace file instead (``{"path": "<workdir>/<name>"}``)."""
+    if not isinstance(items, list):
+        return items
+    out = []
+    for item in items:
+        name = item if isinstance(item, str) else None
+        if isinstance(item, Mapping) and not (CONTENT_KEYS | {"path"}) & set(item):
+            name = item.get("filename") or item.get("name")
+        out.append({"path": posixpath.join(workdir, str(name).strip())} if name else item)
+    return out
+
+
+# A command's --help example of an attachment parameter, as OfficeEnv's command line quotes it
+_CLI_ATTACHMENTS = re.compile(r"'--attachments=(\[[^']*\])'")
+
+
+def _cli_example_attachments(match: re.Match, workdir: str) -> str:
+    try:
+        items = json.loads(match.group(1))
+    except ValueError:
+        return match.group(0)
+    attached = example_attachments(items, workdir=workdir)
+    return shlex.quote("--attachments=" + json.dumps(attached, separators=(",", ":")))
+
+
+# --help as OfficeEnv's CLI prints it: an app's command list ("  <command>  <description>"), and a command's head line
+# ("<app> <command>: <description>") and options ("  --<flag>=VALUE  <type> <description>[ [default: ...]]").
+_HELP_COMMAND = re.compile(r"^(?P<lead>  (?P<command>[a-z0-9-]+) +)(?P<description>\S.*)$")
+_HELP_HEAD = re.compile(r"^(?P<app>[a-z0-9_-]+) (?P<command>[a-z0-9-]+): (?P<description>.*)$")
+_HELP_OPTION = re.compile(
+    r"^(?P<lead>  --(?P<flag>[a-z0-9-]+)=VALUE +\S+ )(?P<description>.*?)(?P<default> \[default: .*\])?$"
+)
+
+
+def with_content_descriptions(
+    text: str, limit: int | None, argv: Sequence[str], *, guide: str, workdir: str = "/workspace"
+) -> str:
+    """A command's --help as a sandboxed episode reads it: each line that describes an op moving content
+    (CONTENT_DESCRIPTIONS) or one of its parameters (PARAM_DESCRIPTIONS) has its whole description replaced, keyed by
+    app, op and parameter, and Gmail's examples attach a workspace file (``example_attachments``). Only help is
+    rewritten (``argv`` names the app alone, or asks for --help): what an op answers is the app's data, left as it is."""
+    if limit is None or not argv or not (len(argv) == 1 or {"--help", "-h"} & set(argv[1:])):
+        return text
+    app = argv[0]
+    command = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else None
+    op = command.replace("-", "_") if command else None
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if op is None:  # the app's command list
+            found = _HELP_COMMAND.match(line)
+            key = (app, found["command"].replace("-", "_")) if found else None
+            if key in CONTENT_DESCRIPTIONS:
+                lines[i] = found["lead"] + content_description(*key, found["description"], limit, guide=guide)
+        elif (found := _HELP_HEAD.match(line)) and (found["app"], found["command"]) == (app, command):
+            if (app, op) in CONTENT_DESCRIPTIONS:
+                lines[i] = f"{app} {command}: " + content_description(
+                    app, op, found["description"], limit, guide=guide
+                )
+        elif (found := _HELP_OPTION.match(line)) and (app, op, found["flag"].replace("-", "_")) in PARAM_DESCRIPTIONS:
+            described = PARAM_DESCRIPTIONS[(app, op, found["flag"].replace("-", "_"))]
+            lines[i] = found["lead"] + described.format(limit=limit, workdir=workdir) + (found["default"] or "")
+    text = "\n".join(lines)
+    if app == "gmail" and op is not None:
+        text = _CLI_ATTACHMENTS.sub(lambda match: _cli_example_attachments(match, workdir), text)
+    return text
+
+
+# An api_search episode finds endpoints over MCP and calls them over HTTP: the two finding tools, with the argument
+# shapes of OfficeEnv's api_search exposure (a public contract). Descriptions are formatted with the guide's path.
+SEARCH_TOOLS: tuple[tuple[str, dict[str, Any], str], ...] = (
+    (
+        "api_search",
+        {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What you want to do, in words (e.g. 'post a message to a slack channel')",
+                },
+                "app": {
+                    "anyOf": [{"type": "string"}, {"type": "null"}],
+                    "default": None,
+                    "description": "Restrict results to one connected app",
+                },
+            },
+            "required": ["query"],
+        },
+        "Search the connected apps' API for endpoints matching what you want to do. Returns endpoint ids and "
+        "their HTTP paths; read an endpoint's parameters before calling it with curl (see {guide}).",
+    ),
+    (
+        "api_fetch",
+        {
+            "type": "object",
+            "properties": {
+                "endpoint": {
+                    "type": "string",
+                    "description": "An endpoint id from search results, e.g. 'slack.post_message'",
+                }
+            },
+            "required": ["endpoint"],
+        },
+        "Fetch an endpoint's documentation: description, parameter schema, examples, and the curl command that "
+        "calls it.",
+    ),
+)
+
+CURL_CALL = (
+    f'curl -sS -X POST "${API_URL_ENV}{{path}}" -H "Authorization: Bearer ${API_TOKEN_ENV}" '
+    "-H 'Content-Type: application/json' -d {data}"
+)
+
+
+def endpoint_path(endpoint: str) -> str:
+    """The HTTP path an api_search endpoint id (``app.op``) is called at."""
+    app, _, op = endpoint.partition(".")
+    return f"{API_PREFIX}/{app}/{op}"
+
+
+def with_http_calls(
+    tool_name: str, text: str, content_limit: int | None = None, *, guide: str, workdir: str = "/workspace"
+) -> str:
+    """api_search's results with each endpoint's HTTP path, and api_fetch's documentation with the curl command that
+    calls the endpoint (its first example as the body): in a sandbox, endpoints are called over HTTP. An endpoint
+    that moves file content is described as it behaves here (``content_description``), and so are Gmail's
+    attachments, in the parameters and the examples (``content_schema``, ``example_attachments``)."""
+    if tool_name not in ("api_search", "api_fetch"):
+        return text
+    try:
+        body = json.loads(text)
+    except ValueError:
+        return text
+    if not isinstance(body, dict) or "error" in body:
+        return text
+    if tool_name == "api_search":
+        for result in body.get("results") or []:
+            if isinstance(result, dict) and isinstance(result.get("endpoint"), str):
+                result["path"] = endpoint_path(result["endpoint"])
+                app, _, op = result["endpoint"].partition(".")
+                if isinstance(result.get("description"), str):
+                    result["description"] = content_description(
+                        app, op, result["description"], content_limit, guide=guide
+                    )
+    elif isinstance(body.get("endpoint"), str):
+        path = endpoint_path(body["endpoint"])
+        app, _, op = body["endpoint"].partition(".")
+        if content_limit is not None and isinstance(body.get("parameters"), dict):
+            body["parameters"] = content_schema(app, op, body["parameters"], content_limit, workdir=workdir)
+        if content_limit is not None and (app, op) in ATTACHMENT_UPLOADS and isinstance(body.get("examples"), list):
+            body["examples"] = [
+                {**example, "attachments": example_attachments(example["attachments"], workdir=workdir)}
+                if isinstance(example, dict) and "attachments" in example
+                else example
+                for example in body["examples"]
+            ]
+        examples = body.get("examples") or []
+        example = examples[0] if examples and isinstance(examples[0], dict) else {}
+        data = shlex.quote(json.dumps(example, ensure_ascii=False))
+        body["http"] = {"method": "POST", "path": path, "curl": CURL_CALL.format(path=path, data=data)}
+        if isinstance(body.get("description"), str):
+            body["description"] = content_description(app, op, body["description"], content_limit, guide=guide)
+    return json.dumps(body, ensure_ascii=False, separators=(",", ":"))
 
 
 def _path_part(name: Any, fallback: str) -> str:
@@ -922,18 +1144,50 @@ def mail_attachments(
     return out, files, size
 
 
+class FileApiCalls:
+    """A sandboxed episode's exposure, answering the file API's own calls (``_Episode.direct``) as the tools exposure
+    does whatever the row's surface: ``<app>_<op>`` parsed on the session's catalog, the result as plain JSON, an
+    error as the app's body, its HTTP status kept for the file API to answer with (``direct_status``: Box's and
+    Microsoft Graph's error bodies carry no numeric code). Every other call is the session's own exposure, which it
+    wraps. A ``cli`` episode's only tool is ``run_command`` and an ``api_search`` episode's are the finding tools and
+    ``api_call``, so without it the file API would reach no app on those surfaces."""
+
+    def __init__(self, inner: Any, episode: "_Episode") -> None:
+        self._inner = inner
+        self._episode = episode
+        self._direct = ToolsExposure(inner.catalog, {})
+
+    def __getattr__(self, name: str) -> Any:  # tools, describe, catalog: the session's exposure
+        if name.startswith("__") or name in ("_inner", "_episode", "_direct"):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+    def _exposure(self) -> Any:
+        return self._direct if self._episode.direct else self._inner
+
+    def parse(self, tool_name: str, args: dict[str, Any]) -> Any:
+        return self._exposure().parse(tool_name, args)
+
+    def format_result(self, inv: Any, result: dict[str, Any]) -> Any:
+        return self._exposure().format_result(inv, result)
+
+    def format_error(self, inv: Any, err: Any) -> Any:
+        if self._episode.direct:  # the file API answers with the app's HTTP status
+            self._episode.direct_status = getattr(err, "status", None)
+        return self._exposure().format_error(inv, err)
+
+
 class ContentInWorkspace:
     """A sandboxed episode's exposure with the file apps' content, and Gmail's attachments, kept out of the
     conversation; everything else is the session's own exposure, which it wraps. A download saves the file in the
     workspace and answers with its path (``saved_download``), and an upload that pastes its content is refused with
-    the file API command that sends the file (``pasted_content_refusal``, an app error the session answers as any
-    other). A message's attachment that names a workspace file by its path carries that file
-    (``mail_attachments``); pasted attachment content is refused the same way. Moving bytes is the route's:
-    ``format_result`` queues a download on the episode, which the tool route writes into the sandbox before it
-    answers (``OfficeEnvResourcesServer._save_downloads``), and the route reads the files a call attaches before it
-    runs (``attachment_paths``, ``_Episode.attached``). The file API's own calls (``_Episode.direct``) pass as they
-    are, and an error they meet is kept with its HTTP status for the file API to answer with. With no ``limit``,
-    content moves through the conversation and only the file API's errors are kept."""
+    the file API command that sends the file (``pasted_content_refusal``, an app error in every surface's own form).
+    A message's attachment that names a workspace file by its path carries that file (``mail_attachments``); pasted
+    attachment content is refused the same way. Moving bytes is the route's: ``format_result`` queues a download on
+    the episode, which the route writes into the sandbox before it answers (``OfficeEnvResourcesServer.
+    _save_downloads``), and the route reads the files a call attaches before it runs (``attachment_paths``,
+    ``_Episode.attached``). The file API's own calls (``_Episode.direct``) pass as they are, to the
+    ``FileApiCalls`` it wraps. With no ``limit``, content moves through the conversation."""
 
     def __init__(
         self, inner: Any, episode: "_Episode", *, limit: int | None, folder: str, guide: str, world: Any
@@ -1032,15 +1286,42 @@ class ContentInWorkspace:
                 self._episode.saves.append((target, data))
         return self._inner.format_result(inv, result)
 
-    def format_error(self, inv: Any, err: Any) -> Any:
-        if self._episode.direct:  # the file API answers with the app's HTTP status
-            self._episode.direct_status = getattr(err, "status", None)
-        return self._inner.format_error(inv, err)
-
 
 RELAY_SOURCE = (Path(__file__).parent / "sandbox" / "relay.py").read_text(encoding="utf-8")
 RELAY_PATH = "/usr/local/lib/net-relay/relay.py"
 RELAY_LOG = "/tmp/net-relay.log"
+
+
+def _without_comments(script: str) -> str:
+    """A script as the sandbox gets it: its comment lines dropped (the shebang kept), so reading a command shows what
+    it runs, not a description of the server behind it."""
+    lines = script.splitlines()
+    return "\n".join(line for n, line in enumerate(lines) if n == 0 or not line.lstrip().startswith("#")) + "\n"
+
+
+# The command every app of a `cli` episode is linked to (sandbox/app_command.sh), and the User-Agent it sends, without
+# which CLI_ROUTE refuses the call.
+APP_COMMAND_SOURCE = _without_comments(
+    (Path(__file__).parent / "sandbox" / "app_command.sh").read_text(encoding="utf-8")
+)
+APP_COMMAND_PATH = "/usr/local/lib/company-cli/app"
+APP_COMMAND_DIR = "/usr/local/bin"
+CLI_USER_AGENT = "{app}-cli/1.0"
+
+
+def link_app_commands(apps: tuple[str, ...]) -> str:
+    """The command that makes a `cli` episode's apps commands: the app command, made executable, linked under each
+    app's name. `ln` refuses a name the image already has there, so a sandbox where an app would not be its command
+    fails to start."""
+    links = " && ".join(f"ln -s {APP_COMMAND_PATH} {shlex.quote(f'{APP_COMMAND_DIR}/{app}')}" for app in apps)
+    return f"chmod 755 {APP_COMMAND_PATH} && mkdir -p {APP_COMMAND_DIR} && {links}"
+
+
+async def run_setup(sandbox: AsyncSandbox, command: str) -> None:
+    """Run one setup command in a started sandbox before it is lent, failing the seed if it fails."""
+    done = await sandbox.exec(command, cwd="/", timeout_s=60)
+    if done.error_type is not None or done.return_code != 0:
+        raise RuntimeError(f"Sandbox setup failed: {done.error_type} {(done.stderr or '')[-500:]}")
 
 
 def _error_status(body: Any) -> int | None:
@@ -1139,7 +1420,12 @@ class _Episode:
 
     episode_id: EpisodeId
     task_id: TaskId
-    tools: list[str]
+    # How its harness reaches its apps (SANDBOX_SURFACES; `tools` without a sandbox), the apps it connects, the tools
+    # its MCP token admits, and a `cli` episode's run_command tool, which its apps' commands call
+    surface: str = "tools"
+    apps: tuple[str, ...] = ()
+    grant: list[str] = field(default_factory=list)
+    command_tool: str | None = None
     # In sandbox mode: the episode's file API token, its sandbox and the access lent to the harness, and whether
     # its verification has started, from which point its tools are closed.
     token: str | None = None
@@ -1159,10 +1445,18 @@ class _Episode:
     attached: dict[str, bytes | str] = field(default_factory=dict)  # the current call's attached files, or why not
     direct: bool = False  # a file API call is under way: its content moves as it is
     direct_status: int | None = None  # the HTTP status of the error that call met, if any
+    # What the episode sent through its surface's routes
+    commands: int = 0
+    commands_refused: int = 0  # calls to CLI_ROUTE made by hand rather than by an app's command
+    endpoint_calls: int = 0
 
     def usage(self) -> dict[str, float]:
-        """What the episode moved through its workspace instead of the conversation, as verify metrics."""
+        """What the episode sent beside MCP, and moved through its workspace instead of the conversation, as verify
+        metrics."""
         return {
+            "sandbox_commands": float(self.commands),
+            "sandbox_commands_refused": float(self.commands_refused),
+            "sandbox_endpoint_calls": float(self.endpoint_calls),
             "sandbox_files_saved": float(self.files_saved),
             "sandbox_bytes_saved": float(self.bytes_saved),
             "sandbox_uploads_refused": float(self.uploads_refused),
@@ -1241,7 +1535,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return app
 
     def _setup_sandbox_routes(self, app: FastAPI) -> None:
-        """The file API, and a lifespan that stops the sandboxes of open episodes at shutdown."""
+        """The file API, the `cli` and `api_search` surfaces' routes, and a lifespan that stops the sandboxes of open
+        episodes at shutdown."""
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -1256,6 +1551,10 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         app.get(f"{FILES_ROUTE}/{{app_name}}/{{file_id}}")(self.download_file)
         app.put(f"{FILES_ROUTE}/{{app_name}}/{{file_id}}")(self.replace_file)
         app.post(FILES_ROUTE)(self.upload_file)
+        app.post(CLI_ROUTE)(self.run_command_line)
+        # A Starlette route, not FastAPI's: Gym's MCP exposure takes any parameterized POST route of FastAPI's for the
+        # tool catch-all, and allows one (the tool route).
+        app.add_route(f"{API_PREFIX}/{{app_name}}/{{op}}", self.call_endpoint, methods=["POST"])
 
     async def list_apps(self, request: Request) -> dict[str, Any]:
         self._require_gym_caller(request)
@@ -1273,7 +1572,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         _SEEDED_TOOLS.set(reply.body["tools"])
         return OfficeEnvSeedSessionResponse(**reply.body)
 
-    def _seed_episode(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
+    def _seed_episode(
+        self, request: Request, body: ResourcesSeedSessionRequest, *, sandboxed: bool = False
+    ) -> ResourcesSeedSessionResponse:
         """Seed an Environment Server episode under its ``resources_session_id``. Seeding the same ID
         for the same episode again answers as the first seed did; a closed ID is never seeded again."""
         session_id = body.resources_session_id
@@ -1282,14 +1583,33 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             raise ResourcesSessionConflictError(f"Resources session {session_id} is already closed")
         episode = self._episodes.get(session_id)
         if episode is None:
-            reply = self._seed(session_id, body.task_data)
-            episode = self._episodes[session_id] = _Episode(body.episode_id, body.task_id, reply.body["tools"])
+            reply = self._seed(session_id, body.task_data, sandboxed=sandboxed)
+            episode = self._episodes[session_id] = self._new_episode(session_id, body, reply, sandboxed=sandboxed)
         elif (episode.episode_id, episode.task_id) != (body.episode_id, body.task_id):
             raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         # Gym's session routing names the cookie session after the ID too; this keeps the two the same without it.
         request.session[SESSION_ID_KEY] = session_id
-        _SEEDED_TOOLS.set(episode.tools)
+        _SEEDED_TOOLS.set(episode.grant)
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
+
+    def _new_episode(
+        self, session_id: str, body: ResourcesSeedSessionRequest, reply: Reply, *, sandboxed: bool
+    ) -> _Episode:
+        """The episode a seed made, with how its harness reaches its apps: a sandboxed episode by its row's exposure
+        (SANDBOX_SURFACES), any other by its tools. Its MCP token admits the row's tools, none for a `cli` episode,
+        whose apps are commands, and the finding tools for an `api_search` one."""
+        session = self.service.store.get(session_id)
+        tools = list(reply.body["tools"])
+        surface = session.describe()["exposure"]["mode"] if sandboxed else "tools"
+        grant = {"tools": tools, "cli": [], "api_search": [name for name, _, _ in SEARCH_TOOLS]}[surface]
+        return _Episode(
+            body.episode_id,
+            body.task_id,
+            surface=surface,
+            apps=tuple(sorted(session.apps)),
+            grant=grant,
+            command_tool=tools[0] if surface == "cli" else None,
+        )
 
     async def _seed_sandboxed_episode(
         self, request: Request, body: ResourcesSeedSessionRequest
@@ -1302,7 +1622,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             if self._shutting_down:  # shutdown stops the sandboxes it finds, and would not find this one
                 raise HTTPException(status_code=503, detail="The server is shutting down")
             new = session_id not in self._episodes
-            self._seed_episode(request, body)
+            self._seed_episode(request, body, sandboxed=True)
             episode = self._episodes[session_id]
             if new:
                 try:
@@ -1322,10 +1642,11 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
 
     def _keep_content_in_workspace(self, session_id: str, episode: _Episode) -> None:
         """Move the episode's file content and mail attachments through its workspace (ContentInWorkspace), unless
-        ``inline_file_bytes`` is None; either way the file API's calls answer with the app's HTTP status."""
+        ``inline_file_bytes`` is None; either way the file API reaches the file apps whatever the surface and answers
+        with their HTTP status (FileApiCalls)."""
         session = self.service.store.get(session_id)
         session.exposure = ContentInWorkspace(
-            session.exposure,
+            FileApiCalls(session.exposure, episode),
             episode,
             limit=self.config.sandbox_config.inline_file_bytes,
             folder=self._workdir(),
@@ -1334,13 +1655,22 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         )
 
     async def _lend_sandbox(self, session_id: str, episode: _Episode, *, task_id: str) -> None:
-        """Start the episode's sandbox with the workspace guide and the episode's file API in its environment."""
+        """Start the episode's sandbox with the workspace guide, for a `cli` episode its apps' commands, and the
+        episode's file API in its environment."""
         config = self.config.sandbox_config
         if not config.image:
             raise ValueError("Set sandbox_config.image to the episode sandbox image (see sandbox/Dockerfile)")
         named_configs = get_global_config_dict()
-        apps = tuple(self.service.store.get(session_id).apps)
-        files = {self._guide_path(): workspace_guide(config.inline_file_bytes, apps, workdir=self._workdir())}
+        guide = workspace_guide(
+            config.inline_file_bytes,
+            episode.apps,
+            surface=episode.surface,
+            prefix=config.mcp_tool_prefix,
+            workdir=self._workdir(),
+        )
+        files = {self._guide_path(): guide}
+        if episode.surface == "cli":
+            files[APP_COMMAND_PATH] = APP_COMMAND_SOURCE
         if config.host_relay:
             files[RELAY_PATH] = RELAY_SOURCE
         spec = config.spec(
@@ -1362,9 +1692,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             spec = replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
         sandbox = AsyncSandbox(provider_config)
         try:
-            if config.host_relay:
-                ports = relay_ports(named_configs, own_port=self.config.port)
-                await sandbox.start_with_setup(spec, lambda box: start_relay(box, config.host_relay, ports))
+            if episode.surface == "cli" or config.host_relay:
+                await sandbox.start_with_setup(spec, lambda box: self._prepare_sandbox(box, episode, named_configs))
             else:
                 await sandbox.start(spec)
             access = SandboxAccess(
@@ -1378,6 +1707,14 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             raise
         episode.token, episode.sandbox, episode.access = token, sandbox, access
         self._tokens[token] = session_id
+
+    async def _prepare_sandbox(self, sandbox: AsyncSandbox, episode: _Episode, named_configs: Mapping) -> None:
+        """Make a started sandbox ready to lend: a `cli` episode's apps become commands, then the host relay starts."""
+        config = self.config.sandbox_config
+        if episode.surface == "cli":
+            await run_setup(sandbox, link_app_commands(episode.apps))
+        if config.host_relay:
+            await start_relay(sandbox, config.host_relay, relay_ports(named_configs, own_port=self.config.port))
 
     async def _release(self, episode: _Episode) -> None:
         """Stop the episode's sandbox and revoke its file API token; a failed stop can be retried."""
@@ -1400,27 +1737,42 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
                 except Exception:
                     LOGGER.exception("Failed to stop the sandbox of OfficeEnv session %s", session_id)
 
-    def _seed(self, session_id: str, row: dict[str, Any]) -> Reply:
+    def _seed(self, session_id: str, row: dict[str, Any], *, sandboxed: bool = False) -> Reply:
         """Build the session ``row`` describes. A malformed task, an unknown app or a row from
-        another OfficeEnv major version fails the seed with OfficeEnv's status and error code;
-        nothing is stored, so the seed can be retried."""
+        another OfficeEnv major version fails the seed with OfficeEnv's status and error code, and so
+        does a row whose apps the episode cannot reach (``_unreachable``); nothing is stored, so the
+        seed can be retried."""
         reply = self.service.seed(session_id, row)
         if reply.status != 200:
             raise HTTPException(status_code=reply.status, detail=reply.body)
-        if self.config.expose_tools_over_mcp:
-            catalog = tools_exposure_catalog()
-            tools = self.service.store.get(session_id).tools()
-            unserved = sorted(tool["name"] for tool in tools if catalog.get(tool["name"]) != tool)
-            if unserved:
-                self._discard(session_id)
-                message = (
-                    f"The MCP endpoint serves the tools exposure's tools, not {unserved[:5]}: "
-                    "emit the row with exposure mode 'tools' and the default separator"
-                )
-                raise HTTPException(
-                    status_code=400, detail={"error": {"code": "unsupported_exposure", "message": message}}
-                )
+        message = self._unreachable(session_id, sandboxed=sandboxed)
+        if message is not None:
+            self._discard(session_id)
+            raise HTTPException(
+                status_code=400, detail={"error": {"code": "unsupported_exposure", "message": message}}
+            )
         return reply
+
+    def _unreachable(self, session_id: str, *, sandboxed: bool) -> str | None:
+        """Why a seeded session's apps cannot be reached, if they cannot. Over MCP a harness reaches the ``tools``
+        exposure's tools under their own names; a sandboxed episode's harness may reach its apps as commands
+        (``cli``) or as endpoints it finds over MCP (``api_search``) instead, and no other way."""
+        session = self.service.store.get(session_id)
+        mode = session.describe()["exposure"]["mode"]
+        if sandboxed and mode in SANDBOX_SURFACES and mode != "tools":
+            return None
+        if sandboxed and mode not in SANDBOX_SURFACES:
+            return f"A sandboxed episode reaches its apps through {', '.join(SANDBOX_SURFACES)}, not {mode}"
+        if not self.config.expose_tools_over_mcp:
+            return None
+        catalog = tools_exposure_catalog()
+        unserved = sorted(tool["name"] for tool in session.tools() if catalog.get(tool["name"]) != tool)
+        if not unserved:
+            return None
+        return (
+            f"The MCP endpoint serves the tools exposure's tools, not {unserved[:5]}: "
+            "emit the row with exposure mode 'tools' and the default separator"
+        )
 
     async def close_resources_session(
         self, request: Request, body: ResourcesCloseSessionRequest
@@ -1492,7 +1844,12 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         reply = await self._episode_call(
             session_id, episode, tool_name, body, lambda: self.service.call(session_id, tool_name, body)
         )
-        return Response(content=reply.text(), media_type="application/json", status_code=reply.status)
+        text = reply.text()
+        if episode is not None and episode.surface == "api_search" and reply.status == 200:
+            # the endpoints the finding tools find are called over HTTP
+            limit = self.config.sandbox_config.inline_file_bytes
+            text = with_http_calls(tool_name, text, limit, guide=self._guide_path(), workdir=self._workdir())
+        return Response(content=text, media_type="application/json", status_code=reply.status)
 
     @staticmethod
     def _require_open(episode: _Episode | None) -> None:
@@ -1502,17 +1859,23 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             raise HTTPException(status_code=409, detail="The task has ended: its tools are closed")
 
     async def _episode_call(
-        self, session_id: str, episode: _Episode | None, tool_name: str, body: bytes | str, call: Callable[[], Reply]
-    ) -> Reply:
+        self, session_id: str, episode: _Episode | None, tool_name: str, body: bytes | str, call: Callable[[], Any]
+    ) -> Any:
         """Run ``call``, the service's (synchronous) call of ``tool_name`` with ``body``, under the episode's lock,
         with the workspace files it attaches read from the sandbox before it (``_read_attachments``) and the files its
         downloads saved written there after it (``_save_downloads``). Verification stops the sandbox under the same
-        lock: a call under way when verification begins finishes first, and one that comes later is refused."""
+        lock: a call under way when verification begins finishes first, and one that comes later is refused. A call
+        that raises saves nothing."""
         async with self._locks.setdefault(session_id, asyncio.Lock()):
             self._require_open(episode)
             attached = await self._read_attachments(session_id, episode, tool_name, body)
             self._require_open(episode)  # verification may have begun while the call's attachments were read
-            reply = self._attaching(episode, attached, call)
+            try:
+                reply = self._attaching(episode, attached, call)
+            except Exception:
+                if episode is not None:
+                    episode.saves.clear()
+                raise
             await self._save_downloads(session_id, episode)
         return reply
 
@@ -1574,7 +1937,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             raise self._provider_failed(session_id, episode, "check the attachments", exc) from exc
 
     @staticmethod
-    def _attaching(episode: _Episode | None, attached: dict[str, bytes | str], call: Callable[[], Reply]) -> Reply:
+    def _attaching(episode: _Episode | None, attached: dict[str, bytes | str], call: Callable[[], Any]) -> Any:
         """Run ``call``, the service's (synchronous) call, with the files ``_read_attachments`` read for it in reach of
         the episode's exposure; no await comes between, so another call of the episode sees none of them."""
         if episode is None:
@@ -1611,7 +1974,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return OfficeEnvLengthPenaltyVerifyResponse(**{**body.model_dump(), **result, **penalty})
 
     def mcp_tools(self, harvested: list["MCPTool"], catchall: Any | None) -> list["MCPTool"] | None:
-        """Every tool of the ``tools`` exposure, dispatched through the tool route; no other route is a tool."""
+        """Every tool of the ``tools`` exposure, and in sandbox mode an ``api_search`` episode's two finding tools,
+        dispatched through the tool route; no other route is a tool. An episode's grant admits only its own."""
         if catchall is None:
             return []
         catalog = tools_exposure_catalog()
@@ -1622,6 +1986,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             description = content_description(app, op, tool["description"], limit, guide=self._guide_path())
             schema = content_schema(app, op, tool["parameters"], limit, workdir=self._workdir())
             tools.append(catchall.tool(name, schema, description))
+        if self.config.sandbox_provider is not None:
+            for name, schema, description in SEARCH_TOOLS:
+                tools.append(catchall.tool(name, schema, description.format(guide=self._guide_path())))
         return tools
 
     def mcp_allowed_tools_for_session(self, seed_body: dict[str, Any]) -> list[str] | None:
@@ -1785,15 +2152,20 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             LOGGER.warning("Could not chmod %s in the sandbox of OfficeEnv session %s: %s", paths, session_id, problem)
 
     @staticmethod
-    async def _content_args(request: Request) -> dict[str, str]:
-        """The request body as the app's upload arguments: UTF-8 text as ``content``, any other
-        bytes base64-encoded as ``content_base64``, so a binary file keeps every byte. The body is
-        read in chunks and refused as soon as it passes the upload limit."""
+    async def _bounded_body(request: Request) -> bytes:
+        """A request's body, read in chunks and refused as soon as it passes the upload limit."""
         data = bytearray()
         async for chunk in request.stream():
             data += chunk
             if len(data) > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail=f"Uploads are limited to {MAX_UPLOAD_BYTES} bytes")
+                raise HTTPException(status_code=413, detail=f"Request bodies are limited to {MAX_UPLOAD_BYTES} bytes")
+        return bytes(data)
+
+    @classmethod
+    async def _content_args(cls, request: Request) -> dict[str, str]:
+        """The request body as the app's upload arguments: UTF-8 text as ``content``, any other
+        bytes base64-encoded as ``content_base64``, so a binary file keeps every byte."""
+        data = await cls._bounded_body(request)
         try:
             return {"content": data.decode("utf-8")}
         except UnicodeDecodeError:
@@ -1835,6 +2207,105 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return JSONResponse(
             self._file_call(session_id, app_name, "update", content, file_id=file_id, mime_type=mime_type)
         )
+
+    # The `cli` and `api_search` surfaces, in sandbox mode: each request names its episode by the episode's bearer
+    # token, as the file API's do.
+
+    def _surface_episode(self, request: Request, surface: str) -> tuple[str, _Episode]:
+        """The bearer's episode, if its apps are reached through ``surface``; to any other episode the route does
+        not exist. An episode being verified has its tools closed."""
+        session_id = self._file_session(request)
+        episode = self._episodes.get(session_id)
+        if episode is None or episode.surface != surface:
+            raise HTTPException(status_code=404, detail="Not Found")
+        self._require_open(episode)
+        return session_id, episode
+
+    async def run_command_line(self, request: Request) -> Response:
+        """A command an app runs in a `cli` episode's sandbox (sandbox/app_command.sh): its arguments, the app's
+        name first, NUL-separated. They run as OfficeEnv's CLI exposure reads a command line; the answer is the
+        command's output as text, stdout for exit 0 and stderr otherwise, with the exit code in X-Exit-Code.
+
+        The commands are the way in: a call that does not come from one (no CLI_USER_AGENT naming the app it runs,
+        as a request made by hand after reading the command lacks) is refused with a pointer to the command, and
+        counted. A model that copies the User-Agent has rebuilt the command, and gains nothing by it: this route
+        takes exactly the command line the command does."""
+        session_id, episode = self._surface_episode(request, "cli")
+        try:
+            argv = (await self._bounded_body(request)).decode("utf-8").split("\0")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="Arguments must be UTF-8") from None
+        if argv and not argv[-1]:
+            argv.pop()  # the terminator after the last argument
+        if not argv or request.headers.get("user-agent") != CLI_USER_AGENT.format(app=argv[0]):
+            episode.commands_refused += 1
+            app = argv[0] if argv and argv[0] in episode.apps else "<app>"
+            text = (
+                f"error: run the app's command in the shell: {app} <command> [--parameter=value ...] ({app} --help)\n"
+            )
+            return Response(content=text, media_type="text/plain; charset=utf-8", status_code=403)
+        episode.commands += 1
+        body = json.dumps({"command": shlex.join(argv)})
+        tool = episode.command_tool
+        reply = await self._episode_call(
+            session_id, episode, tool, body, lambda: self.service.call(session_id, tool, body)
+        )
+        try:
+            envelope = json.loads(reply.text())
+        except ValueError:
+            envelope = None
+        if isinstance(envelope, dict) and {"exit_code", "stdout", "stderr"} <= set(envelope):
+            code = int(envelope["exit_code"])
+            text = envelope["stdout"] if code == 0 else envelope["stderr"]
+        else:  # no command answer (an op that crashed, a session gone): its body is the command's error
+            code, text = 1, reply.text()
+        limit = self.config.sandbox_config.inline_file_bytes
+        text = with_content_descriptions(text, limit, argv, guide=self._guide_path(), workdir=self._workdir())
+        if text and not text.endswith("\n"):
+            text += "\n"
+        return Response(
+            content=text,
+            media_type="text/plain; charset=utf-8",
+            status_code=reply.status,
+            headers={"X-Exit-Code": str(code)},
+        )
+
+    async def call_endpoint(self, request: Request) -> Response:
+        """An endpoint an `api_search` episode calls with curl, ``/v1/<app>/<op>``: the body is the op's parameters
+        as a JSON object. It runs as OfficeEnv's api_call does and answers with the app's result, or with its error
+        under the error's HTTP status (a 404, a 429 with its retry hint), as a vendor's API would."""
+        app_name, op = request.path_params["app_name"], request.path_params["op"]
+        session_id, episode = self._surface_episode(request, "api_search")
+        try:
+            params = parse_arguments(await self._bounded_body(request))
+            if not isinstance(params, dict):
+                raise ValueError("send the endpoint's parameters as a JSON object")
+        except (ValueError, RecursionError) as exc:
+            body = {"error": {"code": "invalid_arguments", "message": f"invalid JSON body: {exc}"}}
+            return JSONResponse(body, status_code=400)
+        episode.endpoint_calls += 1
+        call = {"endpoint": f"{app_name}.{op}", "params": params}
+        # The store's call, not the service's: the service answers every app error with 200 (a tool output the
+        # model reads), and an HTTP API answers with the error's status.
+        try:
+            result = await self._episode_call(
+                session_id,
+                episode,
+                "api_call",
+                json.dumps(call),
+                lambda: self.service.store.call(session_id, "api_call", call),
+            )
+        except HTTPException:  # the call refused, or the sandbox failed it, as any surface answers
+            raise
+        except Exception:
+            LOGGER.exception("The %s.%s endpoint failed in OfficeEnv session %s", app_name, op, session_id)
+            # the details stay in the server's log: the model reads no exception text
+            body = {"error": {"code": "internal_error", "message": "The request could not be completed"}}
+            return JSONResponse(body, status_code=500)
+        status = 200
+        if result.is_error:
+            status = result.status if 400 <= result.status < 600 else 400
+        return Response(content=result.output, media_type="application/json", status_code=status)
 
 
 if __name__ == "__main__":
