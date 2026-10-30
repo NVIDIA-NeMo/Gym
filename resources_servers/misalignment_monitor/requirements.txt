@@ -1,0 +1,6 @@
+-e nemo-gym[dev,sandbox] @ ../../
+# Layer 0 (activation_mode probe or jspace). jlens is the Apache-2.0 reference implementation of the Jacobian lens
+# from "Verbalizable Representations Form a Global Workspace in Language Models"; it brings torch and transformers.
+jlens @ git+https://github.com/anthropics/jacobian-lens@581d398613e5602a5af361e1c34d3a92ea82ba8e
+accelerate
+safetensors
