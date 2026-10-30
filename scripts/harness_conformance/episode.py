@@ -13,6 +13,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from nemo_gym.base_responses_api_model import NeMoGymResponse
 from nemo_gym.harness_capabilities.cli import digest_file
 
 from .provider import Probe
-from .registry import HARNESSES
+from .registry import BORROWED_SANDBOX_HARNESSES, CONFIG_CLASSES, HARNESSES
 from .scenarios import SCENARIOS
 
 
@@ -38,6 +39,8 @@ class _Server(uvicorn.Server):
 
 def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     """Record session runtime pins or require a preinstalled legacy runtime."""
+    if harness == "terminus_2_sandboxed" and (os.geteuid() != 0 or not shutil.which("tmux")):
+        raise RuntimeError("Terminus conformance requires a disposable Linux runner as root with tmux installed")
     if harness == "simple":
         return {"installation": "builtin"}
     if use_agent_sessions and harness != "hermes":
@@ -95,6 +98,32 @@ def _config(
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
     if harness == "simple":
         agent["max_steps"] = 6
+    if harness == "claude_code":
+        agent.update(
+            claude_code_version="2.1.108",
+            timeout=int(timeout),
+            max_turns=6,
+            allowed_tools="Bash",
+            thinking="disabled",
+        )
+    if harness == "miniswe_sandboxed":
+        agent.update(
+            harness={"step_limit": 6, "step_timeout_sec": 10},
+            agent_timeout_sec=timeout,
+            setup_timeout_sec=timeout,
+            artifacts_dir=str(directory / "native"),
+        )
+    if harness == "terminus_2_sandboxed":
+        agent = {
+            **defaults,
+            **agent,
+            "max_turns": 6,
+            "enable_summarize": False,
+            "llm_request_timeout": int(timeout),
+            "sandbox_timeout": timeout,
+        }
+        if use_agent_sessions:
+            agent.pop("resources_server", None)
     if harness in ("opencode", "pi"):
         agent["timeout"] = timeout
         if not use_agent_sessions:
@@ -160,7 +189,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
     agent_cls = getattr(module, HARNESSES[harness])
-    config_cls = getattr(module, HARNESSES[harness] + "Config")
+    config_cls = getattr(module, CONFIG_CLASSES.get(harness, HARNESSES[harness] + "Config"))
     use_agent_sessions = _supports_agent_sessions(agent_cls)
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
         raise RuntimeError(
@@ -173,7 +202,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    probe = Probe(scenario, directory)
+    probe = Probe(scenario, directory, harness=harness)
     probe.save()
     tasks = []
     servers = []
@@ -245,12 +274,38 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             ),
             server_client=client,
         )
+        sandbox = None
+        sandbox_started = False
+        sandbox_access = None
+        terminal_directory = None
         try:
+            if harness in BORROWED_SANDBOX_HARNESSES:
+                from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+
+                from .local_sandbox import ProbeLocalProvider, borrowable_local_provider
+
+                stack.enter_context(borrowable_local_provider())
+                sandbox = AsyncSandbox(ProbeLocalProvider(concurrency=1))
+                sandbox_env = {}
+                if harness == "terminus_2_sandboxed":
+                    # tmux socket paths must be short and unique across episodes.
+                    terminal_directory = stack.enter_context(tempfile.TemporaryDirectory(prefix="gym-probe-tmux-"))
+                    sandbox_env["TMUX_TMPDIR"] = terminal_directory
+                await sandbox.start(SandboxSpec(workdir=str(directory / "workspace"), env=sandbox_env))
+                sandbox_started = True
+                sandbox_access = {
+                    "connection": {
+                        "kind": "direct",
+                        "provider_config_ref": "probe_sandbox",
+                        "descriptor": await sandbox.serialize(),
+                    },
+                    "workdir": str(directory / "workspace"),
+                }
             apps = {
                 "policy_model": probe.model_app(
                     assistant_message_header=client.assistant_message_header("policy_model")
                 ),
-                "probe_resources": probe.resources_app(server_client=client),
+                "probe_resources": probe.resources_app(server_client=client, sandbox_access=sandbox_access),
                 "probe_agent": agent.setup_webserver(),
                 "probe_environment": environment.setup_webserver(),
             }
@@ -303,8 +358,19 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             for server in servers:
                 server.should_exit = True
             await asyncio.gather(*tasks, return_exceptions=True)
-            await get_global_aiohttp_client().close()
-            probe.save()
+            try:
+                if sandbox_started:
+                    try:
+                        if terminal_directory is not None:
+                            result = await sandbox.exec("tmux kill-server", timeout_s=5)
+                            # Exit 1 also means setup never started this episode's server.
+                            if result.error_type is not None or result.return_code not in (0, 1):
+                                raise RuntimeError(f"Could not close conformance terminal: {result.stderr}")
+                    finally:
+                        await sandbox.stop()
+            finally:
+                await get_global_aiohttp_client().close()
+                probe.save()
 
 
 def main() -> None:

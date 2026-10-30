@@ -67,6 +67,9 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
+      - name: Install terminal runtime
+        if: matrix.harness == 'terminus_2_sandboxed'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
       - name: Install pinned dependencies and runtime
         timeout-minutes: 12
         env:
@@ -94,7 +97,10 @@ jobs:
         env:
           HARNESS: ${{ matrix.harness }}
         run: |
-          if .venv/bin/python scripts/run_harness_conformance.py \
+          launcher=()
+          # The Terminus sandbox contract creates /logs/agent as root.
+          if [[ "$HARNESS" == "terminus_2_sandboxed" ]]; then launcher=(sudo); fi
+          if "${launcher[@]}" .venv/bin/python scripts/run_harness_conformance.py \
             --harness "$HARNESS" --output "$PROBE_OUTPUT"; then
             code=0
           else
