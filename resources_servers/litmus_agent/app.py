@@ -101,10 +101,10 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 # ---------------------------------------------------------------------------

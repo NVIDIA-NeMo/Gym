@@ -27,6 +27,7 @@ import pytest
 
 pytest.importorskip("opentelemetry.sdk.metrics")
 
+import nemo_gym.client.http_client
 from nemo_gym.telemetry import observer  # noqa: E402
 from nemo_gym.telemetry import setup as telemetry_setup  # noqa: E402
 
@@ -312,7 +313,7 @@ def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(colle
     from nemo_gym.base_responses_api_model import _CaptureMiddleware
     from nemo_gym.rollout_correlation import RolloutContextMiddleware
 
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
     async def run():
         ready = asyncio.Event()
@@ -411,7 +412,7 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
     from nemo_gym.base_responses_api_model import _CaptureMiddleware
     from nemo_gym.rollout_correlation import RolloutContextMiddleware
 
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
     async def run():
         app = FastAPI()
@@ -478,7 +479,7 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 def test_cancellation_before_routing_uses_one_unmatched_bucket(collected, monkeypatch):
     from nemo_gym import server_utils
 
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
     async def run():
         ready = asyncio.Event()
@@ -534,20 +535,18 @@ def test_every_process_reports_its_pid_as_a_resource_attribute():
 
 
 def test_outbound_calls_are_counted_while_they_wait_for_a_response(collected, monkeypatch):
-    from nemo_gym import server_utils
-
     seen = []
 
     async def fake_send(*_args, **_kwargs):
         seen.append(observer.request_counts().outbound_in_flight)
         return "response"
 
-    monkeypatch.setattr(server_utils, "_request_with_retries", fake_send)
-    monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _group: False)
+    monkeypatch.setattr("nemo_gym.client.http_client._request_with_retries", fake_send)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _group: False)
 
     async def call():
         async with observer.observe_event_loop("server"):
-            assert await server_utils.request("GET", "http://example.invalid/x") == "response"
+            assert await nemo_gym.client.http_client.request("GET", "http://example.invalid/x") == "response"
             return observer.request_counts().outbound_in_flight
 
     assert asyncio.run(call()) == 0

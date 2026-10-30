@@ -47,6 +47,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
@@ -72,7 +73,7 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
+from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.skills import stage_skills
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.codex_agent.observability import (

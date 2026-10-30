@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -30,7 +31,7 @@ from nemo_gym.core import (
     NeMoGymSummary,
 )
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient, SimpleServer
+from nemo_gym.server_utils import SimpleServer
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.proof_jury_judge.app import (
     VERIFIER_FIXTURE,

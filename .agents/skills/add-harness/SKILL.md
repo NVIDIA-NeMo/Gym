@@ -183,5 +183,5 @@ pytest tests/unit_tests/test_session_contract_repo.py
 - One adapter per harness. Never add a pair-specific adapter or launcher.
 - Never change a benchmark's data, prompts, or verifier to fit a harness.
 - Keep credentials out of committed files; reference them from `env.yaml`.
-- Use aiohttp through `nemo_gym.server_utils.request()`, not httpx, for async HTTP.
+- Use aiohttp through `nemo_gym.client.request()`, not httpx, for async HTTP.
 - `/run` and activation code must be async; code must run on Linux.

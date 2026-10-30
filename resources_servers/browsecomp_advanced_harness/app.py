@@ -43,11 +43,11 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     SimpleResourcesServer,
 )
+from nemo_gym.client import SESSION_ID_KEY, raise_for_status, request
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES
-from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 

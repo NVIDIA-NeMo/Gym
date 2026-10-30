@@ -325,7 +325,7 @@ def test_harness_property_reaches_model_capture_and_links_message(tmp_path, pars
     from omegaconf import OmegaConf
 
     from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.client import ServerClient
 
     class Model(SimpleResponsesAPIModel):
         async def chat_completions(self, body):

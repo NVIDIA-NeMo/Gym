@@ -1024,7 +1024,7 @@ def generation_cut_requester(
     """
 
     async def request_cut(backend: str, inventory: GenerationCutInventory) -> GenerationCutReceipt:
-        from nemo_gym.server_utils import get_response_json, raise_for_status, request
+        from nemo_gym.client.http_client import get_response_json, raise_for_status, request
 
         response = await request(
             method="POST",

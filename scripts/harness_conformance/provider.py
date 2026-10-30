@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.chat_streaming import synthesize_chat_completion_sse
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletion
 from nemo_gym.judge import call_judge
 from nemo_gym.observability.verifiers import observe_verifier
@@ -27,7 +28,6 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
 )
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
-from nemo_gym.server_utils import ServerClient
 
 from .scenarios import Scenario
 
