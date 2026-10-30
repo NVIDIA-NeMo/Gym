@@ -33,6 +33,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox import (
@@ -45,7 +46,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 LOG = logging.getLogger(__name__)

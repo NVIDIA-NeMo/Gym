@@ -34,8 +34,8 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
 )
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.swebench_pro.app import (
     SWEBenchProInstanceRequest,

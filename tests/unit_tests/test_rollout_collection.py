@@ -50,11 +50,13 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
 import nemo_gym.batch_status
+import nemo_gym.client.http_client
 import nemo_gym.rollout_collection
 import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import observe_materialized_rows
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import (
     AmbiguousEnvironmentServerError,
     BaseServerConfig,
@@ -126,7 +128,7 @@ from nemo_gym.rollout_collection import (
 )
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
-from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
+from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
@@ -1741,8 +1743,8 @@ class TestRolloutCollection:
             else ServerDisconnectedError()
         )
         transport.request = AsyncMock(side_effect=[failure, FakeResponse(200, {"reward": 1})])
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
-        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", AsyncMock())
         run = RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests)
         if retry_requests or connection_refused:
             _, result = await next(run)
@@ -1770,15 +1772,17 @@ class TestRolloutCollection:
         client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
         monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
         # The real read: collection's own read of the reply is the step under test.
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", nemo_gym.server_utils.get_response_json)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_response_json", nemo_gym.client.http_client.get_response_json
+        )
         replies = []
         for _ in range(3):
             cut_off = FakeResponse(200, {"reward": 0})
             cut_off.read = AsyncMock(side_effect=ClientPayloadError("Response payload is not completed"))
             replies.append(cut_off)
         transport = MagicMock(request=AsyncMock(side_effect=_guarded_replies(replies)))
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
-        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", AsyncMock())
         run = RolloutCollectionHelper().run_examples(
             [failing_row()], retry_requests=retry_requests, route_failures_to_sidecar=route_failures_to_sidecar
         )
@@ -1835,10 +1839,14 @@ class TestRolloutCollection:
         )
         client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
         monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", nemo_gym.server_utils.get_response_json)
-        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", nemo_gym.server_utils.raise_for_status)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "get_response_json", nemo_gym.client.http_client.get_response_json
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "raise_for_status", nemo_gym.client.http_client.raise_for_status
+        )
         async with server, ClientSession() as session:
-            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
             run = RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True)
             _, result = await next(run)
         if failure_body is None:
@@ -7529,7 +7537,7 @@ class TestRunExamplesAclose:
             )
             monkeypatch.setattr(RolloutCollectionHelper, "setup_server_client", lambda *args: server_client)
             async with ClientSession() as session:
-                monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+                monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", session)
                 completions = RolloutCollectionHelper().run_examples(
                     [self._row(0)], max_resident_tasks=max_resident_tasks
                 )

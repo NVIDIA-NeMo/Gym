@@ -19,11 +19,12 @@ from unittest.mock import AsyncMock, MagicMock, call
 import orjson
 from pytest import approx, fixture
 
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -31,7 +32,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.tavily_search.app import (
     FindInPageRequest,
     ScrollPageRequest,

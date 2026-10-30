@@ -13,7 +13,7 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 import httpx
 
-from nemo_gym import server_utils
+from nemo_gym.client import http_client
 
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
         timeout = request.extensions.get("timeout", {})
         for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
             with _map_aiohttp_exceptions():
-                response = await server_utils.request(
+                response = await http_client.request(
                     method=request.method,
                     url=str(request.url),
                     # Only explicit rate-limit rejections are retried here. Connection

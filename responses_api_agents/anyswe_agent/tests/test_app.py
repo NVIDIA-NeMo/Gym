@@ -29,8 +29,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.anyswe_agent import agent_runner
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
@@ -196,10 +196,10 @@ class TestSandboxAPI:
 
     def test_model_url_carries_trace_context_without_a_rollout_id(self, monkeypatch) -> None:
         # Capture off, traces on: the harness still gets the current span in the URL.
-        from nemo_gym import server_utils
+        from nemo_gym.client import server_client
 
         monkeypatch.setattr(
-            server_utils, "trace_context_path_segment", lambda: "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+            server_client, "trace_context_path_segment", lambda: "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
         )
         assert (
             _model_url_for_rollout("http://model-host:8000", None)

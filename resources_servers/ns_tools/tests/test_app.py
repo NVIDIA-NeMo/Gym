@@ -26,9 +26,9 @@ from fastapi import FastAPI
 from nemo_skills.mcp.tool_manager import ToolManager
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 
 
 class TestApp:

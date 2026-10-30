@@ -371,7 +371,7 @@ Next, update `resources_servers/my_weather_tool/tests/test_app.py`. Keep the gen
 import asyncio
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 
 from ..app import (

@@ -19,7 +19,7 @@ import aiohttp
 import pathspec
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym.server_utils import request
+from nemo_gym.client import request
 
 
 class Settings(BaseModel):

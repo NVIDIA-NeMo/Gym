@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 from pytest import approx, fixture
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -24,7 +25,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.terminal_multi_harness.app import (
     TerminalMultiHarnessResourcesServer,
     TerminalMultiHarnessResourcesServerConfig,
