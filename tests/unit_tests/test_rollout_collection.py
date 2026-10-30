@@ -54,7 +54,12 @@ import nemo_gym.client.http_client
 import nemo_gym.rollout_collection
 import nemo_gym.server_utils
 import nemo_gym.token_id_capture.delivery
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.artifacts.rollout_rows import (
+    NG_DISPATCH_DRAINED_KEY,
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    _rollout_for_export,
+)
 from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import (
@@ -75,7 +80,7 @@ from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.health.types import RunHealthLimits
-from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
@@ -85,12 +90,9 @@ from nemo_gym.rollout_collection import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_DATASET_DIGEST_KEY,
     NG_DIGEST_KEY,
-    NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
-    NG_FAILURE_CLASS_KEY,
     NG_FAILURE_JUDGE_ERROR_KEY,
     NG_FAILURE_MAX_ATTEMPTS_KEY,
-    NG_NO_PERSIST_KEY,
     NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
     NG_RESULT_TYPE_KEY,
@@ -117,7 +119,6 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
     _masking_step_metrics,
     _missing_rollout_rows_counted_as_zero,
-    _rollout_for_export,
     _rollout_order_key,
     _rollout_request_debug_summary,
     _round_robin_by_agent,
@@ -128,6 +129,7 @@ from nemo_gym.rollout_collection import (
 )
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
+from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -10341,7 +10343,7 @@ class TestTurnsFromModelCalls:
 
     @staticmethod
     def _call(call_id: str, response: dict, *, started_at: float, response_id: str | None = None):
-        from nemo_gym.rollout_observability import TrajectoryModelCall
+        from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 
         return TrajectoryModelCall.model_validate(
             {
@@ -10358,7 +10360,7 @@ class TestTurnsFromModelCalls:
 
     @staticmethod
     def _invocation(invocation_id: str, call_ids: list[str]):
-        from nemo_gym.rollout_observability import AgentInvocation
+        from nemo_gym.trajectory.trajectory_record import AgentInvocation
 
         return AgentInvocation.model_validate(
             {"invocation_id": invocation_id, "model_calls": [{"model_call_id": call_id} for call_id in call_ids]}
@@ -10399,7 +10401,7 @@ class TestTurnsFromModelCalls:
         assert turn.answer == {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]}
 
     def test_a_call_that_returned_nothing_is_not_a_turn(self) -> None:
-        from nemo_gym.rollout_observability import TrajectoryModelCall
+        from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 
         failed = TrajectoryModelCall.model_validate({"model_call_id": "failed", "started_at": 1.0})
         answered = self._call("answered", {"output": []}, started_at=2.0)
@@ -12446,7 +12448,7 @@ def test_episode_record_carries_the_failure_kind_into_the_sidecar_row() -> None:
     """An Environment Server's failure kind (Harbor's ``harbor:task_deadline``) reaches the sidecar row as it left
     the wire, under the key the metrics label reads; a failure that names no kind adds no key."""
     import nemo_gym.rollout_collection as rollout_collection
-    from nemo_gym.episode_types import EpisodeFailure
+    from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     failure = EpisodeFailure(
         failure_reason="Episode exceeded the time budget",

@@ -41,7 +41,7 @@ from typing import Any, Dict, List
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseVerifyRequest,

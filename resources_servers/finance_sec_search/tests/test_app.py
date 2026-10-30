@@ -26,11 +26,6 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_resources_server import (
-    BaseSeedSessionRequest,
-    ResourcesCloseSessionRequest,
-    ResourcesSeedSessionRequest,
-)
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -39,9 +34,14 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     TaskId,
 )
-from nemo_gym.judge import JudgeError
-from nemo_gym.session_routing import ResourcesSessionLifetimes
+from nemo_gym.server_runtime import (
+    BaseSeedSessionRequest,
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+)
+from nemo_gym.server_runtime.request_handling.session_routing import ResourcesSessionLifetimes
 from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.verification import JudgeError
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,

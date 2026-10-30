@@ -40,7 +40,14 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
@@ -56,14 +63,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionLostError,
     SimpleResourcesServer,
 )
-from nemo_gym.client import SESSION_ID_KEY, get_response_json
-from nemo_gym.config import ModelServerRef
-from nemo_gym.core import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.judge import JudgeError, call_judge, reraise_judge_errors
+from nemo_gym.verification import JudgeError, call_judge, reraise_judge_errors
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
 from resources_servers.sec_local_index.html_text import html_to_text
 from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch
@@ -649,8 +649,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 self._typed_seeds[session_id] = body.model_copy(deep=True)
                 self._start_session(request, session_id)
             # The session router already names a typed seed's cookie session by its resources_session_id
-            # (see nemo_gym.session_routing). Binding it here keeps the tools on that key in an app served without
-            # the router too; only after the checks, so a refused seed's reply carries no cookie for this session.
+            # (see nemo_gym.server_runtime.request_handling.session_routing). Binding it here keeps the tools on
+            # that key in an app served without the router too; only after the checks, so a refused seed's reply
+            # carries no cookie for this session.
             request.session[SESSION_ID_KEY] = session_id
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
 

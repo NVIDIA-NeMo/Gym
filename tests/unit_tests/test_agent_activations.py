@@ -25,7 +25,7 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, TrajectoryTurn
+from nemo_gym.trajectory.trajectory_record import AgentInvocation, TrajectoryRecord, TrajectoryTurn
 
 
 def response(text="done"):

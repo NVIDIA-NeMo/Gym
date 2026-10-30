@@ -1100,7 +1100,7 @@ async def test_file_cleanup_failure_keeps_connection_and_can_retry(setup):
 
 
 def test_malformed_later_artifact_keeps_partial_output(setup):
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     agent, _ = setup
     export = json.loads(events())

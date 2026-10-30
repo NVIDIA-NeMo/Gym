@@ -25,7 +25,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import JudgeError, judge_failsafe
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.aalcr.app import (
     LEGACY_JUDGE_PROTOCOL,
     V1_0_DATASET_REVISION,

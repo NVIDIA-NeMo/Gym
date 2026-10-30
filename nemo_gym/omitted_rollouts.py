@@ -40,7 +40,8 @@ def omitted_rollout_record(result: Mapping[str, Any]) -> Dict[str, Any]:
     ``_ng_failure_message`` keeps the reason the result gave, else says that no result was produced.
     """
     # Lazy: rollout_collection imports this module.
-    from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_OMITTED_ROLLOUT_KEY
+    from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY
+    from nemo_gym.rollout_collection import NG_OMITTED_ROLLOUT_KEY
 
     record = dict(result)
     failure_class = record.get(NG_FAILURE_CLASS_KEY) or (

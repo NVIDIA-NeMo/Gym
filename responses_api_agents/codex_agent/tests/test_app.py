@@ -34,7 +34,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.codex_agent.app import (
     CodexAgent,
     CodexAgentConfig,

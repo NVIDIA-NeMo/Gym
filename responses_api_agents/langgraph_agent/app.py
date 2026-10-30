@@ -20,11 +20,11 @@ from typing import Any
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 def response_output_items(policy_outputs: list[Any]) -> list[Any]:

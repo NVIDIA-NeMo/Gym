@@ -24,6 +24,11 @@ from typing import Any
 import orjson
 from pydantic import BaseModel, ValidationError
 
+from nemo_gym.artifacts.run_files import (
+    QUALITY_SUMMARY_FILENAME,
+    QUALITY_SUMMARY_SOURCES_KEY,
+    ROLLOUT_VERDICTS_FILENAME,
+)
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -51,11 +56,8 @@ from nemo_gym.health.checks import (
 from nemo_gym.health.timeouts import read_rollout_timing, summarize_timeouts
 from nemo_gym.health.types import (
     CALL_BINDING_INPUTS,
-    QUALITY_SUMMARY_FILENAME,
-    QUALITY_SUMMARY_SOURCES_KEY,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
-    ROLLOUT_VERDICTS_FILENAME,
     TASK_INDEX_KEY,
     CheckInput,
     CheckScope,
@@ -559,10 +561,8 @@ def _rollout_accounting(
     The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
-    from nemo_gym.rollout_collection import (
-        NG_FAILURE_CLASS_KEY,
-        is_terminal_failure,
-    )
+    from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
+    from nemo_gym.rollout_collection import is_terminal_failure
 
     failed, owed, any_sidecar = failures.rows, failures.owed, failures.any_sidecar
     expected = None if owed is None else len(owed)
