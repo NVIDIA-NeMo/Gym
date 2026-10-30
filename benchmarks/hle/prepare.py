@@ -93,11 +93,13 @@ def prepare(include_vision: bool = False) -> Path:
                 "expected_answer": batch.column("answer")[i].as_py(),
                 "answer_type": batch.column("answer_type")[i].as_py(),  # not used for grading; useful for analysis
                 "uuid": batch.column("id")[i].as_py(),
+                "has_image": bool(image),
+                "category": batch.column("category")[i].as_py() if "category" in batch.column_names else None,
+                "raw_subject": batch.column("raw_subject")[i].as_py() if "raw_subject" in batch.column_names else None,
                 "task_id": batch.column("id")[i].as_py(),
             }
             if include_vision:
                 # Materialize the prompt so the row is self-contained (no prompt_config needed).
-                row["has_image"] = bool(image)
                 row["responses_create_params"] = {"input": build_image_input(prompt_config, question, image)}
             rows.append(json.dumps(row) + "\n")
 
