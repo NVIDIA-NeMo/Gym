@@ -794,7 +794,7 @@ class TestConfigYaml:
         assert "opencode_agent" in data
         inner = data["opencode_agent"]["responses_api_agents"]["opencode_agent"]
         if training_capture is not None:
-            inner["token_id_capture"] = training_capture
+            inner["token_capture"] = training_capture
         config = OpenCodeAgentConfig.model_validate(inner | {"host": "localhost", "port": 8000, "name": "opencode"})
         assert config.entrypoint == "app.py"
         assert "execution_mode" not in type(config).model_fields
@@ -810,9 +810,9 @@ class TestConfigYaml:
         assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
         assert config.opencode_config["tools"]["webfetch"] is False
 
-        assert config.token_id_capture is (training_capture is True)
+        assert config.token_capture is (training_capture is True)
         client = MagicMock(spec=ServerClient)
-        client.global_config_dict = {"observability_enabled": True, "token_id_capture": {"enabled": True}}
+        client.global_config_dict = {"observability_enabled": True, "token_capture": {"enabled": True}}
         agent = OpenCodeAgent(config=config, server_client=client)
         capture_path = "/training-token-capture" if training_capture else ""
         assert (

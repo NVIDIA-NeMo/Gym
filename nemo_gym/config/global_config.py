@@ -139,8 +139,14 @@ QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
-# See ``nemo_gym/token_id_capture/config.py``.
-TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+# See ``nemo_gym/models/token_capture/config.py``.
+TOKEN_CAPTURE_BLOCK = "token_capture"
+# Old spellings of the token capture keys, from before the package was named token_capture.
+# Each config source has them rewritten to the new keys when it is loaded, until nemo_gym 0.10.0.
+RENAMED_CONFIG_KEYS = {
+    "token_id_capture": TOKEN_CAPTURE_BLOCK,
+    "token_id_capture_non_generating_requests": "token_capture_non_generating_requests",
+}
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -187,7 +193,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
-    TOKEN_ID_CAPTURE_BLOCK,
+    TOKEN_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -442,12 +448,56 @@ def _load_config_yaml(config_path):
     from yaml import YAMLError
 
     try:
-        return OmegaConf.load(config_path)
+        config = OmegaConf.load(config_path)
     except YAMLError as e:
         mark = getattr(e, "problem_mark", None)
         location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
         problem = getattr(e, "problem", None) or str(e).splitlines()[0]
         raise ConfigError(f"Malformed YAML in '{config_path}'{location}: {problem}") from e
+    rename_deprecated_config_keys(config, source=str(config_path))
+    return config
+
+
+def rename_deprecated_config_keys(config: "DictConfig | ListConfig", *, source: str) -> None:
+    """Rewrite the old token capture keys in `config` to their new names, in place.
+
+    Logs one warning per source that uses an old key. A mapping that sets both the old and the new key
+    is refused, since it is unclear which one is meant.
+    """
+    renamed: List[str] = []
+
+    def walk(node: "DictConfig | ListConfig", path: List[str]) -> None:
+        if isinstance(node, DictConfig):
+            for old_key, new_key in RENAMED_CONFIG_KEYS.items():
+                if old_key not in node:
+                    continue
+                where = ".".join([*path, old_key])
+                if new_key in node:
+                    raise ConfigError(
+                        f"'{where}' and '{'.'.join([*path, new_key])}' are both set in {source}. "
+                        f"'{old_key}' is the old name of '{new_key}'; keep only '{new_key}'."
+                    )
+                with open_dict(node):
+                    node[new_key] = node._get_node(old_key)
+                    del node[old_key]
+                renamed.append(where)
+            children = [(str(key), node._get_node(key)) for key in node.keys()]
+        elif isinstance(node, ListConfig):
+            children = [(str(index), node._get_node(index)) for index in range(len(node))]
+        else:
+            return
+        for key, child in children:
+            if isinstance(child, (DictConfig, ListConfig)):
+                walk(child, [*path, key])
+
+    walk(config, [])
+    if renamed:
+        logger.warning(
+            "%s uses the old token capture key names, which work until nemo_gym 0.10.0: %s. "
+            "Rename token_id_capture to token_capture.",
+            source,
+            ", ".join(renamed),
+        )
 
 
 def _nemo_gym_openai_requirement() -> Optional[str]:
@@ -1454,9 +1504,11 @@ For example, on the command line:
         )
         # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
         OmegaConf.set_struct(cli_global_config_dict, False)
+        rename_deprecated_config_keys(cli_global_config_dict, source="the command line")
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
+        rename_deprecated_config_keys(initial_global_config_dict, source="the initial global config")
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
@@ -2371,3 +2423,10 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
 
     This server will NOT be started.
     """
+
+
+# Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

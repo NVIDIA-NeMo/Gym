@@ -45,8 +45,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.observability.model_calls import read_model_call_records
-from nemo_gym.token_id_capture.replay import replay_context
 
 
 @pytest.mark.parametrize("text", ["What is 2 + 2?", ""])
@@ -858,7 +858,7 @@ def test_context_overflow_error_fields_reads_the_engine_body_and_the_marked_code
 
 # --- capture-store config + init failure ---
 def test_model_call_capture_keys_are_reserved_global_config():
-    assert {"observability_enabled", "model_call_capture_dir", "token_id_capture"} <= set(
+    assert {"observability_enabled", "model_call_capture_dir", "token_capture"} <= set(
         NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
     )
 
@@ -992,19 +992,19 @@ def test_base_agent_resolve_model_base_url(monkeypatch):
             global_config_dict={},
             _build_server_base_url=lambda _config: "http://h:1",
         ),
-        _token_id_capture_enabled=lambda: False,
+        _token_capture_enabled=lambda: False,
     )
 
     assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", "rid") == "http://h:1/ng-rollout/rid/v1"
     assert SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", None) == "http://h:1/v1"
-    agent._token_id_capture_enabled = lambda: True
+    agent._token_capture_enabled = lambda: True
     assert (
         SimpleResponsesAPIAgent.resolve_model_base_url(agent, "model", "rid")
         == "http://h:1/ng-rollout/rid/training-token-capture/v1"
     )
 
 
-def _make_base_agent(global_config, *, token_id_capture=False):
+def _make_base_agent(global_config, *, token_capture=False):
     from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
 
     class _Agent(SimpleResponsesAPIAgent):
@@ -1021,7 +1021,7 @@ def _make_base_agent(global_config, *, token_id_capture=False):
         port=0,
         entrypoint="",
         name="agent",
-        token_id_capture=token_id_capture,
+        token_capture=token_capture,
     )
     return _Agent(config=config, server_client=server_client)
 
@@ -1048,25 +1048,25 @@ def test_base_agent_propagates_explicit_token_capture_intent():
     body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
     global_config = {
         "observability_enabled": True,
-        "token_id_capture": {"enabled": True},
+        "token_capture": {"enabled": True},
     }
-    opted_in = _make_base_agent(global_config, token_id_capture=True)
+    opted_in = _make_base_agent(global_config, token_capture=True)
     assert opted_in.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/training-token-capture/v1/responses"
     assert opted_in.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1/training-token-capture"
 
-    opted_out = _make_base_agent(global_config, token_id_capture=False)
+    opted_out = _make_base_agent(global_config, token_capture=False)
     assert opted_out.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
 
 
 def test_base_agent_all_agents_overrides_the_agent_opt_in():
     body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
     global_config = {
-        "token_id_capture": {
+        "token_capture": {
             "enabled": True,
             "all_agents": True,
         }
     }
-    agent = _make_base_agent(global_config, token_id_capture=False)
+    agent = _make_base_agent(global_config, token_capture=False)
 
     assert agent.url_path_for_run("/v1/responses", body) == ("/ng-rollout/3-1/training-token-capture/v1/responses")
 
@@ -1564,7 +1564,7 @@ def _run_capture_middleware_on(path: str, *, token_store, sent: list | None = No
 def test_unobserved_dialect_under_capture_prefix_marks_incomplete(tmp_path):
     # The middleware cannot capture tokens from /v1/completions.
     # Its output can still feed later prompts.
-    from nemo_gym.token_id_capture.store import TokenCaptureStore
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
 
     token_store = TokenCaptureStore(tmp_path)
     forwarded, sent = _run_capture_middleware_on(
@@ -1590,7 +1590,7 @@ def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
 
 
 def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path):
-    from nemo_gym.token_id_capture.store import TokenCaptureStore
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
 
     token_store = TokenCaptureStore(tmp_path)
     forwarded, _sent = _run_capture_middleware_on(

@@ -51,8 +51,8 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
+    TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
-    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -408,9 +408,9 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         return super().failure_response(request, failure)
 
     def _activation_path(self, request: SWETRequest) -> str:
-        block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
-        capture = bool(block.get("enabled")) and (block.get("all_agents") or config.get("token_id_capture"))
+        capture = bool(block.get("enabled")) and (block.get("all_agents") or config.get("token_capture"))
         segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""
         return f"/ng-rollout/{request.episode_id.capture_key}{segment}/v1/responses"
 

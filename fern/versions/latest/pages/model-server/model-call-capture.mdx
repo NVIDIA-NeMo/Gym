@@ -64,7 +64,7 @@ original request and response payloads.
 
 ### Buffered SSE with external token staging
 
-With `token_id_capture.external_staging: true` and `parent_resolution: fingerprint`, captured requests can use `stream: true`
+With `token_capture.external_staging: true` and `parent_resolution: fingerprint`, captured requests can use `stream: true`
 on Chat Completions, Responses (including the compaction adapter), and Anthropic Messages.
 Gym requests a complete, non-streaming answer from the inference worker. The worker stages
 training tokens before returning commit coordinates. Gym removes internal token fields,
@@ -78,7 +78,7 @@ No content is delivered during generation, so buffered SSE does not reduce time 
 Worker streaming with external capture remains unsupported. Training reconstruction reads
 the external staged tokens, not the SSE text.
 
-The staging ledger's wire models (`nemo_gym/token_id_capture/staging/records.py`) forbid unknown
+The staging ledger's wire models (`nemo_gym/models/token_capture/staging/records.py`) forbid unknown
 fields, so the model server that stages a call and the framework that rebuilds the rollout from
 the staged rows must run the same Gym version. A framework whose Gym predates a column the model
 server writes, such as `source_capture_key` or `finish_reason`, rejects every manifest row as
@@ -87,7 +87,7 @@ server writes, such as `source_capture_key` or `finish_reason`, rejects every ma
 ### Source-history continuity and context compaction
 
 A compatible training framework can own exact-token prefix reuse and training-row reconstruction.
-Set `token_id_capture.parent_resolution: source_history` to match source history and effective render
+Set `token_capture.parent_resolution: source_history` to match source history and effective render
 options. Gym sends a root when they do not match or no unique parent can be identified. The default
 `fingerprint` mode continues to match assistant content against captured calls.
 For a candidate parent, the inference worker verifies the converted-message boundary and any
@@ -128,7 +128,7 @@ The framework must configure the worker, shared capture ledger and control beare
 these run-wide settings:
 
 ```yaml
-token_id_capture:
+token_capture:
   enabled: true
   external_staging: true
   external_staging_backend: vllm_worker
@@ -387,7 +387,7 @@ varies by producer and execution path; the
 
 ## Framework-owned media staging
 
-Training frameworks using `nemo_gym.token_id_capture.staging` can hand a framework's
+Training frameworks using `nemo_gym.models.token_capture.staging` can hand a framework's
 processed media (for example an inference worker's pixel tensors) to
 `RolloutTokenCapture.complete_call` or `complete_call_from_response` through the
 keyword-only `attachments` mapping. Gym forwards the mapping unchanged to

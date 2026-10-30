@@ -34,7 +34,7 @@ from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import ServerClient
-from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_ID_CAPTURE_BLOCK
+from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_CAPTURE_BLOCK
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import ApptainerProvider, DockerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
@@ -345,8 +345,8 @@ class TestSetupParams:
             _config(global_agent_timeout=0)
 
     def test_model_server_url_carries_the_training_capture_prefix(self, tmp_path: Path) -> None:
-        agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000", token_id_capture=True)
-        agent.server_client.global_config_dict = {TOKEN_ID_CAPTURE_BLOCK: {"enabled": True}}
+        agent = _make_setup_agent(tmp_path, model_server_url="http://policy:8000", token_capture=True)
+        agent.server_client.global_config_dict = {TOKEN_CAPTURE_BLOCK: {"enabled": True}}
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
 
         params = agent._setup_params(body, rollout_id="7-2")

@@ -67,6 +67,13 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.openai_utils": MovedPath(new="nemo_gym.models.openai_utils", since="0.8.0"),
+    "nemo_gym.anthropic_utils": MovedPath(new="nemo_gym.models.anthropic_utils", since="0.8.0"),
+    "nemo_gym.anthropic_converter": MovedPath(new="nemo_gym.models.anthropic_converter", since="0.8.0"),
+    "nemo_gym.responses_converter": MovedPath(new="nemo_gym.models.chat_completions_converter", since="0.8.0"),
+    "nemo_gym.chat_streaming": MovedPath(new="nemo_gym.models.chat_streaming", since="0.8.0"),
+    "nemo_gym.responses_streaming": MovedPath(new="nemo_gym.models.responses_streaming", since="0.8.0"),
+    "nemo_gym.token_id_capture": MovedPath(new="nemo_gym.models.token_capture", since="0.8.0"),
     "nemo_gym.server_utils": MovedPath(new="nemo_gym.server_runtime.base_server", since="0.8.0"),
     "nemo_gym._checkpoint.model": MovedPath(new="nemo_gym.models._checkpoint", since="0.8.0"),
     "nemo_gym._checkpoint.model_workers": MovedPath(new="nemo_gym.models._checkpoint_workers", since="0.8.0"),
@@ -469,6 +476,56 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.artifacts.run_files", "0.8.0", "AGGREGATION_ERROR_KEY"),
     },
 }
+
+# Names renamed with the token capture package (token_id_capture -> token_capture), at each old module path that
+# defined or imported them. Kept apart so a module path that MOVED_NAMES already lists keeps its other entries.
+_TOKEN_CAPTURE = "nemo_gym.models.token_capture"
+_RENAMED_TOKEN_CAPTURE_NAMES: dict[str, dict[str, MovedPath]] = {
+    "nemo_gym.token_id_capture": {
+        "TokenIdCaptureConfig": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TokenCaptureConfig", since="0.8.0"),
+        "token_id_capture_dirs_from_config": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.consumer:token_capture_dirs_from_config", since="0.8.0"
+        ),
+    },
+    "nemo_gym.token_id_capture.config": {
+        "TOKEN_ID_CAPTURE_BLOCK": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TOKEN_CAPTURE_BLOCK", since="0.8.0"),
+        "TokenIdCaptureConfig": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TokenCaptureConfig", since="0.8.0"),
+        "TokenIdCaptureSettings": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TokenCaptureSettings", since="0.8.0"),
+        "token_id_capture_config": MovedPath(new=f"{_TOKEN_CAPTURE}.config:token_capture_config", since="0.8.0"),
+        "token_id_capture_enabled_for_agent": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.config:token_capture_enabled_for_agent", since="0.8.0"
+        ),
+    },
+    "nemo_gym.token_id_capture.consumer": {
+        "token_id_capture_dirs_from_config": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.consumer:token_capture_dirs_from_config", since="0.8.0"
+        ),
+    },
+    "nemo_gym.global_config": {
+        "TOKEN_ID_CAPTURE_BLOCK": MovedPath(new="nemo_gym.config.global_config:TOKEN_CAPTURE_BLOCK", since="0.8.0"),
+    },
+    "nemo_gym.base_responses_api_agent": {
+        "TOKEN_ID_CAPTURE_BLOCK": MovedPath(new="nemo_gym.config.global_config:TOKEN_CAPTURE_BLOCK", since="0.8.0"),
+    },
+    "nemo_gym._checkpoint.model": {
+        "token_id_capture_enabled_for_agent": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.config:token_capture_enabled_for_agent", since="0.8.0"
+        ),
+    },
+    "nemo_gym.rollout_collection": {
+        "TokenIdCaptureConfig": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TokenCaptureConfig", since="0.8.0"),
+        "token_id_capture_dirs_from_config": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.consumer:token_capture_dirs_from_config", since="0.8.0"
+        ),
+        "token_id_capture_enabled_for_agent": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.config:token_capture_enabled_for_agent", since="0.8.0"
+        ),
+    },
+}
+for _module, _renamed in _RENAMED_TOKEN_CAPTURE_NAMES.items():
+    _listed = MOVED_NAMES.setdefault(_module, {})
+    assert not set(_listed) & set(_renamed), f"{_module} lists a renamed token capture name twice"
+    _listed.update(_renamed)
 
 
 def _running_version() -> str:

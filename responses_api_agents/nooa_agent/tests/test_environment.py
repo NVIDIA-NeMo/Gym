@@ -65,8 +65,8 @@ def _environment(instance: NOOAAgent) -> tuple[SingleAgentTurnEnvironmentServer,
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = OmegaConf.create(
         {
-            "agent": {"responses_api_agents": {"nooa_agent": {"entrypoint": "app.py", "token_id_capture": True}}},
-            "token_id_capture": {"enabled": True},
+            "agent": {"responses_api_agents": {"nooa_agent": {"entrypoint": "app.py", "token_capture": True}}},
+            "token_capture": {"enabled": True},
         }
     )
     client._resolve_base_url.return_value = "http://resources:8000"

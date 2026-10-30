@@ -76,10 +76,8 @@ class TestBaseResponsesAPIAgent:
         assert result.agent_metrics == {}
         assert result.key_metrics == {}
 
-    def _agent(self, global_config: dict, *, token_id_capture: bool = False) -> SimpleResponsesAPIAgent:
-        config = BaseResponsesAPIAgentConfig(
-            host="", port=0, entrypoint="", name="", token_id_capture=token_id_capture
-        )
+    def _agent(self, global_config: dict, *, token_capture: bool = False) -> SimpleResponsesAPIAgent:
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="", token_capture=token_capture)
 
         class _Agent(SimpleResponsesAPIAgent):
             async def responses(self, body=...):
@@ -104,18 +102,18 @@ class TestBaseResponsesAPIAgent:
         # Correlated calls preserve ``/ng-rollout/<id>/training-token-capture``.
         # Native agents carry token ids inline and do not opt in.
         body = {"_ng_task_index": 0, "_ng_rollout_index": 0}
-        gc = {"token_id_capture": {"enabled": True}}
-        assert self._agent(gc, token_id_capture=False).rollout_id_from_run(body) is None
-        assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
+        gc = {"token_capture": {"enabled": True}}
+        assert self._agent(gc, token_capture=False).rollout_id_from_run(body) is None
+        assert self._agent(gc, token_capture=True).rollout_id_from_run(body) == "0-0"
         # Agent opt-in alone does not enable capture.
-        assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
+        assert self._agent({}, token_capture=True).rollout_id_from_run(body) is None
 
 
 class TestModelEndpoint:
     MODEL_SERVER = ModelServerRef(type="responses_api_models", name="policy_model")
 
     def _agent(self, *, token_capture: bool = False) -> SimpleResponsesAPIAgent:
-        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="", token_id_capture=token_capture)
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="", token_capture=token_capture)
 
         class _Agent(SimpleResponsesAPIAgent):
             async def responses(self, body=...):
@@ -128,7 +126,7 @@ class TestModelEndpoint:
         client.global_config_dict = OmegaConf.create(
             {
                 "policy_model": {"responses_api_models": {"vllm_model": {"host": "model-host", "port": 8000}}},
-                "token_id_capture": {"enabled": token_capture},
+                "token_capture": {"enabled": token_capture},
             }
         )
         client._build_server_base_url.side_effect = lambda server: ServerClient._build_server_base_url(client, server)

@@ -410,7 +410,7 @@ async def test_sandbox_model_url_keeps_training_capture_route(fixture, monkeypat
     original = module.MiniSWEHarness
     model_response = module.empty_response(f.body.responses_create_params, "model")
     f.agent.server_client.global_config_dict = {"observability_enabled": True}
-    monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_id_capture_enabled", lambda self: True)
+    monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_capture_enabled", lambda self: True)
 
     def harness(**kw):
         h = original(**kw)

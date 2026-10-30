@@ -191,7 +191,7 @@ def test_judge_supplied_quotes_are_rejected():
 
 def test_judge_requests_object_mode_through_the_real_gym_converter():
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.responses_converter import ResponsesConverter
+    from nemo_gym.models import ResponsesConverter
 
     configured = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=2048, temperature=0, top_p=0.5)
     payload = llm.request_payload(rubric(), EvidenceBundle(answer="HELLO"), configured)
