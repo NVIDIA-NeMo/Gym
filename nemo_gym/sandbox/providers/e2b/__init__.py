@@ -22,6 +22,9 @@ from nemo_gym.sandbox.providers.e2b.provider import (
     E2BExecConfig,
     E2BOperationConfig,
     E2BProvider,
+    E2BSandboxUnreachableError,
+    E2BSnapshotConfig,
+    E2BSnapshotError,
 )
 
 
@@ -32,4 +35,7 @@ __all__ = [
     "E2BExecConfig",
     "E2BOperationConfig",
     "E2BProvider",
+    "E2BSandboxUnreachableError",
+    "E2BSnapshotConfig",
+    "E2BSnapshotError",
 ]

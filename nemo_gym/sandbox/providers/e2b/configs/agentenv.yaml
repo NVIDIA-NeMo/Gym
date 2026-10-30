@@ -1,0 +1,52 @@
+# AgentENV sandbox provider config: the E2B provider pointed at an AgentENV cell.
+#
+# AgentENV speaks the E2B API. Swap it in for another provider config in `+config_paths`:
+#
+#   gym env start \
+#     --config <agent and resources server configs> \
+#     --config nemo_gym/sandbox/providers/e2b/configs/agentenv.yaml
+#
+# Environment:
+#   E2B_API_KEY       AgentENV API key
+#   E2B_API_URL       the cell's address (API and sandboxes share it)
+#   E2B_SANDBOX_URL   usually the same address
+#   SSL_CERT_FILE     a CA bundle with the system CAs and the cell's certificate, when the cell
+#                     serves a certificate the system does not trust; keeps TLS verification on.
+#                     Set REQUESTS_CA_BUNDLE to the same bundle for other clients in the process.
+#
+# AgentENV snapshots save the whole VM, so a sandbox restored from a checkpoint continues the
+# processes it was running (`snapshot_keeps_processes`).
+sandbox:
+  default_metadata:
+    sandbox-api: e2b
+  e2b:
+    connection:
+      api_key: ${oc.env:E2B_API_KEY,null}
+      api_url: ${oc.env:E2B_API_URL,null}
+      sandbox_url: ${oc.env:E2B_SANDBOX_URL,null}
+      request_timeout_s: 120.0
+    create:
+      # One template per task image: map image references to AgentENV template names.
+      template: null
+      template_map: {}
+      timeout_s: 3600.0
+      # Kill at timeout. AgentENV otherwise pauses timed-out sandboxes and never evicts them.
+      auto_resume: false
+      # Sandboxes of a process that died end one lease later instead of at their full lifetime.
+      lease_s: 1200.0
+      secure: true
+      allow_internet_access: true
+      strict_resources: false
+    exec:
+      default_timeout_s: 180.0
+      # Task images expect root, as on OpenSandbox.
+      user: root
+      request_timeout_s: null
+      background: true
+      reconnect_attempts: 2
+    snapshots:
+      send_names: false
+    operations:
+      retries: 2
+      retry_delay_s: 0.5
+      retry_max_delay_s: 8.0
