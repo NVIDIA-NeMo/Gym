@@ -264,12 +264,23 @@ def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
     if chain is None:
         # A legacy row may carry observations without selecting one; they are not its causal failure.
         return row.get(FAILURE_ID) is not None
-    return any(
-        boundary == FailureBoundary.RESOURCES_SERVER and operation == "verify" for boundary, operation, *_ in chain
-    ) or (
-        bool(chain)
-        and chain[0][0] == FailureBoundary.COLLECTION
-        and any(boundary == FailureBoundary.MODEL for boundary, *_ in chain)
+    return (
+        any(
+            boundary == FailureBoundary.RESOURCES_SERVER and operation == "verify" for boundary, operation, *_ in chain
+        )
+        or (
+            bool(chain)
+            and chain[0][0] == FailureBoundary.COLLECTION
+            and any(boundary == FailureBoundary.MODEL for boundary, *_ in chain)
+        )
+        or (
+            # Unconfirmed harness termination after the agent saved an answer: replay would ask the model again.
+            any(
+                boundary == FailureBoundary.HARNESS and operation == "harness.terminate"
+                for boundary, operation, *_ in chain
+            )
+            and _saved_answer(row)
+        )
     )
 
 

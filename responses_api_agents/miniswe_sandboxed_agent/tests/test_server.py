@@ -959,7 +959,7 @@ async def test_shutdown_finishes_seeding_and_requests_cleanup_within_budget(fixt
     f.grade.assert_not_awaited()
 
 
-@pytest.mark.parametrize("graded", ["healthy", "wrong", "verifier_error"])
+@pytest.mark.parametrize("graded", ["healthy", "wrong", "verifier_error", "cleanup_unconfirmed"])
 async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture, monkeypatch, graded):
     """The /run path posts /verify through the real ServerClient into the registered, observed /verify route."""
     import re
@@ -969,9 +969,34 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
 
     from nemo_gym.client import server_client
     from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
+    from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
+    from nemo_gym.orchestration.recovery import _policy_evidence
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
     from nemo_gym.server_utils import BaseServerConfig
+    from nemo_gym.typed_exceptions import NgFailureEvent
 
     f = fixture
+    if graded == "cleanup_unconfirmed":
+        # Simulated harness result: what MiniSWEHarness.execute returns when its process cleanup failed.
+        def harness(**kwargs):
+            async def execute(budget):
+                failure = NgFailureEvent(
+                    boundary=FailureBoundary.HARNESS,
+                    failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
+                    failure_reason="mini-SWE harness termination was not confirmed",
+                    operation="harness.terminate",
+                )
+                failure.__cause__ = TimeoutError("provider command timed out")
+                return (
+                    module.empty_response(kwargs["params"], "model"),
+                    HarnessOutcome(reason="infrastructure_error", detail="Process cleanup failed: timed out"),
+                    {"harness_version": "test", **FailureReportRow.fields(report_for_current_request(failure))},
+                )
+
+            return SimpleNamespace(**kwargs, setup=AsyncMock(), execute=AsyncMock(side_effect=execute))
+
+        monkeypatch.setattr(module, "MiniSWEHarness", harness)
     if graded == "wrong":
         f.grade.side_effect = AsyncMock(return_value={"rewards": {"reward": 0.0}})
     elif graded == "verifier_error":
@@ -1011,7 +1036,8 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
     dumped = result.model_dump(mode="json")
     (invocation,) = dumped["ng_verifier_invocations"]
     assert invocation["invocation_id"].startswith("verify-")
-    assert invocation["status"] == ("completed" if graded != "verifier_error" else "failed")
+    # The verify reply of an agent infrastructure failure carries _ng_failure_class, so its invocation is failed.
+    assert invocation["status"] == ("completed" if graded in {"healthy", "wrong"} else "failed")
     assert "ng_verifier_invocations" not in (dumped.get("ng_agent_observations") or {})
     # The collection writer moves the separate top-level field into ng_trajectory.verifier_invocations.
     record = {"_ng_task_index": 0, "_ng_rollout_index": 0, **dumped}
@@ -1021,8 +1047,61 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
         invocation["invocation_id"]
     ]
     assert record["reward"] == dumped["reward"]
+    # Collection merges the /run reply header's report; the row's own failure_id wins, and recovery selects on it.
+    row = FailureReportRow.merged_into(record)
+    if graded == "cleanup_unconfirmed":
+        (event_id,) = row[FailureReportRow.EVENTS]
+        assert row[FailureReportRow.FAILURE_ID] == event_id
+        assert row[FailureReportRow.EVENTS][event_id]["operation"] == "harness.terminate"
+        assert _policy_evidence(row) == (HARNESS_TERMINATION_UNCONFIRMED, None)
+        assert dumped["_ng_failure_class"] == "infrastructure_error"
+        # TB4 still grades a started agent; the row names the harness's selected failure kind.
+        assert (dumped["_ng_failure_class"], dumped["failure_kind"], dumped["reward"]) == (
+            "infrastructure_error",
+            HARNESS_TERMINATION_UNCONFIRMED,
+            0.75,
+        )
+        return
+    assert FailureReportRow.FAILURE_ID not in row and FailureReportRow.EVENTS not in row
     if graded == "verifier_error":
         assert dumped["evaluation_completed"] is False
     else:
         assert dumped["reward"] == (0.75 if graded == "healthy" else 0.0)
         assert dumped["evaluation_completed"] is True
+
+
+@pytest.mark.parametrize("reported", [True, False])
+def test_episode_infrastructure_refusal_keeps_the_harness_failure_as_its_cause(reported):
+    """The 503 stays; a harness-reported failure is its cause, and an unreported one is not invented."""
+    from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
+    from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.HARNESS,
+        failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
+        failure_reason="mini-SWE harness termination was not confirmed",
+        operation="harness.terminate",
+    )
+    failure.__cause__ = TimeoutError("provider command timed out")
+    fields = FailureReportRow.fields(report_for_current_request(failure)) if reported else {}
+    params = TerminalBench4RunRequest(
+        task_name="t", task_ref="r", dataset_ref="d", rollout_id="r", responses_create_params={"input": []}
+    ).responses_create_params
+    result = module.AgentExecutionResult(
+        responses_create_params=params,
+        response=module.empty_response(params, "model"),
+        termination=HarnessOutcome(reason="infrastructure_error", detail="Process cleanup failed: timed out"),
+        agent_started=True,
+        harness_metadata={"harness_version": "test", **fields},
+    )
+    with pytest.raises(HTTPException) as raised:
+        module.MiniSWESandboxedAgent._episode_turn_response(SimpleNamespace(observations=None), result)
+    assert raised.value.status_code == 503
+    report = failure_report_for(raised.value)
+    if reported:
+        assert report.failure_id == fields[FailureReportRow.FAILURE_ID]
+        assert report.events[report.failure_id].failure_kind == HARNESS_TERMINATION_UNCONFIRMED
+    else:
+        assert raised.value.__cause__ is None and report.failure_id is None

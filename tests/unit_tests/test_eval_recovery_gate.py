@@ -22,6 +22,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from nemo_gym.orchestration.recovery import IdentityState, RecoveryAction, RecoveryBudget, decide_recovery
 
 
@@ -357,3 +359,36 @@ def test_an_infrastructure_failure_before_any_answer_still_retries_within_its_bu
     spent = [dict(first, _ng_attempt_index=a) for a in range(3)]
     d = decide_recovery(materialized=inventory(1), results=[], failures=spent, budget=OK_BUDGET)
     assert d.counts.get(IdentityState.EXHAUSTED) == 1
+
+
+@pytest.mark.parametrize(
+    "extra,unsupported",
+    [
+        ({"response": {"output": [{"type": "message"}]}, "evaluation_completed": True}, True),
+        ({"response": {"output": [{"type": "message"}]}, "evaluation_completed": False}, True),
+        ({"_ng_collected_saved_answer": True}, True),
+        ({"_ng_collected_saved_answer": False, "response": {"output": []}}, False),
+        ({}, False),
+    ],
+)
+def test_unconfirmed_harness_termination_replays_only_without_a_saved_answer(extra, unsupported):
+    from nemo_gym.orchestration.recovery import _policy_replay_is_unsupported
+
+    events = {
+        "h": {
+            "boundary": "harness",
+            "operation": "harness.terminate",
+            "failure_kind": "harness_termination_unconfirmed",
+        }
+    }
+    assert _policy_replay_is_unsupported({"_ng_failure_id": "h", "_ng_failure_events": events, **extra}) is unsupported
+
+
+def test_other_harness_failures_and_malformed_causes_keep_their_replay_decision():
+    from nemo_gym.orchestration.recovery import _policy_replay_is_unsupported
+
+    other = {"h": {"boundary": "harness", "operation": "harness.run"}}
+    assert not _policy_replay_is_unsupported(
+        {"_ng_failure_id": "h", "_ng_failure_events": other, "response": {"a": 1}}
+    )
+    assert _policy_replay_is_unsupported({"_ng_failure_id": "missing", "_ng_failure_events": other})
