@@ -121,6 +121,7 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
+from nemo_gym.uvicorn_reuse_port import reuse_port_supported, run_with_reuse_port
 
 
 try:
@@ -1252,6 +1253,13 @@ class UvicornBacklogConfig(BaseModel):
     uvicorn_backlog: PositiveInt = DEFAULT_UVICORN_BACKLOG
 
 
+class UvicornReusePortConfig(BaseModel):
+    # Multi-worker servers only, Linux only: each worker listens on its own SO_REUSEPORT socket, so the
+    # kernel spreads connections evenly across workers instead of whichever worker accepts first.
+    # A server's own `uvicorn_reuse_port` overrides this.
+    uvicorn_reuse_port: bool = False
+
+
 # Every IPv4 address as it appears on a dual-stack socket.
 _ALL_V4_MAPPED = ip_network("::ffff:0:0/96")
 
@@ -2098,6 +2106,11 @@ repr(e): {repr(e)}"""
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
         backlog = UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog
+        reuse_port = server.config.uvicorn_reuse_port
+        if reuse_port is None:
+            reuse_port = UvicornReusePortConfig.model_validate(global_config_dict).uvicorn_reuse_port
+        if reuse_port and (server.config.num_workers or 1) > 1 and not reuse_port_supported():
+            raise RuntimeError("uvicorn_reuse_port needs Linux, where SO_REUSEPORT spreads connections across sockets")
         # A worker of a multi-worker server serves a private socket in this directory and claims sessions in it.
         # The main process of a multi-worker server never serves the app.
         session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV) if not is_main_fastapi_proc else None
@@ -2201,7 +2214,10 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             startup.announce_serve()
             try:
-                uvicorn.run(**uvicorn_kwargs)
+                if uvicorn_kwargs.get("workers") and reuse_port:
+                    run_with_reuse_port(**uvicorn_kwargs)
+                else:
+                    uvicorn.run(**uvicorn_kwargs)
             finally:
                 # BatchSpanProcessor only exports on a timer, so without an explicit flush
                 # the last seconds of a run — including the spans of whatever was in

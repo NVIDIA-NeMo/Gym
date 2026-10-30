@@ -179,7 +179,8 @@ without collecting these metrics.
 
 ### Listen Backlog
 
-`uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them.
+`uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them
+(for each worker, on a server that uses `uvicorn_reuse_port`).
 It applies to the head server, every agent, model, environment, and resources server, and the private sockets that
 the workers of a multi-worker server use to forward requests to each other. The default is 16384:
 
@@ -217,6 +218,43 @@ Only list reverse proxies you control. Trusting a loopback address such as `127.
 only a proxy running on that address. Deployments that previously relied on Uvicorn's implicit loopback trust must set
 these options explicitly.
 </Warning>
+
+### Per-Worker Listening Sockets
+
+A server with `num_workers` above 1 runs that many Uvicorn worker processes. By default they share one listening
+socket, and whichever worker wakes first accepts the next connection. Under load this spreads connections unevenly,
+and because clients keep connections alive, a few workers can end up serving most of the traffic while the rest idle;
+on a busy model server the overloaded workers then delay every call they hold.
+
+On Linux, top-level `uvicorn_reuse_port` gives every worker its own listening socket on the server's port
+(`SO_REUSEPORT`), and the kernel spreads new connections evenly across the workers:
+
+```yaml
+uvicorn_reuse_port: true
+```
+
+The setting applies to every multi-worker server and has no effect on single-worker servers. A multi-worker server
+fails at startup on platforms other than Linux. To turn it on for one server only, or to exempt one server, set
+`uvicorn_reuse_port` on that server; an explicit `true` or `false` there wins over the top-level key:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 32
+      uvicorn_reuse_port: true
+```
+
+The kernel balances connections, not requests, so a few long-lived keep-alive connections can still load one worker
+more than the others. Each worker queues up to `uvicorn_backlog` connections on its own socket. When a worker exits,
+the connections waiting in its queue are reset rather than handed to another worker, unless the host sets
+`net.ipv4.tcp_migrate_req=1` (Linux 5.14 or later). A worker that stops responding keeps receiving its share of new
+connections until Uvicorn's health check replaces it after `uvicorn_timeout_worker_healthcheck` seconds, and a worker
+whose event loop is blocked while its process still answers the health check is not replaced. While every worker is
+down, new connections are refused instead of queued.
+
+With checkpointing on, `/run` is never resent, so a reset connection in a dead worker's queue fails that episode
+attempt. Prefer enabling the setting only on the servers that need it, such as the model server.
 
 ### Model Server Fields
 
