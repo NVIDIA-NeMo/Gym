@@ -2284,7 +2284,7 @@ UNROUTED_DISPATCH_ERROR = {
     "_ng_environment_server": "my_environment_server",
     "_ng_result_type": "legacy_agent",
     "_ng_failure_events": {
-        "7becf785f445465b9a6e92b7247153b6": {
+        "failure-id-fixture": {
             "event_id": "7becf785f445465b9a6e92b7247153b6",
             "boundary": "collection",
             "failure_reason": "Rollout dispatch failed: ClientResponseError",
