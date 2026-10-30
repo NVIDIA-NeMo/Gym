@@ -3303,3 +3303,13 @@ def test_rows_are_counted_by_their_own_verification_skipped_value(tmp_path: Path
     result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
     stats = json.loads(result.summary_path.read_text())["run"]["stats"]["model_call_errors"]
     assert stats["verification_skipped"] == {"true": 1, "false": 1, "absent": 1}
+
+
+def test_rows_are_counted_by_their_own_context_window_step_status(tmp_path: Path) -> None:
+    rows = [(_record(t, 0, refs=[{"model_call_id": f"c{t}"}]), [_call(model_call_id=f"c{t}")]) for t in range(4)]
+    rows[0][0]["step_usage"] = [{"status": "generated"}, {"status": "context_window_exceeded"}]
+    rows[1][0]["step_usage"] = [{"status": "prefilled"}, {"status": "generated"}]
+    rows[2][0]["step_usage"] = [{"status": 3}]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    stats = json.loads(result.summary_path.read_text())["run"]["stats"]["model_call_errors"]
+    assert stats["context_window_exceeded"] == {"true": 1, "false": 1, "absent": 2}

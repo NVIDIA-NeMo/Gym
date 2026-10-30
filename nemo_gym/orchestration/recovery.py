@@ -449,7 +449,8 @@ try:
                "ignored_checks": run.get("ignored_checks"), "responses": (run.get("stats") or {}).get("responses"),
                "provenance": run.get("provenance"),
                "ended_on_failed_model_call": ((run.get("stats") or {}).get("model_call_errors") or {}).get("ended_on_error"),
-               "verification_skipped": ((run.get("stats") or {}).get("model_call_errors") or {}).get("verification_skipped")}
+               "verification_skipped": ((run.get("stats") or {}).get("model_call_errors") or {}).get("verification_skipped"),
+               "context_window_exceeded": ((run.get("stats") or {}).get("model_call_errors") or {}).get("context_window_exceeded")}
 except (OSError, ValueError, KeyError, TypeError):
     pass
 score = None
@@ -743,6 +744,14 @@ def _count(value: Any) -> int | None:
     return value if type(value) is int and value >= 0 else None
 
 
+def _clip_text(quality: Mapping[str, Any]) -> str:
+    counts = quality.get("context_window_exceeded")
+    fields = ("true", "false", "absent")
+    if isinstance(counts, dict) and all(_count(counts.get(k)) is not None for k in fields):
+        return str({k: counts[k] for k in fields})
+    return "not reported or malformed"
+
+
 def trial_boundary(quality: Mapping[str, Any] | None) -> str:
     """Why trial failures outside the sidecar cannot be ruled out, from the run's own persisted facts.
 
@@ -778,7 +787,9 @@ def trial_boundary(quality: Mapping[str, Any] | None) -> str:
     # The producer sets ended_on_error only where the rollout's model calls were captured, so the count is a floor.
     ended_text = f"at least {ended} (counted where calls were captured)" if ended is not None else "unknown"
     return (
-        f"{facts}, rollouts ended on a failed model call {ended_text}, rows by verification_skipped {skipped_text}; "
+        f"{facts}, rollouts ended on a failed model call {ended_text}, rows by verification_skipped {skipped_text}, "
+        f"rows whose step_usage records context_window_exceeded {_clip_text(quality)} (a signal from a best-effort "
+        "error-text match or model metadata, not proof that the input was clipped); "
         "an agent session (in_session) is runtime state that no report records, so it is unknown; model-generated "
         "code that fails, raises or times out is scored by the benchmark protocol, and whether it counts as a trial "
         "failure is open for the benchmark PIC"

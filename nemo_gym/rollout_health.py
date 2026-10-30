@@ -279,6 +279,7 @@ def evaluate_record(
         ),
         errors_by_status=dict(errors_by_status),
         ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
+        context_window_exceeded=_context_window_exceeded(record),
         verification_skipped=(
             record.get("verification_skipped") if isinstance(record.get("verification_skipped"), bool) else None
         ),
@@ -497,6 +498,12 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                     "by_status": dict(sorted(error_statuses.items())),
                     "rollouts_affected": sum(bool(digest.model_call_errors) for digest in digests),
                     "ended_on_error": sum(digest.ended_on_error for digest in digests),
+                    # Rows by their own step_usage: a sub-step recorded context_window_exceeded, none, or no step_usage.
+                    "context_window_exceeded": {
+                        "true": sum(digest.context_window_exceeded is True for digest in digests),
+                        "false": sum(digest.context_window_exceeded is False for digest in digests),
+                        "absent": sum(digest.context_window_exceeded is None for digest in digests),
+                    },
                     # Rows by their own verification_skipped: written True, written False, or not written.
                     "verification_skipped": {
                         "true": sum(digest.verification_skipped is True for digest in digests),
@@ -961,6 +968,18 @@ def write_provisional_summary(
 def _flag(value: Any) -> bool | None:
     """A config flag as written: a bool is known, anything else (absent, interpolated, malformed) is unknown."""
     return value if isinstance(value, bool) else None
+
+
+def _context_window_exceeded(record: Mapping[str, Any]) -> bool | None:
+    """From the row's own `step_usage` (written by scicode_agent): a sub-step recorded as context_window_exceeded.
+
+    scicode_agent sets that status from a best-effort error-text match or model metadata, so it is a signal of a
+    context-window failure, not proof that the input was clipped.
+    """
+    steps = record.get("step_usage")
+    if not isinstance(steps, list) or not all(isinstance(s, dict) and isinstance(s.get("status"), str) for s in steps):
+        return None
+    return any(step["status"] == "context_window_exceeded" for step in steps)
 
 
 def run_provenance(rollout_path: Path) -> dict[str, Any]:

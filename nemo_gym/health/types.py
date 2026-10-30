@@ -177,6 +177,9 @@ class RolloutDigest(BaseModel):
     ended_on_error: bool = False
     # The row's own `verification_skipped` when written as a boolean, else None (absent is not False).
     verification_skipped: bool | None = None
+    # Whether a sub-step of the row's `step_usage` (scicode_agent) has status `context_window_exceeded`, a
+    # signal, not proof of input clipping; None when the row has no well-formed `step_usage`.
+    context_window_exceeded: bool | None = None
     duplicated_calls: int = 0
     transcript_prompt_tokens: int = 0
     transcript_completion_tokens: int = 0

@@ -1218,3 +1218,31 @@ def test_a_malformed_persisted_trial_fact_is_named_never_read_or_raised(quality)
     text = trial_boundary(quality)
     assert "malformed" in text or "not reported" in text
     assert "failed model call unknown" in text or "at least" not in text
+
+
+@pytest.mark.parametrize(
+    ("counts", "reported"),
+    [
+        ({"true": 1, "false": 99, "absent": 0}, "{'true': 1, 'false': 99, 'absent': 0}"),
+        ({"true": 0, "false": 100, "absent": 0}, "{'true': 0, 'false': 100, 'absent': 0}"),
+        ({"true": True, "false": 99, "absent": 0}, "not reported or malformed"),
+        ({"true": -1, "false": 99, "absent": 0}, "not reported or malformed"),
+        (None, "not reported or malformed"),
+    ],
+)
+def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_the_score(
+    tmp_path, counts, reported
+) -> None:
+    job = gate_job(tmp_path, expected=100, final_zeros=0)
+    path = job / "artifacts" / "quality_summary.json"
+    summary = json.loads(path.read_text())
+    if counts is not None:
+        summary["run"]["stats"] = {"model_call_errors": {"context_window_exceeded": counts}}
+    path.write_text(json.dumps(summary))
+    write_postrun_receipt(job)
+    d, task = gate_of(job)
+    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    assert d.action == RecoveryAction.NOOP and task["score"] == 0.5 and task["status"] == "FAILED"
+    # A context-window signal is never read as proven clipping: the trial gate stays unknown, not failed.
+    assert health.startswith("response/trial health unknown")
+    assert f"records context_window_exceeded {reported} (a signal" in health and "not proof" in health
