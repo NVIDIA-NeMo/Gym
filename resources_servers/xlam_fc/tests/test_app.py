@@ -53,8 +53,8 @@ def _call(call_id: str, name: str, arguments: dict) -> dict:
     return {"call_id": call_id, "name": name, "arguments": json.dumps(arguments), "type": "function_call"}
 
 
-def _tool_output(call_id: str, output: str = '{"detail":"Not Found"}') -> dict:
-    return {"call_id": call_id, "output": output, "type": "function_call_output"}
+def _tool_output(call_id: str, output: dict) -> dict:
+    return {"call_id": call_id, "output": json.dumps(output), "type": "function_call_output"}
 
 
 def _message(text: str) -> dict:
@@ -68,7 +68,6 @@ def _message(text: str) -> dict:
 
 
 LONDON = {"name": "timezone_for_location", "arguments": {"location": "London", "area": "Europe"}}
-TOKYO = {"name": "timezone_for_location", "arguments": {"location": "Tokyo", "area": "Asia"}}
 
 
 class TestApp:
@@ -498,3 +497,47 @@ class TestToolRoutes:
             ),
             keeps_state=False,
         )
+
+    def test_verify_grades_a_call_the_model_answered_after_the_acknowledgement(self) -> None:
+        # The whole flow through the app: the tool route answers, then /verify (registered before the catch-all)
+        # still reaches its handler and grades the call.
+        client = TestClient(_server().setup_webserver())
+        acknowledgement = client.post(f"/{LONDON['name']}", json=LONDON["arguments"]).json()
+        request = XlamFcVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "What time zone is London in?"}]},
+            response=_response(
+                [
+                    _call("call_1", LONDON["name"], LONDON["arguments"]),
+                    _tool_output("call_1", acknowledgement),
+                    _message("London is in the Europe/London time zone."),
+                ]
+            ),
+            expected_answers=[LONDON],
+        )
+        result = client.post("/verify", json=request.model_dump(mode="json")).json()
+        assert (result["reward"], result["num_expected"], result["num_predicted"], result["num_correct"]) == (
+            1.0,
+            1,
+            1,
+            1,
+        )
+
+    def test_verify_counts_a_call_repeated_after_the_acknowledgement(self) -> None:
+        # README rule: every function_call in the response is graded, so a call repeated after the
+        # acknowledgement costs the reward.
+        client = TestClient(_server().setup_webserver())
+        acknowledgement = client.post(f"/{LONDON['name']}", json=LONDON["arguments"]).json()
+        request = XlamFcVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "What time zone is London in?"}]},
+            response=_response(
+                [
+                    _call("call_1", LONDON["name"], LONDON["arguments"]),
+                    _tool_output("call_1", acknowledgement),
+                    _call("call_2", LONDON["name"], LONDON["arguments"]),
+                ]
+            ),
+            expected_answers=[LONDON],
+        )
+        result = client.post("/verify", json=request.model_dump(mode="json")).json()
+        assert result["reward"] == 0.0
+        assert (result["num_expected"], result["num_predicted"]) == (1, 2)

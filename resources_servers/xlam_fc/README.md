@@ -35,8 +35,10 @@ acknowledgement (`{"status": "ok", ...}`), so the model sees no error for a tool
 The tool schemas that `generate_dataset.py` writes follow the xlam type annotations (`int, optional` → `integer`,
 `List[int]` → `array` of `integer`, `Tuple[float, float]` → `array` of `number`, `Dict[...]` → `object`), so the
 declared type agrees with the native JSON values in `expected_answers`. An annotation that cannot be typed
-(`Callable[...]`, `Union[int, str]`) declares no type. Re-run the generator to refresh `train.jsonl` and
-`valid.jsonl` built with an older version.
+(`Callable[...]`, `Union[int, str]`) declares no type. The registry artifact the config pins
+(`xlam_function_calling_60k` version `0.0.1`, fetched by `gym dataset collate --download`) was built by the previous
+generator and still declares `string` for every compound annotation; its republish is pending. Until then, re-run
+the generator to get `train.jsonl` and `valid.jsonl` with the typed schemas.
 
 ## Licensing
 Code: Apache 2.0
