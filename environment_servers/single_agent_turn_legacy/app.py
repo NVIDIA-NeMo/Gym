@@ -6,6 +6,7 @@
 from typing import Any
 
 from fastapi import FastAPI
+from pydantic import ConfigDict, PositiveFloat
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
@@ -31,10 +32,20 @@ from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
+class SingleAgentTurnLegacyEnvironmentServerConfig(SingleAgentTurnEnvironmentServerConfig):
+    """Keep the migrated relay's timeout defaults for flat-row episodes."""
+
+    # Existing callers can still pass a typed SingleAgentTurnEnvironmentServerConfig, including its explicit limits.
+    model_config = ConfigDict(from_attributes=True)
+
+    default_episode_timeout_seconds: PositiveFloat | None = 21600
+    cleanup_timeout_seconds: PositiveFloat = 180
+
+
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
-    config: SingleAgentTurnEnvironmentServerConfig
+    config: SingleAgentTurnLegacyEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()

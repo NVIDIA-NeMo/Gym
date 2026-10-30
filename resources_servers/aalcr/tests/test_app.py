@@ -19,6 +19,7 @@ import pytest
 from fastapi.responses import JSONResponse
 
 from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -292,3 +293,49 @@ Reply as JSON, with a verdict of CORRECT or INCORRECT."""
         assert result.reward == 0.0
         assert result.invalid_model_response is True
         judge.assert_not_awaited()
+
+
+class TestBandRewardOfUnverifiedRows:
+    @staticmethod
+    def _verified(task: int, reward: float, *, empty_answer: bool = False) -> dict:
+        return {
+            "_ng_task_index": task,
+            "_ng_rollout_index": 0,
+            "reward": reward,
+            "input_tokens_band": "80k-100k",
+            "reward_80k_100k": reward,
+            "reward_lt_80k": None,
+            "invalid_model_response": empty_answer,
+        }
+
+    async def _metrics(self, rows: list[dict]) -> dict:
+        server = AalcrResourcesServer(config=_config(), server_client=MagicMock(spec=ServerClient))
+        result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+        return result.agent_metrics
+
+    async def test_a_counted_zero_enters_its_band_and_nothing_else(self) -> None:
+        # A rollout counted as 0 without verify(): its reward and dataset fields only.
+        counted = {"_ng_task_index": 9, "_ng_rollout_index": 0, "reward": 0.0, "input_tokens_band": "80k-100k"}
+        rows = [self._verified(0, 1.0), self._verified(1, 0.0, empty_answer=True), counted]
+
+        metrics = await self._metrics(rows)
+
+        assert metrics["mean/reward"] == pytest.approx(1 / 3)
+        assert metrics["mean/reward_80k_100k"] == pytest.approx(1 / 3)
+        # Only verify() decides whether a returned answer was empty.
+        assert metrics["mean/invalid_model_response"] == pytest.approx(1 / 2)
+        assert "reward_80k_100k" not in counted
+
+    async def test_verified_rows_alone_are_unchanged(self) -> None:
+        rows = [self._verified(0, 1.0), self._verified(1, 0.0)]
+        assert (await self._metrics(rows))["mean/reward_80k_100k"] == pytest.approx(1 / 2)
+        # Another band's empty value is left alone, and a row of another band does not enter this one.
+        other = {
+            "_ng_task_index": 2,
+            "_ng_rollout_index": 0,
+            "reward": 1.0,
+            "input_tokens_band": "<80k",
+            "reward_lt_80k": 1.0,
+        }
+        metrics = await self._metrics([*rows, other])
+        assert metrics["mean/reward_80k_100k"] == pytest.approx(1 / 2) and metrics["mean/reward_lt_80k"] == 1.0

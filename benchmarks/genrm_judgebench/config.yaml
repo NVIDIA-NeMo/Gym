@@ -26,6 +26,6 @@ genrm_judgebench_benchmark_agent:
 genrm_judgebench_environment_server:
   _inherit_from: genrm_eval_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: genrm_judgebench_benchmark_agent

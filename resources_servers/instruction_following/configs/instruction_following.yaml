@@ -34,8 +34,10 @@ instruction_following_simple_agent:
 
 instruction_following_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
         name: instruction_following_simple_agent
+      resources_tool_transports:
+      - direct_http
