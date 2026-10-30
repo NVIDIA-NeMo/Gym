@@ -41,7 +41,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class InferenceProviderConfig(BaseResponsesAPIModelConfig):

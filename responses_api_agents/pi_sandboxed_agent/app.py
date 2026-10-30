@@ -52,12 +52,8 @@ from nemo_gym.sandbox.agent_tools import (
     seed_mcp_servers,
     verify_agent_response,
 )
-from nemo_gym.server_utils import (
-    get_response_json,
-    is_nemo_gym_fastapi_entrypoint,
-    is_nemo_gym_fastapi_worker,
-    raise_for_status,
-)
+from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.pi_agent.app import (
     MCP_SETUP_ERROR_EXIT_CODE,
     PiAgent,

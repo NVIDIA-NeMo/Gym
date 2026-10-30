@@ -96,13 +96,6 @@ from nemo_gym.observability.model_calls import (
     observability_enabled_from_config,
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
-from nemo_gym.path_utils import (
-    aggregate_metrics_path_for,
-    aggregation_sources_path_for,
-    failures_path_for,
-    materialized_path_for,
-    resubmit_offset_path_for,
-)
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -136,6 +129,13 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.utils.path_utils import (
+    aggregate_metrics_path_for,
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 
 
 if TYPE_CHECKING:
@@ -5340,7 +5340,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
 # Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.eval`.
 # Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

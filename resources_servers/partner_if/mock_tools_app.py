@@ -37,7 +37,8 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.mcp_auto_exposure import MCPTool
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.partner_if.app import (
     NoAnswer,

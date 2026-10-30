@@ -61,12 +61,13 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
-from nemo_gym.server_utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, ServerClient
+from nemo_gym.server_utils import ServerClient
 from nemo_gym.session_routing import (
     ResourcesSessionLifetimes,
     SessionClaims,
     install_session_routing,
 )
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,

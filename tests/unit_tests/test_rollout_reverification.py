@@ -34,7 +34,6 @@ from nemo_gym.config.global_config import (
     TASK_SOURCE_KEY_NAME,
     rollout_run_key,
 )
-from nemo_gym.path_utils import aggregation_sources_path_for
 from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
@@ -74,6 +73,7 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.utils.path_utils import aggregation_sources_path_for
 
 
 _TOOL_TRAJECTORY_SHA256 = (

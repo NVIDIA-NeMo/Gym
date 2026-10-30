@@ -36,7 +36,6 @@ from pydantic import ValidationError
 from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.path_utils import materialized_path_for
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
 from nemo_gym.sandbox.config import SANDBOX_BLOCK_VOLUME_SOURCES_KEY, validate_volume_sources
@@ -116,6 +115,7 @@ from nemo_gym.tasks.harbor.validation_report import (
     _validation_rows,
     summarize_validation,
 )
+from nemo_gym.utils.path_utils import materialized_path_for
 
 
 if TYPE_CHECKING:

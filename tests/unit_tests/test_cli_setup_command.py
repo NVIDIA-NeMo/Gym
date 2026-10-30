@@ -26,10 +26,9 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from pytest import MonkeyPatch, raises
 
-import nemo_gym.cli._venv_setup
 import nemo_gym.cli.setup_command
+import nemo_gym.utils.venv_setup
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli._venv_setup import SETUP_COMPLETE_MARKER, setup_environment
 from nemo_gym.cli.setup_command import (
     _LOCAL_NEMO_GYM_REQUIREMENT_RE,
     _get_nemo_gym_install_flags,
@@ -41,6 +40,7 @@ from nemo_gym.cli.setup_command import (
     setup_env_command,
 )
 from nemo_gym.config.global_config import UV_VENV_DIR_KEY_NAME
+from nemo_gym.utils.venv_setup import SETUP_COMPLETE_MARKER, setup_environment
 from tests.unit_tests.config.test_global_config import TestGlobalConfig as _TestGlobalConfig
 
 
@@ -507,7 +507,7 @@ def _install_command(venv: Path) -> str:
 def _runner_command(venv: Path, command: str) -> list[str]:
     return [
         sys.executable,
-        nemo_gym.cli._venv_setup.__file__,
+        nemo_gym.utils.venv_setup.__file__,
         "--venv",
         str(venv),
         "--command",
