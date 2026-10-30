@@ -50,10 +50,6 @@ from fastapi import Body, Request, Response
 from openai.types.responses.response import IncompleteDetails
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -69,6 +65,10 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
     failure_kinds,
+)
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
 )
 from responses_api_agents.vcqa_agent.judge import extract_must_have_items
 from responses_api_agents.vcqa_agent.judge import grade as judge_grade

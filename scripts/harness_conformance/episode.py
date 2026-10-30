@@ -199,7 +199,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 SingleAgentTurnEnvironmentServerConfig,
             )
             from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-            from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
+            from nemo_gym.server_runtime import SingleAgentTurnRequest
 
             class ObservedEnvironment(SingleAgentTurnLegacyEnvironmentServer):
                 async def _invoke_agent(

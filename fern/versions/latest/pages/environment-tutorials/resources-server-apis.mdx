@@ -163,7 +163,7 @@ The complete server below combines the tool route with final trajectory verifica
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
@@ -397,7 +397,7 @@ The session ID comes from the request itself:
 
 A typed seed's `resources_session_id` becomes its cookie's `SESSION_ID_KEY`, so the seed, its close, and every request in between name the session by the same ID. If a request's cookie and body name different sessions, it gets HTTP 409. A seed, or another route in `checkpoint_session_starts`, claims its session even if its handler never reads it. Any other request whose handler never reads or writes the session, such as a health check or `/aggregate_metrics`, claims nothing and gets no session cookie. A cookie whose claim has ended is claimed again by the worker that serves it, if the handler uses the session.
 
-The worker that creates a session claims it, including a seed that failed and the close of an ID nobody has seeded, which keeps a delayed seed from opening it on another worker. A claim lasts while the session is open, from a successful `/seed_session` (or another route in `checkpoint_session_starts`) until its `/close_session`, its `/verify`, or `checkpoint_session_ended`; a `/verify` that says a close follows, as `single_agent_turn`'s does, leaves it open for that close. After that, and for a session that never opened, the claim ends `session_close_retry_window_seconds` (default 300) after the last request for the session, so a retried close or a delayed seed still reaches the worker that saw it. Remember closed sessions with `ClosedResourcesSessionRecords` from `nemo_gym.base_resources_server`, constructed with the same setting: a record then ends no later than the claim, so every worker gives a late seed the same answer.
+The worker that creates a session claims it, including a seed that failed and the close of an ID nobody has seeded, which keeps a delayed seed from opening it on another worker. A claim lasts while the session is open, from a successful `/seed_session` (or another route in `checkpoint_session_starts`) until its `/close_session`, its `/verify`, or `checkpoint_session_ended`; a `/verify` that says a close follows, as `single_agent_turn`'s does, leaves it open for that close. After that, and for a session that never opened, the claim ends `session_close_retry_window_seconds` (default 300) after the last request for the session, so a retried close or a delayed seed still reaches the worker that saw it. Remember closed sessions with `ClosedResourcesSessionRecords` from `nemo_gym.server_runtime.base_resources_server`, constructed with the same setting: a record then ends no later than the claim, so every worker gives a late seed the same answer.
 
 If the worker that holds a session is no longer running, for example because it crashed and Uvicorn replaced it, the session's requests get HTTP 410 instead of running against empty state. State keyed only by some other ID in the request body is not routed; key state by the session ID as shown above. Agent Server sessions follow the same rule, with `agent_session_id` as the session ID, in the cookie and in the seed and close bodies.
 

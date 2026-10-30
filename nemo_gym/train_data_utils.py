@@ -29,7 +29,6 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 from tqdm.auto import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config.config_types import (
     AGENT_REF_KEY,
     BaseNeMoGymCLIConfig,
@@ -58,12 +57,13 @@ from nemo_gym.dataset_metrics import (
     DatasetMetricValue,
     load_dataset_metrics_hook,
 )
-from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 from nemo_gym.task_data import (
     TaskDataSchemaError,
     TaskDataValidator,

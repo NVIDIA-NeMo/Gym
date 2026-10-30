@@ -970,7 +970,7 @@ def test_fetch_artifact_omits_headers_when_none(tmp_path: Path, monkeypatch: pyt
 
 
 def _hardening_run_body(text_rubric: str = "Says forty-two.", **body_extra):  # type: ignore[no-untyped-def]
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from responses_api_agents.vcqa_agent.app import VcqaAgentRunRequest
 
     return VcqaAgentRunRequest(
@@ -1975,7 +1975,7 @@ class TestRunWithProviderBackend:
         return VcqaAgent(config=config, server_client=server_client)
 
     def _body(self):  # type: ignore[no-untyped-def]
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
         from responses_api_agents.vcqa_agent.app import VcqaAgentRunRequest
 
         return VcqaAgentRunRequest(

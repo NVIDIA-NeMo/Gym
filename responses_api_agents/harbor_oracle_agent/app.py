@@ -35,7 +35,6 @@ from pydantic import Field
 
 from environment_servers.harbor.session import SOLUTION_DIR
 from environment_servers.harbor.verifier import TIMEOUT_WRAPPER_GUARD
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -62,6 +61,7 @@ from nemo_gym.sandbox import (
     exec_as_root,
     resolve_provider_config,
 )
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 LOGGER = logging.getLogger(__name__)

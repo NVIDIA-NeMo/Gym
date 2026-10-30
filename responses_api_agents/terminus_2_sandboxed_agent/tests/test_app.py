@@ -26,7 +26,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
+from nemo_gym.trajectory import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (

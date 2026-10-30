@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
     parse_codex_observations,
     parse_codex_usage,

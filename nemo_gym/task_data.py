@@ -49,7 +49,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from pydantic import BaseModel, TypeAdapter
 
-from nemo_gym.episode_types import is_materialized_task_row
+from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 
 
 TASK_DATA_MODULE_NAME = "task_data"

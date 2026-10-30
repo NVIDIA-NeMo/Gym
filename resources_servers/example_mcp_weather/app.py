@@ -18,7 +18,8 @@ from typing import Any, Optional
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -26,7 +27,6 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.client import SESSION_ID_KEY
 
 
 def _weather_sentence(city: str) -> str:

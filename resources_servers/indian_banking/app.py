@@ -28,7 +28,6 @@ import aiohttp
 from fastapi import FastAPI
 from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -36,6 +35,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 from resources_servers.indian_banking.core import engine, judge, reward, user_sim
 from resources_servers.indian_banking.core.reward import TASK_KEY, WORLD_KEY
