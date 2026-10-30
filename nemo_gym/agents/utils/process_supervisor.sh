@@ -43,16 +43,24 @@
 # launch until it is continued. A stop requested while paused continues the processes first, so the
 # harness is running when it receives TERM; one that ignores TERM is killed after the cleanup timeout.
 # The receipt, written when the harness ends, answers any pause the supervisor never acknowledged.
+# Every acknowledgement also names the pause mode and the supervisor's identity, PID.START (its /proc
+# start time), which marks the processes it launched.
+#
+# With --pause-mode hold, for a sandbox whose snapshot keeps its processes, a pause sends no signal: the
+# harness keeps running, the supervisor acknowledges at once and stops counting the deadline until the
+# continue, which sends nothing either. The checkpoint holds the harness's model calls instead.
 #
 # A pause nobody continues would hold the harness for good: the deadline does not run, and an expire
 # waits for the continue. With --max-pause, a pause that lasts longer ends as an expire does: the
 # processes are continued, the harness is terminated, and the receipt records timed_out and
 # pause_expired. The limit counts the supervisor's own polls, not the clock, so the time a sandbox
-# spends snapshotted and not running is not counted. A pause also ends when the harness is gone.
+# spends snapshotted and not running is not counted. A pause that stops the harness also ends when the
+# harness is gone.
 #
 # usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH
 #        [--expire-file PATH]
-#        [--pause-file PATH --paused PATH --continue-file PATH --continued PATH [--max-pause SECONDS]]
+#        [--pause-file PATH --paused PATH --continue-file PATH --continued PATH [--max-pause SECONDS]
+#         [--pause-mode stop|hold]]
 #        -- COMMAND...
 
 # An inherited BASH_ENV or SHELLOPTS must not turn an expected failure into a missing receipt.
@@ -224,6 +232,9 @@ stop_signal() {
     fi
 }
 
+# How a pause treats the processes it reaches: stop sends STOP and CONT, hold sends nothing (see the header).
+pause_mode=stop
+
 write_receipt() {
     local foreign=
     ((${foreign_signals:-0} > 0)) && foreign=", \"foreign_signals\": $foreign_signals"
@@ -244,7 +255,10 @@ request_seq() {
 
 # Write acknowledgement $1 for request $2 atomically.
 acknowledge() {
-    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s}' "$2" "$3" "$4" "$5" >"$1.tmp" && mv -f "$1.tmp" "$1"
+    local named=null
+    [[ -n ${identity-} ]] && named="\"$identity\""
+    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s, "mode": "%s", "identity": %s}' \
+        "$2" "$3" "$4" "$5" "$pause_mode" "$named" >"$1.tmp" && mv -f "$1.tmp" "$1"
 }
 
 # Record in paused[PID]=START every process a pause reaches: what a stop would reach now, and
@@ -292,6 +306,10 @@ paused_settled() {
 pause() {
     local limit error=null pid list= known round
     paused=()
+    if [[ $pause_mode == hold ]]; then
+        acknowledge "$paused_ack" "$1" true "" null
+        return
+    fi
     if [[ -n ${harness-} ]]; then
         pause_scan
         [[ -n ${groups[harness]} ]] && owned_group "$harness" "${groups[harness]}" && kill -STOP -- "-$harness" 2>/dev/null
@@ -323,6 +341,10 @@ pause() {
 # Continue request $1: continue every process the pause stopped and acknowledge.
 resume_paused() {
     local limit error=null
+    if [[ $pause_mode == hold ]]; then
+        acknowledge "$continued_ack" "$1" true "" null
+        return
+    fi
     now
     limit=$((NOW + pause_wait))
     signal_paused CONT
@@ -353,7 +375,8 @@ serve_pause() {
     paused_since=$NOW
     pause "$pause_seq"
     while request_seq "$continue_file" && ((SEQ < pause_seq)) && ! stopped; do
-        [[ -n ${harness-} ]] && ! kill -0 "$harness" 2>/dev/null && break
+        # A hold does not watch the harness: one that exits is reaped after the continue (see the header).
+        [[ $pause_mode != hold && -n ${harness-} ]] && ! kill -0 "$harness" 2>/dev/null && break
         if ((max_pause && waited >= max_pause)); then
             pause_expired=1
             break
@@ -387,6 +410,10 @@ while (($#)) && [[ $1 != -- ]]; do
     --continue-file) continue_file=$2 ;;
     --continued) continued_ack=$2 ;;
     --max-pause) max_pause=$(centiseconds "$2") || { echo "--max-pause must be finite and positive" >&2; exit 2; } ;;
+    --pause-mode)
+        [[ $2 == stop || $2 == hold ]] || { echo "--pause-mode must be stop or hold" >&2; exit 2; }
+        pause_mode=$2
+        ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
     shift 2
