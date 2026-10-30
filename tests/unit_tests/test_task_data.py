@@ -13,7 +13,7 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel
 
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     EnvironmentServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
@@ -687,7 +687,7 @@ class TestHarborLayoutThroughTheProcessor:
     def _processor_and_configs(self, tmp_path, monkeypatch, rows):
         from omegaconf import DictConfig
 
-        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.config.global_config import GlobalConfigDictParser
         from nemo_gym.train_data_utils import TrainDataProcessorConfig
 
         env_dir = tmp_path / "environment_servers" / "harbor"
@@ -776,7 +776,7 @@ class TestLegacyWrapperLayoutThroughTheProcessor:
     def _processor_and_configs(self, tmp_path, monkeypatch, rows):
         from omegaconf import DictConfig
 
-        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.config.global_config import GlobalConfigDictParser
         from nemo_gym.train_data_utils import TrainDataProcessorConfig
 
         agent_dir = tmp_path / "responses_api_agents" / "tau2"

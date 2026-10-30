@@ -35,7 +35,7 @@ from haystack import component
 from haystack.core.serialization import allow_deserialization_module, default_from_dict, default_to_dict
 from haystack.dataclasses import ChatMessage, ChatRole, TextContent, ToolCall
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     RESPONSES_TO_TRAIN,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
