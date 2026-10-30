@@ -56,9 +56,18 @@ def test_importing_a_package_loads_none_of_its_lazy_submodules(package: str) -> 
         "import sys, nemo_gym.{p}; print(sorted(m for m in {lazy!r} if f'nemo_gym.{p}.' + m in sys.modules))"
     ).format(p=package, lazy=lazy)
     loaded = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
-    # sandbox's existing eager exports import these submodules; nothing else may load.
-    eager = {"sandbox": ["compose_fields", "config", "providers.base", "utils"]}
-    assert loaded.strip() == repr(eager.get(package, []))
+    assert loaded.strip() == "[]"
+
+
+@pytest.mark.parametrize("package", PACKAGES)
+def test_importing_a_package_loads_only_the_package_and_the_lazy_export_helper(package: str) -> None:
+    # Catches imports the check above cannot see: other nemo_gym packages and third-party libraries. Measured
+    # after the root package, whose own imports are not this package's cost.
+    code = (
+        "import sys, nemo_gym; before = set(sys.modules); import nemo_gym.{p}; print(sorted(set(sys.modules) - before))"
+    ).format(p=package)
+    loaded = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
+    assert loaded.strip() == repr(sorted({"nemo_gym._public_api", f"nemo_gym.{package}"}))
 
 
 def test_packages_declare_public_apis() -> None:

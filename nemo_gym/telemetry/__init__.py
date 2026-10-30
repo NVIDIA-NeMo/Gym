@@ -38,48 +38,6 @@ See ``nemo_gym/telemetry/README.md`` for the design, and
 ``fern/versions/latest/pages/observability/`` for user documentation.
 """
 
-from nemo_gym.telemetry._fallbacks import (
-    is_span_group_enabled,
-    managed_span,
-    safe_set_span_attributes,
-    span_cm,
-    trace_fn,
-)
-from nemo_gym.telemetry.config import MemoryProfilingConfig, TelemetryConfig
-from nemo_gym.telemetry.setup import (
-    TELEMETRY_KEY_NAME,
-    configure_telemetry_env,
-    get_telemetry,
-    init_telemetry,
-    is_telemetry_env_enabled,
-    is_telemetry_metrics_enabled,
-    memory_profiling_config_from_env,
-    shutdown_telemetry,
-    telemetry_config_from_global_config,
-)
-from nemo_gym.telemetry.span_groups import GymSpanGroup
-
-
-__all__ = [
-    "TELEMETRY_KEY_NAME",
-    "GymSpanGroup",
-    "MemoryProfilingConfig",
-    "TelemetryConfig",
-    "configure_telemetry_env",
-    "get_telemetry",
-    "init_telemetry",
-    "is_span_group_enabled",
-    "is_telemetry_env_enabled",
-    "is_telemetry_metrics_enabled",
-    "managed_span",
-    "memory_profiling_config_from_env",
-    "safe_set_span_attributes",
-    "shutdown_telemetry",
-    "span_cm",
-    "telemetry_config_from_global_config",
-    "trace_fn",
-]
-
 # Public API
 from typing import TYPE_CHECKING
 
@@ -87,15 +45,52 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.telemetry._fallbacks import (
+        is_span_group_enabled,
+        managed_span,
+        safe_set_span_attributes,
+        span_cm,
+        trace_fn,
+    )
+    from nemo_gym.telemetry.config import MemoryProfilingConfig, TelemetryConfig
     from nemo_gym.telemetry.profiling import Profiler
     from nemo_gym.telemetry.resources_operations import resources_operation
+    from nemo_gym.telemetry.setup import (
+        TELEMETRY_KEY_NAME,
+        configure_telemetry_env,
+        get_telemetry,
+        init_telemetry,
+        is_telemetry_env_enabled,
+        is_telemetry_metrics_enabled,
+        memory_profiling_config_from_env,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
+    from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "GymSpanGroup": "span_groups",
+    "MemoryProfilingConfig": "config",
     "Profiler": "profiling",
+    "TELEMETRY_KEY_NAME": "setup",
+    "TelemetryConfig": "config",
+    "configure_telemetry_env": "setup",
+    "get_telemetry": "setup",
+    "init_telemetry": "setup",
+    "is_span_group_enabled": "_fallbacks",
+    "is_telemetry_env_enabled": "setup",
+    "is_telemetry_metrics_enabled": "setup",
+    "managed_span": "_fallbacks",
+    "memory_profiling_config_from_env": "setup",
     "resources_operation": "resources_operations",
+    "safe_set_span_attributes": "_fallbacks",
+    "shutdown_telemetry": "setup",
+    "span_cm": "_fallbacks",
+    "telemetry_config_from_global_config": "setup",
+    "trace_fn": "_fallbacks",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
-__all__ = sorted({*__all__, *_PUBLIC_API})
+__all__ = sorted(_PUBLIC_API)
