@@ -22,10 +22,12 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId, FailureReport, MaterializedTask, TaskId
+from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
+from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.episode_types import FailureReport, MaterializedTask
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponse
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 from tests.unit_tests.test_agent_environment_collection_failures import _serve
@@ -260,8 +262,8 @@ async def test_an_exhausted_model_call_is_the_environments_own_agent_stage_failu
 def test_an_unhandled_environment_error_owns_its_report_without_borrowing_the_causes_kind(typed_cause: bool) -> None:
     from fastapi.testclient import TestClient
 
+    from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
     from nemo_gym.episode_types import EpisodeFailure, FailureBoundary
-    from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
     from nemo_gym.typed_exceptions import NgFailureEvent
     from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
 

@@ -21,13 +21,16 @@ Importing ``nemo_gym`` does not eagerly import the server stack.
 """
 
 import importlib
+import inspect
 import subprocess
 import sys
+import types
 
 import pytest
 
 import nemo_gym
 from nemo_gym import _LAZY_EXPORTS
+from nemo_gym._moved_paths import MOVED_MODULES
 
 
 EXPECTED_LAZY_EXPORTS = {
@@ -91,6 +94,40 @@ def test_public_symbol_matches_deep_import(name: str, module_name: str):
     """
     module = importlib.import_module(f"nemo_gym.{module_name}")
     assert getattr(nemo_gym, name) is getattr(module, name)
+
+
+def _defining_module_problem(name: str, module_name: str) -> str | None:
+    """Why a `_LAZY_EXPORTS` entry does not name the module that defines `name`, or None if it does.
+
+    An entry that names an old path, or a module that only imports the name, still serves the same object,
+    so the identity check above cannot catch it.
+    """
+    module_path = f"nemo_gym.{module_name}"
+    if module_path in MOVED_MODULES:
+        return f"{module_path} is an old path"
+    namespace = vars(importlib.import_module(module_path))
+    if name not in namespace:
+        return f"{module_path} does not bind {name}"
+    value = namespace[name]
+    if (inspect.isclass(value) or inspect.isfunction(value)) and value.__module__ != module_path:
+        return f"{name} is defined in {value.__module__}, not {module_path}"
+    return None
+
+
+@pytest.mark.parametrize("name, module_name", sorted(_LAZY_EXPORTS.items()))
+def test_lazy_export_names_its_defining_module(name: str, module_name: str):
+    assert _defining_module_problem(name, module_name) is None
+
+
+def test_defining_module_check_refuses_old_paths_and_reexports(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setitem(MOVED_MODULES, "nemo_gym._old_path_for_test", None)
+    assert "is an old path" in _defining_module_problem("anything", "_old_path_for_test")
+
+    reexporting = types.ModuleType("nemo_gym._reexporting_for_test")
+    reexporting.helper = _defining_module_problem
+    monkeypatch.setitem(sys.modules, reexporting.__name__, reexporting)
+    assert "is defined in" in _defining_module_problem("helper", "_reexporting_for_test")
+    assert "does not bind" in _defining_module_problem("missing", "_reexporting_for_test")
 
 
 def test_all_is_sorted():

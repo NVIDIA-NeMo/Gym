@@ -65,13 +65,13 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
 )
+from nemo_gym.judge import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 

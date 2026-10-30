@@ -11,8 +11,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from typing_extensions import Self
 
-from nemo_gym.episode_types import MaterializedTask, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.episode import TaskId
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.episode_types import MaterializedTask
 from nemo_gym.tasks.harbor.dataset_config import GymDatasetConfig
 from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY, DIGEST_KEY
 from nemo_gym.tasks.harbor.errors import HarborTaskError
@@ -23,7 +24,7 @@ AGENT_TIMEOUT_METADATA_KEY = "agent_timeout_sec"
 # The Harbor step a turn's request belongs to, in its `responses_create_params.metadata`.
 STEP_METADATA_KEY = "harbor_step"
 # The dataset a row came from, on every row: the dataset folder's name (the taskset, unless the target is a single
-# task folder, whose dataset is its parent). The same string as `nemo_gym.global_config.TASK_SOURCE_KEY_NAME`,
+# task folder, whose dataset is its parent). The same string as `nemo_gym.config.global_config.TASK_SOURCE_KEY_NAME`,
 # which this module does not import; rollout collection copies the key from a row onto the record it writes, so
 # every results row names its dataset.
 TASK_SOURCE_KEY = "task_source"

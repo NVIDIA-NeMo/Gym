@@ -13,7 +13,7 @@ from fastapi import Request
 from hypotest.env.interpreter_env import InterpreterEnv, InterpreterEnvState
 from hypotest.env.kernel_server import NBLanguage
 
-from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
+from nemo_gym.core import NeMoGymResponseFunctionToolCall
 from nemo_gym.server_utils import ServerClient
 from resources_servers.aviary.hypotest_app import HypotestResourcesServer, HypotestServerConfig
 from resources_servers.aviary.schemas import (

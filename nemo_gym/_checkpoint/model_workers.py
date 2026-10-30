@@ -53,7 +53,7 @@ from nemo_gym._checkpoint.workers import (
     WorkerLink,
 )
 from nemo_gym._checkpoint.workers import coordinator_socket_path as _socket_path
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId
 
 
 LOGGER = logging.getLogger(__name__)

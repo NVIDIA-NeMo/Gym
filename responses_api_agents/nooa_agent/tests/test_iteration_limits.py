@@ -14,7 +14,7 @@ from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,

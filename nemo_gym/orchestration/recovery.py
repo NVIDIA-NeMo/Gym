@@ -40,7 +40,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from nemo_gym.failure_kinds import (
+from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
     MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,

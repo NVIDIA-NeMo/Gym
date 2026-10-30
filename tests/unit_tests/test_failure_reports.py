@@ -12,15 +12,8 @@ from aiohttp import web
 from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
-from nemo_gym.episode_types import (
-    BaseEpisodeResponse,
-    EpisodeFailure,
-    EpisodeId,
-    FailureBoundary,
-    FailureEvent,
-    FailureReport,
-    TaskId,
-)
+from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.episode_types import BaseEpisodeResponse, EpisodeFailure, FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.failure_transport import (
     FailureHeader,
     FailureReportRow,

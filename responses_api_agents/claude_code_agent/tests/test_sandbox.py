@@ -14,7 +14,7 @@ import pytest
 from fastapi import HTTPException, Request
 
 from nemo_gym.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY, AgentSeedSessionRequest
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.claude_code_agent import app
 from responses_api_agents.claude_code_agent import sandbox as adapter

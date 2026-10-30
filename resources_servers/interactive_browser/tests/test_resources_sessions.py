@@ -29,8 +29,7 @@ from itsdangerous import TimestampSigner
 from pytest import MonkeyPatch
 
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.failure_kinds import SESSION_LOST
+from nemo_gym.core import SESSION_LOST, EpisodeId, TaskId
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 

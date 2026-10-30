@@ -75,7 +75,7 @@ from nemo_gym._checkpoint.errors import (
 from nemo_gym._checkpoint.store import WriteStop, read_participant_state, write_participant_state
 from nemo_gym._checkpoint.telemetry import OperationSpan, checkpoint_span
 from nemo_gym._checkpoint.telemetry import operation as checkpoint_operation
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.telemetry.gym_metrics import (
     record_checkpoint_control_error,
     record_checkpoint_event,
@@ -1008,9 +1008,9 @@ class ParticipantControlPlane:
                         Path(request.checkpoint_dir),
                         kind=self.participant.kind,
                         instance=self.instance_name,
-                        select=lambda record: _validate_record(model, record)
-                        if _record_key(record) in scope
-                        else None,
+                        select=lambda record: (
+                            _validate_record(model, record) if _record_key(record) in scope else None
+                        ),
                     ),
                 )
                 span.set(records=len(records), bytes=size)

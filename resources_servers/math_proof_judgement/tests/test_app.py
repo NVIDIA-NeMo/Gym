@@ -15,7 +15,7 @@ from app import (
     parse_judgement,
 )
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

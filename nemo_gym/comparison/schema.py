@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
 
 ReportFormat = Literal["md", "json", "both"]

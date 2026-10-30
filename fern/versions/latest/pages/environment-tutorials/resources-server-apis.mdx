@@ -404,7 +404,7 @@ If the worker that holds a session is no longer running, for example because it 
 Uvicorn starts several workers by importing the server's entrypoint module in each of them and serving its module-level `app`. A server that supports several workers ends its entrypoint with:
 
 ```python
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 if __name__ == "__main__":
     StatefulServer.run_webserver()

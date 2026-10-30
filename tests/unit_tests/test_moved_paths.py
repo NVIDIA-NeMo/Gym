@@ -336,7 +336,7 @@ class TestMovedNames:
             # A module that already has its own `__getattr__` wraps the moved-name getter in it.
             "from nemo_gym._moved_paths import moved_names_getattr\n_moved = moved_names_getattr(__name__)\n"
             "def __getattr__(name):\n    return _moved(name)\n",
-            "from nemo_gym.cli._compat import moved_attr_getter\n_shim = moved_attr_getter(__name__, {'THING': 'new_home'})\n"
+            "from nemo_gym.utils.compat import moved_attr_getter\n_shim = moved_attr_getter(__name__, {'THING': 'new_home'})\n"
             "def __getattr__(name):\n    return _shim(name)\n",
         ],
         ids=["direct", "wrapped", "moved_attr_getter"],

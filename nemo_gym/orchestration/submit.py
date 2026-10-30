@@ -15,7 +15,6 @@
 
 import math
 
-from nemo_gym.decorators import experimental
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
@@ -26,6 +25,7 @@ from nemo_gym.orchestration.recovery import (
     gate_summary_from_collected,
     gate_task_summary,
 )
+from nemo_gym.utils.decorators import experimental
 
 
 _EXECUTORS = {

@@ -69,8 +69,9 @@ from nemo_gym._checkpoint.model_workers import (
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.openai_utils import (
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -87,13 +88,8 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, rollout_context, scope_with_routed_path
-from nemo_gym.server_utils import (
-    BaseRunServerInstanceConfig,
-    BaseServer,
-    SimpleServer,
-    is_nemo_gym_fastapi_worker,
-)
+from nemo_gym.rollout_correlation import scope_with_routed_path
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -122,6 +118,7 @@ from nemo_gym.token_id_capture.protocols import (
 )
 from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
 logger = logging.getLogger(__name__)
@@ -2090,7 +2087,7 @@ def install_model_call_capture(
 
 
 # Preserve old reader imports during deprecation without eagerly importing the reader back here.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(
@@ -2121,6 +2118,6 @@ __getattr__ = moved_attr_getter(
             ),
             "nemo_gym.observability.model_calls",
         ),
-        "maybe_rollout_id_from_run_body": "nemo_gym.rollout_correlation",
+        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode",
     },
 )

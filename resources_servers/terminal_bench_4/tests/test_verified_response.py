@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.terminal_bench_4.app import TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.models import AgentTermination, SandboxedVerifyRequest, SandboxedVerifyResponse
 
