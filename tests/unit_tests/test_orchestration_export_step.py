@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch
 
-import nemo_gym.exporters.runner as runner
+import nemo_gym.orchestration.export_step as runner
 from nemo_gym.config_types import ConfigError, MLflowExportConfig, RunExportConfig, WandbExportConfig
 from nemo_gym.exporters.base import ExportResult, ExportState
 from nemo_gym.run_artifacts import RunArtifacts
@@ -184,5 +185,67 @@ def test_a_succeeded_result_is_kept_even_when_the_settings_are_incomplete(tmp_pa
 
 
 @pytest.mark.parametrize("model", [RunExportConfig, MLflowExportConfig, WandbExportConfig])
-def test_every_exporters_settings_accept_a_result_file(model: type[RunExportConfig]) -> None:
-    assert "result_json_fpath" in model.model_fields
+def test_the_result_file_is_a_setting_of_the_step_not_of_the_exporters_and_does_not_upset_them(
+    model: type[RunExportConfig],
+) -> None:
+    assert "result_json_fpath" not in model.model_fields
+
+    model.model_validate({"rollouts_jsonl_fpath": "rollouts.jsonl", "result_json_fpath": "exports/x.result.json"})
+
+
+def _run_main(monkeypatch: MonkeyPatch, argv: list[str], outcome: ExportResult) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def fake_global_config(**kwargs: Any) -> DictConfig:
+        seen["argv"], seen["skip_exporters"] = (
+            list(sys.argv),
+            kwargs["global_config_dict_parser_config"].skip_exporters,
+        )
+        return OmegaConf.create({"rollouts_jsonl_fpath": "rollouts.jsonl"})
+
+    def fake_run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
+        seen["name"] = name
+        return outcome
+
+    monkeypatch.setattr("nemo_gym.global_config.get_global_config_dict", fake_global_config)
+    monkeypatch.setattr(runner, "run_export", fake_run_export)
+    monkeypatch.setattr(sys, "argv", ["export_step", *argv])
+    return seen
+
+
+def test_the_step_takes_the_exporter_name_apart_from_the_overrides_and_prints_the_outcome(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    seen = _run_main(
+        monkeypatch, ["fake", "+label=x", "+tags=[a]"], ExportResult.succeeded(run_id="r-1", uploaded_rollouts=True)
+    )
+
+    runner.main()
+
+    assert seen["name"] == "fake"
+    assert seen["argv"] == ["export_step", "+label=x", "+tags=[a]"]
+    assert seen["skip_exporters"] is True
+    assert capsys.readouterr().out.splitlines() == [
+        "Export fake: succeeded",
+        "  run_id: r-1",
+        "  uploaded_rollouts: True",
+    ]
+
+
+def test_a_failed_step_exits_with_the_exit_code_of_the_result_and_names_the_error(
+    monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    _run_main(monkeypatch, ["fake"], ExportResult.failed("quota exceeded", exit_code=4))
+
+    with pytest.raises(SystemExit) as exit_info:
+        runner.main()
+
+    assert exit_info.value.code == 4
+    assert "Error: quota exceeded" in capsys.readouterr().err
+
+
+def test_the_step_without_an_exporter_name_says_how_to_call_it(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["export_step"])
+
+    with pytest.raises(SystemExit, match="usage: python3 -m nemo_gym.orchestration.export_step"):
+        runner.main()

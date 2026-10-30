@@ -35,6 +35,10 @@ KUBERNETES = {
     "k8s": {"type": "kubernetes", "namespace": "ns", "gpus_per_node": 8, "context": "ctx", "pvc_name": "pvc"}
 }
 SERVICE = {"container": "gym:latest", "type": "vllm", "model": "org/model"}
+# What the job script runs for an export, and what a fake `python3` on PATH then sees as its arguments.
+STEP_MODULE = "nemo_gym.orchestration.export_step"
+STEP = f"python3 -m {STEP_MODULE}"
+STEP_ARGS = f"-m {STEP_MODULE}"
 JOB_ID = "gym-job-20261023T101500Z-abc123"
 BENCH_DIR = Path("/jobs") / JOB_ID / "gpqa"
 
@@ -263,14 +267,14 @@ class TestSbatchScript:
         script = _script(_submit(gym_install=True))
 
         assert 'exec "$@"' in script
-        assert "gym eval export" not in script
+        assert STEP not in script
         assert "eval.exit" not in script
 
     def test_exports_run_after_the_eval_in_the_same_step_with_the_derived_settings(self) -> None:
         script = _script(_submit(gym_install=True, job_exports={"evalrdl": {"label": "nightly", "tags": ["a", "b"]}}))
 
         assert 'exec "$@"' not in script
-        assert "gym eval export evalrdl" in script
+        assert f"{STEP} evalrdl" in script
         for expected in (
             "+label=nightly",
             "+tags=[a,b]",
@@ -279,12 +283,12 @@ class TestSbatchScript:
             "+meta.benchmark=gpqa",
         ):
             assert expected in script
-        assert script.index("gym eval export evalrdl") > script.index("uv pip install")
+        assert script.index(f"{STEP} evalrdl") > script.index("uv pip install")
 
     def test_every_effective_export_gets_a_command_in_order(self) -> None:
         script = _script(_submit(gym_install=True, job_exports={"atif": {"agent_version": "1"}, "evalrdl": {}}))
 
-        assert script.index("gym eval export atif") < script.index("gym eval export evalrdl")
+        assert script.index(f"{STEP} atif") < script.index(f"{STEP} evalrdl")
 
     @staticmethod
     def _install_extras(script: str) -> list[str]:
@@ -307,20 +311,20 @@ class TestSbatchScript:
     def test_the_tail_is_used_even_when_the_driver_installs_and_prepares_nothing(self) -> None:
         script = _script(_submit(job_exports={"evalrdl": {}}))
 
-        assert "gym eval export evalrdl" in script
+        assert f"{STEP} evalrdl" in script
         assert "bash -c" in script
 
     def test_a_command_benchmark_script_has_no_tail(self) -> None:
         config = _submit(job_exports={"evalrdl": {}}, benchmarks={"custom": {"command": "echo hi"}})
 
-        assert "gym eval export" not in _script(config, "custom")
+        assert STEP not in _script(config, "custom")
 
 
-# A real bash run of the tail, with a `gym` that records what it is asked to export.
-FAKE_GYM = """#!/bin/bash
+# A real bash run of the tail, with a `python3` that records what it is asked to export.
+FAKE_PYTHON = f"""#!/bin/bash
 echo "$@" >> "$FAKE_GYM_LOG"
 printf '%s\\0' "$@" > "$FAKE_GYM_LOG.args"
-if [ "$1 $2" = "eval export" ] && [ "${FAKE_EXPORT_FAILS:-}" = "$3" ]; then exit 1; fi
+if [ "$1 $2" = "{STEP_ARGS}" ] && [ "${{FAKE_EXPORT_FAILS:-}}" = "$3" ]; then exit 1; fi
 """
 
 
@@ -328,8 +332,8 @@ if [ "$1 $2" = "eval export" ] && [ "${FAKE_EXPORT_FAILS:-}" = "$3" ]; then exit
 def tail_env(tmp_path: Path) -> dict[str, Any]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "gym").write_text(FAKE_GYM)
-    (bin_dir / "gym").chmod(0o755)
+    (bin_dir / "python3").write_text(FAKE_PYTHON)
+    (bin_dir / "python3").chmod(0o755)
     run = tmp_path / "run.sh"
     run.write_text('#!/bin/bash\necho run >> "$FAKE_GYM_LOG"\nexit "${FAKE_RUN_RC:-0}"\n')
     run.chmod(0o755)
@@ -362,7 +366,7 @@ class TestExportTail:
         completed = _run_tail(tail_env, [("atif", ["+a=1"]), ("evalrdl", ["+label=x"])])
 
         assert completed.returncode == 0
-        assert _calls(tail_env) == ["run", "eval export atif +a=1", "eval export evalrdl +label=x"]
+        assert _calls(tail_env) == ["run", f"{STEP_ARGS} atif +a=1", f"{STEP_ARGS} evalrdl +label=x"]
         assert (tail_env["bench"] / "eval.exit").read_text().strip() == "0"
         assert (tail_env["bench"] / "exports").is_dir()
 
@@ -391,7 +395,7 @@ class TestExportTail:
         completed = _run_tail(tail_env, [("atif", []), ("evalrdl", [])])
 
         assert completed.returncode == 0
-        assert _calls(tail_env) == ["run", "eval export atif", "eval export evalrdl"]
+        assert _calls(tail_env) == ["run", f"{STEP_ARGS} atif", f"{STEP_ARGS} evalrdl"]
 
     def test_an_unwritable_exit_file_does_not_replace_the_exit_code_of_a_failed_run(
         self, tail_env: dict[str, Any]
@@ -414,7 +418,7 @@ class TestExportTail:
 
     def test_the_marker_exists_before_the_first_export_starts(self, tail_env: dict[str, Any]) -> None:
         marker = tail_env["bench"] / "eval.succeeded.1"
-        (Path(tail_env["env"]["PATH"].split(":")[0]) / "gym").write_text(
+        (Path(tail_env["env"]["PATH"].split(":")[0]) / "python3").write_text(
             f'#!/bin/bash\n[ -e "{marker}" ] && echo "marker-first" >> "$FAKE_GYM_LOG"\n'
         )
 
@@ -426,7 +430,7 @@ class TestExportTail:
         completed = _run_tail(tail_env, [("evalrdl", [])])
 
         assert completed.returncode == 0
-        assert _calls(tail_env) == ["run", "eval export evalrdl"]
+        assert _calls(tail_env) == ["run", f"{STEP_ARGS} evalrdl"]
 
     def test_an_unwritable_marker_does_not_stop_the_exports_or_change_the_exit_code(
         self, tail_env: dict[str, Any]
@@ -436,7 +440,7 @@ class TestExportTail:
         )
 
         assert completed.returncode == 0
-        assert _calls(tail_env) == ["run", "eval export evalrdl"]
+        assert _calls(tail_env) == ["run", f"{STEP_ARGS} evalrdl"]
 
     def test_a_failing_export_neither_changes_the_exit_code_nor_stops_the_others(
         self, tail_env: dict[str, Any]
@@ -444,13 +448,13 @@ class TestExportTail:
         completed = _run_tail(tail_env, [("atif", []), ("evalrdl", [])], FAKE_EXPORT_FAILS="atif")
 
         assert completed.returncode == 0
-        assert _calls(tail_env) == ["run", "eval export atif", "eval export evalrdl"]
+        assert _calls(tail_env) == ["run", f"{STEP_ARGS} atif", f"{STEP_ARGS} evalrdl"]
 
     def test_the_run_is_not_exec_d_so_arguments_with_quotes_survive(self, tail_env: dict[str, Any]) -> None:
         completed = _run_tail(tail_env, [("evalrdl", ["'+label=a b'"])])
 
         assert completed.returncode == 0
-        assert _calls(tail_env)[-1] == "eval export evalrdl +label=a b"
+        assert _calls(tail_env)[-1] == f"{STEP_ARGS} evalrdl +label=a b"
 
     def test_term_reaches_the_run_which_decides_the_exit_code_and_nothing_is_exported(
         self, tail_env: dict[str, Any]
@@ -586,7 +590,7 @@ def test_the_rendered_entrypoint_passes_awkward_settings_to_gym_eval_export_unch
 
     assert completed.returncode == 0, completed.stderr
     received = Path(f"{tail_env['log']}.args").read_bytes().decode().split("\0")[:-1]
-    assert received[:3] == ["eval", "export", "evalrdl"]
+    assert received[:3] == ["-m", STEP_MODULE, "evalrdl"]
     assert _parse_overrides(received[3:]) == {
         "label": "nightly(run)",
         "tags": ["a b", "1"],

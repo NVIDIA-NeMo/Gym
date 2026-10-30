@@ -12,8 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""One post-run export of a submitted benchmark, with its outcome kept in a result file.
+
+The driver step of a job runs this after `gym eval run`, once per configured export:
+`python3 -m nemo_gym.orchestration.export_step <exporter> +key=value ...`. The exporters themselves know nothing
+about it; what a job needs on top of them (telling several exports apart afterwards, not repeating one that
+finished, retrying one that was interrupted) lives here.
+"""
+
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,8 +64,8 @@ def _result_payload(result: ExportResult) -> dict[str, Any]:
 def run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
     """Run the post-run exporter `name` on the run `rollouts_jsonl_fpath` points at.
 
-    With `result_json_fpath` set, the outcome is also kept in that file, which is how a job that runs several
-    exports can tell them apart afterwards: no file means never attempted, `running` means interrupted (for
+    `result_json_fpath` is a setting of this step, not of the exporters. When it is set, the outcome is also kept
+    in that file, which is how a job that runs several exports can tell them apart afterwards: no file means never attempted, `running` means interrupted (for
     example at the walltime), and anything else is a final result. An export that already succeeded or was
     skipped is not repeated; a failed or interrupted one is retried. A configuration error is recorded as a
     failed result too, and still raised.
@@ -83,3 +92,35 @@ def run_export(name: str, global_config_dict: DictConfig) -> ExportResult:
     if result_fpath is not None:
         _write_json_atomically(result_fpath, _result_payload(result))
     return result
+
+
+def main() -> None:
+    """`python3 -m nemo_gym.orchestration.export_step <exporter> +key=value ...`: the settings are Hydra overrides."""
+    from nemo_gym.cli.utils import exit_cleanly_on_config_error
+    from nemo_gym.global_config import GlobalConfigDictParserConfig, get_global_config_dict
+
+    @exit_cleanly_on_config_error
+    def run() -> None:
+        name = sys.argv[1]
+        # The exporter's name is not an override.
+        sys.argv = [sys.argv[0], *sys.argv[2:]]
+        # The step opens its own backend session, so no live exporter may be started beside it.
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=GlobalConfigDictParserConfig(skip_exporters=True)
+        )
+        result = run_export(name, global_config_dict)
+
+        print(f"Export {name}: {result.state.value}")
+        for key, value in result.detail.items():
+            print(f"  {key}: {value}")
+        if result.state is ExportState.FAILED:
+            print(f"Error: {result.error}", file=sys.stderr)
+            raise SystemExit(result.exit_code)
+
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: python3 -m nemo_gym.orchestration.export_step <exporter> [+key=value ...]")
+    run()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

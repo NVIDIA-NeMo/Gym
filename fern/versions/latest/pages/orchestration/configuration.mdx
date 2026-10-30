@@ -201,7 +201,7 @@ Asking for `resumable` on an executor that does not support it is an error rathe
 
 ### export
 
-An export sends a finished benchmark run somewhere, using `gym eval export` as the last step of the benchmark's job. It runs in the same container as `gym eval run`, so it needs `gym_install` or an image that has Gym.
+An export sends a finished benchmark run somewhere, with the same exporters as `gym eval export`, as the last step of the benchmark's job. It runs in the same container as `gym eval run`, so it needs `gym_install` or an image that has Gym, with `python3` being the Python Gym is installed in.
 
 ```yaml
 job:
