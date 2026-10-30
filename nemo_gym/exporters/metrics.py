@@ -25,7 +25,7 @@ def flatten_aggregate_metrics(agent_entries: Iterable[dict[str, Any]]) -> dict[s
     either way: `<agent>/<metric>` and `key_metrics/<agent>/<metric>`, primitive values only.
     """
     # Imported here because `global_config` imports this package to set up exporters.
-    from nemo_gym.global_config import AGENT_REF_KEY_NAME
+    from nemo_gym.config.global_config import AGENT_REF_KEY_NAME
 
     metrics: dict[str, Any] = {}
     for entry in agent_entries:

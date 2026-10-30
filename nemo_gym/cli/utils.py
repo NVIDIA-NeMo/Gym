@@ -154,7 +154,7 @@ def exit_cleanly_on_config_error(fn):
         import rich
         from rich.markup import escape
 
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
 
         try:
             return fn(*args, **kwargs)

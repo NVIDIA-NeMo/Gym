@@ -14,7 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.episode_types import TaskId
 from nemo_gym.task_materialization import TASK_ID_FIELDS, materialize_task
 

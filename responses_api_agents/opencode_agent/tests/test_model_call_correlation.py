@@ -6,7 +6,7 @@ from copy import deepcopy
 import pytest
 
 from nemo_gym.base_responses_api_model import CaptureStore
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record, read_model_call_records
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_observability import (

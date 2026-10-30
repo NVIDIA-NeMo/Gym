@@ -17,9 +17,9 @@ from pathlib import Path
 import yaml
 from omegaconf import OmegaConf
 
+from nemo_gym.config.secret_utils import MASKED_VALUE, hide_secrets_in_container
 from nemo_gym.path_utils import resolved_config_path_for
 from nemo_gym.resolved_config import write_resolved_config
-from nemo_gym.secret_utils import MASKED_VALUE, hide_secrets_in_container
 
 
 def test_resolved_config_path_for() -> None:

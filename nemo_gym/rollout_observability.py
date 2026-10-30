@@ -20,7 +20,7 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseInputItem
 

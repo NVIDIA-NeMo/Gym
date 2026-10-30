@@ -28,7 +28,7 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigPathNotFoundError, PromptConfigMalformedError
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigPathNotFoundError, PromptConfigMalformedError
 
 
 class PromptConfig(BaseModel):

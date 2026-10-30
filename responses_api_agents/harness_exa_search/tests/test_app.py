@@ -11,7 +11,7 @@ from aiohttp import ClientSession, web
 from fastapi import Request
 from pytest import mark, raises
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxEndpoint
 from nemo_gym.server_utils import ServerClient

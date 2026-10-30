@@ -35,7 +35,7 @@ from omegaconf import OmegaConf
 import nemo_gym.server_utils as http
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.base_resources_server import BaseVerifyResponse
-from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.reward_profile import RewardProfiler
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member

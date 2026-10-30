@@ -150,9 +150,21 @@ def main() -> None:
     agent_kwargs = _json_env("NGSWE_AGENT_KWARGS")
     sampling = _json_env("NGSWE_SAMPLING")
 
-    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-    from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.server_utils import ServerClient
+    try:
+        from nemo_gym.config import ModelServerRef, ResourcesServerRef
+        from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.server_utils import ServerClient
+    except ModuleNotFoundError as exc:
+        # This runs against the nemo-gym the sandbox image installed, which can predate the package
+        # reorganization (#5166). A missing dependency other than nemo_gym still fails here.
+        if not (exc.name or "").startswith("nemo_gym."):
+            raise
+        from nemo_gym.config_types import ModelServerRef, ResourcesServerRef  # path before nemo_gym 0.8.0
+        from nemo_gym.openai_utils import (
+            NeMoGymEasyInputMessage,
+            NeMoGymResponseCreateParamsNonStreaming,
+        )  # path before nemo_gym 0.8.0
+        from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
 
     module = importlib.import_module(os.environ["NGSWE_AGENT_MODULE"])
     agent_class = getattr(module, os.environ["NGSWE_AGENT_CLASS"])

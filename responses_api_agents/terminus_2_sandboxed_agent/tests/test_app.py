@@ -13,7 +13,7 @@ from fastapi import HTTPException
 
 from nemo_gym import server_utils
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -694,7 +694,7 @@ class TestNativeSessions:
 
         from omegaconf import DictConfig, OmegaConf
 
-        from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+        from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
         root = Path(__file__).parents[3]
         global_config = GlobalConfigDictParser().parse(

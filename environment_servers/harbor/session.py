@@ -27,9 +27,14 @@ from fastapi import HTTPException
 from environment_servers.harbor.entrypoint import EntrypointLaunch, _cancel_entrypoint
 from environment_servers.harbor.users import _is_root
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.transfer import exec_as_root, upload_dir
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    AsyncSandboxCompose,
+    DirectSandboxConnection,
+    SandboxAccess,
+    exec_as_root,
+    upload_dir,
+)
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
 from nemo_gym.tasks.harbor.compose_overlay import merged_mcp_servers

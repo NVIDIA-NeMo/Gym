@@ -48,10 +48,10 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     DISALLOWED_PORTS_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
+    ROLLOUT_PATH_PREFIX,
     TOKEN_ID_CAPTURE_BLOCK,
     find_open_port,
     get_global_config_dict,

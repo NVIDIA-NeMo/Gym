@@ -26,7 +26,7 @@ import pytest
 from aiohttp import ClientResponseError
 from PIL import Image
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gdp_pdf_agent import app as gdp_pdf_agent_app

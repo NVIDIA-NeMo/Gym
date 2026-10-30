@@ -30,7 +30,7 @@ from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPToolSchema
 from pytest import MonkeyPatch
 
-from nemo_gym.config_types import AggregateMetricsRequest
+from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

@@ -35,7 +35,7 @@ from pydantic import ValidationError
 
 from nemo_gym import component_search_roots
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.path_utils import materialized_path_for
 from nemo_gym.sandbox.compose_config import deployment_platform
 from nemo_gym.sandbox.compose_fields import DEFAULT_PLATFORM
@@ -238,11 +238,11 @@ def pairing_override_from_overrides(overrides: list[str]) -> bool:
     """Whether the run waives the agent admission checks: ``--allow-unsupported-pairing`` (which the CLI translates
     to ``+allow_unsupported_pairing=true``), a configuration file the command names that sets the key, or
     ``NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING``. The same reading as the collector's pairing guard at dispatch
-    (:func:`~nemo_gym.global_config.pairing_override_enabled`), so the early admission check of ``prepare_target``
+    (:func:`~nemo_gym.config.global_config.pairing_override_enabled`), so the early admission check of ``prepare_target``
     and the guard agree on one explicit override."""
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import ALLOW_UNSUPPORTED_PAIRING_KEY_NAME, pairing_override_enabled
+    from nemo_gym.config.global_config import ALLOW_UNSUPPORTED_PAIRING_KEY_NAME, pairing_override_enabled
 
     block = _block_from_overrides(overrides, ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)
     return pairing_override_enabled(OmegaConf.create({ALLOW_UNSUPPORTED_PAIRING_KEY_NAME: block}))
@@ -1354,7 +1354,7 @@ def run_target(args: argparse.Namespace, overrides: list[str]) -> None:
 
 def _collector_split() -> str | None:
     """The split the resolved run config dispatches (``validation`` unless overridden), for the run summary."""
-    from nemo_gym.global_config import get_global_config_dict
+    from nemo_gym.config.global_config import get_global_config_dict
 
     split = get_global_config_dict().get("split")
     return str(split) if split else None
@@ -1375,7 +1375,7 @@ def _clear_collector_metrics(rollouts: Path, *, split: str | None) -> None:
     they describe. ``split`` is the resolved run config's (:func:`_collector_split`); without one nothing is known
     to clear.
     """
-    from nemo_gym.global_config import get_global_config_dict
+    from nemo_gym.config.global_config import get_global_config_dict
     from nemo_gym.tasks.harbor.run_summary import PREPROCESSED_SUBDIR
 
     if not split:
@@ -1422,7 +1422,11 @@ def _resolved_collection(tokens: list[str], prepared: PreparedTaskset) -> "Rollo
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
 
-    from nemo_gym.global_config import get_global_config_dict, reset_global_config_dict, translate_interpolation_error
+    from nemo_gym.config.global_config import (
+        get_global_config_dict,
+        reset_global_config_dict,
+        translate_interpolation_error,
+    )
     from nemo_gym.rollout_collection import RolloutCollectionConfig
 
     sys.argv = [sys.argv[0], *tokens]
@@ -1444,7 +1448,7 @@ def _requested_output(tokens: list[str], default: Path) -> Path:
     Resolved through the same parser dispatch uses, so a quoted ``--output`` and a file overlay both count, for
     the path that dispatches nothing and so has no run config to resolve a collection from.
     """
-    from nemo_gym.global_config import get_global_config_dict, reset_global_config_dict
+    from nemo_gym.config.global_config import get_global_config_dict, reset_global_config_dict
 
     sys.argv = [sys.argv[0], *tokens]
     reset_global_config_dict()

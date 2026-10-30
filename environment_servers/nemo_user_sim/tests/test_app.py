@@ -30,7 +30,7 @@ from environment_servers.nemo_user_sim.app import (
     _to_responses_input_items,
 )
 from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
-from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseServerConfig, ServerClient

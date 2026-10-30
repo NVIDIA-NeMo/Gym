@@ -82,7 +82,7 @@ _OTEL_FALLBACK_PREFIX = "NEMO_LENS"
 _SERVICE_NAME_ENV = "OTEL_SERVICE_NAME"
 
 #: Top-level key of the telemetry block in a Gym config. Registered in
-#: ``nemo_gym.global_config.NEMO_GYM_RESERVED_TOP_LEVEL_KEYS`` so the config parser does
+#: ``nemo_gym.config.global_config.NEMO_GYM_RESERVED_TOP_LEVEL_KEYS`` so the config parser does
 #: not mistake it for a server instance definition.
 TELEMETRY_KEY_NAME = "telemetry"
 

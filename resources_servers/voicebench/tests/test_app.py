@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.config_types import AggregateMetricsRequest
+from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.voicebench.app import (

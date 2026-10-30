@@ -38,7 +38,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, get_global_config_dict
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -58,7 +58,7 @@ from nemo_gym.server_utils import (
     is_global_aiohttp_client_setup,
     set_global_aiohttp_client,
 )
-from nemo_gym.telemetry.setup import init_telemetry
+from nemo_gym.telemetry import init_telemetry
 
 
 logger = logging.getLogger(__name__)

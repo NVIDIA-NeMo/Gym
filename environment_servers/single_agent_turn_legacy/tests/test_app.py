@@ -20,7 +20,7 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServerConfig,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
+from nemo_gym.config import AgentServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer

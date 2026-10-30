@@ -154,7 +154,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     from fastapi import HTTPException, Request
     from scripts.harness_conformance import episode
 
-    import nemo_gym.global_config
+    import nemo_gym.config.global_config
     import nemo_gym.server_utils
     from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
     from nemo_gym.base_responses_api_agent import (
@@ -227,7 +227,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
     monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-    monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
     if interface.endswith("error"):
         with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):

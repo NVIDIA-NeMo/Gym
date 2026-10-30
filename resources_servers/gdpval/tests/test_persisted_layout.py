@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.episode_types import EpisodeId
-from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from resources_servers.gdpval.multistage_orchestrator import build_stage_rows, index_rows_by_task

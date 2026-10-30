@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     ConfigError,
     DownloadJsonlDatasetGitlabConfig,
     MLFlowConfig,

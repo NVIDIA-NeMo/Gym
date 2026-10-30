@@ -77,7 +77,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/agent_registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/rollout_collection.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/profiling.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/server_metadata.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/config/server_metadata.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_status.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/train_data_utils.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_core
@@ -96,8 +96,8 @@ uv.lock @nvidia-nemo/automation
 
 # Co-owned
 # suggest: /nemo_gym/__init__.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/config_types.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/global_config.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/config/config_types.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/config/global_config.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/package_info.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
 # suggest: /responses_api_agents/verifiers_agent/ @nvidia-nemo/gym_env_benchmarks @nvidia-nemo/gym_core
 
