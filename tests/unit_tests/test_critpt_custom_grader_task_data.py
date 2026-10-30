@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Core-suite tests for resources_servers/critpt_custom_grader/task_data.py.
 
-tests/unit_tests/test_task_data.py imports every server's task_data.py, so the core job measures the schema module
+tests/unit_tests/data/test_task_data.py imports every server's task_data.py, so the core job measures the schema module
 against its coverage gate ([tool.coverage.report] fail_under). The server's own tests under
 resources_servers/critpt_custom_grader/tests/ are not collected there (testpaths = ["tests"]), so this file covers
 the schema's bounds, delivered row shapes and validators in the core suite, on synthetic values.

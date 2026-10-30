@@ -30,14 +30,14 @@ from pydantic import BaseModel, ConfigDict, Field
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    # The wire key is ``_ng_digest`` (nemo_gym.tasks.harbor.DIGEST_KEY); pydantic forbids a leading
+    # The wire key is ``_ng_digest`` (nemo_gym.data.tasks.harbor.DIGEST_KEY); pydantic forbids a leading
     # underscore in a field name, so the field is addressed by alias.
     ng_digest: str = Field(
         alias="_ng_digest",
         description="Content hash of the task folder when the row was materialized.",
         json_schema_extra={"consumed_by": ["verify", "provenance"]},
     )
-    # The wire key is ``_ng_dataset_digest`` (nemo_gym.tasks.harbor.digest.DATASET_DIGEST_KEY).
+    # The wire key is ``_ng_dataset_digest`` (nemo_gym.data.tasks.harbor.digest.DATASET_DIGEST_KEY).
     ng_dataset_digest: str | None = Field(
         default=None,
         alias="_ng_dataset_digest",

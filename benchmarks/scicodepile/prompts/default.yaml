@@ -6,7 +6,7 @@
 # invention that changes what is measured. See the benchmark README for that
 # reasoning and the non-attempt rate it costs.
 #
-# There is deliberately no `system` key. `nemo_gym/prompt.py` emits a system turn
+# There is deliberately no `system` key. `nemo_gym/data/prompt.py` emits a system turn
 # whenever the key is present, so `system: ""` would send an empty system message on
 # every request — template-dependent on the chat path, a blank line pair on the
 # completions path — which is neither upstream's prompt nor nothing.

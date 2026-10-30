@@ -23,11 +23,11 @@ from nemo_gym.core import (
     EpisodeId,
     maybe_rollout_id_from_run_body,
 )
+from nemo_gym.data.task_materialization import materialize_task
 from nemo_gym.server_runtime import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
 )
-from nemo_gym.task_materialization import materialize_task
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 

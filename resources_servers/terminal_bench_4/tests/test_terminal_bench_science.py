@@ -17,9 +17,9 @@ from benchmarks.terminal_bench_science import prepare as preparation
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, global_config
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema
 from nemo_gym.sandbox import AsyncSandboxCompose, SandboxExecResult, create_provider, resolve_provider_config
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 from resources_servers.terminal_bench_4 import environment as environment_module
 from resources_servers.terminal_bench_4 import shared_logs as shared_logs_module
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer

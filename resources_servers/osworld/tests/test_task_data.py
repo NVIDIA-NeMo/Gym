@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.task_data import load_task_data_schema, normalize_task_fields
+from nemo_gym.data import normalize_task_fields
+from nemo_gym.data.task_data import load_task_data_schema
 from resources_servers.osworld.task_data import TaskData
 
 

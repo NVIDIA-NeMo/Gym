@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema, validate_jsonl_rows
+from nemo_gym.data.task_data import TaskDataValidator, load_task_data_schema, validate_jsonl_rows
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]

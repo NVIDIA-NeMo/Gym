@@ -21,7 +21,7 @@ from typing import Any
 
 from nemo_gym.artifacts.exporters import exporter_extras
 from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
-from nemo_gym.gitlab_utils import gitlab_storage_extras
+from nemo_gym.data.gitlab_utils import gitlab_storage_extras
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
     BenchmarkRunConfig,

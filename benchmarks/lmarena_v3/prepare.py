@@ -20,7 +20,7 @@ Downloads the v3 dataset from the NVIDIA GitLab Model Registry.
 from pathlib import Path
 
 from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
-from nemo_gym.gitlab_utils import download_jsonl_dataset
+from nemo_gym.data import download_jsonl_dataset
 
 
 BENCHMARK_DIR = Path(__file__).parent

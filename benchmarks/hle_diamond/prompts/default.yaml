@@ -1,7 +1,7 @@
 # The HLE authors' SYSTEM_PROMPT, verbatim, from hle_eval/run_model_predictions.py in
 # https://github.com/centerforaisafety/hle (MIT) at commit 22ed3074b1e7b134bcbc09028d0ba320839b0655.  # pragma: allowlist secret
 # Upstream sends it as the system message with the bare question as the user message. The braces
-# are doubled here only because nemo_gym.prompt fills {placeholders} with str.format_map; the
+# are doubled here only because nemo_gym.data.prompt fills {placeholders} with str.format_map; the
 # rendered message carries upstream's single braces byte for byte.
 system: |-
   Your response should be in the following format:
