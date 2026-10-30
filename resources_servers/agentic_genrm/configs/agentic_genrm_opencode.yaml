@@ -1,0 +1,153 @@
+# Agentic GenRM: generative_reward_model's pairwise judging task and reward, with the policy working
+# inside OpenCode in an OpenSandbox sandbox. It can read and run the responses' code and search the web
+# (Exa, through genrm_search over Gym MCP) before it writes the verdict.
+#
+#   gym env start --config resources_servers/agentic_genrm/configs/agentic_genrm_opencode.yaml \
+#       --config responses_api_models/vllm_model/configs/vllm_model.yaml
+#
+# Environment: OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY (sandboxes) and BC_EXA_API_KEYS_JSON (a JSON list
+# of Exa keys, as for the search RL harness). The sandbox can reach only the policy model and genrm_search,
+# so OpenCode cannot be downloaded inside it: set remote_opencode_* (or bake OpenCode into the image) and
+# local_ripgrep_binary_path, as the SWE OpenCode runs do.
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+# Restricted network policies reject loopback and wildcard addresses.
+use_absolute_ip: true
+
+agentic_genrm:
+  resources_servers:
+    agentic_genrm:
+      entrypoint: app.py
+      domain: rlhf
+      verified: false
+      description: Train a GenRM to judge response pairs from inside a sandboxed agent with code execution and web search
+      # verify scores the final assistant message of an agent trajectory.
+      allowed_agents: [opencode_sandboxed_agent]
+      score_weight: 1.0
+      ranking_weight: 2.0
+      rubric_weight: 0.5
+      parse_failure_penalty: -100.0
+      sandbox_files_dir: /workspace/genrm
+
+genrm_search:
+  resources_servers:
+    agentic_genrm:
+      entrypoint: search_app.py
+      domain: agent
+      verified: false
+      description: Exa web search and page browsing for the agentic GenRM, served over Gym MCP
+      expose_tools_over_mcp: true
+      search_provider: exa
+      exa_api_key: ${oc.decode:${oc.env:BC_EXA_API_KEYS_JSON}}
+      # Domains never searched or browsed. Point this at the data-registry opt-out list for training;
+      # extra_exclude_domains below is added on top.
+      exclude_domains_file_path: resources_servers/agentic_genrm/data/search_exclusions.json
+      extra_exclude_domains: []
+      # Preference datasets with their labels are public; a judge that finds its row reads the answer.
+      # The harness already drops huggingface.co/datasets and datasets-server.huggingface.co results.
+      extra_contaminated_url_substrings:
+      - huggingface.co/spaces/lmarena
+      - github.com/lm-sys
+      - github.com/lmarena
+      - kaggle.com/datasets
+      - kaggle.com/competitions
+      extra_contamination_patterns:
+      - helpsteer
+      - arena-human-preference
+      - lmsys-chat-1m
+      - chatbot_arena_conversations
+      - chatbot-arena-conversations
+      use_judge: false
+      # Results inline: the sandbox has no page workspace.
+      workspace: none
+      exa_search_writes_pages: false
+      max_results: 5
+      search_max_total_length: 20000
+      search_cache_dir: null
+
+agentic_genrm_opencode_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: agentic_genrm
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      tool_servers:
+      - type: resources_servers
+        name: genrm_search
+      network_access: model_and_tools
+      opencode_version: 1.17.11
+      opencode_max_context_window: 131072
+      output_token_policy: remaining_context
+      # A GenRM reward of 0 is a perfect verdict, so a failed run must not be zeroed: it is scored on
+      # its output (no final verdict -> parse failure), and the trainer masks infrastructure failures.
+      execution_failure_reward_zero: false
+      # The judge prompt goes in on stdin: verbatim (as an argument OpenCode quotes it and escapes its
+      # quotes) and without the 128 KiB command-line limit long prompts hit.
+      query_via_stdin: true
+      sandbox_timeout: 1800
+      sandbox_config:
+        image: python:3.12-bookworm
+        workdir: /workspace
+        ttl_s: 3600
+        ready_timeout_s: 1200
+        entrypoint:
+        - sleep
+        - infinity
+        resources:
+          cpu: 1
+          memory_mib: 4096
+          disk_gib: 10
+        metadata:
+          benchmark: agentic-genrm
+          harness: opencode
+        files:
+          # The image has no /workspace and OpenSandbox runs commands only in an existing workdir; rows
+          # without code blocks get no per-row files to create it.
+          /workspace/.keep: "\n"
+          /tmp/nemo-gym-environment.txt: |
+            Direct internet access is disabled on this machine. To look something up, use the `search` and `browse` web tools.
+            Python 3.12 (standard library only; pip cannot reach the internet), gcc and g++ are installed.
+            Fenced code blocks in the two responses of the user's message, if any, are saved as files: /workspace/genrm/response_<n>_code/block_<k>.<ext>.
+      opencode_config:
+        instructions:
+        - /tmp/nemo-gym-environment.txt
+        compaction:
+          auto: false
+          prune: false
+        agent:
+          build:
+            steps: 40
+            prompt: |
+              You are an expert evaluation judge. You compare two AI assistant responses to the same conversation and give a calibrated, evidence-based verdict in the exact format the user asks for.
+
+              You are working on a sandboxed Linux machine with tools. Use them to check what you cannot judge reliably by reading alone:
+              - Run code from the responses (bash, python3, gcc/g++) to see whether it works and does what it claims; write small tests.
+              - Recompute calculations and numbers.
+              - Search the web and read pages to verify factual claims, specifications, citations and recent information.
+              Check the points that decide the comparison rather than everything, and stop when you have enough evidence.
+
+              Keep your messages before the verdict short. Your final message is your judgment: exactly one JSON object in the format the user specified, with nothing after it. Do not write a JSON verdict in any earlier message.
+          title:
+            disable: true
+        permission:
+          task: deny
+          todowrite: deny
+          todoread: deny
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/agentic_genrm/data/example.jsonl
+
+agentic_genrm_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: agentic_genrm_opencode_agent

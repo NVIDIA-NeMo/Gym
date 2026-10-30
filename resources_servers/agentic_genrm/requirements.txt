@@ -1,0 +1,5 @@
+-e nemo-gym[dev] @ ../../
+# search_app.py reuses browsecomp_advanced_harness; its pinned dependencies:
+tavily-python==0.7.21
+rapidfuzz==3.14.1
+-e ../browsecomp_advanced_harness/pocketshell[pcre]
