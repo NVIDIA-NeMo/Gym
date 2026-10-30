@@ -1357,6 +1357,44 @@ def test_nemotron_model_transport_failure_stops_and_masks(monkeypatch, agent_out
     assert FakeEnv.instances[0].actions == []
 
 
+@pytest.mark.parametrize("model_call_completed", [False, True])
+def test_nemotron_context_limit_stop_is_evaluated_and_trainable(monkeypatch, model_call_completed) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+
+    def context_limit(_self, _instruction, _obs):
+        return (
+            "context_length_exceeded",
+            [],
+            {
+                "agent_outcome": "context_limit_reached",
+                "stop_rollout": True,
+                "model_call_completed": model_call_completed,
+                "parse_failure": {"last_error": "context_length_exceeded"},
+                "model_calls": [],
+            },
+        )
+
+    monkeypatch.setattr(FakeNemotronAgent, "predict", context_limit)
+    result = osworld_client.run_osworld_task(
+        {"id": "task-nano-context-limit", "instruction": "Use the scaffold."},
+        model_fn=lambda *_args: pytest.fail("Nemotron should not use model_fn"),
+        runner_name="nemotron_v3_nano_omni_agent",
+        env_class_path="fake.FakeEnv",
+        agent_class_path="fake.FakeNemotronAgent",
+        messages_model_fn=lambda *_args: pytest.fail("predict is stubbed"),
+        policy_model_name="nemotron-3-nano-omni-under-test",
+        sleep_after_execution=0,
+        task_timeout=10,
+    )
+
+    assert result.evaluation_completed is True
+    assert result.runtime_eligible is True
+    assert result.mask_sample is False
+    assert result.termination_reason == "context_limit_reached"
+    assert result.error is None
+    assert FakeEnv.instances[0].actions == []
+
+
 def test_nemotron_model_authored_fail_remains_unmasked(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 
@@ -1455,6 +1493,19 @@ def test_stage_setup_cache_links_task_artifacts_without_patching_osworld(monkeyp
     assert linked == 1
     assert destination.is_symlink()
     assert destination.read_bytes() == b"pdf"
+
+
+def test_sanitize_setup_task_config_avoids_pkill_self_match_without_mutation() -> None:
+    command = "pkill -f 'http.server 8539'; rm -rf /home/user/crosstown && mkdir -p /home/user/crosstown"
+    task_config = {"config": [{"parameters": {"command": command}}]}
+
+    sanitized = osworld_client._sanitize_setup_task_config(task_config)
+
+    assert task_config["config"][0]["parameters"]["command"] == command
+    assert sanitized["config"][0]["parameters"]["command"] == (
+        "pkill -f '[h]ttp.server 8539' 2>/dev/null || true; "
+        "rm -rf /home/user/crosstown && mkdir -p /home/user/crosstown"
+    )
 
 
 def test_stage_setup_cache_does_not_link_evaluator_outputs(monkeypatch, tmp_path: Path) -> None:

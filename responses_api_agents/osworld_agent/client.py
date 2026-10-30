@@ -41,6 +41,7 @@ import requests
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
 from responses_api_agents.osworld_agent.rollout_outcome import (
+    CONTEXT_LIMIT_STOP_REASON,
     RUNTIME_ADMISSION_POLICY_ID,
     RolloutOutcomeFacts,
     classify_rollout_outcome,
@@ -366,6 +367,21 @@ def _readonly_task_cache_names(task_config: Mapping[str, Any]) -> List[str]:
                     destination for destination in destinations if isinstance(destination, str) and destination
                 )
     return list(dict.fromkeys(names))
+
+
+def _sanitize_setup_task_config(value: Any) -> Any:
+    """Prevent a known cleanup command from killing its own setup shell."""
+
+    if isinstance(value, dict):
+        return {key: _sanitize_setup_task_config(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_setup_task_config(item) for item in value]
+    if isinstance(value, str):
+        return value.replace(
+            "pkill -f 'http.server 8539'",
+            "pkill -f '[h]ttp.server 8539' 2>/dev/null || true",
+        )
+    return value
 
 
 def _stage_setup_cache(task_config: Dict[str, Any], cache_dir: str, setup_cache_dir: Optional[str] = None) -> int:
@@ -1991,7 +2007,7 @@ def run_osworld_task(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
             )
         rollout_phase = "environment_reset"
-        env.reset(task_config=task_config)
+        env.reset(task_config=_sanitize_setup_task_config(task_config))
         if use_gym_sandbox and runner_spec.kind == "pointer_agent":
             _install_guest_idle_inhibitor(env.setup_controller, task_logger)
         rollout_phase = "rollout"
@@ -2425,7 +2441,7 @@ def run_osworld_task(
                     },
                 )
                 if agent_stop_reason is not None:
-                    if agent_model_call_completed is False:
+                    if agent_model_call_completed is False and agent_stop_reason != CONTEXT_LIMIT_STOP_REASON:
                         parse_failure = agent_step_info.get("parse_failure")
                         failure_message = (
                             parse_failure.get("last_error") if isinstance(parse_failure, Mapping) else None
@@ -2597,7 +2613,11 @@ def run_osworld_task(
         infrastructure_failure_reason = "evaluator_error"
     elif proxy_setup_error:
         infrastructure_failure_reason = "proxy_setup_error"
-    elif agent_stop_reason is not None and agent_model_call_completed is False:
+    elif (
+        agent_stop_reason is not None
+        and agent_model_call_completed is False
+        and agent_stop_reason != CONTEXT_LIMIT_STOP_REASON
+    ):
         infrastructure_failure_reason = "model_call_failed"
     elif error:
         infrastructure_failure_reason = "rollout_error"

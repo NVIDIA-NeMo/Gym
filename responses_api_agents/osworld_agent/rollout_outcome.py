@@ -16,6 +16,9 @@ from typing import Optional
 
 RUNTIME_ADMISSION_POLICY_ID = "osworld-runtime-admission-v1"
 LEGACY_RUNTIME_ADMISSION_POLICY_ID = "legacy-mask-sample-v1"
+# The adapter's context budget ended the rollout. Like the step horizon this
+# is the policy's own end, so the evaluated trajectory stays trainable.
+CONTEXT_LIMIT_STOP_REASON = "context_limit_reached"
 
 
 @dataclass(frozen=True)

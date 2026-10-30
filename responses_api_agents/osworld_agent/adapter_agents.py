@@ -29,6 +29,7 @@ from responses_api_agents.osworld_agent.history_policy import (
     HistoryPolicyState,
     plan_history,
 )
+from responses_api_agents.osworld_agent.rollout_outcome import CONTEXT_LIMIT_STOP_REASON
 from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
 from responses_api_agents.osworld_agent.trajectory import stable_id
 
@@ -86,6 +87,12 @@ PRE_DONE_CHECKLIST = """Before returning computer.terminate with status=success,
 If any item is not verified, take one corrective or verification action instead of terminating."""
 STEP_TEMPLATE = "# Step {step_num}:\n"
 TEXT_HISTORY_TEMPLATE = "## Thought:\n{thought}\n\n## Action:\n{action}\n"
+TEXT_HISTORY_CODE_TEMPLATE = "\n## Code:\n```python\n{code}\n```\n"
+# normalized: Thought + Action everywhere (benchmark contract).
+# raw_live: served output inside the live window; compacted turns normalized.
+# raw_full: raw_live, plus the policy's original Code in compacted turns.
+_ASSISTANT_HISTORY_REPLAY_MODES = frozenset({"normalized", "raw_live", "raw_full"})
+_RAW_ASSISTANT_HISTORY_REPLAY_MODES = frozenset({"raw_live", "raw_full"})
 ASSISTANT_HISTORY_TEMPLATE_THINKING = "<think>\n{thought}\n</think>\n## Action:\n{action}\n"
 ASSISTANT_HISTORY_TEMPLATE_NON_THINKING = "## Thought:\n{thought}\n\n## Action:\n{action}\n"
 
@@ -523,6 +530,9 @@ NEMOTRON_AGENT_OPTION_DEFAULTS: Dict[str, Any] = {
     "repeated_action_warning_threshold": 0,
     "repeated_action_window": 12,
 }
+# shrink: drop one live image per overflow and retry the step.
+# stop: end the rollout at the first overflow and score it as is.
+_CONTEXT_OVERFLOW_POLICIES = frozenset({"shrink", "stop"})
 
 
 def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, Any]:
@@ -533,8 +543,13 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
     coordinate_type = normalized["coordinate_type"]
     if coordinate_type not in {"relative", "absolute", "qwen25"}:
         raise ValueError(f"Unsupported coordinate_type: {coordinate_type}")
+    assistant_history_replay = options.get("assistant_history_replay", "normalized")
+    if assistant_history_replay not in _ASSISTANT_HISTORY_REPLAY_MODES:
+        raise ValueError(
+            "assistant_history_replay must be 'normalized', 'raw_live' or 'raw_full'"
+        )
     retry_temperature = normalized["parse_retry_temperature"]
-    return {
+    result = {
         "coordinate_type": coordinate_type,
         "thinking": bool(normalized["thinking"]),
         "parse_retries": max(1, int(normalized["parse_retries"])),
@@ -544,6 +559,21 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
         "repeated_action_warning_threshold": max(0, int(normalized["repeated_action_warning_threshold"])),
         "repeated_action_window": max(1, int(normalized["repeated_action_window"])),
     }
+    # Keep the published normalized benchmark contract byte-identical while
+    # assigning raw replay its own explicit semantic identity.
+    if assistant_history_replay != "normalized":
+        result["assistant_history_replay"] = assistant_history_replay
+    context_overflow_policy = options.get("context_overflow_policy", "shrink")
+    if context_overflow_policy not in _CONTEXT_OVERFLOW_POLICIES:
+        raise ValueError("context_overflow_policy must be 'shrink' or 'stop'")
+    if context_overflow_policy != "shrink":
+        result["context_overflow_policy"] = context_overflow_policy
+    prompt_token_limit = options.get("context_prompt_token_limit")
+    if prompt_token_limit is not None:
+        if type(prompt_token_limit) is not int or prompt_token_limit <= 0:
+            raise ValueError("context_prompt_token_limit must be a positive integer")
+        result["context_prompt_token_limit"] = prompt_token_limit
+    return result
 
 
 @dataclass(frozen=True)
@@ -628,6 +658,9 @@ class NemotronV3NanoOmniAgent:
         max_live_images: int | None = None,
         history_policy: Mapping[str, Any] | HistoryPolicySpec | None = None,
         model_protocol_id: str | None = None,
+        assistant_history_replay: str = "normalized",
+        context_overflow_policy: str = "shrink",
+        context_prompt_token_limit: int | None = None,
         platform: str = "ubuntu",
         max_tokens: int = 16384,
         top_p: float | None = 0.95,
@@ -657,6 +690,9 @@ class NemotronV3NanoOmniAgent:
                 "pre_done_checklist": pre_done_checklist,
                 "repeated_action_warning_threshold": repeated_action_warning_threshold,
                 "repeated_action_window": repeated_action_window,
+                "assistant_history_replay": assistant_history_replay,
+                "context_overflow_policy": context_overflow_policy,
+                "context_prompt_token_limit": context_prompt_token_limit,
             }
         )
         if action_space != "pyautogui":
@@ -694,6 +730,11 @@ class NemotronV3NanoOmniAgent:
         self.max_live_images = self.history_policy.high_water
         self.model_protocol = resolve_nemotron_protocol(model_protocol_id)
         self.model_protocol_id = self.model_protocol.protocol_id
+        self.assistant_history_replay = behavior_options.get(
+            "assistant_history_replay", "normalized"
+        )
+        self.context_overflow_policy = behavior_options.get("context_overflow_policy", "shrink")
+        self.context_prompt_token_limit = behavior_options.get("context_prompt_token_limit")
         self.max_steps = max_steps
         self.client_password = client_password
         self.thinking = behavior_options["thinking"]
@@ -766,10 +807,66 @@ class NemotronV3NanoOmniAgent:
         return context
 
     def _assistant_history(self, cot: Dict[str, Any]) -> str:
+        if self.assistant_history_replay in _RAW_ASSISTANT_HISTORY_REPLAY_MODES:
+            raw_output = cot.get("raw_output")
+            if not isinstance(raw_output, str) or not raw_output:
+                raise ValueError(
+                    f"{self.assistant_history_replay} history is missing the served assistant output"
+                )
+            return raw_output
         return self.assistant_history_template.format(
             thought=cot.get("thought", ""),
             action=cot.get("action", ""),
         )
+
+    def _text_history(self, cot: Dict[str, Any]) -> str:
+        text = self.model_protocol.text_history_template.format(
+            thought=cot.get("thought", ""),
+            action=cot.get("action", ""),
+        )
+        if self.assistant_history_replay != "raw_full":
+            return text
+        # Replay the policy's own coordinates, not the screen-projected
+        # execution code, so compacted history matches what the model wrote.
+        code = cot.get("original_code")
+        if isinstance(code, str) and code:
+            text += TEXT_HISTORY_CODE_TEMPLATE.format(code=code)
+        return text
+
+    @staticmethod
+    def _served_assistant_output(response: Any) -> str:
+        """Return the assistant bytes to replay in the next live turn.
+
+        Gym's model boundary supplies ``raw_content`` with interleaved
+        reasoning preserved. Unit/standalone callers may provide the ordinary
+        OpenAI content and reasoning fields instead, so reconstruct that
+        representation only as a compatibility fallback.
+        """
+
+        if isinstance(response, Mapping):
+            raw_content = response.get("raw_content")
+            if isinstance(raw_content, str) and raw_content:
+                return raw_content
+        content, reasoning = _response_parts(response)
+        if reasoning and _THINK_RE.search(content) is None:
+            return f"<think>\n{reasoning}\n</think>\n{content}"
+        return content
+
+    def _check_prompt_token_limit(self, response: Any) -> None:
+        """Reject a served call whose prompt left less than the output reserve.
+
+        The server clamps the output budget to what remains of its window, so
+        a prompt near the window still samples, usually into a truncated reply.
+        """
+
+        limit = self.context_prompt_token_limit
+        if limit is None or not isinstance(response, Mapping):
+            return
+        prompt_tokens = response.get("prompt_tokens")
+        if type(prompt_tokens) is int and prompt_tokens > limit:
+            raise ValueError(
+                f"context_length_exceeded: prompt_tokens={prompt_tokens} exceeds context_prompt_token_limit={limit}"
+            )
 
     def _parse_retry_messages(
         self,
@@ -861,10 +958,7 @@ class NemotronV3NanoOmniAgent:
                 return ""
             history_parts = [
                 self.model_protocol.step_template.format(step_num=index + 1)
-                + self.model_protocol.text_history_template.format(
-                    thought=self.cots[index].get("thought", ""),
-                    action=self.cots[index].get("action", ""),
-                )
+                + self._text_history(self.cots[index])
                 for index in pending_text
             ]
             pending_text.clear()
@@ -984,6 +1078,7 @@ class NemotronV3NanoOmniAgent:
                 model_call_completed = True
                 completed_model_calls += 1
                 model_call_record["response"] = _jsonable(response)
+                self._check_prompt_token_limit(response)
                 finish_reason = response.get("finish_reason") if isinstance(response, Mapping) else None
                 if finish_reason is not None and finish_reason not in {"stop", "tool_calls"}:
                     raise ValueError(f"Model response did not finish cleanly: finish_reason={finish_reason!r}")
@@ -1039,7 +1134,10 @@ class NemotronV3NanoOmniAgent:
                 model_call_record["parsed_actions"] = attempt_actions
                 model_calls.append(model_call_record)
                 will_retry = attempt + 1 < self.parse_retries
-                if last_failure_kind == "context_overflow" and will_retry:
+                if last_failure_kind == "context_overflow" and self.context_overflow_policy == "stop":
+                    will_retry = False
+                    feedback_next = False
+                elif last_failure_kind == "context_overflow" and will_retry:
                     # Resending an over-long prompt cannot succeed; parse
                     # feedback would only make it longer. Shrink the live-image
                     # set and rebuild instead, replanning from the entry state.
@@ -1108,10 +1206,13 @@ class NemotronV3NanoOmniAgent:
             # runtime-admission policy decides whether the result is masked.
             # In particular, do not turn malformed sampled output into a
             # synthetic model-authored FAIL action.
+            context_limit_stop = last_failure_kind == "context_overflow" and self.context_overflow_policy == "stop"
             parsed_info.update(
                 {
-                    "agent_outcome": MODEL_FAILURE_OUTCOMES[last_failure_kind],
-                    "agent_outcome_family": "model_response_invalid",
+                    "agent_outcome": (
+                        CONTEXT_LIMIT_STOP_REASON if context_limit_stop else MODEL_FAILURE_OUTCOMES[last_failure_kind]
+                    ),
+                    "agent_outcome_family": "policy_stop" if context_limit_stop else "model_response_invalid",
                     "stop_rollout": True,
                     # Admission needs the terminal attempt's fact. An earlier
                     # malformed sample must not hide a later transport failure.
@@ -1145,7 +1246,12 @@ class NemotronV3NanoOmniAgent:
         self.observations.append(obs)
         self.actions.append(low_level)
         # The returned evidence may contain several full prompts and images.
-        # Keep only parser semantics in the agent's rolling text history.
-        self.cots.append({key: value for key, value in parsed_info.items() if key != "model_calls"})
+        # Keep parser semantics for explicit compaction summaries and retain
+        # the accepted served output for exact replay inside the live window.
+        history_entry = {
+            key: value for key, value in parsed_info.items() if key != "model_calls"
+        }
+        history_entry["raw_output"] = self._served_assistant_output(response)
+        self.cots.append(history_entry)
 
         return content, actions, parsed_info

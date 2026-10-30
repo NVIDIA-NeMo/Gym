@@ -46,6 +46,10 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import (
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+)
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -108,7 +112,12 @@ _OSWORLD_LOG_CONTEXT_FIELDS = (
 _MODEL_LOG_CONTEXT_HEADERS = {
     field: f"x-nemo-gym-log-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS
 }
-_ROLLOUT_DIAGNOSTIC_ENV_VARS = (
+_ROLLOUT_CHILD_ENV_VARS = (
+    # The OpenSandbox aiohttp transport consults Gym's injected global config.
+    # Without these, a Ray child falls back to Hydra and tries to parse Ray's
+    # default_worker.py flags as Gym CLI overrides.
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     "NEMO_GYM_RESPONSE_LOGGING",
     "OSWORLD_MODEL_IO_LOG",
     "OSWORLD_RUN_ID",
@@ -819,6 +828,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
             return normalized
 
         normalization_error = None
@@ -831,6 +841,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -862,6 +873,22 @@ def _build_messages_model_fn(
         return normalized
 
     return _call
+
+
+def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
+    """Keep the served Chat envelope id beside one structured model response.
+
+    Token capture keys each captured call by this id. Returning it lets the
+    agent name its scored call (``terminal_response_id``) without inventing
+    an identity the model server never served.
+    """
+
+    response_id = getattr(resp, "id", None)
+    if isinstance(response_id, str) and response_id:
+        normalized["response_id"] = response_id
+    prompt_tokens = getattr(getattr(resp, "usage", None), "prompt_tokens", None)
+    if type(prompt_tokens) is int:
+        normalized["prompt_tokens"] = prompt_tokens
 
 
 def _recover_first_fenced_action(content: str) -> str | None:
@@ -1571,9 +1598,9 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             future = None
             try:
                 # Child Ray tasks do not reliably inherit the NemoGym actor's
-                # runtime environment. Forward diagnostic paths explicitly so
-                # parse failures retain their model I/O and task trajectory.
-                rollout_env = {name: os.environ[name] for name in _ROLLOUT_DIAGNOSTIC_ENV_VARS if os.environ.get(name)}
+                # runtime environment. Forward both Gym's injected service
+                # config and diagnostic paths explicitly.
+                rollout_env = {name: os.environ[name] for name in _ROLLOUT_CHILD_ENV_VARS if os.environ.get(name)}
                 runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
                 if rollout_env:
                     runtime_env["env_vars"] = rollout_env
@@ -1646,6 +1673,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
+                served_call_output=self._token_id_capture_enabled(),
             )
 
 
@@ -1713,8 +1741,15 @@ def _build_response(
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
+    served_call_output: bool = False,
 ) -> OSWorldVerifyResponse:
-    """Pack one run without changing its prompt policy for training consumers."""
+    """Pack one run without changing its prompt policy for training consumers.
+
+    ``served_call_output`` is set when training-token capture owns the token
+    evidence. The model server then withholds token arrays from the agent, so
+    exact-trace output is unavailable; the returned history instead carries
+    every captured generation verbatim, one assistant message per model call.
+    """
 
     steps = result.get("steps", [])
     if not isinstance(steps, list):
@@ -1785,14 +1820,28 @@ def _build_response(
         if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
             raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
         exact_fields.pop("media_assets")
-        # Exact model calls, including parser retries, are the trainable units.
-        # Semantic step messages remain available through trajectory_transitions.
+        # Ordinary output is the loss-membership carrier. Exact sidecars retain
+        # every model call, including parser retries, while output contains only
+        # calls the agent accepted as executable actions.
         output = exact_fields.pop("model_call_output")
         if exact_trace_transport_version == 3:
             # The schema-3 sidecar and canonical output arrays retain all
             # training evidence. The full projected prompts and their duplicate
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
+    terminal_response_id: Optional[str] = None
+    accepted_call_references: List[Dict[str, str]] = []
+    if served_call_output and not capabilities["exact_model_call_evidence"]:
+        (
+            served_output,
+            terminal_response_id,
+            accepted_call_references,
+        ) = _served_model_call_output(model_calls)
+        # Model-call evidence is authoritative for capture-backed membership.
+        # An empty accepted set must stay empty instead of falling back to
+        # synthesized step messages that may contain a rejected retry.
+        if model_calls:
+            output = served_output
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1853,7 +1902,69 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    if terminal_response_id is not None:
+        # Names the scored (last) generation by the id the model server served.
+        response_fields["terminal_response_id"] = terminal_response_id
+    if accepted_call_references:
+        # NeMo-RL resolves these served response IDs against capture records.
+        # Keeping membership separate from response.output means rejected
+        # retries remain in the capture manifest as exact context evidence.
+        response_fields["ng_trajectory"] = {
+            "turns": [{"model_calls": accepted_call_references}]
+        }
     return OSWorldVerifyResponse(**response_fields)
+
+
+def _served_model_call_output(
+    model_calls: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Optional[str], List[Dict[str, str]]]:
+    """Return accepted served generations and their capture identities.
+
+    Capture fingerprints the content the model server served, which keeps the
+    reasoning inline as ``<think>...</think>``. Step text strips that reasoning
+    and omits parser-retry calls, so it cannot identify captured calls.
+
+    Rejected parser retries stay in ``model_calls`` and the capture manifest as
+    exact evidence/context ancestry, but they are not ordinary output and do
+    not receive policy loss by default.
+
+    A call with no response never reached the model. A call whose served
+    content is empty is a local stand-in (for example the model server's
+    context-overflow reply), which generated nothing and was never captured.
+    Both are skipped. Accepted calls must carry the response ID served by the
+    model endpoint, which provides an unambiguous join even when retries have
+    identical content.
+    """
+
+    output: List[Dict[str, Any]] = []
+    terminal_response_id: Optional[str] = None
+    references: List[Dict[str, str]] = []
+    for model_call in model_calls:
+        if model_call.get("accepted") is not True:
+            continue
+        response = model_call.get("response")
+        if not isinstance(response, Mapping):
+            continue
+        raw_content = response.get("raw_content")
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        response_id = response.get("response_id")
+        if not isinstance(response_id, str) or not response_id:
+            raise ValueError(
+                "Accepted OSWorld model call is missing its served response_id"
+            )
+        output.append(
+            {
+                "id": f"msg-call-{model_call['turn_id']}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "annotations": [], "text": raw_content}],
+            }
+        )
+        references.append({"response_id": response_id})
+        terminal_response_id = response_id
+    return output, terminal_response_id, references
 
 
 def _empty_response(
