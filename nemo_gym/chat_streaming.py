@@ -65,7 +65,9 @@ def _wants_usage(stream_options: Any) -> bool:
     return bool(isinstance(stream_options, dict) and stream_options.get("include_usage"))
 
 
-def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+def sanitize_streaming_chat_body(
+    body: dict[str, Any], *, extra_fields: frozenset[str] = frozenset()
+) -> tuple[dict[str, Any], bool]:
     """Map a streaming-dialect chat body onto the strict non-streaming params shape.
 
     Returns the cleaned body dict (ready for ``NeMoGymChatCompletionCreateParamsNonStreaming``
@@ -75,17 +77,19 @@ def sanitize_streaming_chat_body(body: dict[str, Any]) -> tuple[dict[str, Any], 
     ``stream`` and ``stream_options`` are removed: the params model's ``stream`` field is typed
     ``Literal[False]``, and ``stream_options`` is only meaningful with ``stream: true``, so it has
     no effect on the non-streaming backend call. Remaining fields are filtered to the known params
-    fields, so a harness's extra bookkeeping never reaches the backend.
+    fields, so a harness's extra bookkeeping never reaches the backend. Provider adapters
+    may explicitly retain additional fields via ``extra_fields``; validation still follows.
     """
     body = deepcopy(body)
     include_usage = _wants_usage(body.get("stream_options"))
     body.pop("stream", None)
     body.pop("stream_options", None)
 
-    dropped = sorted(set(body) - _PARAM_FIELDS)
+    allowed_fields = _PARAM_FIELDS | extra_fields
+    dropped = sorted(set(body) - allowed_fields)
     if dropped:
         LOG.debug("Dropping unsupported fields from a streaming /v1/chat/completions request: %s", dropped)
-    return {key: value for key, value in body.items() if key in _PARAM_FIELDS}, include_usage
+    return {key: value for key, value in body.items() if key in allowed_fields}, include_usage
 
 
 def _sse_data(payload: dict[str, Any]) -> str:

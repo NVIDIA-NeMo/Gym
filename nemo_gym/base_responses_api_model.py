@@ -358,6 +358,11 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    # Provider adapters can specialize validation without widening the shared OpenAI schema.
+    chat_completion_request_model: ClassVar[type[NeMoGymChatCompletionCreateParamsNonStreaming]] = (
+        NeMoGymChatCompletionCreateParamsNonStreaming
+    )
+    streaming_chat_extra_fields: ClassVar[frozenset[str]] = frozenset()
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
@@ -734,8 +739,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
 
-        A non-streaming request validates strictly against
-        ``NeMoGymChatCompletionCreateParamsNonStreaming`` and delegates to this server's own
+        A non-streaming request validates strictly against ``chat_completion_request_model``
+        (``NeMoGymChatCompletionCreateParamsNonStreaming`` by default) and delegates to this server's own
         ``chat_completions()``, preserving the historical non-streaming behavior (including the
         standard 422 shape). When the client sends ``stream: true`` (blackbox
         Chat-Completions-over-SSE harnesses like the OpenClaw agent always do), the request is
@@ -757,14 +762,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ):
             raise HTTPException(status_code=422, detail="Framework context requires one Chat completion")
         if body.get("stream") is not True:
-            params = _validate_chat_params(body)
+            params = _validate_chat_params(body, request_model=self.chat_completion_request_model)
             response = await self._invoke_chat_completions(request, params)
             dispatched = _orjson_dispatch_response(response)
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, include_usage = sanitize_streaming_chat_body(body)
-        params = _validate_chat_params(cleaned)
+        cleaned, include_usage = sanitize_streaming_chat_body(body, extra_fields=self.streaming_chat_extra_fields)
+        params = _validate_chat_params(cleaned, request_model=self.chat_completion_request_model)
 
         async def completed_stream(completion: Any) -> StreamingResponse:
             completion_json = (
@@ -962,7 +967,11 @@ def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStre
         raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
 
 
-def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStreaming:
+def _validate_chat_params(
+    body: dict,
+    *,
+    request_model: type[NeMoGymChatCompletionCreateParamsNonStreaming] = NeMoGymChatCompletionCreateParamsNonStreaming,
+) -> NeMoGymChatCompletionCreateParamsNonStreaming:
     """Validate a /v1/chat/completions body dict, surfacing failures as FastAPI's standard 422.
 
     ``include_url=False`` mirrors FastAPI's native body validation, which strips the
@@ -970,7 +979,7 @@ def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStr
     identical to the previous typed-``Body()`` binding.
     """
     try:
-        return NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+        return request_model.model_validate(body)
     except ValidationError as exc:
         raise RequestValidationError(
             [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)]
