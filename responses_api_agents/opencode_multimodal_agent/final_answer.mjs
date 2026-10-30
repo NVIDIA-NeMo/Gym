@@ -45,9 +45,11 @@ export default async () => {
         const value = state(headers.get("x-nemo-visual-session"));
         if (typeof init?.body !== "string") throw new Error("Expected JSON visual model request");
         const body = JSON.parse(init.body);
-        const extra = JSON.parse(body.metadata?.extra_body ?? "{}");
-        extra.nemo_final_answer_reserve = value.final ? 0 : policy.reserve;
-        body.metadata = {...body.metadata, extra_body: JSON.stringify(extra)};
+        if (policy.backend_reserve) {
+          const extra = JSON.parse(body.metadata?.extra_body ?? "{}");
+          extra.nemo_final_answer_reserve = value.final ? 0 : policy.reserve;
+          body.metadata = {...body.metadata, extra_body: JSON.stringify(extra)};
+        }
         if (value.final) {
           const messages = [...body.messages];
           const last = messages.at(-1);

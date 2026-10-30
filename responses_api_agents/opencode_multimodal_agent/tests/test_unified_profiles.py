@@ -36,6 +36,18 @@ def test_scoring_cleanup_is_explicit_and_does_not_edit_history():
     assert output[0]["content"][0]["text"] == text
 
 
+def test_training_without_backend_reserve_keeps_final_answer_plugin(monkeypatch, tmp_path):
+    training = agent(monkeypatch, backend_final_answer_reserve=False)
+    training._write_opencode_config(tmp_path)
+    config = json.loads((tmp_path / "opencode.json").read_text())
+    assert any(".visual-final-answer.mjs" in path for path in config["plugin"])
+    source = (tmp_path / ".visual-final-answer.mjs").read_text()
+    policy = json.loads(source.splitlines()[0].removeprefix("const policy = ").removesuffix(";"))
+    assert policy["backend_reserve"] is False
+    assert policy["reserve"] == 2048
+    assert policy["max_turns"] == 8
+
+
 def test_advisory_headroom_is_configurable(monkeypatch, tmp_path):
     runner = evaluation(monkeypatch, tmp_path)
     assert runner._build_opencode_config()["agent"]["build"]["steps"] == 18

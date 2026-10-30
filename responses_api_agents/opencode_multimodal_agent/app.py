@@ -69,6 +69,8 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
     max_turns: int = Field(default=8, gt=0)
     # None preserves native stock turn behavior (used by the eval entrypoint).
     final_answer_reserve: int | None = Field(default=2048, gt=0)
+    # Send the exact-token reserve extension only to backends that implement it.
+    backend_final_answer_reserve: bool = True
     strip_reasoning_for_grading: bool = True
     preserve_image_format: bool = False
     image_policy: OpenCodeImageConfig = Field(default_factory=OpenCodeImageConfig)
@@ -197,6 +199,7 @@ class OpenCodeMultimodalAgent(OpenCodeAgent):
             "context_window": self.config.context_window,
             "max_output_tokens": self.config.max_output_tokens,
             "reserve": self.config.final_answer_reserve,
+            "backend_reserve": self.config.backend_final_answer_reserve,
             "stock_max_steps": OPENCODE_1_17_11_MAX_STEPS,
             "prompt": (
                 "You have reached the tool-use limit. No further tools are available. "
