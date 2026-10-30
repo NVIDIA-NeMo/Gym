@@ -41,9 +41,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
-    NeMoGymSummary,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -54,6 +52,7 @@ from nemo_gym.rollout_observability import (
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
@@ -165,16 +164,19 @@ class TestOpenCodeSandboxedAgent:
                 status="completed",
                 type="message",
             ),
-            NeMoGymResponseReasoningItem(
-                id="rs_",
-                summary=[
-                    NeMoGymSummary(
-                        text="Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.",
-                        type="summary_text",
+            NeMoGymResponseOutputMessage(
+                id="msg_",
+                content=[
+                    NeMoGymResponseOutputText(
+                        annotations=[],
+                        text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
+                        type="output_text",
+                        logprobs=None,
                     )
                 ],
-                type="reasoning",
-                encrypted_content=None,
+                role="assistant",
+                status="completed",
+                type="message",
             ),
             NeMoGymResponseFunctionToolCall(
                 arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
@@ -194,6 +196,80 @@ class TestOpenCodeSandboxedAgent:
         ]
 
         assert expected_output_items == actual_output_items
+
+    @mark.parametrize(
+        "text",
+        [
+            "An ordinary answer.",
+            "<think>Inspect the repository.</think>",
+            "<think>Inspect the repository.</think>\nThen run tests.\n",
+            "Before <think>one</think> between <think>two</think> after",
+            "The literal tags are <think> and </think>.",
+            "<think>An unfinished block",
+            "",
+        ],
+    )
+    def test_export_preserves_text_parts_and_capture_fingerprints(self, text: str) -> None:
+        exported = {"messages": [{"info": {"role": "assistant"}, "parts": [{"type": "text", "text": text}]}]}
+        items = OpenCodeSandboxedAgent._opencode_export_to_output_items(None, exported)
+
+        assert len(items) == 1
+        assert isinstance(items[0], NeMoGymResponseOutputMessage)
+        assert items[0].content[0].text == text
+        assert assistant_fingerprint([item.model_dump(mode="json") for item in items]) == assistant_fingerprint(
+            [{"role": "assistant", "content": text}]
+        )
+
+    def test_export_preserves_explicit_reasoning_text_tools_and_turn_order(self) -> None:
+        tagged_text = "<think>Inspect both files.</think>\n"
+        calls = [
+            {"type": "function_call", "call_id": "tool-1", "name": "read", "arguments": '{"path": "a.py"}'},
+            {"type": "function_call", "call_id": "tool-2", "name": "read", "arguments": '{"path": "b.py"}'},
+        ]
+        parts = [{"type": "reasoning", "text": "Explicit reasoning."}, {"type": "text", "text": tagged_text}]
+        for call_item in calls:
+            parts.append(
+                {
+                    "type": "tool",
+                    "callID": call_item["call_id"],
+                    "tool": call_item["name"],
+                    "state": {"input": json.loads(call_item["arguments"]), "output": "file contents"},
+                }
+            )
+        exported = {
+            "messages": [
+                {"info": {"role": "assistant"}, "parts": parts},
+                {"info": {"role": "assistant"}, "parts": [{"type": "text", "text": "Done."}]},
+            ]
+        }
+        items = OpenCodeSandboxedAgent._opencode_export_to_output_items(None, exported)
+
+        assert [item.type for item in items] == [
+            "reasoning",
+            "message",
+            "function_call",
+            "function_call_output",
+            "function_call",
+            "function_call_output",
+            "message",
+        ]
+        assert items[0].summary[0].text == "Explicit reasoning."
+        assert items[1].content[0].text == tagged_text
+        assert items[-1].content[0].text == "Done."
+        for index, expected in zip((2, 4), calls, strict=True):
+            assert items[index].call_id == expected["call_id"]
+            assert items[index].name == expected["name"]
+            assert items[index].arguments == expected["arguments"]
+            assert items[index + 1].call_id == expected["call_id"]
+            assert items[index + 1].output == "file contents"
+
+        # Match the served text/tool items, without treating tool results as generations.
+        actual = [items[index].model_dump(mode="json") for index in (1, 2, 4)]
+        expected = [{"role": "assistant", "content": tagged_text}, *calls]
+        fingerprint = assistant_fingerprint(actual)
+        assert fingerprint == assistant_fingerprint(expected)
+        assert fingerprint != assistant_fingerprint([{**expected[0], "content": "edited"}, *calls])
+        assert fingerprint != assistant_fingerprint(expected[:-1])
 
     def test_opencode_export_to_usages(self, opencode_export_test_data: Dict[str, Any]) -> None:
         actual_usages = OpenCodeSandboxedAgent._opencode_export_to_usages(None, opencode_export_test_data)
@@ -417,16 +493,19 @@ class TestOpenCodeSandboxedAgent:
                     status="completed",
                     type="message",
                 ),
-                NeMoGymResponseReasoningItem(
-                    id="rs_",
-                    summary=[
-                        NeMoGymSummary(
-                            text="Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.",
-                            type="summary_text",
+                NeMoGymResponseOutputMessage(
+                    id="msg_",
+                    content=[
+                        NeMoGymResponseOutputText(
+                            annotations=[],
+                            text="<think>Let me look at the main implementation of `separability_matrix` in `separable.py` and the `_calculate_separability_matrix` method in `core.py`.</think>",
+                            type="output_text",
+                            logprobs=None,
                         )
                     ],
-                    type="reasoning",
-                    encrypted_content=None,
+                    role="assistant",
+                    status="completed",
+                    type="message",
                 ),
                 NeMoGymResponseFunctionToolCall(
                     arguments='{"filePath": "/testbed/astropy/modeling/separable.py"}',
