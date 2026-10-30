@@ -33,6 +33,7 @@ driver:
 | `NEMO_GYM_POLICY_BASE_URL` | The policy's OpenAI-compatible base URL. Set when `driver.policy_model` is set. |
 | `NEMO_GYM_POLICY_MODEL_NAME` | The served model name. Set when `driver.policy_model` is set. |
 | `NEMO_GYM_POLICY_API_KEY` | The API key to present. Set when `driver.policy_model` is set. |
+| `NEMO_GYM_MODEL_CALL_CAPTURE_DIR` | Slurm only. `$NEMO_GYM_BENCH_DIR/model-calls`, the model-call capture directory `gym eval run` would get. Gym processes your script starts read it as their default `model_call_capture_dir` and turn on `observability_enabled`, so their model servers capture calls; an explicit setting in their config wins. Set it to an empty value in `driver.env` to turn capture off, or to another absolute path. |
 
 The driver clones Gym into a fresh temporary checkout when `gym_install` is set, so a script that sits next to your submit config is not copied there. Put the harness on a shared cluster path, mount it with `driver.mounts`, and call it by absolute path, as `/harness/run_my_harness.py` above.
 
@@ -43,5 +44,5 @@ The variables from `driver.env` are present too, and `driver.container` and `dri
 - The `command` is emitted verbatim as the last statement of the driver's shell, under `set -euo pipefail`. A multi-line script is fine, and its exit status is the job's.
 - If `gym_install` is set, the install step still runs first, and so does `prepare`. Your script starts in the Gym checkout.
 - Nothing from `run` is applied, which is why `run` and `command` cannot be combined: `run` only configures `gym eval run`. Put those settings in your script.
-- `--model-type`, `require_complete`, observability capture, and the default `rollouts.jsonl` output are properties of `gym eval run`. They do not apply; your script decides where results go and what counts as complete.
+- `--model-type`, `require_complete`, and the default `rollouts.jsonl` output are properties of `gym eval run`. They do not apply; your script decides where results go and what counts as complete.
 - `resumable` cannot be combined with `command`. A resumed job only passes `resume_from_cache` to `gym eval run`, so a custom command would restart from zero.
