@@ -153,6 +153,42 @@ metadata.
   separately configured `E2BProvider`. E2B's public connect operation may extend a
   near-expiry sandbox to its SDK-default connection lifetime (300 seconds in E2B 2.36).
 
+- With `create.lease_s`, a sandbox is created with the lease as its timeout and the provider that
+  created it renews it every third of a lease (64 at a time, 10 s per renewal) up to its own
+  lifetime. If that process dies, its sandboxes end one lease later instead of at their full
+  lifetime.
+- A command that runs out its timeout returns exit code 124 with `error_type="timeout"`, as on
+  other providers, and the processes it left running are killed by an environment marker
+  (`NEMO_GYM_E2B_EXEC`), never by process group: envd shares the group, and killing it ends the
+  sandbox. A timeout well before the deadline (a stream that could not open) still raises.
+- A kill that finds no sandbox is checked again and repeated if the sandbox still runs.
+- A sandbox the gateway could not reach raises `E2BSandboxUnreachableError` from `exec`, and is
+  retried by idempotent operations (connect, close, file transfer, snapshot delete).
+
+## Snapshots
+
+The provider implements Gym's snapshot capability, which sandbox checkpointing uses. A snapshot
+(`create_snapshot`) saves the whole VM -- memory, running processes and disk -- and is usable as
+soon as the call returns; the source keeps running. `create_from_snapshot` starts a sandbox from
+the snapshot's template id, and its processes continue where they were, so the provider sets
+`snapshot_keeps_processes`. `delete_snapshot` deletes the snapshot's template; one already gone
+is not an error.
+
+E2B files a *named* snapshot as a template alias visible to the whole team, so names are not sent
+by default (`snapshots.send_names: false`): checkpoint snapshots are released by the ids the
+checkpointer indexed, and `list_snapshots` finds unnamed snapshots under no prefix. Snapshots
+need an e2b SDK that has `AsyncSandbox.create_snapshot`.
+
+`resource_requests` in `provider_options` (an OpenSandbox option many task configs set) is
+reported once and not applied. `network_policy` in OpenSandbox's shape maps onto E2B's `network`
+option: `defaultAction: deny` denies all egress except the `allow` targets.
+
+`configs/agentenv.yaml` is this provider pointed at an AgentENV cell, with kill-on-timeout, a
+lease and `exec.user: root`. If the cell serves a certificate the system does not trust, point
+`SSL_CERT_FILE` (and `REQUESTS_CA_BUNDLE`) at a bundle of the system CAs plus the cell's
+certificate; TLS verification stays on. `scripts/agentenv_cleanup.py` lists and deletes leftover
+snapshots and sandboxes after a run.
+
 ## Security and Isolation
 
 E2B supplies the remote sandbox isolation boundary; a custom gateway's operator controls its
