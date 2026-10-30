@@ -666,7 +666,11 @@ def test_job_config_subagent_mode_configures_depth_one_children(tmp_path):
         "prompt": child_prompt,
     }
     assert opencode["agent"]["explore"] == {"disable": True}
-    assert opencode["agent"]["build"] == {"steps": 32, "prompt": prompt}
+    assert opencode["agent"]["build"] == {
+        "steps": 32,
+        "prompt": prompt,
+        "permission": {"*": "deny", "task": "allow"},
+    }
     # The native-ID hook must be installed at the same path OpenCode loads.
     plugin_path = cfg["environment"]["kwargs"]["opencode_session_headers_path"]
     assert opencode["plugin"] == ["file://" + plugin_path]

@@ -307,6 +307,7 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                     record_dir,
                     local_step_cap_reply=self.config.local_step_cap_reply,
                     require_native_session_headers=self.config.opencode_subagents_enabled,
+                    require_delegation=self.config.opencode_training_mode == "subagent",
                 )
             command = [
                 self._harbor_python,
@@ -381,6 +382,20 @@ class AgenticVBenchAgent(SimpleResponsesAPIAgent):
                 items, stats = capture_output(
                     load_records(record_dir), include_compaction_summaries=self.config.train_compaction_summaries
                 )
+                if self.config.opencode_training_mode == "subagent" and not any(
+                    trace.get("session_role") == "child" for trace in stats.session_traces
+                ):
+                    (output / "delegation_required_error.json").write_text(
+                        json.dumps(
+                            {
+                                "error": "strict subagent rollout completed without a verified child session",
+                                "session_traces": stats.session_traces,
+                            },
+                            indent=2,
+                        )
+                    )
+                    await asyncio.to_thread(self._cleanup_containers, output)
+                    raise RuntimeError("Strict subagent rollout completed without a verified child session")
                 response.update(model=model, output=items)
                 extra = {
                     "terminal_response_id": stats.terminal_response_id,

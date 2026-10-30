@@ -120,9 +120,11 @@ def main() -> None:
         }
     }
     opencode_config.setdefault("permission", {})["claw_*"] = "allow"
-    for agent in opencode_config.get("agent", {}).values():
+    for agent_name, agent in opencode_config.get("agent", {}).items():
         if isinstance(agent, dict) and isinstance(agent.get("permission"), dict):
-            agent["permission"]["claw_*"] = "allow"
+            agent["permission"]["claw_*"] = (
+                "deny" if args.training_mode == "subagent" and agent_name == "build" else "allow"
+            )
 
     config = JobConfig.model_validate(raw_config)
     config_path = args.output / "harbor_job.json"

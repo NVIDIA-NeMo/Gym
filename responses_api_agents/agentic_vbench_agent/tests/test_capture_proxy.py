@@ -169,6 +169,98 @@ async def test_native_sessions_keep_identical_children_and_same_child_followups(
 
 
 @pytest.mark.asyncio
+async def test_strict_subagent_route_forces_task_until_native_child_is_observed(tmp_path: Path) -> None:
+    task_call = {
+        "id": "call_task",
+        "type": "function",
+        "function": {"name": "task", "arguments": '{"prompt":"inspect the clip"}'},
+    }
+    upstream = Upstream()
+    await upstream.start()
+    upstream.responses = [
+        completion(0, {"role": "assistant", "tool_calls": [task_call]}, "tool_calls"),
+        completion(1, {"role": "assistant", "content": "child result"}, "stop"),
+        completion(2, {"role": "assistant", "content": "final synthesis"}, "stop"),
+    ]
+    proxy = CaptureProxy(advertise_host="127.0.0.1")
+    await proxy.start()
+    endpoint = proxy.register(
+        "strict-native",
+        upstream.url,
+        tmp_path,
+        require_native_session_headers=True,
+        require_delegation=True,
+    )
+    tools = [
+        {"type": "function", "function": {"name": "task", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}},
+    ]
+    parent = {
+        "model": "policy",
+        "messages": [{"role": "user", "content": "inspect"}],
+        "tools": tools,
+        "tool_choice": "auto",
+    }
+    child = {**parent, "messages": [{"role": "user", "content": "inspect the clip"}]}
+    child_headers = {
+        "x-opencode-session": "ses_child",
+        "x-opencode-parent-session": "ses_parent",
+        "x-opencode-spawn-call": "call_task",
+        "x-opencode-task-call": "call_task",
+        "x-opencode-agent": "general",
+    }
+    try:
+        async with aiohttp.ClientSession() as client:
+            for body, headers in (
+                (parent, {"x-opencode-session": "ses_parent"}),
+                (child, child_headers),
+                (parent, {"x-opencode-session": "ses_parent"}),
+            ):
+                async with client.post(endpoint + "/chat/completions", json=body, headers=headers) as response:
+                    assert response.status == 200, await response.text()
+                    await response.json()
+        forced = {"type": "function", "function": {"name": "task"}}
+        assert upstream.requests[0][1]["tool_choice"] == forced
+        assert upstream.requests[1][1]["tool_choice"] == "auto"
+        assert upstream.requests[2][1]["tool_choice"] == "auto"
+        records = load_records(tmp_path)
+        assert records[0]["delegation_forced"] is True
+        assert "delegation_forced" not in records[1]
+        assert len(capture_output(records)[1].session_traces) == 2
+    finally:
+        await proxy.stop()
+        await upstream.runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_strict_subagent_route_rejects_parent_request_without_task_tool(tmp_path: Path) -> None:
+    upstream = Upstream()
+    await upstream.start()
+    proxy = CaptureProxy(advertise_host="127.0.0.1")
+    await proxy.start()
+    endpoint = proxy.register(
+        "strict-missing-tool",
+        upstream.url,
+        tmp_path,
+        require_native_session_headers=True,
+        require_delegation=True,
+    )
+    try:
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                endpoint + "/chat/completions",
+                json={"model": "policy", "messages": [], "tools": []},
+                headers={"x-opencode-session": "ses_parent"},
+            ) as response:
+                assert response.status == 400
+                assert "native task tool" in (await response.text()).lower()
+        assert upstream.requests == []
+    finally:
+        await proxy.stop()
+        await upstream.runner.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_native_task_results_bind_deferred_children_without_rewriting_calls(tmp_path: Path) -> None:
     def task(call_id: str) -> dict:
         return {

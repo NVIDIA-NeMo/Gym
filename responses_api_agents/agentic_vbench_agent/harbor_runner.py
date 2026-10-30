@@ -175,6 +175,10 @@ def job_config(
         opencode_config["plugin"] = ["file:///tmp/nemo-gym-session-headers.mjs"]
         if delegation_prompt is not None:
             agents.setdefault("build", {})["prompt"] = delegation_prompt
+        if training_mode == "subagent":
+            # A strict subagent rollout gives the root only orchestration and
+            # synthesis duties. Children retain the ordinary tool permissions.
+            agents.setdefault("build", {})["permission"] = {"*": "deny", "task": "allow"}
         agents["general"] = {
             "mode": "subagent",
             "permission": {"*": "allow", "task": "deny"},

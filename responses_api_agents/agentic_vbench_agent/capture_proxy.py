@@ -135,6 +135,7 @@ class EpisodeRoute:
     record_dir: Path
     local_step_cap_reply: bool = False
     require_native_session_headers: bool = False
+    require_delegation: bool = False
     turn: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Native subagent runs install an observation-only OpenCode headers hook.
@@ -189,6 +190,7 @@ class CaptureProxy:
         *,
         local_step_cap_reply: bool = False,
         require_native_session_headers: bool = False,
+        require_delegation: bool = False,
     ) -> str:
         """Route ``/avb/<episode>/...`` to ``upstream`` (a root URL without ``/v1``).
 
@@ -198,6 +200,11 @@ class CaptureProxy:
         cannot attach to a served completion, so the ledger would poison the call
         and mask the whole rollout. The reply is never training data (the agent
         drops it as an ignored side call) and the verifier scores files, not text.
+
+        ``require_delegation`` constrains the parent policy call to OpenCode's
+        native ``task`` tool until a child session has actually reached inference.
+        The upstream policy therefore generates the delegated call itself; no
+        tool call or training token is synthesized by the environment.
         """
         if episode in self._routes:
             raise ValueError(f"Episode already registered: {episode}")
@@ -207,6 +214,7 @@ class CaptureProxy:
             record_dir=record_dir,
             local_step_cap_reply=local_step_cap_reply,
             require_native_session_headers=require_native_session_headers,
+            require_delegation=require_delegation,
         )
         return f"http://{self.advertise_host}:{self.port}/avb/{episode}/v1"
 
@@ -312,6 +320,17 @@ class CaptureProxy:
                 raise web.HTTPBadRequest(text="OpenCode subagent capture requires native session headers")
             else:
                 session = observe_session(route, body, agent=agent)
+            delegation_forced = False
+            if (
+                route.require_delegation
+                and session.role == "parent"
+                and not any(trace.role == "child" for trace in route.sessions.values())
+            ):
+                try:
+                    force_task_tool_choice(body)
+                except ValueError as error:
+                    raise web.HTTPBadRequest(text=str(error)) from error
+                delegation_forced = True
             async with self._session.post(
                 f"{route.upstream}/v1/chat/completions", json=body, headers=self._upstream_headers(request)
             ) as upstream:
@@ -326,6 +345,7 @@ class CaptureProxy:
                 "session_role": session.role,
                 "parent_session_id": session.parent_session_id,
                 "spawn_call_id": session.spawn_call_id,
+                **({"delegation_forced": True} if delegation_forced else {}),
                 **({"native_task_binding_pending": True} if request.headers.get(TASK_BINDING_HEADER) else {}),
                 **(
                     {"delegation_call_id": request.headers[TASK_CALL_HEADER]}
@@ -359,6 +379,20 @@ class CaptureProxy:
                 body=events.encode(), content_type="text/event-stream", headers={"Cache-Control": "no-cache"}
             )
         return web.Response(body=payload, content_type="application/json")
+
+
+def force_task_tool_choice(body: dict[str, Any]) -> None:
+    """Require a policy-generated native OpenCode Task call for this turn."""
+    tools = body.get("tools")
+    if not isinstance(tools, list) or not any(
+        isinstance(tool, dict)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("function"), dict)
+        and tool["function"].get("name") == "task"
+        for tool in tools
+    ):
+        raise ValueError("Strict subagent mode requires OpenCode's native task tool in the policy request")
+    body["tool_choice"] = {"type": "function", "function": {"name": "task"}}
 
 
 def _message_text(message: Any) -> str:
