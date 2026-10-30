@@ -135,8 +135,11 @@ jobs:
     if: >-
       always() && !cancelled() &&
       (needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true')
-    runs-on: ubuntu-latest
+    runs-on: nemo-ci-aws-cpu-4-16
     timeout-minutes: 45
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     steps:
       - name: Check shard results
         env:
@@ -163,6 +166,15 @@ jobs:
           key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
             uv-${{ runner.os }}-
+
+      - name: Install system test dependencies
+        if: needs.detect.outputs.run_servers == 'true'
+        timeout-minutes: 20
+        run: bash scripts/ci/install_test_dependencies.sh
+
+      - name: Check shared test-data inventory
+        if: needs.detect.outputs.run_servers == 'true'
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
 
       - name: Download shard coverage
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
