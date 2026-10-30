@@ -1652,6 +1652,9 @@ def install_trace_context_path(app: FastAPI) -> None:
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
 
+    # Direct MCP dispatch has no client connection to monitor.
+    skipped_on_direct_mcp_dispatch = True
+
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
         self.num_cancelled = 0
@@ -1991,6 +1994,9 @@ class SimpleServer(BaseServer):
                 del session[SESSION_ID_KEY]
             return response
 
+        # Direct MCP dispatch materializes the session itself.
+        add_session_id.skipped_on_direct_mcp_dispatch = True
+
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
@@ -2014,6 +2020,9 @@ class SimpleServer(BaseServer):
                     report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
                 response.headers.update(FailureHeader.encode(report))
                 return response
+
+        # Direct MCP dispatch handles exceptions in the /mcp request itself.
+        exception_handling_middleware.skipped_on_direct_mcp_dispatch = True
 
     def _failure_reply(self, e: BaseException) -> JSONResponse:  # pragma: no cover
         """The reply for an exception the route did not handle."""
