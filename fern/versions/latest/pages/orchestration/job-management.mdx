@@ -1,0 +1,107 @@
+---
+title: "Job Management"
+description: "List submitted runs, see what is happening to them, and find where their parts are."
+position: 6
+---
+
+`gym eval submit` queues one job per benchmark and leaves a [job record](./job-records) behind. The `gym job` commands read that record, so you can look at a run without going to the scheduler yourself.
+
+| Command | Asks the scheduler? | What it does |
+| --- | --- | --- |
+| `gym job list` | No | Lists the submissions in this machine's job index, newest first. |
+| `gym job status [ID ...]` | Yes | Shows what is happening to each benchmark of one or more submissions. |
+| `gym job info ID [BENCHMARK]` | Yes, for job ids | Describes one submission and where its parts are. |
+
+`gym job status` is the only command that reports live state. `gym job list` never touches the network, so it is instant and works offline.
+
+## List your submissions
+
+```bash
+gym job list [--limit N] [--json]
+```
+
+```text
+ID                               SUBMITTED             CLUSTER    EXECUTOR  BENCHMARKS
+gym-job-20261029T093012Z-4f1a9c  2026-10-29 09:30:12Z  cluster-a  slurm     gpqa, ruler, ifbench
+gym-job-20261028T154501Z-77be02  2026-10-28 15:45:01Z  cluster-a  slurm     ruler
+```
+
+The index is per machine and per user. A submission made from another machine does not appear here.
+
+## See what is happening
+
+```bash
+gym job status [ID ...] [--benchmark NAME[,NAME...]] [--limit N | --all] [--json]
+```
+
+With ids, `status` shows each submission as a block: a header with its cluster and rolled-up state, then one row per benchmark. With no ids it shows the same blocks for the newest submissions in the index (10 by default, or `--all`).
+
+```text
+gym-job-20261029T093012Z-4f1a9c  cluster-a  RUNNING (1 RUNNING, 2 SUCCEEDED)
+  BENCHMARK  STATE      JOB ID                     DETAIL
+  gpqa       SUCCEEDED  8123401                    COMPLETED
+  ruler      RUNNING    8123455 (record: 8123402)  RUNNING
+  ifbench    SUCCEEDED  8123403                    COMPLETED
+
+gym-job-20261028T154501Z-77be02  cluster-a  FAILED (1 FAILED)
+  BENCHMARK  STATE   JOB ID   DETAIL
+  ruler      FAILED  8119870  FAILED
+             Chain stopped at the walltime cap with rollouts missing; resubmit to continue.
+             logs: gym job logs gym-job-20261028T154501Z-77be02 ruler --tail 100
+```
+
+The job id shown is the one the scheduler reports. When it differs from the id in the record (a resumed run, or a job started by hand), the recorded id is shown beside it.
+
+A submission has one state, rolled up from its benchmarks: running wins, then queued, failed, cancelled, and only a submission whose benchmarks all succeeded is `SUCCEEDED`. The counts beside it show a mixed result.
+
+`--benchmark` limits every submission to the named benchmarks. With ids it is strict: a submission that lacks one fails the whole call, before anything is asked, and the error lists each offender with the benchmarks it has. With no ids it selects: only submissions that have all of the named benchmarks are shown.
+
+`--json` prints one object per submission, with the record and every benchmark's status.
+
+### States
+
+| State | Meaning |
+| --- | --- |
+| `QUEUED` | Waiting for resources. |
+| `RUNNING` | Running. |
+| `SUCCEEDED` | The run finished and exited with status 0. |
+| `FAILED` | The scheduler reports a failure, the run exited non-zero, or a chain of resumed jobs stopped before the run finished. The row says which. |
+| `CANCELLED` | Cancelled in the scheduler. |
+| `UNKNOWN` | The scheduler could not be reached, or no longer remembers the job. |
+
+The state comes from two places. The scheduler says what happened to the job. The job also writes files into its directory, and they win over the scheduler for a job that has finished: a chain that stopped early (`.gym_chain_incomplete`, which holds the reason shown) makes it `FAILED`, and the exit code of the run (`eval.exit`) decides success or failure. That is how a result survives the scheduler forgetting the job. A `CANCELLED` job is never overridden by a file left by an earlier attempt.
+
+Nothing is stored: `status` reads and never writes the record.
+
+### Many submissions at once
+
+The cost of `gym job status` grows with the number of hosts, not submissions. Submissions are grouped by the host they are reached through, the hosts are asked at the same time, and each is asked once. If a host cannot be reached, its jobs are `UNKNOWN` with the reason, and the others still print.
+
+On Slurm, one script per host runs a single `squeue` for the whole batch, a single `sacct` over every job id any of them has had, and reads the state files of each job directory. Jobs are found by the directory they run in, not by the recorded id, so a job started by hand or resubmitted from another machine is still seen. `sacct` has to be available for jobs that have left the queue; without it a finished job is `UNKNOWN` unless its files say how it ended.
+
+## Find where things are
+
+```bash
+gym job info ID [BENCHMARK] [--config] [--json]
+```
+
+```text
+Submission  gym-job-20261029T093012Z-4f1a9c
+Executor    slurm, cluster-a
+Submitted   2026-10-29 09:30:12Z by tgrzegorzek
+Gym         0.4.0 (commit c155b77c8)
+Run dir     /lustre/runs/gym-job-20261029T093012Z-4f1a9c
+
+ruler
+  Job dir   /lustre/runs/gym-job-20261029T093012Z-4f1a9c/ruler
+  Jobs      8123402, 8123455
+  Logs      SOURCE  INSTANCE  LOCATION
+            driver  -         logs/driver-8123455.log
+            vllm    -         logs/vllm-8123455.log
+
+Config      not shown; use --config to print the resolved config
+```
+
+- **Jobs** lists every job id seen for the benchmark, oldest first: the whole chain of a resumed run.
+- **Logs** lists the logs the job was set up to write, planned when the run was submitted (see `log_sources` in [Job Records](./job-records)), with the newest job's id filled in. A planned log is not proof that the file exists. A submission made before log sources were recorded shows none.
+- **Config** is the resolved config the run was submitted with, read from the run directory. It is shown only with `--config`, because it can hold literal values a user typed. When the run directory cannot be read, the reason is shown instead.
