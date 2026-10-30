@@ -30,7 +30,7 @@ from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.package_info import __version__ as nemo_gym_version
 from nemo_gym.sandbox import AsyncSandbox, ConnectableProvider
 from nemo_gym.sandbox.providers import e2b as e2b_pkg
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import SandboxEgressRules, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.e2b import provider as e2b_provider
 from nemo_gym.sandbox.providers.e2b.provider import _API_PARAM_KEYS, E2BCreateError, E2BProvider
@@ -206,6 +206,14 @@ class FakeSandbox:
                 return False
         self.killed = True
         return True
+
+    async def update_network(self, network, **kwargs):
+        self.network_calls = [*getattr(self, "network_calls", []), (network, kwargs)]
+        outcomes = getattr(self, "network_outcomes", [])
+        if outcomes:
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
 
 
 def _fake_sdk() -> types.SimpleNamespace:
@@ -1078,3 +1086,84 @@ def test_invalid_template_config_is_rejected(create: dict[str, object]) -> None:
 def test_invalid_config_values_are_rejected(section: str, config: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=re.escape(message)):
         E2BProvider(**{section: config})
+
+
+# --------------------------------------------------------------------------
+# Egress rules
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rules", "network"),
+    [
+        (SandboxEgressRules(mode="allow"), {"deny_out": ["0.0.0.0/0"]}),
+        (
+            SandboxEgressRules(mode="allow", allowed_cidrs=("10.0.0.0/8",), allowed_domains=("pypi.org",)),
+            {"allow_out": ["10.0.0.0/8", "pypi.org"], "deny_out": ["0.0.0.0/0"]},
+        ),
+        (SandboxEgressRules(mode="block", blocked_cidrs=("140.82.112.0/20",)), {"deny_out": ["140.82.112.0/20"]}),
+    ],
+)
+async def test_create_maps_egress_rules_onto_network(rules, network) -> None:
+    handle = await E2BProvider(create={"template": "base"}).create(_spec(egress_rules=rules))
+    assert handle.raw.create_kwargs["network"] == network
+    assert handle.raw.create_kwargs["allow_internet_access"] is True
+
+
+async def test_create_without_or_with_allow_all_rules_sends_no_network() -> None:
+    provider = E2BProvider(create={"template": "base"})
+    for spec in (_spec(), _spec(egress_rules=SandboxEgressRules(mode="allow_all"))):
+        assert "network" not in (await provider.create(spec)).raw.create_kwargs
+
+
+@pytest.mark.parametrize(
+    ("create", "rules", "message"),
+    [
+        ({"template": "base", "allow_internet_access": False}, SandboxEgressRules(mode="allow"), "allow_internet"),
+        (
+            {"template": "base"},
+            SandboxEgressRules(mode="block", blocked_domains=("github.com",)),
+            "IP address or CIDR only",
+        ),
+    ],
+)
+async def test_egress_rules_e2b_cannot_apply_are_rejected_before_create(create, rules, message) -> None:
+    sandbox = AsyncSandbox(E2BProvider(create=create))
+    with pytest.raises(ValueError, match=message):
+        await sandbox.start(_spec(egress_rules=rules))
+    assert FakeSandbox.instances == []
+
+
+async def test_update_egress_rules_replaces_the_network_and_retries_transient_errors() -> None:
+    provider = E2BProvider(connection={"api_key": "k"}, create={"template": "base"}, operations={"retry_delay_s": 0.0})
+    handle = await provider.create(_spec())
+    handle.raw.network_outcomes = [RuntimeError("502 bad gateway")]
+    await provider.update_egress_rules(
+        handle, SandboxEgressRules(mode="allow", allowed_domains=("pypi.org",)), timeout_s=5
+    )
+    await provider.update_egress_rules(handle, SandboxEgressRules(mode="allow_all"))
+    calls = handle.raw.network_calls
+    assert [network for network, _ in calls] == [
+        {"allow_out": ["pypi.org"], "deny_out": ["0.0.0.0/0"]},
+        {"allow_out": ["pypi.org"], "deny_out": ["0.0.0.0/0"]},
+        {},
+    ]
+    assert calls[0][1]["api_key"] == "k" and calls[0][1]["request_timeout"] == 5.0
+    assert "request_timeout" not in calls[2][1]
+
+
+async def test_update_egress_rules_does_not_retry_a_missing_sandbox() -> None:
+    provider = E2BProvider(create={"template": "base"}, operations={"retry_delay_s": 0.0})
+    handle = await provider.create(_spec())
+    handle.raw.network_outcomes = [FakeSandboxNotFound("gone")]
+    with pytest.raises(FakeSandboxNotFound):
+        await provider.update_egress_rules(handle, SandboxEgressRules(mode="allow"))
+    assert len(handle.raw.network_calls) == 1
+
+
+async def test_sandbox_facade_updates_e2b_egress_rules() -> None:
+    sandbox = AsyncSandbox(E2BProvider(create={"template": "base"}))
+    await sandbox.start(_spec(egress_rules=SandboxEgressRules(mode="allow")))
+    await sandbox.update_egress_rules(SandboxEgressRules(mode="allow_all"))
+    assert FakeSandbox.instances[0].network_calls == [({}, {})]
+    await sandbox.stop()

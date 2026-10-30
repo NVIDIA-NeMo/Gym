@@ -35,6 +35,7 @@ from nemo_gym.sandbox.providers.base import (
     ORPHAN_REAP_TIMEOUT_S,
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEgressRules,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -565,6 +566,17 @@ def _to_network_policy(network_policy: Mapping[str, Any]) -> Any:
     return NetworkPolicy.model_validate(network_policy)
 
 
+def _egress_network_policy(rules: SandboxEgressRules) -> dict[str, Any] | None:
+    """Map egress rules onto an OpenSandbox ``network_policy``; ``None`` for ``allow_all`` (no policy)."""
+    if rules.allowed_cidrs or rules.blocked_cidrs:
+        raise ValueError("OpenSandbox egress rules match domains only; CIDR rules are not supported")
+    if rules.mode == "allow":
+        return {"defaultAction": "deny", "egress": [{"action": "allow", "target": d} for d in rules.allowed_domains]}
+    if rules.mode == "block":
+        return {"defaultAction": "allow", "egress": [{"action": "deny", "target": d} for d in rules.blocked_domains]}
+    return None
+
+
 def _to_volumes(volumes: list[Mapping[str, Any]]) -> list[Any]:
     _, _, _, _, Volume = _require_opensandbox_sdk()
     return [Volume(**dict(volume)) for volume in volumes]
@@ -999,6 +1011,12 @@ class OpenSandboxProvider:
         return {
             "extensions": {IMAGE_PULL_POLICY_EXTENSION_KEY: mapped, IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY: mapped}
         }
+
+    def validate_egress_rules(self, rules: SandboxEgressRules, spec: SandboxSpec) -> None:
+        """Egress rules apply at creation only; this provider cannot change them on a running sandbox."""
+        if OpenSandboxProviderOptions.from_mapping(spec.provider_options).network_policy is not None:
+            raise ValueError("Set either SandboxSpec.egress_rules or provider_options.network_policy, not both")
+        _egress_network_policy(rules)
 
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
@@ -1832,6 +1850,11 @@ class OpenSandboxProvider:
             kwargs["platform"] = _to_platform_spec(options.platform)
         if options.network_policy is not None:
             kwargs["network_policy"] = _to_network_policy(options.network_policy)
+        if spec.egress_rules is not None:
+            self.validate_egress_rules(spec.egress_rules, spec)
+            network_policy = _egress_network_policy(spec.egress_rules)
+            if network_policy is not None:
+                kwargs["network_policy"] = _to_network_policy(network_policy)
         if options.volumes:
             kwargs["volumes"] = _to_volumes(list(options.volumes))
         if self._create.skip_health_check:
