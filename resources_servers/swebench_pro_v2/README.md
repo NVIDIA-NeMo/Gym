@@ -37,4 +37,5 @@ gym env start \
 ```
 
 Then run `resources_servers/swebench_pro/apply_golden_patch.py` with
-`+benchmark_jsonl=benchmarks/swebench/data/swebench_pro_v2_benchmark.jsonl`; all 642 tasks should resolve.
+`+benchmark_jsonl=benchmarks/swebench/data/swebench_pro_v2_benchmark.jsonl` and
+`+server_name=swebench_pro_v2_resources_server`; all 642 tasks should resolve.
