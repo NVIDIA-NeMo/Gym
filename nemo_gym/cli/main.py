@@ -1716,7 +1716,7 @@ COMMANDS = {
                     "--max-unhealthy-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the configured response-health criterion; without it health is not evaluated.",
+                    help="With --recover: the per-rollout health criterion; independent response/trial gates still apply.",
                 ),
             ),
             Flag(
