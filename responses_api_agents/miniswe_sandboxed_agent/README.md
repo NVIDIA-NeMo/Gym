@@ -73,6 +73,22 @@ budget and `agent_max_timeout_sec`. Default artifacts are written to
 `results/miniswe_sandboxed_agent/<session_id>/`; TB4 uses its configured jobs'
 `agent/` directory. `artifact_directory` can override the location per run.
 
+## Experimental image viewing
+
+Set `harness.enable_view_image=true` to install `view_image PATH` in the sandbox
+and return supported image files as multimodal observations. For TB4, opt in with
+`++tb4_enable_view_image=true` and use a model endpoint that accepts vision input.
+The command supports PNG, JPEG, GIF, and WebP up to 20 MiB; create a crop or
+smaller image through bash for larger files.
+A separate command directory preserves the task's existing Python and other tools.
+
+This experiment selects a model subclass through mini-SWE's extension hook.
+`DefaultAgent`, `LocalEnvironment`, the bash schema, and native text observation
+limits are retained. Image results are appended after the batch of textual tool
+results, with their originating call ID and file digest. Record the option in
+benchmark comparisons. It defaults to false: regular runs install no image
+command and retain the existing model class and prompts.
+
 ## Native behavior and observability
 
 The CLI loads `mini.yaml` from the pinned package and overlays the task/model
