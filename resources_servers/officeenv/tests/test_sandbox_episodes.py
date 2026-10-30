@@ -1794,6 +1794,9 @@ def test_the_rows_name_the_company_api_as_the_sandbox_does() -> None:
         prefix = configured_mcp_settings()["mcp_server_name"]
         assert f"{prefix}_user_complete_task" in system  # the tool as Pi lists it
         assert not ENVIRONMENT_NAMES.search(system), system
+        # every file app's content goes through the file API, and mail attaches workspace files by their path
+        assert "between the workspace and the apps with the file API" in system and "Google Drive with" not in system
+        assert "attach workspace files to email by their path" in system
 
 
 # The committed rows.

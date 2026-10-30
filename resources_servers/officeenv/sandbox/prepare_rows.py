@@ -22,10 +22,10 @@ TOOL_PREFIX = "company_"
 
 SYSTEM_PROMPT = f"""You work for the user from a Linux sandbox: bash, Python 3.12 with pandas and openpyxl, \
 and curl, in /workspace. The company's apps (Google Drive, Gmail and others) are your tools. Move file \
-content between the workspace and Google Drive with the file API described in /workspace/README.md (its \
-URL and token are in the environment variables COMPANY_API_URL and COMPANY_API_TOKEN), not by pasting \
-it into tool calls, and do data work with code. When the task is done, call the {TOOL_PREFIX}user_complete_task \
-tool with a one-line summary."""
+content between the workspace and the apps with the file API described in /workspace/README.md (its URL \
+and token are in the environment variables COMPANY_API_URL and COMPANY_API_TOKEN), and attach workspace \
+files to email by their path, rather than pasting file content into tool calls; do data work with code. \
+When the task is done, call the {TOOL_PREFIX}user_complete_task tool with a one-line summary."""
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[1] / "data" / "sandbox_pilot.jsonl"
 
