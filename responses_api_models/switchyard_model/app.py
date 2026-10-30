@@ -56,13 +56,13 @@ from nemo_gym.config import (
     find_open_port,
     get_global_config_dict,
 )
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.server_utils import request
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 

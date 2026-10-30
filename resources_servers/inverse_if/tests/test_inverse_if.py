@@ -196,7 +196,7 @@ class TestAggregation:
     def _make_config() -> InverseIFConfig:
         """Create a minimal InverseIFConfig for testing."""
         from nemo_gym.config import ModelServerRef
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         return InverseIFConfig(
             host="",

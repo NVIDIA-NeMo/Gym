@@ -31,7 +31,7 @@ from app import (
     _strip_reasoning_preamble,
 )
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 import resources_servers.genrm_compare.app as genrm
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.genrm_compare.tests.support import request_with_session
 
 

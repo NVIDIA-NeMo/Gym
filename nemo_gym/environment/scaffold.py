@@ -769,7 +769,7 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         from fastapi import Request, Response
 
         from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
         from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import SimpleAgent
 
@@ -789,7 +789,7 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         from fastapi import Request, Response
 
         from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
         from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import (
             SimpleAgent,

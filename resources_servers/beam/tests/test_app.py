@@ -27,13 +27,13 @@ from pytest import approx
 from nemo_gym import judge as judge_module
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config import ModelServerRef
-from nemo_gym.judge import JudgeError, judge_failsafe
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.server_utils import ServerClient
 from resources_servers.beam.app import (
     ABILITIES,

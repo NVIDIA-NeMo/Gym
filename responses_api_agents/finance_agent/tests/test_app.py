@@ -30,7 +30,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
 )
 from nemo_gym.server_utils import ServerClient

@@ -22,7 +22,7 @@ import pytest
 from pytest import fixture
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from resources_servers.indian_banking.app import (
     IndianBankingResourcesServer,
@@ -158,7 +158,7 @@ class TestApp:
         engine.configure()
 
     async def test_reset_and_tool_step(self, configured_engine, tmp_path: Path) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseFunctionToolCall
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseFunctionToolCall
 
         config = _config(db_fpath=configured_engine._DB_PATH, kb_fpath=configured_engine._KB_PATH)
         server = IndianBankingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -438,7 +438,7 @@ class TestReviewFixes:
 
     @staticmethod
     def _response(output):
-        from nemo_gym.openai_utils import NeMoGymResponse
+        from nemo_gym.core import NeMoGymResponse
 
         return NeMoGymResponse.model_validate(
             {

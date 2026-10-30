@@ -25,7 +25,7 @@ import pytest
 import yaml
 from sandbox_execution import check_correctness_in_sandbox, exec_timeout_s
 
-from nemo_gym.failure_kinds import VERIFIER_ERROR
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, SandboxVerificationError
 

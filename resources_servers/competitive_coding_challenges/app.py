@@ -30,7 +30,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import get_provider_class, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError

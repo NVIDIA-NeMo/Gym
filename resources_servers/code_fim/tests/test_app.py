@@ -32,7 +32,7 @@ from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

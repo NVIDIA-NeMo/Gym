@@ -28,7 +28,7 @@ attempt as a ``kill_shaped`` failure in the run history, so a second row would r
 
 from typing import Any, Dict, Mapping
 
-from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
 
 
 _FAILURE_MESSAGE_KEY = "_ng_failure_message"

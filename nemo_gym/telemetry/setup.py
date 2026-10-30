@@ -452,7 +452,7 @@ def _sdk_tracer_provider_installed() -> bool:
 def rollout_span_attributes() -> dict[str, str]:
     """The correlation attribute Gym's endpoint spans carry, for spans opened by code that does not
     know about rollouts (the sandbox API). Empty outside a rollout context."""
-    from nemo_gym.rollout_correlation import current_rollout_id
+    from nemo_gym.core.episode import current_rollout_id
 
     rollout_id = current_rollout_id()
     return {"nemo.gym.rollout.id": rollout_id} if rollout_id else {}

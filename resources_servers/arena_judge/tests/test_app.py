@@ -18,14 +18,14 @@ import pytest
 from pytest import approx, fixture
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import ServerClient
 from resources_servers.arena_judge.app import (
     ArenaJudgeConfig,
@@ -163,7 +163,7 @@ class TestExtractOutputText:
         assert ArenaJudgeServer._extract_response_output_text(response) == ""
 
     def test_chat_completion_extracts_content(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymChatCompletion
+        from nemo_gym.core import NeMoGymChatCompletion
 
         completion = NeMoGymChatCompletion.model_validate(_make_chat_completion("judge verdict text"))
         assert ArenaJudgeServer._extract_chat_completion_text(completion) == "judge verdict text"
@@ -526,7 +526,7 @@ class TestComputeAndKeyMetrics:
 
 class TestExtractChatCompletionEdgeCases:
     def test_no_choices_returns_empty(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymChatCompletion
+        from nemo_gym.core import NeMoGymChatCompletion
 
         completion = NeMoGymChatCompletion.model_validate(
             {

@@ -84,10 +84,8 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.episode_types import EpisodeFailure, EpisodeId, TaskId, is_materialized_task_row
-from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.failure_kinds import (
+from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_kinds import (
     CANCELLED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
     ENVIRONMENT_SERVER_FAILED,
@@ -95,6 +93,9 @@ from nemo_gym.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.episode_types import EpisodeFailure, is_materialized_task_row
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -105,7 +106,6 @@ from nemo_gym.observability.model_calls import (
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,

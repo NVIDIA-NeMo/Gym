@@ -558,7 +558,8 @@ def test_journal_health_waits_for_followup_without_reporting_stale_results(prepa
 
 @pytest.mark.parametrize("mismatch", ["run_id", "rollout_id", "attempt", "terminal", "failure_kind"])
 def test_nested_failure_must_agree_with_saved_envelope(prepared_run, mismatch):
-    from nemo_gym.episode_types import EpisodeFailure, EpisodeId
+    from nemo_gym.core.episode import EpisodeId
+    from nemo_gym.episode_types import EpisodeFailure
     from nemo_gym.rollout_collection import _failure_compatibility_row
     from nemo_gym.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollout_records import logical_rollout_id

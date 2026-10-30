@@ -504,7 +504,7 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
 
     ``timeout_exceeded`` is an ``_ng_failure_class`` label that agents already
     write to the failures sidecar (pinchbench, nooa). It predates
-    ``nemo_gym.failure_kinds`` and is not registered there; ``agent_timeout`` is
+    ``nemo_gym.core.failure_kinds`` and is not registered there; ``agent_timeout`` is
     the shared name.
 
     As ``failure_kinds`` requires, this function decides retryability for the

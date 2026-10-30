@@ -49,7 +49,7 @@ from nemo_gym.base_resources_server import (
     lost_session_verification,
 )
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import (
     AsyncSandbox,
     ConnectableProvider,

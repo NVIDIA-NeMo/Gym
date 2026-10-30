@@ -32,8 +32,7 @@ from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_recovery import (
     RunManifest,
