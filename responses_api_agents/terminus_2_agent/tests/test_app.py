@@ -130,6 +130,19 @@ class TestStandaloneTerminus2:
 
 
 class TestTrajectoryOutput:
+    def test_shared_terminal_observation_pairs_every_call(self) -> None:
+        calls = [
+            {"tool_call_id": "a", "function_name": "bash_command", "arguments": {"keystrokes": "ls\n"}},
+            {"tool_call_id": "b", "function_name": "mark_task_complete", "arguments": {}},
+        ]
+        output = trajectory_to_responses(
+            {"steps": [{"source": "agent", "tool_calls": calls, "observation": {"results": [{"content": "files"}]}}]}
+        )
+        calls_out = [item for item in output if item["type"] == "function_call"]
+        outputs = [item for item in output if item["type"] == "function_call_output"]
+        assert [item["call_id"] for item in calls_out] == [item["call_id"] for item in outputs] == ["a", "b"]
+        assert [item["output"] for item in outputs] == ["", "files"]
+
     def test_raw_content_preserves_training_fields_and_commands(self) -> None:
         trajectory = {
             "steps": [
