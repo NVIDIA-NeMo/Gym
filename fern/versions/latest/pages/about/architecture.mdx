@@ -34,11 +34,11 @@ This gives you flexibility to integrate with your existing models and agents:
 
 ## How an Agent Runs a Task in NeMo Gym Environments
 
-Each task attempt is an *episode*. Rollout collection sends every episode to an Environment Server. An Environment Server that drives agent sessions, such as `single_agent_turn`, runs it in this order, and the resulting trajectory is called a *rollout*:
+Each sample of a task is a *rollout*, and Gym executes each rollout as an *episode*. Rollout collection sends every episode to an Environment Server. An Environment Server that drives agent sessions, such as `single_agent_turn`, runs it in this order and records what happened as a *trajectory*:
 
 1. **Seed** — The Environment Server receives a task row from the dataset and seeds a session on the Resources Server, which sets up isolated state for this task. It then seeds a session on the Agent Server, passing along any tool and sandbox access that the Resources Server returned.
 2. **Agent Loop** — The Environment Server activates the agent session. The agent calls a model for inference, then routes tool calls to either its own tools or the Resources Server. This repeats until the agent decides the task is complete.
-3. **Close and Verify** — The Environment Server closes the agent session, then asks the Resources Server to score the attempt. The verifier inspects the final state and returns a reward signal.
+3. **Close and Verify** — The Environment Server closes the agent session, then asks the Resources Server to score the episode. The verifier inspects the final state and returns a reward signal.
 4. **Clean up** — The Environment Server closes the Resources Server session, which releases per-task state such as sandboxes.
 
 ```mermaid

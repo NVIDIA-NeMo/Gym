@@ -9,13 +9,27 @@ Deeper treatment: [Environments](/about/concepts/environments), [Evaluation](/ab
 
 ## Overview
 
-A **dataset** is a JSONL file of **tasks** (one row = one problem). Running the agent on a task produces a **rollout** (also called a **trajectory**) — one attempt and its record.
+A **dataset** is a JSONL file of **tasks** (one row = one problem). A **run** samples each task one or more times; each sample is a **rollout**, and each rollout gets one **reward**. Gym executes a rollout as an **episode**, and records what happened in the episode as a **trajectory**.
 
-Each run follows:
+```text
+run                    one collection or evaluation job
+└── task               one dataset row
+    └── rollout        one sample of a task; gets one reward
+        └── episode    one execution of the rollout, from setup to verify
+            ├── session      the episode's state inside one server
+            └── trajectory   the record of what happened in the episode
+                └── agent invocation   the root agent or one subagent
+                    └── turn           one exchange: a request and the agent's answer
+                        └── step       one model call and the tool calls it requests
+```
 
-1. **seed_session** — set up isolated state for this attempt  
-2. **agent loop** — call the model (policy), use tools, repeat until done  
-3. **verify** — score the attempt → **reward**
+Each episode follows:
+
+1. **seed_session** — set up isolated state for this episode
+2. **agent loop** — call the model (policy), use tools, repeat until done
+3. **verify** — score the episode → **reward**
+
+Usually a rollout has exactly one episode. If an episode fails for an infrastructure reason, Gym can run the rollout again as a new episode; only the final episode's result becomes the rollout's reward.
 
 Two compositions matter:
 
@@ -32,7 +46,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | --- | --- |
 | Dataset | JSONL rows with `responses_create_params` + `verifier_metadata` — [Prepare Data](/data) |
 | Agent harness | Implemented by the **Agent server** (`responses_api_agents/`) — [Agent Server](/agent-server) |
-| Verifier, per-attempt state, env tools | Implemented by the **Resources server** (`resources_servers/`): `seed_session()` initializes state; tools mutate it; `verify()` scores the attempt — [Build Verifiers](/build-verifiers) |
+| Verifier, per-episode state, env tools | Implemented by the **Resources server** (`resources_servers/`): `seed_session()` initializes state; tools mutate it; `verify()` scores the episode — [Build Verifiers](/build-verifiers) |
 | Model | Served by the **Model server** (`responses_api_models/`) — wraps local or remote endpoints — [Model Server](/model-server) |
 | Protocol | **Responses API** (Chat Completions converted via middleware when needed) |
 
@@ -42,11 +56,14 @@ The **model** (also called the **policy**) is what you call for generation — l
 
 | Term | Definition |
 | --- | --- |
-| **Task** | One problem for the agent to solve — one dataset row (`responses_create_params` + `verifier_metadata`). |
+| **Task** | One problem for the agent to solve — one dataset row (`responses_create_params` + `verifier_metadata`). Inspect calls a row a *sample* and uses *task* for the whole benchmark. |
 | **Dataset** | Collection of tasks plus metadata needed for scoring (usually JSONL). See [Prepare Data](/data). |
-| **Rollout / trajectory** | **Rollout** (verb): execute an agent in an environment — take actions and record what happens. **Rollout** (noun) / **trajectory**: the ordered record of one attempt (states, actions, rewards). In Gym these names are aliases; architecture calls the resulting trajectory a *rollout*. Multiple rollouts per task support metrics like pass@k. See [trajectory capabilities](/reference/trajectory-capabilities). |
-| **Task attempt** | One rollout for a specific task. Multiple attempts per task capture different approaches and support pass@k. |
-| **Trace** | Debug-oriented log of a rollout (timing, tool I/O, metadata) beyond the scored trajectory. |
+| **Run** | One collection or evaluation job over one or more tasksets. Not the agent server's `/run` endpoint; call that "the agent's `/run` episode". |
+| **Rollout** | One sample of a task. Each rollout gets one reward. `num_repeats` sets how many rollouts each task gets, and metrics such as pass@k count rollouts. A rollout is identified by its task and its repeat index. Other tools call this a *sample* (pass@k papers, Inspect) or a *trial* (Harbor). |
+| **Episode** | One execution of a rollout, from `seed_session()` through `verify()`, identified by the rollout ID and an attempt number. As in Gymnasium, an episode runs from reset to done. Gym may retry a rollout after an infrastructure failure; each retry is a new episode of the same rollout, and only the final episode's result counts. |
+| **Attempt** | The retry number of an episode within its rollout, starting at 0. Use "attempt" only in this sense: a repeat of a task is a new rollout, not a new attempt. The cap is `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. |
+| **Trajectory** | The record of what happened in one episode: agent invocations, turns, model calls, and tool calls, plus gaps where data is missing. A rollout's trajectory is the trajectory of its final episode. A trajectory is data; a rollout is the sample it describes. See [trajectory capabilities](/reference/trajectory-capabilities). |
+| **Trace** | An OpenTelemetry trace: timed spans across Gym's servers, emitted when [distributed tracing](/observability/distributed-tracing) is on. LLM observability tools use the word the same way. A trace shows timing; the trajectory is the scored record. |
 | **Rollout batch** | Multiple rollouts generated together (across tasks for throughput, or grouped on one task for methods like GRPO). |
 | **Rollout collection** | Running inference, tools, and verification at scale to produce scored rollouts. Start with the [Quickstart](/get-started/quickstart) or [Evaluate](/evaluation). |
 
@@ -55,10 +72,11 @@ The **model** (also called the **policy**) is what you call for generation — l
 | Term | Definition |
 | --- | --- |
 | **Environment** | Everything required for an agent to complete a task, excluding the model: `Dataset + Agent Harness + Verifier + State`. See [Environments](/about/concepts/environments) and [Build Environments](/environment-tutorials). |
-| **State** | Per-attempt mutable world (files, DB, tool results, and so on). `seed_session()` starts a clean session; tools update that session; it is not a snapshot of the whole environment config. |
-| **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server. Also called scorer or grader. See [Build Verifiers](/build-verifiers). |
-| **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
-| **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
+| **State** | Per-episode mutable world (files, DB, tool results, and so on). `seed_session()` starts a clean session; tools update that session; it is not a snapshot of the whole environment config. |
+| **Verifier** | Scores an episode into a **reward** (typically 0–1) via `verify()` on the resources server. Also called scorer or grader. See [Build Verifiers](/build-verifiers). |
+| **Reward** | Numerical score (typically 0.0–1.0) for how well the episode did; the final episode's reward is the rollout's reward — used as eval metrics and as the RL learning signal. |
+| **Session** | The state one server keeps for one episode: the *resources session* (started by `seed_session()`) and the *agent session*. A session ends with its episode. |
+| **Sandbox** | Runtime with isolated execution per episode (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
 
 ### Agent & model
 
@@ -68,6 +86,9 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Agent harness** | How the model interacts with the environment: loops model calls, routes tools, manages context, and decides when the task is done. See [Agent Server](/agent-server). |
 | **Agent** | Model + agent harness. |
 | **Rollout driver** | Coordinates an episode and records its trajectory. |
+| **Agent invocation** | One conversation held by the root agent or by a subagent within an episode. |
+| **Turn** | One exchange within an agent invocation: a request to the agent and the agent's answer. A turn contains one or more steps. |
+| **Step** | One model call and the tool calls it requests. ATIF and agent RL papers use "step" in the same sense. |
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
 | **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
 | **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
