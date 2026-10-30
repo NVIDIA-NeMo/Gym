@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 from unittest.mock import MagicMock
+
+import pytest
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -125,6 +128,32 @@ class TestApp:
         )
         real_request = self._create_real_request(response_content, exp_cal_state)
         self._run_verify_test(real_request, 1)
+
+    @pytest.mark.parametrize("duplicate_id", [0, "0"])
+    @pytest.mark.parametrize("duplicate_first", [False, True])
+    @pytest.mark.parametrize("same_time", [False, True])
+    def test_duplicate_event_ids(self, duplicate_id: int | str, duplicate_first: bool, same_time: bool) -> None:
+        """Repeated IDs are invalid even when their times do not overlap."""
+        exp_cal_state = {
+            "0": {"event_id": 0, "duration": 60, "constraint": None, "min_time": "10:00", "max_time": "16:00"}
+        }
+        event = {"event_id": 0, "start_time": "10:00", "duration": 60}
+        duplicate = {"event_id": duplicate_id, "start_time": "10:00" if same_time else "12:00", "duration": 60}
+        events = [duplicate, event] if duplicate_first else [event, duplicate]
+        request = self._create_real_request(json.dumps(events), exp_cal_state)
+
+        self._run_verify_test(request, 0)
+
+    @pytest.mark.parametrize("event_id", [0, "0"])
+    def test_single_event_id_representation(self, event_id: int | str) -> None:
+        """Both accepted ID representations still match the expected calendar key."""
+        exp_cal_state = {
+            "0": {"event_id": 0, "duration": 60, "constraint": None, "min_time": "10:00", "max_time": "16:00"}
+        }
+        response = json.dumps([{"event_id": event_id, "start_time": "10:00", "duration": 60}])
+        request = self._create_real_request(response, exp_cal_state)
+
+        self._run_verify_test(request, 1)
 
     def test_think_tag_present(self):
         """Test that response with <think> tag gets reward 0."""
