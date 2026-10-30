@@ -40,6 +40,7 @@ from nemo_gym.health.checks import (
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
+    _response_has_usable_output,
     _subject,
     _token_count,
     _trajectory_has_any_gap,
@@ -265,6 +266,7 @@ def evaluate_record(
         policy_calls_observed=turn_call_scope_complete and turn_bindings.complete,
         model_calls=len(calls),
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
+        responses=_response_population(turn_call_scope_complete, turn_bindings),
         model_call_errors=len(failed),
         model_call_errors_usage_unknown=sum(
             _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
@@ -402,6 +404,34 @@ def _task_findings(
     return findings, coverage
 
 
+def _response_population(scope_complete: bool, bindings: Any) -> dict[str, list[str]] | None:
+    """The call ids of the rollout's verified successful raw model responses selected for evaluation, and of the
+    faulted ones among them. IDs only: no response text is kept.
+
+    Selected means bound to an agent turn of a complete call scope. A bound call that failed is a trial matter and
+    is left out. Every other bound call must carry an explicit 2xx/3xx status, a raw response and a call id, or the
+    population is unknown. A fault is judged from the raw output itself: a length-limited finish that is not a
+    length refusal (truncated), or an output with nothing usable (`_response_has_usable_output`: empty, reasoning
+    only or malformed). Token counts alone are never a fault.
+    """
+    if not scope_complete or not bindings.complete:
+        return None
+    selected: list[str] = []
+    faulted: list[str] = []
+    for call in bindings.matched_calls:
+        if _is_failed(call):
+            continue
+        status = call.get("status_code")
+        identity = str(call.get("model_call_id") or call.get("response_id") or "")
+        if type(status) is not int or not 200 <= status < 400 or call.get("response") is None or not identity:
+            return None
+        selected.append(identity)
+        truncated = call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and not _is_length_refusal(call)
+        if truncated or not _response_has_usable_output(call["response"]):
+            faulted.append(identity)
+    return {"selected": sorted(selected), "faulted": sorted(faulted)}
+
+
 def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dict[str, Any]:
     records_by_task: dict[int | str, list[RolloutDigest]] = defaultdict(list)
     for digest in digests:
@@ -422,6 +452,7 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     issues = Counter(finding.check for digest in digests for finding in digest.findings)
     issues.update(finding.check for findings in task_findings.values() for finding in findings)
     verdicts = Counter(digest.verdict for digest in digests)
+    selected_ids = Counter(i for digest in digests if digest.responses for i in digest.responses["selected"])
     error_statuses: Counter[str] = Counter()
     for digest in digests:
         error_statuses.update(digest.errors_by_status)
@@ -461,6 +492,14 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                     # Failed calls with no finished response and no usage: the token checks skip them,
                     # and any tokens the server spent on them are counted nowhere else.
                     "usage_unknown": sum(digest.model_call_errors_usage_unknown for digest in digests),
+                },
+                # Counted by call id across the whole run, so a response selected twice is a duplicate, never two.
+                "responses": {
+                    "rollouts": len(digests),
+                    "unknown": sum(digest.responses is None for digest in digests),
+                    "selected": len(selected_ids),
+                    "faulted": len({i for d in digests if d.responses for i in d.responses["faulted"]}),
+                    "duplicated": sum(count > 1 for count in selected_ids.values()),
                 },
                 "duplicated_calls": {
                     "replayed": sum(digest.duplicated_calls for digest in digests),
@@ -681,6 +720,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
                 "verdict": digest.verdict,
                 "findings": findings,
                 "unobserved": digest.unobserved,
+                "responses": digest.responses,
             }
             if digest.stage_index is not None:
                 row["stage_index"] = digest.stage_index

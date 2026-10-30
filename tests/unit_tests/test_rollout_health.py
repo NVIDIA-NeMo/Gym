@@ -315,6 +315,7 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
         "verdict",
         "findings",
         "unobserved",
+        "responses",
     }
 
 
@@ -3189,3 +3190,54 @@ class TestFailureGroupsAreNamedByRetry:
 
         _, overrides = _dispatch_for(monkeypatch, ["eval", command, "--health-max-not-final-failure-fraction", "0.05"])
         assert overrides == ["+health_check_max_not_final_failure_fraction=0.05"]
+
+
+def test_the_response_population_judges_faults_from_the_raw_output_by_call_id(tmp_path: Path) -> None:
+    # Labelled synthetic data through the real producer: 3 rollouts (trials) carry 4 selected raw responses.
+    two = [{"model_call_id": "a1"}, {"model_call_id": "a2"}]
+    rows = [
+        (
+            _record(0, 0, refs=two),
+            [_call(model_call_id="a1", response_id="ra1"), _call(model_call_id="a2", call_index=1)],
+        ),
+        # Zero completion tokens with a usable body: token metadata is not an empty output, so no fault.
+        (_record(1, 0, refs=[{"model_call_id": "b1"}]), [_call(model_call_id="b1", tokens_out=0)]),
+        # A raw {} is a malformed, unusable output: selected and faulted.
+        (_record(2, 0, refs=[{"model_call_id": "d1"}]), [_call(model_call_id="d1", response={})]),
+    ]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    by_rollout = {(d.task_index, d.rollout_index): d.responses for d in result.rollouts}
+    assert by_rollout == {
+        (0, 0): {"selected": ["a1", "a2"], "faulted": []},
+        (1, 0): {"selected": ["b1"], "faulted": []},
+        (2, 0): {"selected": ["d1"], "faulted": ["d1"]},
+    }
+    summary = json.loads(result.summary_path.read_text())
+    assert summary["run"]["stats"]["responses"] == {
+        "rollouts": 3,
+        "unknown": 0,
+        "selected": 4,
+        "faulted": 1,
+        "duplicated": 0,
+    }
+    rows_written = [json.loads(line) for line in result.verdicts_path.read_text().splitlines()]
+    assert [row["responses"] for row in rows_written] == [by_rollout[(t, 0)] for t in range(3)]
+
+
+def test_a_response_selected_by_two_rollouts_is_a_duplicate_not_two_responses(tmp_path: Path) -> None:
+    rows = [(_record(t, 0, refs=[{"model_call_id": "same"}]), [_call(model_call_id="same")]) for t in range(2)]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    stats = json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]
+    assert (stats["selected"], stats["duplicated"]) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [{"status_code": None}, {"response": None}, {"model_call_id": None, "response_id": None}],
+)
+def test_an_unverified_selected_call_leaves_the_response_population_unknown(tmp_path: Path, updates: dict) -> None:
+    ref = [{"model_call_id": "c1"}] if updates.get("model_call_id", "c1") else None
+    rows = [(_record(0, 0, refs=ref), [_call(**updates)])]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    assert [d.responses for d in result.rollouts] == [None]
+    assert json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]["unknown"] == 1

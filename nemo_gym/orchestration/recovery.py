@@ -446,7 +446,7 @@ try:
     acc = run.get("artifacts") or {}
     quality = {"artifacts": {k: acc.get(k) for k in ("expected", "missing", "healthy", "unhealthy_reasons", "partial")},
                "verdicts": run.get("verdicts"), "issues": run.get("issues"), "coverage": acc.get("coverage"),
-               "ignored_checks": run.get("ignored_checks")}
+               "ignored_checks": run.get("ignored_checks"), "responses": (run.get("stats") or {}).get("responses")}
 except (OSError, ValueError, KeyError, TypeError):
     pass
 score = None
@@ -705,6 +705,62 @@ def mlflow_errors(local: Mapping[str, Any] | None, observed_status: str | None) 
     return errors
 
 
+# The Day-0 bounded failure policy: a gate passes only below this failure rate, measured before rounding.
+GATE_FAILURE_LIMIT = 0.02
+
+
+def response_health(decision: RecoveryDecision, quality: Mapping[str, Any] | None) -> tuple[bool | None, str]:
+    """The response gate from ``run.stats.responses`` of the health report: faulted over selected responses.
+
+    Evaluated only when every scored rollout has a verified response population and every selected call id is
+    unique across the run (a report that predates it, an unverified call scope, a response selected twice, or zero
+    selected responses is unknown, neither pass nor fail). Failed trials have no response row and are left out, as
+    the policy leaves failed attempts out of the response denominator.
+    """
+    r = (quality or {}).get("responses")
+    fields = ("rollouts", "unknown", "selected", "faulted", "duplicated")
+    if not isinstance(r, dict) or not all(type(r.get(k)) is int and r[k] >= 0 for k in fields):
+        return None, "response: the health report has no verified response population (run.stats.responses)"
+    scored = decision.counts.get(IdentityState.SCORED, 0)
+    if not decision.complete or r["rollouts"] != scored or r["unknown"] or r["duplicated"] or not r["selected"]:
+        return None, (
+            f"response: population not verified for every scored rollout ({r['rollouts']} reported, {scored} scored, "
+            f"{r['unknown']} unknown, {r['duplicated']} duplicated, {r['selected']} selected)"
+        )
+    if r["faulted"] > r["selected"]:
+        return None, f"response: {r['faulted']} faulted exceeds {r['selected']} selected responses"
+    rate = r["faulted"] / r["selected"]
+    counts = f"{r['faulted']} faulted of {r['selected']} selected raw responses ({rate:.2%})"
+    if rate >= GATE_FAILURE_LIMIT:
+        return False, f"response: {counts} is not below {GATE_FAILURE_LIMIT:.0%}"
+    return True, f"response: {counts} is below {GATE_FAILURE_LIMIT:.0%}"
+
+
+def trial_health(decision: RecoveryDecision) -> tuple[bool | None, str]:
+    """The trial gate's known failures: settled zero-scored failures over the expected trials, including repeats.
+
+    A failure counts when rollout collection settled it as a scored zero (MODEL_FINAL: marked counts-as-zero by its
+    producer and terminal), so it is recorded as incorrect under the benchmark protocol. The denominator is the full
+    materialized inventory. A run that is not complete has unaccounted trials, so the gate is not evaluated. Other
+    terminal trial failures (a judge, verifier or harness error scored as a zero in the main output) carry no failure
+    record and cannot be ruled out, so the count is a lower bound: at or above the limit it fails, below it the gate
+    is unknown, never passed.
+    """
+    if not decision.complete or decision.expected <= 0:
+        return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})"
+    failed = decision.counts.get(IdentityState.MODEL_FINAL, 0)
+    kinds = Counter(e.failure_kind for e in decision.evidence if e.state == IdentityState.MODEL_FINAL)
+    rate = failed / decision.expected
+    counts = f"{failed} settled zero-scored failure(s) of {decision.expected} expected trials ({rate:.2%})"
+    detail = f", kinds {dict(sorted(kinds.items(), key=lambda kv: str(kv[0])))}" if kinds else ""
+    if rate >= GATE_FAILURE_LIMIT:
+        return False, f"trial: {counts} is not below {GATE_FAILURE_LIMIT:.0%}{detail}"
+    return None, (
+        f"trial: known failures are a lower bound, {counts}{detail}; failures recorded only as zero rewards "
+        "cannot be ruled out"
+    )
+
+
 _MAX_FACTS = 20
 
 
@@ -762,9 +818,18 @@ def gate_summary_from_collected(
         decision, collected, max_unhealthy_fraction=max_unhealthy_fraction
     )
     # The Day-0 gate's response and trial health need their own counters and denominators; quality_summary's
-    # verdicts are per rollout, so they are reported in warnings, never used as either. Health stays unknown.
-    health = None
-    health_reasons = ["this adapter lacks separately validated ModelOpt response and trial health evidence"]
+    # verdicts are per rollout, so they are reported in warnings, never used as either. The trial gate is measured;
+    # the trial gate is a lower bound below the limit, so health passes never: it is unknown, or failed when a gate fails.
+    trial_passed, trial_reason = trial_health(decision)
+    response_passed, response_reason = response_health(decision, collected.quality)
+    gates = [(response_passed, response_reason), (trial_passed, trial_reason)]
+    if any(passed is False for passed, _ in gates):
+        health = False
+    elif all(passed is True for passed, _ in gates):
+        health = True
+    else:
+        health = None
+    health_reasons = [reason for passed, reason in gates if passed is not True]
     task = gate_task_summary(
         decision,
         score=collected.score,
@@ -778,6 +843,7 @@ def gate_summary_from_collected(
         task["warnings"]
         + [f"per-rollout health {judged} the configured criterion: {rollout_reasons}"]
         + health_check_facts(collected.quality)
+        + [f"health gate within the bounded failure policy: {reason}" for passed, reason in gates if passed]
     )
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:

@@ -38,6 +38,21 @@ from nemo_gym.orchestration.recovery import (
 )
 
 
+class _StartsWith:
+    def __init__(self, prefix: str) -> None:
+        self.prefix = prefix
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, str) and other.startswith(self.prefix)
+
+    def __repr__(self) -> str:
+        return f"startswith({self.prefix!r})"
+
+
+# A report without run.stats.responses leaves the response gate unknown, and the trial count is a lower bound.
+HEALTH_UNKNOWN = _StartsWith("response/trial health unknown: ['response: the health report has no verified response")
+
+
 def ident(task: int, **extra) -> dict:
     return {"_ng_task_index": task, "_ng_rollout_index": 0, **extra}
 
@@ -442,9 +457,7 @@ def test_gate_summary_from_collected_reads_the_named_score_and_passes_only_when_
         0.75,
         4,
         4,
-        [
-            "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
-        ],
+        [HEALTH_UNKNOWN],
     )
     missing_key = collect_with_score(job, json.dumps(["agent", "no_such_metric"]))
     assert gate_summary_from_collected(d, missing_key, max_unhealthy_fraction=0.02)["score"] is None
@@ -566,9 +579,7 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
     )
     assert code == 0 and out["dispatched"] is None and fake_executor.calls == ["decide"]
     assert out["gate_task"]["status"] == "FAILED" and out["gate_task"]["score"] == 0.5
-    assert out["gate_task"]["errors"] == [
-        "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
-    ]
+    assert out["gate_task"]["errors"] == [HEALTH_UNKNOWN]
     assert out["gate_task"]["warnings"][0].startswith("per-rollout health within the configured criterion")
 
 
@@ -685,9 +696,6 @@ def mlflow_job(tmp_path: Path, *, mode: str) -> Path:
     if mode == "empty-marker":
         (job / "artifacts" / "rollouts_mlflow_export_done").write_text("")
     return job
-
-
-HEALTH_UNKNOWN = "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
 
 
 @pytest.mark.parametrize(
@@ -1074,3 +1082,88 @@ def test_a_current_post_run_receipt_with_finished_is_the_only_mlflow_pass() -> N
     assert (
         mlflow_errors({"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True}}, "FINISHED") == []
     )
+
+
+def gate_job(
+    tmp_path: Path, *, expected: int, final_zeros: int, missing: int = 0, responses: dict | None = None
+) -> Path:
+    """Reader fixture (hand-written report): scored rows, settled zeros and a quality summary."""
+    scored = expected - final_zeros - missing
+    results = [ident(t, reward=float(t % 2)) for t in range(scored)]
+    failures = [final_model_zero(t, 0) for t in range(scored, scored + final_zeros)]
+    job = write_job_dir(tmp_path / "job", n=expected, results=results, failures=failures)
+    (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 0.5}}))
+    write_quality(
+        job, expected=expected, healthy=True, verdicts={"healthy": expected, "unhealthy": 0, "unobserved": 0}
+    )
+    if responses is not None:
+        path = job / "artifacts" / "quality_summary.json"
+        summary = json.loads(path.read_text())
+        summary["run"]["stats"] = {"responses": responses}
+        path.write_text(json.dumps(summary))
+    write_postrun_receipt(job)
+    return job
+
+
+def gate_of(job: Path) -> tuple:
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    return d, gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status="FINISHED")
+
+
+@pytest.mark.parametrize(("final_zeros", "failed"), [(0, False), (1, False), (2, True), (3, True)])
+def test_known_trial_failures_fail_at_two_percent_and_are_only_a_lower_bound_below_it(
+    tmp_path, final_zeros, failed
+) -> None:
+    job = gate_job(tmp_path, expected=100, final_zeros=final_zeros)
+    rollouts = (job / "artifacts" / "rollouts.jsonl").read_bytes()
+    d, task = gate_of(job)
+    # Settled answers stand: the action is NOOP whatever the health, and nothing rewrites the main output.
+    assert d.action == RecoveryAction.NOOP and (job / "artifacts" / "rollouts.jsonl").read_bytes() == rollouts
+    assert task["status"] == "FAILED" and task["scored_samples"] == 100 and task["score"] == 0.5
+    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    rate = f"{final_zeros} settled zero-scored failure(s) of 100 expected trials ({final_zeros / 100:.2%})"
+    if failed:
+        assert health.startswith("response/trial health failed") and f"trial: {rate} is not below 2%" in health
+    else:
+        assert health.startswith("response/trial health unknown") and "known failures are a lower bound" in health
+    assert not any(w.startswith("health gate within") and "trial" in w for w in task["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("responses", "state"),
+    [
+        ({"rollouts": 100, "unknown": 0, "selected": 250, "faulted": 4, "duplicated": 0}, "within"),
+        ({"rollouts": 100, "unknown": 0, "selected": 250, "faulted": 5, "duplicated": 0}, "failed"),
+        ({"rollouts": 100, "unknown": 0, "selected": 250, "faulted": 5, "duplicated": 1}, "unknown"),
+        ({"rollouts": 100, "unknown": 1, "selected": 250, "faulted": 0, "duplicated": 0}, "unknown"),
+        ({"rollouts": 99, "unknown": 0, "selected": 250, "faulted": 0, "duplicated": 0}, "unknown"),
+        ({"rollouts": 100, "unknown": 0, "selected": 0, "faulted": 0, "duplicated": 0}, "unknown"),
+        ({"rollouts": 100, "unknown": 0, "selected": True, "faulted": 0, "duplicated": 0}, "unknown"),
+        ({"rollouts": 100, "unknown": 0, "selected": 250, "faulted": 251, "duplicated": 0}, "unknown"),
+        ({"rollouts": 100, "unknown": 0, "selected": 250, "faulted": 0}, "unknown"),
+    ],
+)
+def test_the_response_gate_reads_the_reported_population_strictly_below_two_percent(
+    tmp_path, responses, state
+) -> None:
+    d, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0, responses=responses))
+    assert d.action == RecoveryAction.NOOP and task["status"] == "FAILED"
+    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    within = [w for w in task["warnings"] if w.startswith("health gate within the bounded failure policy: response:")]
+    if state == "within":
+        assert within and "4 faulted of 250 selected raw responses (1.60%)" in within[0]
+        assert health.startswith("response/trial health unknown") and "response:" not in health
+    elif state == "failed":
+        assert health.startswith("response/trial health failed") and "5 faulted of 250" in health and not within
+    else:
+        assert health.startswith("response/trial health unknown") and "response:" in health and not within
+
+
+def test_the_trial_gate_is_not_evaluated_on_an_incomplete_run(tmp_path) -> None:
+    d, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0, missing=1))
+    assert d.action == RecoveryAction.RESUBMIT and not d.complete
+    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    assert "trial: not evaluated, the run is not complete" in health
