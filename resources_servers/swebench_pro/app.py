@@ -254,6 +254,8 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     environment_repairs: tuple[str, ...] = DEFAULT_ENVIRONMENT_REPAIRS
     image_repository: str = "docker.io/jefzda/sweap-images"
     image_template: str | None = None  # Local SIF path with a checked provenance manifest.
+    # Egress policy for the agent sandbox only; the grading sandbox keeps default network access.
+    agent_network_policy: dict[str, Any] | None = None
     sandbox_provider: str
     sandbox_config: dict[str, Any]
     task_network_policy: SWEBenchProTaskNetworkPolicy | None = None
@@ -327,6 +329,8 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
     config: SWEBenchProResourcesServerConfig
+    # Subclasses (e.g. SWE-bench Pro v2) swap in their own verifier workspace.
+    workspace_assembler = staticmethod(assemble_workspace_files)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -443,6 +447,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             # Replace rather than extend any baseline allowlist. Grading keeps the original options.
             provider_options = dict(provider_options or {})
             provider_options["network_policy"] = restricted_network_policy(next(iter(provider_config)), [model_url])
+        elif files is None and self.config.agent_network_policy:
+            provider_options = provider_options | {"network_policy": self.config.agent_network_policy}
         image_info = await asyncio.to_thread(self._image_info, body)
         spec = SandboxSpec(
             image=image_info["image"],
@@ -681,7 +687,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 extraction_error = f"Failed to extract model patch: {exc}"
 
         inputs = self._verification_inputs(body, model_patch)
-        workspace_files, _ = assemble_workspace_files(body.instance_id, None, model_patch, asdict(inputs))
+        workspace_files, _ = self.workspace_assembler(body.instance_id, None, model_patch, asdict(inputs))
         sandbox_files = {
             f"/workspace/{relative_path}": contents for relative_path, contents in workspace_files.items()
         }
@@ -707,6 +713,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                         inputs=inputs,
                         log_dir=run_log_dir,
                         timeout_s=self.config.evaluation_timeout,
+                        assemble=self.workspace_assembler,
                     )
                     patch_verification_time_taken = time() - verification_start
             except Exception as exc:
