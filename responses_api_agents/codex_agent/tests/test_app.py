@@ -25,6 +25,7 @@ import yaml
 from fastapi import Request
 from pydantic import ValidationError
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import SKILLS_REF_KEY_NAME
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -34,7 +35,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.codex_agent.app import (
     CodexAgent,
     CodexAgentConfig,

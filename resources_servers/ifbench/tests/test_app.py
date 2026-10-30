@@ -16,7 +16,7 @@ import asyncio
 from unittest.mock import MagicMock, patch
 
 from nemo_gym.base_resources_server import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.ifbench.app import (
     IFBenchResourcesServer,
     IFBenchResourcesServerConfig,

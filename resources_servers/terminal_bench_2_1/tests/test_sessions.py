@@ -11,11 +11,11 @@ from aiohttp import ClientOSError, ServerDisconnectedError
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-import nemo_gym.server_utils as server_utils
+import nemo_gym.client.http_client
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
@@ -255,8 +255,10 @@ async def test_lost_verdict_response_replays_through_shared_http_retry(
                 raise disconnect("lost completed verdict")
             return response
 
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: SimpleNamespace(request=send))
-        response = await server_utils._request_with_retries(
+        monkeypatch.setattr(
+            "nemo_gym.client.http_client.get_global_aiohttp_client", lambda: SimpleNamespace(request=send)
+        )
+        response = await nemo_gym.client.http_client._request_with_retries(
             "POST",
             "http://testserver/verify",
             _internal=True,

@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -35,7 +36,6 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.responses_converter import ResponsesConverter, chat_completion_usage_to_response_usage
-from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 PROTOCOL_VERSION = "domain-generation/v1"

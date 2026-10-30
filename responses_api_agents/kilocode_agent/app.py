@@ -44,6 +44,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -67,7 +68,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession

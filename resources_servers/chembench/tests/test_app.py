@@ -8,8 +8,8 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.chembench.app import (

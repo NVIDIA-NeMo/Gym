@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     EpisodeId,
@@ -39,7 +40,6 @@ from nemo_gym.core import (
     TaskId,
 )
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.session_routing import ResourcesSessionLifetimes
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.finance_sec_search.app import (

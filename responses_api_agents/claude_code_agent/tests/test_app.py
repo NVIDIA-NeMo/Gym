@@ -25,6 +25,7 @@ import yaml
 from fastapi import Request
 
 from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.client import ServerClient
 from nemo_gym.config import SKILLS_REF_KEY_NAME
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -34,7 +35,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.records import TokenEntry
 from nemo_gym.token_id_capture.terminal import resolve_terminal

@@ -27,6 +27,7 @@ import yaml
 from omegaconf import OmegaConf
 from starlette.requests import Request
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -36,7 +37,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
 )
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.kilocode_agent.app import (
     KiloCodeAgent,
     KiloCodeAgentConfig,

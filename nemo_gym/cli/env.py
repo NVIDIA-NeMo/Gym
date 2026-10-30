@@ -50,11 +50,13 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
+from nemo_gym.client.server_client import ServerClient, ServerStatus
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
 from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    HEAD_SERVER_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -86,11 +88,8 @@ from nemo_gym.registry import (
 )
 from nemo_gym.server_status import StatusCommand
 from nemo_gym.server_utils import (
-    HEAD_SERVER_KEY_NAME,
     HeadServer,
-    ServerClient,
     ServerInstanceDisplayConfig,
-    ServerStatus,
     entrypoint_ray_enabled,
     entrypoint_server_class_names,
     initialize_ray,

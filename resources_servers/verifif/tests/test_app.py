@@ -21,8 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.base_resources_server import NeMoGymResponse
+from nemo_gym.client import ServerClient
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient
 from resources_servers.verifif.app import (
     LLMJudgeItem,
     TuringVIFResourcesServer,

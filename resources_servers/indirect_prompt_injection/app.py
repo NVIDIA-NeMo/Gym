@@ -28,7 +28,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 from resources_servers.indirect_prompt_injection.ecommerce_tools import TOOL_HANDLERS as ECOMMERCE_HANDLERS
 from resources_servers.indirect_prompt_injection.education_tools import TOOL_HANDLERS as EDUCATION_HANDLERS
 from resources_servers.indirect_prompt_injection.healthcare_tools import TOOL_HANDLERS as HEALTHCARE_HANDLERS
