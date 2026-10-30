@@ -78,7 +78,8 @@ resources_servers/ns_tools/.venv/bin/python resources_servers/ns_tools/prepare_d
 
 `--prompt_config generic/math` reads `prompts/generic/math.yaml`, a copy of the NeMo Skills prompt config, because the
 pinned `nemo-skills-tools` package does not ship its prompt YAMLs. To use another prompt, pass the path to its YAML
-file. The script stops with an error when the prompt config does not exist.
+file; its `system` and `user` templates can use `{problem}` and `{examples}` (always empty). The script stops with an
+error, before writing any output, when the prompt config does not exist or a template cannot be filled.
 
 ### Validating example data
 

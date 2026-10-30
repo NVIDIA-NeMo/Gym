@@ -99,3 +99,35 @@ def test_prompt_config_yaml_path_is_used_as_given(tmp_path: Path) -> None:
             {"role": "system", "content": "Answer briefly."},
             {"role": "user", "content": "Q: What is 1+1?"},
         ]
+
+
+def test_system_template_is_filled_like_the_user_template(tmp_path: Path) -> None:
+    prompt = tmp_path / "custom.yaml"
+    prompt.write_text("system: 'Put the answer in \\boxed{{}}.'\nuser: 'Q: {problem}'\n")
+    source = tmp_path / "test.txt"
+    source.write_text(json.dumps({"id": 0, "problem": "What is 1+1?", "expected_answer": "2"}) + "\n")
+    output = tmp_path / "out.jsonl"
+
+    result = run_readme_command(source, output, str(prompt))
+
+    assert result.returncode == 0, result.stderr
+    with open(output) as f:
+        assert json.loads(f.readline())["responses_create_params"]["input"][0] == {
+            "role": "system",
+            "content": "Put the answer in \\boxed{}.",
+        }
+
+
+def test_template_error_fails_before_the_existing_output_is_truncated(tmp_path: Path) -> None:
+    prompt = tmp_path / "custom.yaml"
+    prompt.write_text("user: 'Q: {question}'\n")
+    source = tmp_path / "test.txt"
+    source.write_text(json.dumps({"id": 0, "problem": "What is 1+1?", "expected_answer": "2"}) + "\n")
+    output = tmp_path / "out.jsonl"
+    output.write_text('{"id": "kept"}\n')
+
+    result = run_readme_command(source, output, str(prompt))
+
+    assert result.returncode != 0
+    assert "KeyError: 'question'" in result.stderr
+    assert output.read_text() == '{"id": "kept"}\n'

@@ -196,12 +196,17 @@ def load_prompt(prompt_config: str) -> PromptConfig:
     return load_prompt_config(prompt_config)
 
 
-def format_user_message(problem: str, prompt: PromptConfig) -> str:
+def build_input_messages(problem: str, prompt: PromptConfig) -> list[dict[str, str]]:
     """
-    Format the user message using the prompt config's user template.
+    Fill the prompt config's system and user templates for one problem.
     """
     # Few-shot examples are not included, so {examples} is empty.
-    return prompt.user.format(problem=problem, examples="")
+    values = {"problem": problem, "examples": ""}
+    input_messages = []
+    if prompt.system:
+        input_messages.append({"role": "system", "content": prompt.system.format(**values)})
+    input_messages.append({"role": "user", "content": prompt.user.format(**values)})
+    return input_messages
 
 
 def process_sample(
@@ -226,14 +231,8 @@ def process_sample(
     if not problem:
         logger.warning(f"Sample {sample_id} has no problem text")
 
-    # Format user message using prompt config
-    user_message = format_user_message(problem, prompt)
-
-    # Build the input messages
-    input_messages = []
-    if prompt.system:
-        input_messages.append({"role": "system", "content": prompt.system})
-    input_messages.append({"role": "user", "content": user_message})
+    # Build the input messages from the prompt config
+    input_messages = build_input_messages(problem, prompt)
 
     # Build the output entry
     output = {
@@ -274,6 +273,8 @@ async def main():
 
     # Loaded before any output is written, so a missing prompt config fails the run instead of leaving raw problems.
     prompt = load_prompt(args.prompt_config)
+    # Fill it once too, so a template error (unknown placeholder, stray brace) fails before the output is truncated.
+    build_input_messages("", prompt)
 
     # Create output directory if needed
     output_path = Path(args.output).expanduser()
