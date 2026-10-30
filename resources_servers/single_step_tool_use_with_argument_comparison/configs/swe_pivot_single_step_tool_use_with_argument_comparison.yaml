@@ -1,7 +1,7 @@
 swe_pivot_single_step_tool_use_with_argument_comparison_resources_server:
   resources_servers:
     single_step_tool_use_with_argument_comparison:
-      allowed_agents: [tool_simulation_agent]
+      allowed_agents: [simple_agent, tool_simulation_agent]
       entrypoint: app.py
       domain: agent
       tool_call_comparator_config:
@@ -10,8 +10,10 @@ swe_pivot_single_step_tool_use_with_argument_comparison_resources_server:
       description: GitHub-issue dataset for software-engineering agents; refactored from SWE-Gym and SWE-Bench-Verified for NeMo Gym.
 swe_pivot_single_step_tool_use_with_argument_comparison_agent:
   responses_api_agents:
-    tool_simulation_agent:
+    simple_agent:
       entrypoint: app.py
+      # One model call; its tool calls go to the verifier unexecuted.
+      execute_tools: false
       resources_server:
         type: resources_servers
         name: swe_pivot_single_step_tool_use_with_argument_comparison_resources_server
@@ -43,8 +45,10 @@ swe_pivot_single_step_tool_use_with_argument_comparison_agent:
 
 swe_pivot_single_step_tool_use_with_argument_comparison_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents
         name: swe_pivot_single_step_tool_use_with_argument_comparison_agent
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180
