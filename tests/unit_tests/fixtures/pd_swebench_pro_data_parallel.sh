@@ -151,7 +151,7 @@ GYM_CMD=(
     +model_call_capture_dir=/jobs/swebench_pro/model-calls
     +require_complete=True
 )
-if [ "${_gym_resubmit:-${GYM_RESUBMIT:-}}" = 1 ]; then GYM_CMD+=(++resubmit=True ++resume_from_cache=True); fi
+if [ "${_gym_resubmit:-${GYM_RESUBMIT:-}}" = 1 ]; then if [ "${_gym_keep_budget:-${GYM_RESUBMIT_KEEP_BUDGET:-}}" = 1 ]; then GYM_CMD+=(++resume_from_cache=True); else GYM_CMD+=(++resubmit=True ++resume_from_cache=True); fi; fi
 env NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_RUN_ID=jobs NEMO_GYM_OTEL_SPAN_GROUPS=default,verify NEMO_GYM_OTEL_LOGS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf srun --overlap --no-container-mount-home --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --container-mounts=/jobs/swebench_pro:/jobs/swebench_pro --container-image=img --output=logs/driver-$SLURM_JOB_ID.log "${GYM_CMD[@]}" &
 _gym_driver_pid=$!
 _gym_service_exited() {

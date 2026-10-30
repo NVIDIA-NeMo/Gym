@@ -744,3 +744,83 @@ def test_resubmit_missing_auth_does_not_change_an_active_runs_collector(
 
     assert collector_path.read_text() == original
     assert not (slurm_bin / "cwd").exists()
+
+
+# --- Recovery keeps the spent budget; a plain resubmit starts a fresh one ---------------------------------------
+
+
+def _resumable_run(tmp_path: Path) -> tuple[Path, str, ResumeConfig]:
+    """A staged resumable run whose job.sh is rendered by this Gym, with spent retries, walltime and one missing row."""
+    resume = ResumeConfig(max_retries=3, max_walltime="16:00:00")
+    config = _config(tmp_path)
+    config.driver.benchmarks["gsm8k"].resumable = resume
+    job_dir = _staged_run(tmp_path, config=config)
+    script = build_sbatch_script(
+        config, "gsm8k", config.driver.benchmarks["gsm8k"], next(iter(config.compute.values())), job_dir
+    )
+    (job_dir / "job.sh").write_text(script)
+    artifacts = job_dir / "artifacts"
+    artifacts.mkdir()
+    rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(2)]
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (artifacts / "rollouts.jsonl").write_text(json.dumps(rows[0] | {"reward": 1.0}) + "\n")
+    (job_dir / ".gym_job_chain").write_text("100\n101\n")
+    (job_dir / RETRY_FILE_NAME).write_text("2\n")
+    (job_dir / ".gym_accumulated_walltime").write_text("7200\n")
+    return job_dir, script, resume
+
+
+def _start_queued_job(script: str, resume: ResumeConfig, job_dir: Path, slurm_bin: Path) -> list[str]:
+    """Start the job sbatch queued: the rendered prologue and `gym eval run` arguments, in the environment it got."""
+    prologue = render_resume_prologue(resume)
+    assert prologue in script
+    queued = {k: v for k, v in _sbatch_env(slurm_bin).items() if k.startswith("GYM_RESUBMIT")}
+    start = script.index("GYM_CMD=(")
+    end = script.index("; fi\n", start) + len("; fi\n")
+    body = prologue + script[start:end] + 'printf "ARG %s\\n" "${GYM_CMD[@]}"\n'
+    out = _run_prologue(body, job_dir, queued).stdout
+    return [line[4:] for line in out.splitlines() if line.startswith("ARG ")]
+
+
+def test_recover_resubmit_keeps_the_spent_retries_walltime_and_attempts(tmp_path: Path, slurm_bin: Path) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, resume = _resumable_run(tmp_path)
+
+    out = recover(*_handle(job_dir))
+
+    assert out.dispatched == "resubmit" and out.job_id == "4242"
+    args = _start_queued_job(script, resume, job_dir, slurm_bin)
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7200\n"
+    # It resumes without `++resubmit=True`, which would start a fresh per-rollout attempt budget.
+    assert args[-1] == "++resume_from_cache=True" and "++resubmit=True" not in args
+    # The follow-up the prologue queues is an ordinary hop.
+    assert (job_dir / "follow_up_env").read_text() == "GYM_RESUBMIT=\n"
+
+
+def test_plain_resubmit_of_the_same_run_still_starts_a_fresh_budget(tmp_path: Path, slurm_bin: Path) -> None:
+    job_dir, script, resume = _resumable_run(tmp_path)
+
+    resubmit(*_handle(job_dir))
+
+    args = _start_queued_job(script, resume, job_dir, slurm_bin)
+    assert not (job_dir / RETRY_FILE_NAME).exists()
+    assert not (job_dir / ".gym_accumulated_walltime").exists()
+    assert args[-2:] == ["++resubmit=True", "++resume_from_cache=True"]
+
+
+def test_recover_refuses_a_job_sh_that_would_reset_the_budget(tmp_path: Path, slurm_bin: Path) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, _ = _resumable_run(tmp_path)
+    # A job.sh rendered before budget-preserving recovery: its prologue resets on any resubmit.
+    (job_dir / "job.sh").write_text(
+        re.sub(r" && \"\$_gym_keep_budget\" != 1", "", script).replace("GYM_RESUBMIT_KEEP_BUDGET", "UNUSED")
+    )
+
+    with pytest.raises(RuntimeError, match="predates budget-preserving recovery"):
+        recover(*_handle(job_dir))
+
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"

@@ -76,8 +76,11 @@ class BaseExecutor(ABC):
         )
 
     @abstractmethod
-    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+    def resubmit(self, record: SubmissionRecord, benchmark: str, *, keep_budget: bool = False) -> BenchmarkJob:
         """Queue `benchmark` of `record` again, in place, and return its updated entry.
+
+        ``keep_budget`` (used by recovery) keeps the run's spent retry, walltime and attempt budget instead of
+        starting a fresh one.
 
         Refuses while a job of that benchmark is still active, so two jobs never write one run.
         Persists the updated record before returning. An executor that cannot do this raises

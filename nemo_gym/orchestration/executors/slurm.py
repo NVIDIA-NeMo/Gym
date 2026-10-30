@@ -40,7 +40,12 @@ from nemo_gym.orchestration.executors.otel import (
     validate_destination,
     validate_gym_telemetry,
 )
-from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV, _walltime_to_seconds
+from nemo_gym.orchestration.executors.resume_script import (
+    KEEP_BUDGET_ENV,
+    PROLOGUE_MARKER,
+    RESUBMIT_ENV,
+    _walltime_to_seconds,
+)
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
@@ -274,8 +279,11 @@ class SlurmExecutor(BaseExecutor):
         """The decision of ``recovery_evidence`` without a score key."""
         return self.recovery_evidence(record, benchmark)[0]
 
-    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+    def resubmit(self, record: SubmissionRecord, benchmark: str, *, keep_budget: bool = False) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
+
+        With ``keep_budget`` (``--recover``) the job keeps the spent retry count, walltime and per-rollout attempts;
+        a job.sh rendered before that option would reset them, so it is refused.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
@@ -326,6 +334,18 @@ class SlurmExecutor(BaseExecutor):
                         "sed -i 's/GYM_CMD+=(++resubmit=True)/GYM_CMD+=(++resubmit=True ++resume_from_cache=True)/g' "
                         "job.sh || fail 'cannot normalize resubmit flags in job.sh'; fi",
                         *collector_update,
+                        *(
+                            [
+                                f"if {{ grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
+                                "|| grep -qx -- '[[:space:]]*gym eval run' job.sh; } "
+                                f"&& ! grep -qF -- {KEEP_BUDGET_ENV} job.sh; then "
+                                'fail "job.sh in $PWD predates budget-preserving recovery, so a resubmit would reset '
+                                'its spent retries, walltime and attempts; use a plain resubmit or submit again"; fi',
+                                f"export {KEEP_BUDGET_ENV}=1",
+                            ]
+                            if keep_budget
+                            else []
+                        ),
                         f"export {RESUBMIT_ENV}=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
                     ]

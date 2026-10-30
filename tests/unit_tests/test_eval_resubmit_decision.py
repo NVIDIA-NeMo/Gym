@@ -177,8 +177,8 @@ class FakeExecutor:
         FakeExecutor.calls.append("reverify")
         return RecoveryOutcome(decision=decision, ok=True, dispatched="reverify")
 
-    def resubmit(self, record, benchmark):
-        FakeExecutor.calls.append("resubmit")
+    def resubmit(self, record, benchmark, *, keep_budget=False):
+        FakeExecutor.calls.append("resubmit" if keep_budget else "resubmit-resetting-budget")
         return type("Job", (), {"job_id": "4242"})()
 
 
@@ -315,7 +315,7 @@ def test_recover_stops_on_unknown_ownership(tmp_path, fake_executor) -> None:
 
 def test_plain_resubmit_is_unchanged_and_does_not_decide(tmp_path, fake_executor) -> None:
     assert submit.resubmit("gym-job-g", "bench").job_id == "4242"
-    assert fake_executor.calls == ["resubmit"]
+    assert fake_executor.calls == ["resubmit-resetting-budget"]
 
 
 def test_gate_summary_never_equates_scored_with_expected_by_dropping_failures(tmp_path) -> None:

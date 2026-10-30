@@ -74,8 +74,8 @@ def recover(
     The executor collects identities, results, failures, the quality summary, the ``score_key`` metric and the job
     chain's stored budget; ``decide_recovery`` picks one action, which runs here: ``noop`` dispatches nothing;
     ``reverify`` re-judges saved answers through the executor (never the policy) or reports that the executor cannot;
-    ``resubmit`` queues the run with the existing ``resubmit``, whose Gym resume runs only missing and retryable
-    identities; ``stop`` dispatches nothing and says why. Every outcome carries the Day-0 gate task entry, where
+    ``resubmit`` queues the run with the existing ``resubmit`` keeping its spent budget (retries, walltime and
+    per-rollout attempts), and its Gym resume runs only missing and retryable identities; ``stop`` dispatches nothing and says why. Every outcome carries the Day-0 gate task entry, where
     response/trial health is judged only against ``max_unhealthy_fraction``. Plain ``resubmit`` is unchanged.
     """
     record = load_submission_record(gym_job_id)
@@ -105,7 +105,7 @@ def recover(
         outcome = executor.reverify_judge_failures(record, benchmark, decision)
         return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow})
     if decision.action == RecoveryAction.RESUBMIT:
-        job = executor.resubmit(record, benchmark)
+        job = executor.resubmit(record, benchmark, keep_budget=True)
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow
         )

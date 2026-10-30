@@ -75,7 +75,7 @@ class KubernetesExecutor(BaseExecutor):
 
     name = "kubernetes"
 
-    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+    def resubmit(self, record: SubmissionRecord, benchmark: str, *, keep_budget: bool = False) -> BenchmarkJob:
         raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:

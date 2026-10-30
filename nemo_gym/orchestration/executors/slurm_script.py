@@ -49,7 +49,11 @@ from nemo_gym.orchestration.executors.otel import (
     vllm_traces_env,
     vllm_traces_flag,
 )
-from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV, render_resume_prologue
+from nemo_gym.orchestration.executors.resume_script import (
+    KEEP_BUDGET_ENV,
+    RESUBMIT_ENV,
+    render_resume_prologue,
+)
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
     bash_var,
@@ -1123,10 +1127,12 @@ def build_sbatch_script(
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
         # A job queued by `gym eval resubmit` resets the attempt budget and enables resume before exporters open:
         # a fresh start would delete the run's rollouts, whatever its original config says.
-        # The auto-resume prologue, when there is one, has moved the variable into `_gym_resubmit`.
+        # The auto-resume prologue, when there is one, has moved the variables into `_gym_resubmit` and
+        # `_gym_keep_budget`. A `--recover` job only resumes: its attempts keep counting from the last resubmit.
         gym_cmd += (
             f'\nif [ "${{_gym_resubmit:-${{{RESUBMIT_ENV}:-}}}}" = 1 ]; then '
-            "GYM_CMD+=(++resubmit=True ++resume_from_cache=True); fi"
+            f'if [ "${{_gym_keep_budget:-${{{KEEP_BUDGET_ENV}:-}}}}" = 1 ]; then GYM_CMD+=(++resume_from_cache=True); '
+            "else GYM_CMD+=(++resubmit=True ++resume_from_cache=True); fi; fi"
         )
     else:
         # A command replaces `gym eval run`, so the run args it would have carried

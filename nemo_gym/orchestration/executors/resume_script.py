@@ -40,6 +40,9 @@ RETRY_FILE_NAME = ".gym_infra_retries"
 INCOMPLETE_MARKER_NAME = ".gym_chain_incomplete"
 # Set to 1 in the environment of a job queued by `gym eval resubmit`.
 RESUBMIT_ENV = "GYM_RESUBMIT"
+# Set to 1 with RESUBMIT_ENV by `gym eval resubmit --recover`: the job resumes and keeps the spent retry count,
+# walltime and per-rollout attempts, so recovery stays within the budget it read.
+KEEP_BUDGET_ENV = "GYM_RESUBMIT_KEEP_BUDGET"
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -59,11 +62,12 @@ _gym_stop_incomplete() {{
 }}
 
 # A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget: a chain
-# stopped at the walltime cap says "resubmit to continue". The variable is read once and unset,
-# so the follow-up queued below (which inherits this environment) is an ordinary chain hop.
+# stopped at the walltime cap says "resubmit to continue". One queued by `--recover` keeps both. The variables
+# are read once and unset, so the follow-up queued below (which inherits this environment) is an ordinary hop.
 _gym_resubmit="${{{resubmit_env}:-}}"
-unset {resubmit_env}
-if [[ "$_gym_resubmit" == 1 ]]; then
+_gym_keep_budget="${{{keep_budget_env}:-}}"
+unset {resubmit_env} {keep_budget_env}
+if [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" != 1 ]]; then
     rm -f "$_retry_file" "$_walltime_file"
 fi
 
@@ -211,6 +215,7 @@ def render_resume_prologue(resume: ResumeConfig) -> str:
         retry_file_name=RETRY_FILE_NAME,
         incomplete_marker_name=INCOMPLETE_MARKER_NAME,
         resubmit_env=RESUBMIT_ENV,
+        keep_budget_env=KEEP_BUDGET_ENV,
         max_retries=resume.max_retries,
         max_walltime_check=max_walltime_check,
     )
