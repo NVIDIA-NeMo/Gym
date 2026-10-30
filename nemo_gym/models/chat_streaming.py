@@ -41,6 +41,7 @@ import logging
 from copy import deepcopy
 from typing import Any, Iterator
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.responses_api_types import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -49,8 +50,6 @@ from nemo_gym.core.responses_api_types import (
 
 LOG = logging.getLogger(__name__)
 
-# The dispatch and checkpoint gate share this exact liveness-only SSE frame.
-SSE_KEEPALIVE = b": keep-alive\n\n"
 
 # Provider extension fields are accepted on the non-streaming path only. Streaming harnesses
 # (e.g. OpenClaw's ``chat_template_kwargs``) have always had them dropped here, so they stay
@@ -170,3 +169,7 @@ def synthesize_chat_completion_sse(completion: dict[str, Any], include_usage: bo
         yield _sse_data(_chunk(completion, [], usage=usage))
 
     yield "data: [DONE]\n\n"
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

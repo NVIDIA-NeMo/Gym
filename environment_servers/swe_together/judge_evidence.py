@@ -8,7 +8,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
-from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.models import CaptureStore
 from nemo_gym.observability.model_calls import (
     ModelCallRecord,
     await_model_call_capture_quiescence,

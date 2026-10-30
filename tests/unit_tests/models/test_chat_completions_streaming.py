@@ -31,12 +31,6 @@ import pytest
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    SimpleResponsesAPIModel,
-    _parse_sse_events,
-    _reconstruct_chat_sse,
-)
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
@@ -45,10 +39,12 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 from nemo_gym.models.chat_streaming import (
     sanitize_streaming_chat_body,
     synthesize_chat_completion_sse,
 )
+from nemo_gym.models.model_call_capture import _parse_sse_events, _reconstruct_chat_sse
 
 
 def _completion(
@@ -313,7 +309,7 @@ def _client(model_cls) -> tuple[TestClient, SimpleResponsesAPIModel]:
 class TestChatDispatchRoute:
     @pytest.mark.asyncio
     async def test_keepalives_arrive_before_delayed_backend_answer(self, monkeypatch) -> None:
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
         _, server = _client(_EchoChatModel)
         release = asyncio.Event()
 
@@ -340,7 +336,7 @@ class TestChatDispatchRoute:
 
     @pytest.mark.asyncio
     async def test_closing_stream_cancels_pending_backend(self, monkeypatch) -> None:
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
         _, server = _client(_EchoChatModel)
         started, cancelled = asyncio.Event(), asyncio.Event()
 
@@ -380,7 +376,7 @@ class TestChatDispatchRoute:
         ],
     )
     async def test_delayed_failure_is_terminal_error_with_status(self, monkeypatch, error, status, message) -> None:
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
         _, server = _client(_EchoChatModel)
         release = asyncio.Event()
 
@@ -403,7 +399,7 @@ class TestChatDispatchRoute:
 
     @pytest.mark.parametrize("delayed", [False, True])
     async def test_capture_finalization_failure_is_not_hidden_in_sse(self, monkeypatch, delayed) -> None:
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
         _, server = _client(_EchoChatModel)
         release = asyncio.Event()
 

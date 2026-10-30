@@ -302,7 +302,7 @@ the collector clears any existing capture for the exact rollout-attempt id.
 Read raw records programmatically when you need more than the rollout attachment:
 
 ```python
-from nemo_gym.base_responses_api_model import CaptureStore
+from nemo_gym.models import CaptureStore
 from nemo_gym.observability.model_calls import (
     aggregate_model_call_metrics,
     read_model_call_records,
