@@ -41,10 +41,16 @@
 # harness keeps running, the supervisor acknowledges at once and stops counting the deadline until the
 # continue, which sends nothing either. The checkpoint holds the harness's model calls instead.
 #
+# --abandon IDENTITY ends a launch for good after a restore of such a snapshot, when nothing of it may run
+# again: it sends KILL, never CONT, to the supervisor IDENTITY names, the shell that started it, every
+# process carrying its marker and their descendants, and writes a stopped, abandoned receipt unless the
+# supervisor wrote one.
+#
 # usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH
 #        [--expire-file PATH] [--pause-file PATH --paused PATH --continue-file PATH --continued PATH
 #         [--pause-mode stop|hold]]
 #        -- COMMAND...
+#        process_supervisor.sh --abandon IDENTITY --receipt PATH [--cleanup-timeout SECONDS]
 
 # An inherited BASH_ENV or SHELLOPTS must not turn an expected failure into a missing receipt.
 set +o errexit +o nounset +o pipefail
@@ -206,6 +212,8 @@ stopped() { ((stopping)) || [[ -e $stop_file ]]; }
 expired() { [[ -n $expire_file && -e $expire_file ]]; }
 # How a pause treats the processes it reaches: stop sends STOP and CONT, hold sends nothing (see the header).
 pause_mode=stop
+# The command line of a shell running this script, for --abandon to tell the shell that started a supervisor.
+SUPERVISOR_NAME=process_supervisor.sh
 
 write_receipt() {
     printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s, "stopped": %s}' \
@@ -348,8 +356,80 @@ serve_pause() {
     return 0
 }
 
+# Abandon the launch of the supervisor whose identity is $1 (PID.START), after a restore of a snapshot that
+# kept its processes (see the header). Kills, and never continues, the supervisor, the shell that started it
+# outside its own group, every process carrying its marker, and their descendants, until none runs or the
+# cleanup timeout passes. Writes a stopped, abandoned receipt unless the supervisor wrote one; succeeds when
+# nothing it killed still runs.
+abandon() {
+    local supervisor=${1%%.*} entry pid shell= word limit changed confirmed=true error=null
+    local -a parent=() doomed=()
+    [[ $1 == *.* && $supervisor =~ ^[0-9]+$ && ${1#*.} =~ ^[0-9]+$ ]] || { echo "--abandon needs PID.START" >&2; return 2; }
+    started=${1#*.} marker=NEMO_GYM_SUPERVISOR=$1
+    # The shell that started the supervisor in a new process group waits for it and passes on its status.
+    if stat_fields "$supervisor" && [[ ${fields[19]} == "$started" ]]; then
+        while IFS= read -r -d '' word; do
+            [[ $word == *"/$SUPERVISOR_NAME" || $word == "$SUPERVISOR_NAME" ]] && shell=${fields[1]}
+        done 2>/dev/null <"/proc/${fields[1]}/cmdline"
+    fi
+    now
+    limit=$((NOW + ${cleanup:-1000}))
+    while :; do
+        parent=() doomed=()
+        for entry in /proc/[0-9]*; do
+            pid=${entry#/proc/}
+            [[ $pid != "$$" ]] && stat_fields "$pid" || continue
+            [[ ${fields[0]} == [ZX] ]] && continue
+            parent[pid]=${fields[1]}
+            if [[ $pid == "$shell" || ($pid == "$supervisor" && ${fields[19]} == "$started") ]] ||
+                marked "$pid" "${fields[19]}"; then
+                doomed[pid]=1
+            fi
+        done
+        changed=1
+        while ((changed)); do
+            changed=0
+            for pid in "${!parent[@]}"; do
+                [[ -z ${doomed[pid]} && -n ${doomed[parent[pid]]} ]] || continue
+                doomed[pid]=1 changed=1
+            done
+        done
+        ((${#doomed[@]})) || break
+        for pid in "${!doomed[@]}"; do kill -KILL "$pid" 2>/dev/null; done
+        now
+        if ((NOW >= limit)); then
+            confirmed=false error='"An abandoned process did not exit"'
+            break
+        fi
+        sleep 0.05
+    done
+    if [[ ! -e $receipt ]]; then
+        printf '{"cleanup_confirmed": %s, "return_code": null, "error": %s, "timed_out": false, "stopped": true, "abandoned": true}' \
+            "$confirmed" "$error" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
+    fi
+    [[ $confirmed == true ]]
+}
+
 # Tests source the functions above without running the supervisor.
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
+
+if [[ ${1-} == --abandon ]]; then
+    (($# >= 2)) || usage
+    abandon_identity=$2
+    shift 2
+    while (($#)); do
+        (($# >= 2)) || usage
+        case $1 in
+        --receipt) receipt=$2 ;;
+        --cleanup-timeout) cleanup=$(centiseconds "$2") || { echo "--cleanup-timeout must be finite and positive" >&2; exit 2; } ;;
+        *) echo "unexpected argument: $1" >&2; exit 2 ;;
+        esac
+        shift 2
+    done
+    [[ -n ${receipt-} ]] || usage
+    abandon "$abandon_identity"
+    exit
+fi
 
 arguments=("$@")
 while (($#)) && [[ $1 != -- ]]; do

@@ -65,6 +65,12 @@ Per-harness policy stays in the adapter:
   forked sandbox. Override `_rebind_restored_agent_session_state` to connect it and call `SandboxSession.reattach`.
   Declare `rebinds_tool_accesses = True` if the re-bound session takes the new seed's tool grants, so episodes with
   resources MCP grants can continue instead of restarting.
+- **Processes kept.** When the provider's snapshot kept the sandbox's processes and the bookmark holds a pause
+  (`pause_seq`, `supervisor_identity`), the launch may still be running in the fork. `check_restored` tells, in one
+  command, whether its supervisor still runs as that identity and holds that pause, with no receipt yet. If so,
+  point the harness at the new model server, then `SandboxSession.adopt(pause_seq=...)` continues the pause and waits
+  for the receipt, as `execute` would have, under `run_until_parked` like a launch. If not, `abandon_launch` kills the
+  launch without continuing anything, and the next launch relaunches as below.
 - **Resume decision.** On the first launch after a stop or a restore, read the saved conversation. Resume it when it is
   the task's own and the model answered at least once; otherwise start afresh from the original prompt. OpenCode
   re-posts the last user message with empty `parts` through `opencode serve` (`resume_opencode.sh`), so no turn is added.
