@@ -477,3 +477,52 @@ def test_forwarded_variable_name_is_validated(tmp_path, name):
     raw["compute"]["hsg"]["forward_env"] = [name]
     with pytest.raises(ValueError, match="Invalid forward_env"):
         SubmitConfig.model_validate(raw)
+
+
+def _config_with_a_service(tmp_path, benchmarks):
+    config = _submit_config(tmp_path, benchmarks).model_dump(mode="json")
+    config["services"] = {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "port": 8000}}
+    return SubmitConfig.model_validate(config)
+
+
+def test_run_records_the_planned_log_sources_of_every_benchmark(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:0:222 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_config_with_a_service(tmp_path, ["bench_a", "bench_b"]))
+
+    expected = [
+        ("driver", "driver", "logs/driver-{job_id}.log"),
+        ("policy", "service", "logs/policy-{job_id}.log"),
+    ]
+    for benchmark in record.benchmarks:
+        assert [(s.name, s.kind, s.location) for s in benchmark.log_sources] == expected
+
+
+def test_a_benchmark_that_failed_to_enqueue_still_records_its_planned_log_sources(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:1:sbatch: error: bad account "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_config_with_a_service(tmp_path, ["bench_a", "bench_b"]))
+
+    by_name = {b.benchmark: b for b in record.benchmarks}
+    assert by_name["bench_b"].job_id is None
+    assert by_name["bench_b"].log_sources == by_name["bench_a"].log_sources
+    assert [s.name for s in by_name["bench_b"].log_sources] == ["driver", "policy"]
+
+
+def test_the_planned_log_sources_reach_the_manifest_and_the_local_index(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_config_with_a_service(tmp_path, ["bench_a"]))
+
+    manifest = SubmissionRecord.load(json.loads((Path(record.run_dir) / MANIFEST_NAME).read_text()))
+    index = SubmissionRecord.load(
+        json.loads((tmp_path / "cache" / "nemo-gym" / "jobs" / f"{record.gym_job_id}.json").read_text())
+    )
+    assert [s.name for s in manifest.benchmarks[0].log_sources] == ["driver", "policy"]
+    assert [s.name for s in index.benchmarks[0].log_sources] == ["driver", "policy"]

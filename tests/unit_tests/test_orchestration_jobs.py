@@ -31,8 +31,18 @@ from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     SCHEMA_VERSION,
+    BenchmarkInfo,
     BenchmarkJob,
+    Failure,
+    FailureCategory,
+    JobInfo,
+    JobRef,
+    JobState,
+    JobStatus,
+    LogSource,
+    ObservedStatus,
     SubmissionRecord,
+    SubmissionStatus,
     installed_gym_commit,
     local_index_dir,
     new_gym_job_id,
@@ -418,3 +428,114 @@ def test_a_record_written_before_gym_commit_still_loads():
 
     assert record.gym_commit is None
     assert record.schema_version == SCHEMA_VERSION
+
+
+# --- Log sources and the status types ------------------------------------------------------------------------
+
+
+def _with_log_sources(record: SubmissionRecord) -> SubmissionRecord:
+    sources = [
+        LogSource(name="driver", kind="driver", location="logs/driver-{job_id}.log"),
+        LogSource(name="vllm", kind="service", instance="node-1", location="logs/vllm-{job_id}.log"),
+    ]
+    benchmarks = [b.model_copy(update={"log_sources": sources}) for b in record.benchmarks]
+    return record.model_copy(update={"benchmarks": benchmarks})
+
+
+def test_log_sources_survive_the_manifest_bytes():
+    record = _with_log_sources(_record())
+
+    restored = SubmissionRecord.load(json.loads(record.dumps()))
+
+    assert restored == record
+    assert restored.benchmarks[0].log_sources[1].instance == "node-1"
+
+
+def test_a_record_written_before_log_sources_existed_still_loads_with_none():
+    payload = json.loads(_with_log_sources(_record()).dumps())
+    for benchmark in payload["benchmarks"]:
+        del benchmark["log_sources"]
+
+    restored = SubmissionRecord.load(payload)
+
+    assert restored.schema_version == SCHEMA_VERSION
+    assert [b.log_sources for b in restored.benchmarks] == [[]]
+    assert restored.benchmarks[0].job_id == "12345"
+
+
+def test_a_log_source_is_either_the_driver_or_a_service():
+    with pytest.raises(ValueError):
+        LogSource(name="x", kind="sidecar", location="logs/x-{job_id}.log")
+
+
+def test_a_log_source_is_not_split_by_instance_unless_it_says_so():
+    assert LogSource(name="vllm", kind="service", location="logs/vllm-{job_id}.log").instance is None
+
+
+def test_a_job_ref_is_keyed_by_the_submission_and_the_benchmark():
+    record = _record()
+
+    ref = JobRef(record, record.benchmarks[0])
+
+    assert ref.key == ("gym-job-20260909T100203Z-abc123", "gsm8k")
+
+
+def test_a_submission_status_survives_json_with_enum_keyed_counts():
+    status = SubmissionStatus(
+        record=_record(),
+        jobs=[
+            JobStatus(
+                benchmark="gsm8k",
+                state=JobState.FAILED,
+                job_id="12346",
+                detail="FAILED",
+                exit_code=1,
+                failure=Failure(
+                    category=FailureCategory.INCOMPLETE,
+                    message="Chain stopped at the walltime cap",
+                    source="job directory",
+                    logs="gym job logs gym-job-x gsm8k --tail 100",
+                ),
+            )
+        ],
+        state=JobState.FAILED,
+        counts={JobState.FAILED: 1},
+    )
+
+    restored = SubmissionStatus.model_validate_json(status.model_dump_json())
+
+    assert restored == status
+    assert restored.counts[JobState.FAILED] == 1
+    assert restored.jobs[0].failure.category is FailureCategory.INCOMPLETE
+
+
+def test_observed_statuses_do_not_share_their_state_files():
+    first = ObservedStatus(state=JobState.RUNNING)
+    first.files[".gym_chain_incomplete"] = "stopped"
+
+    assert ObservedStatus(state=JobState.RUNNING).files == {}
+
+
+def _log_source() -> LogSource:
+    return LogSource(name="driver", kind="driver", location="logs/driver-{job_id}.log")
+
+
+def test_a_job_info_says_why_the_config_is_missing_and_survives_json():
+    info = JobInfo(
+        record=_with_log_sources(_record()),
+        benchmarks=[
+            BenchmarkInfo(
+                benchmark="gsm8k",
+                job_dir="/jobs/x/gsm8k",
+                job_ids=["12345", "12400"],
+                log_sources=[_log_source()],
+            )
+        ],
+        config_unavailable="the run directory is not readable",
+    )
+
+    restored = JobInfo.model_validate_json(info.model_dump_json())
+
+    assert restored == info
+    assert restored.config is None
+    assert restored.benchmarks[0].job_ids == ["12345", "12400"]

@@ -30,6 +30,7 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
+from nemo_gym.orchestration.executors.otel import COLLECTOR_SERVICE_NAME
 from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
@@ -52,6 +53,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _with_default_capture_dir,
     _with_resume_flag,
     build_sbatch_script,
+    planned_log_sources,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
 
@@ -2987,3 +2989,110 @@ def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged
     assert service_steps and driver_steps
     assert all(" --kill-on-bad-exit=1 --wait=1 " in line for line in service_steps)
     assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps + collector_steps)
+
+
+# ---------------------------------------------------------------------------
+# planned_log_sources
+# ---------------------------------------------------------------------------
+
+
+def _ray_alongside_a_policy(tmp_path):
+    return _placement_config(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"], "port": 6380},
+        },
+        _TWO_POOLS,
+    )
+
+
+def _with_a_collector(tmp_path):
+    return SubmitConfig.model_validate(
+        {
+            "services": {"policy": _vllm(8000, "aux", tensor_parallel_size=4)},
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"b": {"run": {}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": _TRACED_OTEL,
+        }
+    )
+
+
+_LOG_PLAN_CONFIGS = {
+    "two pinned services": lambda tmp_path: _placement_config(
+        tmp_path,
+        {
+            "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+            "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+        },
+        _TWO_POOLS,
+    ),
+    "a ray service with worker steps": _ray_alongside_a_policy,
+    "a prefill/decode pair": lambda tmp_path: _pd_config(tmp_path),
+    "a per-node prefill/decode pair": lambda tmp_path: _pd_config(tmp_path, services=_per_node_services()),
+    "a telemetry collector": _with_a_collector,
+}
+
+
+@pytest.mark.parametrize("make_config", _LOG_PLAN_CONFIGS.values(), ids=_LOG_PLAN_CONFIGS.keys())
+def test_the_planned_log_sources_are_exactly_the_logs_the_script_writes(tmp_path, make_config):
+    config = make_config(tmp_path)
+    compute = config.compute["hsg"]
+
+    script = build_sbatch_script(config, "b", config.driver.benchmarks["b"], compute, tmp_path / "jobs" / "b")
+
+    written = set(re.findall(r"--output=(logs/\S+)", script))
+    planned = {source.location.replace("{job_id}", "$SLURM_JOB_ID") for source in planned_log_sources(config, compute)}
+    assert written == planned
+    assert len(written) > 1
+
+
+def _without_telemetry(config):
+    return config.model_copy(update={"otel": config.otel.model_copy(update={"enabled": False})})
+
+
+def test_a_ray_service_plans_a_log_for_its_head_and_for_each_worker_step(tmp_path):
+    config = _without_telemetry(_ray_alongside_a_policy(tmp_path))
+
+    sources = planned_log_sources(config, config.compute["hsg"])
+
+    assert [source.name for source in sources] == ["driver", "policy", "ray", "ray_aux_workers"]
+
+
+def test_the_driver_is_planned_first_and_is_the_only_driver_source(tmp_path):
+    config = _pd_config(tmp_path)
+
+    sources = planned_log_sources(config, config.compute["hsg"])
+
+    assert sources[0].name == "driver"
+    assert [source.kind for source in sources].count("driver") == 1
+    assert {source.kind for source in sources[1:]} == {"service"}
+
+
+def test_a_prefill_decode_pair_plans_both_tiers_and_the_router(tmp_path):
+    config = _without_telemetry(_pd_config(tmp_path))
+
+    names = [source.name for source in planned_log_sources(config, config.compute["hsg"])]
+
+    assert names == ["driver", "policy-prefill", "policy-decode", "policy"]
+
+
+def test_the_telemetry_collector_has_a_planned_log_only_when_it_is_on(tmp_path):
+    with_collector = _with_a_collector(tmp_path)
+    without = _without_telemetry(with_collector)
+
+    on = [s.name for s in planned_log_sources(with_collector, with_collector.compute["hsg"])]
+    off = [s.name for s in planned_log_sources(without, without.compute["hsg"])]
+
+    assert on == ["driver", COLLECTOR_SERVICE_NAME, "policy"]
+    assert off == ["driver", "policy"]
+
+
+def test_planned_locations_keep_the_job_id_open_for_the_reader(tmp_path):
+    config = _pd_config(tmp_path)
+
+    locations = [s.location for s in planned_log_sources(config, config.compute["hsg"])]
+
+    assert locations[0] == "logs/driver-{job_id}.log"
+    assert all("{job_id}" in location and "$SLURM_JOB_ID" not in location for location in locations)
