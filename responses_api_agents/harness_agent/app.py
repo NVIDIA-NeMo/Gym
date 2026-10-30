@@ -106,7 +106,8 @@ def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     """The failure_kind when ``exc`` is the sandbox runtime failing rather than the harness or model, else None.
 
     A sandbox that ends mid-episode (OpenSandbox ``SANDBOX::ENDED``, e.g. its container OOM-killed with exit 137), a
-    sandbox that cannot be created, and transport failures to it are infrastructure: the rollout is not a measurement of
+    sandbox that cannot be created, a runner killed before its deadline, and timeouts or dropped connections while the
+    episode runs (to the sandbox or to the resources server) are infrastructure: the rollout is not a measurement of
     the policy. Exit 137 is reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
     """
     text = str(exc)
