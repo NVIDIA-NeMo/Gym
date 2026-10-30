@@ -1511,6 +1511,117 @@ def test_a_rollout_ending_on_a_failed_attempt_is_unhealthy_for_that_reason_only(
     assert {finding.check for finding in digest.findings} == {"rollout_ended_on_failed_model_call"}
 
 
+def _verdict_of(tmp_path, call):
+    result = run_health_checks(_write_fixture(tmp_path, [(_owned_attempts(call), [call])]), workers=1)
+    [digest] = result.rollouts
+    return result, digest
+
+
+# What a delivered answer looks like once its raw body is recovered, per dialect: Responses reports a
+# `completed` status and usually no finish reason; Chat and Messages report a finish reason.
+DELIVERED_AFTER_CANCEL = {
+    "responses completed, no finish reason": {"response_status": "completed", "finish_reason": None},
+    "chat stop": {"response_status": None, "finish_reason": "stop"},
+    "chat tool_calls": {"response_status": None, "finish_reason": "tool_calls"},
+    "chat length": {"response_status": None, "finish_reason": "length"},
+    "messages end_turn": {"response_status": None, "finish_reason": "end_turn"},
+}
+
+
+@pytest.mark.parametrize("shape", DELIVERED_AFTER_CANCEL.values(), ids=DELIVERED_AFTER_CANCEL.keys())
+def test_a_call_cancelled_after_a_complete_answer_is_a_successful_call(tmp_path, shape):
+    """Recovered from the captured body, the answer was delivered; the late disconnect is not a failure."""
+    delivered = _call(model_call_id="delivered", status_code=200, error_category="cancelled", **shape)
+
+    result, digest = _verdict_of(tmp_path, delivered)
+
+    assert digest.verdict == "healthy"
+    assert not digest.findings
+    assert digest.model_call_errors == 0
+    assert result.summary["run"]["stats"]["model_call_errors"]["usage_unknown"] == 0
+
+
+_RECOVERED_RESPONSES_BODY = {
+    "id": "r",
+    "status": "completed",
+    "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+}
+_RECOVERED_RESPONSES_STREAM = (
+    "event: response.created\ndata: "
+    + json.dumps({"type": "response.created", "response": {"id": "r"}})
+    + "\n\nevent: response.completed\ndata: "
+    + json.dumps({"type": "response.completed", "response": _RECOVERED_RESPONSES_BODY})
+    + "\n\n"
+)
+
+
+@pytest.mark.parametrize(
+    "response_raw", [json.dumps(_RECOVERED_RESPONSES_BODY), _RECOVERED_RESPONSES_STREAM], ids=["json", "stream"]
+)
+def test_a_recovered_responses_call_has_no_finish_reason_and_is_still_a_successful_call(tmp_path, response_raw):
+    """The record built from a real cancelled Responses exchange, not a hand-made finish reason."""
+    record = build_model_call_record(
+        {
+            "model_call_id": "recovered",
+            "dialect": "responses",
+            "status_code": 200,
+            "error_category": "cancelled",
+            "response": None,
+            "response_raw": response_raw,
+        },
+        call_index=0,
+    )
+    assert (record.finish_reason, record.response_status) == (None, "completed")
+    call = _call(
+        model_call_id="recovered",
+        status_code=record.status_code,
+        error_category=record.error_category,
+        response_status=record.response_status,
+        finish_reason=record.finish_reason,
+        tokens_in=record.tokens_in,
+        tokens_out=record.tokens_out,
+    )
+
+    result, digest = _verdict_of(tmp_path, call)
+
+    assert digest.verdict == "healthy"
+    assert not digest.findings
+    assert digest.model_call_errors == 0
+
+
+# Cancelled calls that were not delivered in full keep failing, whatever else they carry.
+NOT_DELIVERED_AFTER_CANCEL = {
+    "cut 200, no status and no finish reason": {"status_code": 200, "response_status": None, "finish_reason": None},
+    "error status with a finish reason": {"status_code": 500, "response_status": None, "finish_reason": "stop"},
+    "error status with a completed status": {
+        "status_code": 500,
+        "response_status": "completed",
+        "finish_reason": None,
+    },
+    "failed response with a finish reason": {"status_code": 200, "response_status": "failed", "finish_reason": "stop"},
+    "error response with a finish reason": {"status_code": 200, "response_status": "error", "finish_reason": "stop"},
+    "cancelled response with a finish reason": {
+        "status_code": 200,
+        "response_status": "cancelled",
+        "finish_reason": "stop",
+    },
+}
+
+
+@pytest.mark.parametrize("shape", NOT_DELIVERED_AFTER_CANCEL.values(), ids=NOT_DELIVERED_AFTER_CANCEL.keys())
+def test_a_call_cancelled_before_a_complete_answer_stays_failed(tmp_path, shape):
+    """A 200 status only means the stream began; only a completed status or a finish reason proves an answer."""
+    cut = _call(
+        model_call_id="cut", error_category="cancelled", tokens_in=None, tokens_out=None, response=None, **shape
+    )
+
+    _, digest = _verdict_of(tmp_path, cut)
+
+    assert digest.verdict == "unhealthy"
+    assert "rollout_ended_on_failed_model_call" in {finding.check for finding in digest.findings}
+
+
 # The two shapes a context-length overflow takes in the capture.
 CONTEXT_OVERFLOWS = {
     # vLLM answers locally with an empty "length" completion when overflow errors are not propagated.

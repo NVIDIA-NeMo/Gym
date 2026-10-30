@@ -55,6 +55,10 @@ After each attempt, collection joins call references and projects the available 
 remain and a `trajectory_projection_failed` gap is recorded. LabBench's
 `multimodal_history_redacted` gap indicates that trajectory payload copies were omitted.
 
+Because `ng_trajectory` then holds the payloads, a capture file whose rollout covers it can be deleted
+with `retire_covered_model_call_captures`; see
+[Delete covered capture files](/main/model-server/model-call-capture#delete-covered-capture-files).
+
 The trajectory does not include the full compaction and sandbox records. Read
 `ng_agent_observations` for those details.
 

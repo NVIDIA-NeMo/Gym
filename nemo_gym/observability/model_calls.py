@@ -7,12 +7,19 @@ import asyncio
 import json
 import logging
 import time
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
+import orjson
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
+from nemo_gym.base_responses_api_model import (
+    CaptureStore,
+    ModelCallCaptureConfig,
+    reconstruct_complete_streamed_response,
+)
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 from nemo_gym.observability.verifiers import merge_verifier_call_observation
@@ -259,9 +266,44 @@ class ModelCallRecord(BaseModel):
     latency_ttft_ms: Optional[float] = None
 
 
+def _parse_json_body(raw_text: str, dialect: Optional[str]) -> Optional[dict[str, Any]]:
+    try:
+        parsed = orjson.loads(raw_text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _parse_streamed_body(raw_text: str, dialect: Optional[str]) -> Optional[dict[str, Any]]:
+    return reconstruct_complete_streamed_response(raw_text.encode(), dialect) if dialect else None
+
+
+# Each parser returns the response of a complete body in one wire format, or None.
+_CANCELLED_BODY_PARSERS = (_parse_json_body, _parse_streamed_body)
+
+
+def _parse_cancelled_call_body(exchange: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Parse the raw body of a cancelled call that already has a 2xx status and a complete body."""
+    if exchange.get("error_category") != "cancelled" or isinstance(exchange.get("response"), dict):
+        return None
+    status = exchange.get("status_code")
+    if type(status) is not int or not 200 <= status < 300:
+        return None
+    raw_text = exchange.get("response_raw")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return None
+    dialect = exchange.get("dialect")
+    for parse in _CANCELLED_BODY_PARSERS:
+        parsed = parse(raw_text, dialect if isinstance(dialect, str) else None)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> ModelCallRecord:
     """Map one captured exchange and its transport metadata into an observability record."""
-    raw_response = exchange.get("response")
+    cancelled_call_response = _parse_cancelled_call_body(exchange)
+    raw_response = cancelled_call_response if cancelled_call_response is not None else exchange.get("response")
     response = raw_response if isinstance(raw_response, dict) else {}
     tokens = extract_token_stats(response.get("usage"))
     cache_hit, cached_tokens = _cache_signal(response.get("usage"))
@@ -313,7 +355,11 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         request=raw_request if isinstance(raw_request, dict) else None,
         response=raw_response if isinstance(raw_response, dict) else None,
         request_raw=exchange.get("request_raw") if isinstance(exchange.get("request_raw"), str) else None,
-        response_raw=exchange.get("response_raw") if isinstance(exchange.get("response_raw"), str) else None,
+        response_raw=(
+            exchange.get("response_raw")
+            if cancelled_call_response is None and isinstance(exchange.get("response_raw"), str)
+            else None
+        ),
         tool_calls=tool_calls,
         reasoning_content=reasoning_content,
         cache_hit=cache_hit,
@@ -392,6 +438,12 @@ def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
 def observability_enabled_from_config(global_config_dict: Any) -> bool:
     """Return the run-wide ``observability_enabled`` flag directly, without going through capture dirs."""
     return ModelCallCaptureConfig.model_validate(global_config_dict).observability_enabled
+
+
+def retire_covered_model_call_captures_from_config(global_config_dict: Any) -> bool:
+    """Return whether capture files are deleted once the persisted rollout fully covers them."""
+    config = ModelCallCaptureConfig.model_validate(global_config_dict)
+    return config.observability_enabled and config.retire_covered_model_call_captures
 
 
 # How long a reader waits for writes already claimed by the model server to land. A claimed
@@ -558,6 +610,143 @@ def merge_model_call_capture_into_record(
         capture["gaps"] = [gap.model_dump(mode="json", exclude_none=True) for gap in gaps]
     record["ng_model_call_capture"] = capture
     return record
+
+
+_PAYLOAD_OMISSION_GAPS = frozenset({"multimodal_history_redacted", "trajectory_projection_failed"})
+
+
+def model_call_capture_uncovered_reasons(result: Mapping[str, Any]) -> list[str]:
+    """Return why a rollout record does not fully cover its capture file; empty when it does.
+
+    A record covers its capture file when collection read the file without a gap and every captured
+    call has its request and response in ``ng_trajectory.model_calls``.
+    """
+    capture = result.get("ng_model_call_capture")
+    if not isinstance(capture, Mapping):
+        return ["no_capture_attachment"]
+    reasons = [f"capture_gap:{gap.get('code')}" for gap in capture.get("gaps") or [] if isinstance(gap, Mapping)]
+
+    trajectory = result.get("ng_trajectory")
+    if not isinstance(trajectory, Mapping):
+        return [*reasons, "no_trajectory"]
+    payload_gaps = []
+    for source in (trajectory, result.get(NG_AGENT_OBSERVATIONS_KEY)):
+        gaps = source.get("gaps") if isinstance(source, Mapping) else None
+        for gap in gaps or []:
+            if isinstance(gap, Mapping) and gap.get("code") in _PAYLOAD_OMISSION_GAPS:
+                payload_gaps.append(f"payload_gap:{gap['code']}")
+    if payload_gaps:
+        # The gap already says the payloads were left out, so each call lacking one adds nothing.
+        return [*reasons, *payload_gaps]
+
+    with_payload = {
+        call.get("model_call_id")
+        for call in trajectory.get("model_calls") or []
+        if isinstance(call, Mapping) and call.get("request") is not None and call.get("response") is not None
+    }
+    for call in capture.get("calls") or []:
+        call_id = call.get("model_call_id") if isinstance(call, Mapping) else None
+        if call_id is None:
+            reasons.append("call_without_id")
+        elif call_id not in with_payload:
+            reasons.append(f"call_without_payload:{call_id}")
+    return reasons
+
+
+@dataclass(frozen=True)
+class CaptureSnapshot:
+    """Where a rollout's capture file was and how large it was just before collection read it."""
+
+    directory: Path
+    size: int
+
+
+def snapshot_model_call_capture(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureSnapshot]:
+    """Record the capture file's size; take it before merging, so a row appended later changes the size."""
+    for directory in capture_dirs:
+        size = CaptureStore(directory).size(rollout_id)
+        if size is not None:
+            return CaptureSnapshot(directory=directory, size=size)
+    return None
+
+
+def shared_capture_rollout_ids(rows: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Capture keys that more than one dispatched row maps to; one row's delete would take the other's calls."""
+    counts: Counter = Counter()
+    for row in rows:
+        try:
+            rollout_id = maybe_rollout_id_from_run_body(row)
+        except (TypeError, ValueError):
+            continue
+        if rollout_id:
+            counts[rollout_id] += 1
+    return {rollout_id for rollout_id, count in counts.items() if count > 1}
+
+
+class CaptureRetirementBatch:
+    """Deletes a rollout's capture file once the persisted rollout holds everything in it.
+
+    ``add`` judges each rollout from the rollout itself (``model_call_capture_uncovered_reasons``) and
+    queues it. ``flush`` makes the queued rollouts durable with one sync, then deletes the capture file of
+    every rollout that covers it. A file stays when the rollout does not cover it, when it grew since its
+    snapshot, or when a call of the rollout still holds a pending write. An unflushed queue deletes nothing.
+    """
+
+    def __init__(self, *, max_size: int = 100, max_age_s: float = 5.0) -> None:
+        self._max_size = max_size
+        self._max_age_s = max_age_s
+        self._pending: list[tuple[str, Optional[CaptureSnapshot], list[str]]] = []
+        self._last_flush = time.monotonic()
+        self.retired = 0
+        self.kept: Counter = Counter()
+
+    def add(
+        self,
+        rollout_id: str,
+        result: Mapping[str, Any],
+        snapshot: Optional[CaptureSnapshot],
+        *,
+        shares_capture_key: bool = False,
+    ) -> None:
+        """Queue a persisted rollout; only its keep-or-delete verdict is retained, not the rollout."""
+        reasons = model_call_capture_uncovered_reasons(result)
+        if shares_capture_key:
+            reasons = ["rollout_id_shared", *reasons]
+        if snapshot is None:
+            reasons.append("no_capture_file")
+        self._pending.append((rollout_id, snapshot, reasons))
+
+    def due(self) -> bool:
+        return bool(self._pending) and (
+            len(self._pending) >= self._max_size or time.monotonic() - self._last_flush >= self._max_age_s
+        )
+
+    def flush(self, make_rollouts_durable: Callable[[], None]) -> None:
+        """Make the queued rollouts durable, then delete the capture files that nothing keeps."""
+        if not self._pending:
+            return
+        make_rollouts_durable()
+        # One scan per capture directory answers "is a write pending?" for every file in the batch.
+        pending_by_directory: dict[Path, set[str]] = {}
+        for rollout_id, snapshot, keep_reasons in self._pending:
+            if not keep_reasons:
+                try:
+                    store = CaptureStore(snapshot.directory)
+                    if snapshot.directory not in pending_by_directory:
+                        pending_by_directory[snapshot.directory] = store.pending_rollout_ids()
+                    kept = store.delete_if_unchanged(
+                        rollout_id, snapshot.size, pending_rollout_ids=pending_by_directory[snapshot.directory]
+                    )
+                except OSError:
+                    logger.warning("Could not delete the model-call capture of rollout %s.", rollout_id, exc_info=True)
+                    kept = "delete_failed"
+                keep_reasons = [kept] if kept else []
+            if keep_reasons:
+                self.kept.update({reason.partition(":")[0] for reason in keep_reasons})
+            else:
+                self.retired += 1
+        self._pending.clear()
+        self._last_flush = time.monotonic()
 
 
 def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:

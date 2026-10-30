@@ -1119,6 +1119,60 @@ class TestRolloutCollection:
             "response_status": "completed",
         }
 
+    def test_a_multi_choice_chat_stream_keeps_both_choices_in_the_persisted_payload_that_retirement_relies_on(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        from nemo_gym.base_responses_api_model import CaptureStore, _reconstruct_streamed_response
+        from nemo_gym.observability.model_calls import (
+            merge_model_call_capture_into_record,
+            model_call_capture_uncovered_reasons,
+        )
+
+        chunks = [
+            {
+                "id": "chatcmpl-n2",
+                "model": "m",
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant", "content": "a"}},
+                    {"index": 1, "delta": {"role": "assistant", "content": "b"}},
+                ],
+            },
+            {
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"},
+                    {"index": 1, "delta": {}, "finish_reason": "stop"},
+                ]
+            },
+            {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}},
+        ]
+        raw = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+        CaptureStore(tmp_path).record(
+            "2-3",
+            {
+                "model_call_id": "call-1",
+                "dialect": "chat",
+                "status_code": 200,
+                "request": {"messages": [{"role": "user", "content": "hi"}], "n": 2},
+                "response": _reconstruct_streamed_response(raw.encode(), "chat"),
+                "response_raw": raw,
+            },
+        )
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        result = dict(row)
+
+        merge_model_call_capture_into_record(result, [tmp_path], include_payloads=True)
+        _attach_trajectory_record(row, result)
+
+        # Retirement deletes the capture file once the rollout covers it, so the rollout must hold both answers.
+        [call] = result["ng_trajectory"]["model_calls"]
+        assert [(choice["index"], choice["message"]["content"]) for choice in call["response"]["choices"]] == [
+            (0, "a"),
+            (1, "b"),
+        ]
+        assert model_call_capture_uncovered_reasons(result) == []
+
     def test_trajectory_projection_failure_preserves_rollout(self) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
         result = {
@@ -5865,6 +5919,381 @@ class TestRolloutCollection:
         assert store.read("0-0")[0]["request"]["input"][0]["type"] == "input_image"
         if redact_payloads:
             assert "data:image/png;base64,secret" not in orjson.dumps(results[0]).decode()
+
+    @pytest.mark.parametrize(
+        "global_config_extra, redact_payloads, expect_deleted",
+        [
+            pytest.param({"retire_covered_model_call_captures": True}, False, True, id="covered, flag on"),
+            pytest.param({}, False, False, id="covered, flag off by default"),
+            pytest.param({"retire_covered_model_call_captures": True}, True, False, id="redacted payloads"),
+        ],
+    )
+    async def test_run_from_config_deletes_a_covered_capture_file_only_when_asked(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        global_config_extra: dict,
+        redact_payloads: bool,
+        expect_deleted: bool,
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"observability_enabled": True, "model_call_capture_dir": str(capture_dir), **global_config_extra},
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                store.record(
+                    "0-0",
+                    {"model_call_id": "call", "dialect": "responses", "request": {"input": "hi"}, "response": {}},
+                )
+                result = {"response": {"usage": {}}}
+                if redact_payloads:
+                    result["ng_trajectory"] = {
+                        "schema_version": "1.0",
+                        "task_id": "0",
+                        "rollout_id": "0-0",
+                        "gaps": [{"code": "multimodal_history_redacted"}],
+                    }
+                future = Future()
+                future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                return [future]
+
+        results = await Helper().run_from_config(config)
+
+        assert store.path_for("0-0").exists() is not expect_deleted
+        # The persisted rollout carries the call whether or not its capture file is kept.
+        assert [call["model_call_id"] for call in results[0]["ng_model_call_capture"]["calls"]] == ["call"]
+
+    async def test_run_from_config_deletes_each_rollouts_capture_file_by_its_own_outcome(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+                "retire_covered_model_call_captures": True,
+            },
+        )
+        kinds = ["covered", "redacted", "failed"]
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}, "kind": kind}
+                )
+                + b"\n"
+                for kind in kinds
+            )
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    rollout_id = f"{example[TASK_INDEX_KEY_NAME]}-0"
+                    store.record(
+                        rollout_id,
+                        {"model_call_id": "call", "dialect": "responses", "request": {"input": "hi"}, "response": {}},
+                    )
+                    if example["kind"] == "failed":
+                        result = {NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, "_ng_failure_message": "boom"}
+                    else:
+                        result = {"response": {"usage": {}}}
+                    if example["kind"] == "redacted":
+                        result["ng_trajectory"] = {
+                            "schema_version": "1.0",
+                            "task_id": rollout_id,
+                            "rollout_id": rollout_id,
+                            "gaps": [{"code": "multimodal_history_redacted"}],
+                        }
+                    future = Future()
+                    future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                    futures.append(future)
+                return futures
+
+        await Helper().run_from_config(config)
+
+        assert [store.path_for(f"{index}-0").exists() for index in range(3)] == [False, True, True]
+        # The failed rollout produced no rollout, so nothing waited to be deleted for it.
+        assert "Model-call capture files: 1 deleted, kept {'payload_gap': 1}" in capsys.readouterr().out
+
+    async def test_run_from_config_leaves_queued_capture_deletions_undone_when_the_run_aborts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+                "retire_covered_model_call_captures": True,
+            },
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes((orjson.dumps(source_row) + b"\n") * 2)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                first, second = examples
+                store.record(
+                    "0-0",
+                    {"model_call_id": "call", "dialect": "responses", "request": {}, "response": {}},
+                )
+                done = Future()
+                done.set_result(
+                    _CompletedRollout(row=first, result={"response": {"usage": {}}}, rollout_latency_ms=None)
+                )
+                crashed = Future()
+                crashed.set_exception(RuntimeError("collection aborted"))
+                return [done, crashed]
+
+        with pytest.raises(RuntimeError, match="collection aborted"):
+            await Helper().run_from_config(config)
+
+        # The first rollout is covered, but its deletion was still queued when the run aborted.
+        assert store.path_for("0-0").exists()
+
+    @pytest.mark.parametrize("strip", [False, True])
+    async def test_run_from_config_keeps_token_metadata_once_per_rollout_only_when_asked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strip: bool
+    ) -> None:
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {"strip_duplicate_token_metadata": True} if strip else {},
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        output_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True
+        )
+        from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
+
+        item = {
+            "id": "msg-1",
+            "type": "message",
+            "prompt_token_ids": [101, 102],
+            "generation_token_ids": [201, 202, 203],
+            "generation_log_probs": [-0.5, -0.25, -0.125],
+        }
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                trajectory = TrajectoryRecord(
+                    task_id="0",
+                    rollout_id="0-0",
+                    turns=[
+                        TrajectoryTurn(
+                            invocation_id="root",
+                            task_id="0",
+                            rollout_id="0-0",
+                            turn_no=1,
+                            timestamp=1.0,
+                            step_count=0,
+                            answer=[dict(item)],
+                        )
+                    ],
+                )
+                result = {
+                    "response": {"output": [dict(item)]},
+                    "ng_trajectory": trajectory.model_dump(mode="json"),
+                }
+                future = Future()
+                future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        written = orjson.loads(output_fpath.read_bytes().splitlines()[0])
+        assert written["response"]["output"][0]["generation_token_ids"] == [201, 202, 203]
+        # The token ids appear once in the line that is written when stripping is on, twice otherwise.
+        assert output_fpath.read_bytes().count(b"[201,202,203]") == (1 if strip else 2)
+
+    @pytest.mark.parametrize("redact_payloads", [False, True])
+    async def test_run_from_config_collects_a_cancelled_call_with_its_token_metadata_kept_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, redact_payloads: bool
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.config.config_types import ModelServerRef
+        from nemo_gym.rollout_observability import ModelCallRef, TrajectoryRecord, TrajectoryTurn
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+                "retire_covered_model_call_captures": True,
+                "strip_duplicate_token_metadata": True,
+            },
+        )
+        source_row = {"responses_create_params": {"input": []}, AGENT_REF_KEY_NAME: {"name": "agent"}}
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(orjson.dumps(source_row) + b"\n")
+        output_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True
+        )
+        item = {
+            "id": "msg-1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "ok"}],
+            "prompt_token_ids": [101, 102],
+            "generation_token_ids": [201, 202, 203],
+            "generation_log_probs": [-0.5, -0.25, -0.125],
+        }
+        usage = {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19}
+        policy_model = {"type": "responses_api_models", "name": "policy_model"}
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                [example] = examples
+                # The call was cancelled after the model had answered: the capture holds only the raw body.
+                body = {"id": "resp-1", "status": "completed", "usage": usage, "output": [dict(item)]}
+                store.record(
+                    "0-0",
+                    {
+                        "model_call_id": "call-1",
+                        "dialect": "responses",
+                        "model_ref": policy_model,
+                        "status_code": 200,
+                        "error_category": "cancelled",
+                        "request": {"input": "hi"},
+                        "response": None,
+                        "response_raw": orjson.dumps(body).decode(),
+                    },
+                )
+                trajectory = TrajectoryRecord(
+                    task_id="0",
+                    rollout_id="0-0",
+                    turns=[
+                        TrajectoryTurn(
+                            invocation_id="root",
+                            task_id="0",
+                            rollout_id="0-0",
+                            turn_no=1,
+                            timestamp=1.0,
+                            step_count=0,
+                            answer=[dict(item)],
+                            model_calls=[ModelCallRef(model_ref=ModelServerRef(**policy_model), response_id="resp-1")],
+                        )
+                    ],
+                    gaps=[{"code": "multimodal_history_redacted"}] if redact_payloads else [],
+                )
+                result = {
+                    "response": {"output": [dict(item)]},
+                    "ng_trajectory": trajectory.model_dump(mode="json"),
+                }
+                future = Future()
+                future.set_result(_CompletedRollout(row=example, result=result, rollout_latency_ms=None))
+                return [future]
+
+        await Helper().run_from_config(config)
+
+        written_bytes = output_fpath.read_bytes()
+        written = orjson.loads(written_bytes.splitlines()[0])
+        # The cancelled call's tokens and response id come from its raw body, so it matches the agent's turn.
+        [call] = written["ng_model_call_capture"]["calls"]
+        assert (call["response_id"], call["tokens_in"], call["tokens_out"]) == ("resp-1", 12, 7)
+        assert call["error_category"] == "cancelled"
+        assert written["ng_trajectory"]["turns"][0]["model_calls"][0]["response_id"] == "resp-1"
+        # The token metadata is kept once, on the response output.
+        assert written["response"]["output"][0]["generation_token_ids"] == [201, 202, 203]
+        assert written_bytes.count(b"[201,202,203]") == 1
+        assert written["ng_trajectory"]["turns"][0]["answer"][0]["id"] == "msg-1"
+        # The capture file goes only when the rollout holds its payloads.
+        assert store.path_for("0-0").exists() is redact_payloads
+
+    async def test_run_from_config_keeps_the_capture_file_that_several_rollouts_share(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.config.global_config import ROLLOUT_ID_KEY_NAME
+
+        capture_dir = tmp_path / "captures"
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "get_global_config_dict",
+            lambda: {
+                "observability_enabled": True,
+                "model_call_capture_dir": str(capture_dir),
+                "retire_covered_model_call_captures": True,
+            },
+        )
+        row = {
+            "responses_create_params": {"input": []},
+            AGENT_REF_KEY_NAME: {"name": "agent"},
+            ROLLOUT_ID_KEY_NAME: "shared-0",
+        }
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes((orjson.dumps(row) + b"\n") * 2)
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+        store = CaptureStore(capture_dir)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    store.record(
+                        "shared-0",
+                        {"model_call_id": "call", "dialect": "responses", "request": {}, "response": {}},
+                    )
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(row=example, result={"response": {"usage": {}}}, rollout_latency_ms=None)
+                    )
+                    futures.append(future)
+                return futures
+
+        await Helper().run_from_config(config)
+
+        assert store.path_for("shared-0").exists()
 
     async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

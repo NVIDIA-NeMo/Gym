@@ -1328,6 +1328,128 @@ def test_reconstruct_responses_sse_uses_terminal_envelope():
     assert _reconstruct_streamed_response(interim, "responses")["id"] == "r2"
 
 
+def _chat_stream_chunks():
+    """Two choices streamed interleaved; both use tool-call slot 0 for their own call."""
+    return [
+        {
+            "id": "chatcmpl-n2",
+            "model": "m",
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant", "content": "a"}},
+                {"index": 1, "delta": {"role": "assistant", "content": "b"}},
+            ],
+        },
+        {
+            "choices": [
+                {
+                    "index": 1,
+                    "delta": {
+                        "tool_calls": [{"index": 0, "id": "t1", "function": {"name": "f1", "arguments": '{"x":'}}]
+                    },
+                },
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{"index": 0, "id": "t0", "function": {"name": "f0", "arguments": '{"y":'}}]
+                    },
+                },
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "1}"}}]},
+                    "finish_reason": "tool_calls",
+                },
+                {
+                    "index": 1,
+                    "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "2}"}}]},
+                    "finish_reason": "stop",
+                },
+            ]
+        },
+        {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}},
+    ]
+
+
+def test_reconstruct_chat_sse_keeps_each_choice_apart_by_its_index():
+    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
+
+    raw = b"".join(_sse("", chunk) for chunk in _chat_stream_chunks()) + b"data: [DONE]\n\n"
+
+    resp = _reconstruct_streamed_response(raw, "chat")
+
+    assert [choice["index"] for choice in resp["choices"]] == [0, 1]
+    first, second = (choice["message"] for choice in resp["choices"])
+    assert (first["content"], second["content"]) == ("a", "b")
+    assert first["tool_calls"] == [
+        {"id": "t0", "type": "function", "function": {"name": "f0", "arguments": '{"y":1}'}}
+    ]
+    assert second["tool_calls"] == [
+        {"id": "t1", "type": "function", "function": {"name": "f1", "arguments": '{"x":2}'}}
+    ]
+    assert [choice["finish_reason"] for choice in resp["choices"]] == ["tool_calls", "stop"]
+    assert resp["id"] == "chatcmpl-n2" and resp["usage"]["total_tokens"] == 8
+
+
+def test_reconstruct_chat_sse_still_joins_a_single_choice_from_its_fragments():
+    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
+
+    chunks = [
+        {"id": "c1", "model": "m", "choices": [{"index": 0, "delta": {"role": "assistant", "refusal": "I cannot "}}]},
+        {"choices": [{"index": 0, "delta": {"refusal": "help with that."}}]},
+        {
+            "choices": [
+                {"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "c", "function": {"name": "get_weather"}}]}}
+            ]
+        },
+        {"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"city":'}}]}}]},
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"tool_calls": [{"index": 0, "function": {"arguments": '"SF"}'}}]},
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+        {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}},
+    ]
+
+    resp = _reconstruct_streamed_response(b"".join(_sse("", c) for c in chunks), "chat")
+
+    [choice] = resp["choices"]
+    assert choice["index"] == 0 and choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["content"] is None
+    assert choice["message"]["refusal"] == "I cannot help with that."
+    assert choice["message"]["tool_calls"][0]["function"] == {"name": "get_weather", "arguments": '{"city":"SF"}'}
+    assert resp["id"] == "c1" and resp["usage"]["total_tokens"] == 3
+
+
+def test_a_captured_multi_choice_chat_stream_keeps_both_choices_in_the_parsed_response(tmp_path):
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def _stream(body: dict = Body()) -> StreamingResponse:
+        async def gen():
+            for chunk in _chat_stream_chunks():
+                yield _sse("", chunk)
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    _install_capture(app, tmp_path)
+
+    assert TestClient(app).post("/ng-rollout/4-0/v1/chat/completions", json={"stream": True}).status_code == 200
+
+    [record] = CaptureStore(tmp_path).read("4-0")
+    assert [choice["message"]["content"] for choice in record["response"]["choices"]] == ["a", "b"]
+    assert [choice["index"] for choice in record["response"]["choices"]] == [0, 1]
+
+
 def test_reconstruct_streamed_response_best_effort_none():
     from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 

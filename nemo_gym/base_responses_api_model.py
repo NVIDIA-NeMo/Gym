@@ -38,7 +38,7 @@ from abc import abstractmethod
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar, Iterable, Literal, NotRequired, Optional, TypedDict
+from typing import Any, ClassVar, Collection, Iterable, Literal, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -982,6 +982,8 @@ class ModelCallCaptureConfig(BaseModel):
 
     observability_enabled: bool = False
     model_call_capture_dir: Optional[Path] = None
+    # Delete a rollout's capture file once the persisted rollout fully covers it.
+    retire_covered_model_call_captures: bool = False
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -1007,6 +1009,20 @@ def _validate_rollout_id(rollout_id: str) -> str:
     if not rollout_id or any(not (char.isascii() and (char.isalnum() or char in "._-")) for char in rollout_id):
         raise ValueError(f"Invalid rollout id: {rollout_id!r}")
     return rollout_id
+
+
+# A write retries when the file it opened was deleted while it waited for the lock; each retry needs another delete.
+_RECORD_ATTEMPTS = 5
+
+
+def _path_names_open_file(path: Path, handle: Any) -> bool:
+    """Whether the path still names the file this handle opened, rather than a deleted or replaced one."""
+    try:
+        current = os.stat(path)
+    except FileNotFoundError:
+        return False
+    opened = os.fstat(handle.fileno())
+    return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
 
 
 class CaptureStore:
@@ -1057,6 +1073,67 @@ class CaptureStore:
         pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
         return any(self._root.glob(pattern))
 
+    def size(self, rollout_id: str) -> Optional[int]:
+        """Byte size of the rollout's capture file, or None when there is none."""
+        try:
+            return self.path_for(rollout_id).stat().st_size
+        except FileNotFoundError:
+            return None
+
+    def pending_rollout_ids(self) -> set[str]:
+        """The rollouts with a claimed write outstanding, from a single scan of the directory.
+
+        Answers for every rollout what ``has_pending`` answers for one, which globs the whole directory
+        each time; use it when checking many rollouts.
+        """
+        rollout_ids: set[str] = set()
+        with os.scandir(self._root) as entries:
+            for entry in entries:
+                if entry.name.endswith(_PENDING_SUFFIX):
+                    # The token after the last dot has no dots; the rollout id may.
+                    rollout_id = entry.name[: -len(_PENDING_SUFFIX)].rpartition(".")[0]
+                    if rollout_id:
+                        rollout_ids.add(rollout_id)
+        return rollout_ids
+
+    def delete_if_unchanged(
+        self, rollout_id: str, expected_size: int, *, pending_rollout_ids: Optional[Collection[str]] = None
+    ) -> Optional[str]:
+        """Delete the rollout's capture file unless it grew or a claimed write is outstanding.
+
+        Returns None once deleted, or the reason the file was kept. The append lock is held across the
+        check and the delete, so a writer that has not yet appended waits instead of racing it. A caller
+        deleting many files passes ``pending_rollout_ids`` from one scan instead of globbing per file.
+
+        A claim made after that scan is not seen here, and need not be: a writer that opened the file
+        before the delete notices under the lock that the path no longer names its file, and appends to a
+        new file instead (see ``record``), so an admitted write is never lost to this delete.
+        """
+        path = self.path_for(rollout_id)
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError:
+            return "capture_file_missing"
+        with handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                has_pending = (
+                    rollout_id in pending_rollout_ids
+                    if pending_rollout_ids is not None
+                    else self.has_pending(rollout_id)
+                )
+                if has_pending:
+                    return "write_pending"
+                if not _path_names_open_file(path, handle):
+                    # Another delete and a new append got here first; the file at the path is not the one judged.
+                    return "capture_file_changed"
+                if os.fstat(handle.fileno()).st_size != expected_size:
+                    return "capture_file_changed"
+                path.unlink()
+                return None
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def clear_all_pending(self, rollout_id: str) -> None:
         pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
         for marker in self._root.glob(pattern):
@@ -1068,17 +1145,26 @@ class CaptureStore:
         ``flock`` serializes appends to the same rollout across worker processes and threads while
         allowing independent rollouts to write concurrently. This does blocking file IO + fsync,
         so callers run it off the event loop (the capture middleware uses ``asyncio.to_thread``).
+
+        The file is opened before the lock is taken, so a delete (``delete_if_unchanged``) can unlink it
+        while this writer waits. The lock holder checks that the path still names the file it opened and
+        otherwise opens the path again, which creates a new file, so the exchange is never written to a
+        file nothing can reach.
         """
         line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
         path = self.path_for(rollout_id)
-        with path.open("ab") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        for _ in range(_RECORD_ATTEMPTS):
+            with path.open("ab") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    if _path_names_open_file(path, handle):
+                        handle.write(line)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                        return
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        raise OSError(f"The capture file for rollout {rollout_id} was removed {_RECORD_ATTEMPTS} times while writing.")
 
     def read(self, rollout_id: str) -> list[dict[str, Any]]:
         path = self.path_for(rollout_id)
@@ -1373,17 +1459,11 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
 
 
 def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Rebuild a Chat Completions response from streamed chunks."""
-    content_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    refusal_parts: list[str] = []
-    tool_calls: dict[int, dict[str, Any]] = {}
+    """Rebuild a Chat Completions response from streamed chunks, keeping every choice apart by its index."""
+    choices: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
     model: Optional[str] = None
     response_id: Optional[str] = None
-    role = "assistant"
-    finish_reason: Optional[str] = None
-    saw_choice = False
     for chunk in events:
         model = chunk.get("model") or model
         if isinstance(chunk.get("id"), str):
@@ -1393,18 +1473,29 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
         for choice in chunk.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
-            saw_choice = True
+            index = choice.get("index")
+            state = choices.setdefault(
+                index if type(index) is int else 0,
+                {
+                    "content": [],
+                    "reasoning": [],
+                    "refusal": [],
+                    "tool_calls": {},
+                    "role": "assistant",
+                    "finish_reason": None,
+                },
+            )
             delta = choice.get("delta") or {}
-            role = delta.get("role") or role
+            state["role"] = delta.get("role") or state["role"]
             if delta.get("content"):
-                content_parts.append(delta["content"])
+                state["content"].append(delta["content"])
             if delta.get("refusal"):
-                refusal_parts.append(delta["refusal"])
+                state["refusal"].append(delta["refusal"])
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning:
-                reasoning_parts.append(reasoning)
+                state["reasoning"].append(reasoning)
             for tc in delta.get("tool_calls") or []:
-                slot = tool_calls.setdefault(
+                slot = state["tool_calls"].setdefault(
                     tc.get("index", 0), {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
                 )
                 if tc.get("id"):
@@ -1415,21 +1506,21 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
             if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-    if not saw_choice:
+                state["finish_reason"] = choice["finish_reason"]
+    if not choices:
         return None
-    message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
-    if reasoning_parts:
-        message["reasoning_content"] = "".join(reasoning_parts)
-    if refusal_parts:
-        message["refusal"] = "".join(refusal_parts)
-    if tool_calls:
-        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-    result: dict[str, Any] = {
-        "object": "chat.completion",
-        "model": model,
-        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-    }
+    rebuilt_choices = []
+    for index in sorted(choices):
+        state = choices[index]
+        message: dict[str, Any] = {"role": state["role"], "content": "".join(state["content"]) or None}
+        if state["reasoning"]:
+            message["reasoning_content"] = "".join(state["reasoning"])
+        if state["refusal"]:
+            message["refusal"] = "".join(state["refusal"])
+        if state["tool_calls"]:
+            message["tool_calls"] = [state["tool_calls"][i] for i in sorted(state["tool_calls"])]
+        rebuilt_choices.append({"index": index, "message": message, "finish_reason": state["finish_reason"]})
+    result: dict[str, Any] = {"object": "chat.completion", "model": model, "choices": rebuilt_choices}
     if response_id is not None:
         result["id"] = response_id
     if usage:
@@ -1460,6 +1551,15 @@ def _reconstruct_streamed_response(raw: bytes, dialect: str) -> Optional[dict[st
     if dialect == "responses":
         return _reconstruct_responses_sse(events)
     return _reconstruct_chat_sse(events)
+
+
+def reconstruct_complete_streamed_response(raw: bytes, dialect: str) -> Optional[dict[str, Any]]:
+    """Reassemble a streamed (SSE) body only if it ended with a non-error terminal event for its dialect."""
+    if dialect not in _TERMINAL_SSE_LINES:
+        return None
+    if _consume_terminal_sse_event(bytearray(raw), dialect) not in ("complete", "incomplete"):
+        return None
+    return _reconstruct_streamed_response(raw, dialect)
 
 
 def _record(
