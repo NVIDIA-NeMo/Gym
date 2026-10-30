@@ -56,9 +56,51 @@ Controls and limits:
   Provider context-overflow errors remain model errors; the adapter does not
   translate them to LangChain's more aggressive overflow retry.
 
-Validation artifacts and real-pairing results are recorded in the implementation
-PR. Full TB2.1 qualification requires all 89 tasks with eight repeats; passing the
-scripted probes alone does not establish a benchmark score.
+### Validation scope (October 30, 2026)
+
+The sandbox implementation is experimental. Full TB2.1 and Observability
+qualification remain incomplete. The
+[evaluation record](evaluation-2026-10-30.md) summarizes the retained results and
+source-specific limits. Raw artifacts and the full internal handoff remain with
+the evaluation owner. No sandbox-integration PR has been opened.
+
+Evidence belongs to the exact runtime source tested:
+
+| Check | Benchmark source `052b2cfda2a5128a18352f1d1df54f95e7c5ff78` | Observer fix `6d5e3186d05836fb80b5ee18f6f769a8f881aa32` |
+| --- | --- | --- |
+| Adapter tests | 71 passed | 74 passed |
+| Controlled conformance | Seven unchanged scenarios; 535 checks passed, 74 N/A | Same scenario and check counts |
+| Configuration / session checks | 474 passed, two skipped | Two focused session checks passed; broader suite not rerun |
+| Repository pre-commit | Passed | Passed |
+| Real TB smoke | `regex-log`: reward 1; health, strict evidence and profile passed | Failed at sandbox seed, before model execution; zero rollouts and captures |
+| Configuration-only second pairing | SWE-bench Pro NodeBB: valid zero; health, strict evidence and profile passed | Not rerun |
+| Full TB2.1 | Both collection segments interrupted; incomplete grade coverage | Not evaluated |
+
+The frozen benchmark source produced 306 passes and 246 valid zeros. Of the 712
+planned task/repeat identities, 160 have unavailable grades: one OOM, four
+interrupted original episodes, 33 continuation sandbox-seed failures and 122
+missing continuation records with unknown dispatch status. No failed or
+interrupted episode was retried. All identities can be accounted for while both
+controller-finished flags remain false; accounting closure does not make the
+89-task, eight-repeat benchmark complete. Missing grades are not verifier zeros.
+
+The 552 graded rows include 467 healthy and 85 unhealthy outcomes; strict evidence
+fulfilled 493 rows and failed 59. Native validation-error observations were fixed
+separately in `6d5e3186d`, but the earlier records remain unchanged. Its fresh
+real-model smoke failed before inference: collector exit 1, evidence exit 2 and
+strict profile exit 1. Health exit 0 checked zero rows and does not qualify it.
+Neither the original benchmark scores nor its passing smoke qualify the later fix.
+
+Additional retained limits are ReasoningGym's missing completion field, Partner
+IF's verifier-judge ownership failure and the shared typed-trajectory identity
+gap. SWE-bench Pro composition briefly shared the original model allocation with
+TB2.1, so scheduling is also a comparison limitation. See the evaluation record
+for the source-specific evidence and the sandbox-seed failure finding.
+
+These results do not establish a supported TB2.1 pairing or complete Observability
+qualification. The full-evaluation, saved-evidence, fresh real-model smoke and
+benchmark-owner review gates remain open. Pairing catalog and `allowed_agents`
+claims must wait for those gates; this documentation does not change them.
 
 ## In-process custom graphs
 
