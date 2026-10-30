@@ -13,9 +13,17 @@ It preserves the existing command restrictions; run configs can override individ
 permissions under `opencode_agent.responses_api_agents.opencode_agent.opencode_config.permission`.
 These command filters are not network or filesystem isolation.
 They are adapted from Gym's benchmark runner restrictions, not OpenCode defaults,
-and apply to local calls too. Subagents (`task`) are intentionally enabled for this
+and apply to local calls too. The profile also denies the `webfetch`, `websearch` and
+`skill` tools. Subagents (`task`) are intentionally enabled for this
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
-profile still disables them. Use explicit tool overrides when comparing scores.
+profile still disables them. Use explicit `permission` overrides when comparing scores.
+The command filters were written for SWE-style repositories: they also deny Git history
+commands (`git reflog`, `git show`, `git log --all`, ...) and every `git fetch`, which some
+terminal tasks need (for example recovering a lost commit or fetching a local bundle).
+Allow those per run with `permission.bash` rules when a benchmark requires them.
+Restrict tools with `permission` rules, not a `tools` map: OpenCode 1.17.11 places the keys
+a `tools` map names before the permission map's `"*"` rule and applies the last matching rule,
+so `"*": allow` then overrides every rule for those keys (naming `bash` voids every command filter).
 
 Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
 and configuration for their Resources-owned lifecycle.

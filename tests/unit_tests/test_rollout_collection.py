@@ -96,6 +96,7 @@ from nemo_gym.rollout_collection import (
     NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
     NG_RESULT_TYPE_KEY,
+    NG_TASK_ID_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
     PROVENANCE_KEYS,
@@ -10728,7 +10729,8 @@ class TestEnvironmentServerRouting:
 
         assert result == payload
         assert post.await_args.kwargs["server_name"] == "environment"
-        assert AGENT_REF_KEY_NAME not in rows[0]
+        # run_examples names the bound agent on the row for its caller; the episode request below stays without it.
+        assert rows[0][AGENT_REF_KEY_NAME] == {"name": "hermes"}
         assert post.await_args.kwargs["json"] == {
             "episode_id": {"rollout_id": "0-0", "attempt": 0},
             "task": {
@@ -12505,3 +12507,232 @@ def test_fallback_excludes_verifier_calls_with_conflicting_agent_ownership(with_
     # Do not repair conflicting ownership silently: the checker must still see both claims.
     assert [ref.model_call_id for ref in trajectory.invocations[0].model_calls] == call_ids
     assert trajectory.verifier_invocations[0].model_calls[0].model_dump(exclude_none=True) == judge_ref
+
+
+class TestRunExamplesMaterializedTasks:
+    """``run_examples`` is the interface NeMo RL drives: its materialized rows arrive straight from the dataset."""
+
+    @staticmethod
+    def _global_config() -> DictConfig:
+        return OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_environment": {"environment_servers": {"harbor": {"agent_server": {"name": "my_agent"}}}},
+                "other_environment": {"environment_servers": {"harbor": {"agent_server": {"name": "my_agent"}}}},
+                "environment_server_routes": {"my_taskset": "my_environment"},
+            }
+        )
+
+    @staticmethod
+    def _materialized_row(taskset: str = "my_taskset") -> dict:
+        return {
+            "task_id": {"taskset": taskset, "task_id": "task-1"},
+            "task_input": {
+                "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
+                "task_data": {NG_DIGEST_KEY: "sha256:task"},
+            },
+            TASK_SOURCE_KEY_NAME: taskset,
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+        }
+
+    @staticmethod
+    def _reply(**outcome: object) -> dict:
+        return {
+            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "task_id": {"taskset": "my_taskset", "task_id": "task-1"},
+        } | outcome
+
+    def _install(self, monkeypatch: pytest.MonkeyPatch, reply: dict) -> AsyncMock:
+        post = AsyncMock(return_value=FakeResponse(200, reply))
+        install_fake_server_client(monkeypatch, post).global_config_dict = self._global_config()
+        return post
+
+    async def test_a_materialized_row_routes_by_taskset_and_names_the_bound_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reply = self._reply(result={"reward": 1.0})
+        post = self._install(monkeypatch, reply)
+
+        row, result = await next(RolloutCollectionHelper().run_examples([self._materialized_row()]))
+
+        assert post.await_args.kwargs["server_name"] == "my_environment"
+        body = post.await_args.kwargs["json"]
+        assert body["episode_id"] == {"rollout_id": "0-0", "attempt": 0}
+        assert body["task"]["task_id"] == {"taskset": "my_taskset", "task_id": "task-1"}
+        assert row[NG_ENVIRONMENT_SERVER_KEY] == "my_environment"
+        assert row[AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+        # The reply is returned exactly as the Environment Server sent it.
+        assert result == reply
+
+    async def test_a_row_carrying_its_bound_agent_is_routed_again(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A trainer keeps the agent_ref it was handed and sends the row again on a retry.
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+        row = self._materialized_row() | {AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+
+        await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert post.await_args.kwargs["server_name"] == "my_environment"
+        assert row[AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+
+    async def test_a_taskset_without_a_route_fails_before_dispatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+
+        with pytest.raises(ValueError, match="environment_server_routes.other_taskset"):
+            RolloutCollectionHelper().run_examples([self._materialized_row(), self._materialized_row("other_taskset")])
+
+        post.assert_not_awaited()
+
+    async def test_a_row_carrying_an_agent_still_needs_its_taskset_route(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The taskset route, not the row's agent, picks the Environment Server for a materialized row.
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+        row = self._materialized_row("other_taskset") | {AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+
+        with pytest.raises(ValueError, match="environment_server_routes.other_taskset"):
+            RolloutCollectionHelper().run_examples([row])
+
+        post.assert_not_awaited()
+
+    @pytest.mark.parametrize("named_by", ["caller", "row"])
+    async def test_an_environment_server_already_named_wins_over_the_taskset_route(
+        self, monkeypatch: pytest.MonkeyPatch, named_by: str
+    ) -> None:
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+        row = self._materialized_row()
+        if named_by == "row":
+            row[NG_ENVIRONMENT_SERVER_KEY] = "other_environment"
+        kwargs = {"environment_server_name": "other_environment"} if named_by == "caller" else {}
+
+        dispatched, _ = await next(RolloutCollectionHelper().run_examples([row], **kwargs))
+
+        assert dispatched[NG_ENVIRONMENT_SERVER_KEY] == "other_environment"
+        assert post.await_args.kwargs["server_name"] == "other_environment"
+
+    async def test_gyms_own_dispatch_leaves_materialized_rows_unattributed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `gym eval run` dispatches through the shared internal path; the records it stores keep no agent.
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+
+        completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([self._materialized_row()]))
+
+        assert post.await_args.kwargs["server_name"] == "my_environment"
+        assert completed.row[NG_ENVIRONMENT_SERVER_KEY] == "my_environment"
+        assert AGENT_REF_KEY_NAME not in completed.row
+
+    async def test_episode_records_resolve_a_result_to_the_stored_record(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, self._reply(result={"reward": 1.0, MASK_SAMPLE_KEY: False}))
+
+        row, record = await next(
+            RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True)
+        )
+
+        assert record == {
+            "reward": 1.0,
+            MASK_SAMPLE_KEY: False,
+            NG_TASK_ID_KEY: {"taskset": "my_taskset", "task_id": "task-1"},
+            NG_DIGEST_KEY: "sha256:task",
+        }
+        assert row[AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+
+    async def test_episode_records_mask_a_handled_failure_at_reward_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        failure = {"failure_reason": "agent unavailable", "terminal": False, "stage": "agent"}
+        self._install(monkeypatch, self._reply(failure=failure))
+
+        _, record = await next(
+            RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True)
+        )
+
+        assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert record["_ng_failure_message"] == "agent unavailable"
+        assert record["_ng_failure_stage"] == "agent"
+        assert record[NG_TERMINAL_KEY] is False
+        assert record[NG_DIGEST_KEY] == "sha256:task"
+        assert record["reward"] == 0.0
+        assert record[MASK_SAMPLE_KEY] is True
+
+    async def test_episode_records_keep_a_gym_built_result_unmasked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A row the dispatch budget never started keeps Gym's drained result, named by its inputs as gym eval run
+        # stores it; it is not an Environment Server failure, so it is not scored or masked here.
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+
+        _, record = await next(
+            RolloutCollectionHelper().run_examples(
+                [self._materialized_row()], dispatch_budget_s=0.0, episode_records=True
+            )
+        )
+
+        post.assert_not_awaited()
+        assert record[NG_DISPATCH_DRAINED_KEY] is True
+        assert record[NG_FAILURE_CLASS_KEY] == CANCELLED
+        assert record[NG_DIGEST_KEY] == "sha256:task"
+        assert "reward" not in record and MASK_SAMPLE_KEY not in record
+
+    async def test_episode_records_leave_a_flat_row_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reply = {"reward": 1.0, "response": {"id": "r"}}
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, reply)))
+
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], episode_records=True))
+
+        assert result == reply
+
+    async def test_episode_records_apply_to_drained_outcomes(self) -> None:
+        gate = asyncio.Event()
+        started = []
+        failure = {"failure_reason": "sandbox lost", "terminal": False}
+
+        async def rollout() -> _CompletedRollout:
+            started.append(True)
+            await gate.wait()
+            return _CompletedRollout(
+                row=self._materialized_row(), result=self._reply(failure=failure), rollout_latency_ms=None
+            )
+
+        internal = nemo_gym.rollout_collection._EagerCompletionIterator(iter([rollout()]), total=1)
+        completions = nemo_gym.rollout_collection._RowResultIterator(internal, episode_records=True)
+        waiter = asyncio.ensure_future(next(completions))
+        try:
+            while not started:
+                await asyncio.sleep(0)
+            gate.set()
+            await asyncio.sleep(0)  # The rollout has finished; the waiter has not claimed it.
+            [drained] = await completions.aclose_and_drain()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+
+            _, record = await drained
+
+            assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+            assert record["reward"] == 0.0
+            assert record[MASK_SAMPLE_KEY] is True
+        finally:
+            await completions.aclose()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+    async def test_episode_records_keep_every_drained_outcome_when_one_reply_cannot_be_converted(self) -> None:
+        loop = asyncio.get_running_loop()
+
+        def settled(reply: dict) -> asyncio.Future:
+            future = loop.create_future()
+            future.set_result(_CompletedRollout(row=self._materialized_row(), result=reply, rollout_latency_ms=None))
+            return future
+
+        reserved = self._reply(result={"reward": 1.0, "_ng_no_persist": True})
+        handled = self._reply(failure={"failure_reason": "sandbox lost", "terminal": False})
+        internal = MagicMock()
+        internal.aclose_and_drain = AsyncMock(return_value=[settled(reserved), settled(handled)])
+        completions = nemo_gym.rollout_collection._RowResultIterator(internal, episode_records=True)
+
+        unconvertible, converted = await completions.aclose_and_drain()
+
+        with pytest.raises(ValueError, match="reserved for rollout collection"):
+            await unconvertible
+        _, record = await converted
+        assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert record[MASK_SAMPLE_KEY] is True

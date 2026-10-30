@@ -23,19 +23,4 @@ opencode_agent:
       session_close_timeout_seconds: 60
       session_close_retry_window_seconds: 300
 
-      opencode_config:
-        tools:
-          bash: true
-          edit: true
-          read: true
-          glob: true
-          grep: true
-          write: true
-          apply_patch: true
-          webfetch: false
-          websearch: false
-          task: true
-          skill: false
-          todowrite: true
-
       datasets: []

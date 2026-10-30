@@ -52,6 +52,8 @@ FINGERPRINT_VERSION = 4
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
 _INSTRUCTION_ROLES = frozenset({"system", "developer"})
+# The tool OpenCode substitutes, in the history it sends back, for a call to a tool it does not offer.
+_UNAVAILABLE_TOOL_PLACEHOLDER = "invalid"
 
 
 def assistant_fingerprint(messages: list[dict]) -> str:
@@ -310,11 +312,37 @@ def _update_field(hasher: Any, tag: bytes, value: str) -> None:
     hasher.update(encoded)
 
 
+def _served_tool_name(name: str, arguments: str) -> str:
+    """Return the tool name the model was served, undoing OpenCode's unavailable-tool placeholder.
+
+    OpenCode echoes a call to a tool it does not offer as a call to its ``invalid`` tool with the
+    same ID and ``{"tool": <the served name>, "error": <message>}`` as arguments. Any other call
+    keeps its name, so a renamed call still cannot match.
+
+    This only moves the unversioned whole-turn key, never the strict fingerprint, so
+    ``FINGERPRINT_VERSION`` stays. A served output can itself hold a model-emitted call of exactly
+    this shape (rare: 4 of 118,502 served Terminal-Bench 2.1 calls); its turn key changes too, so a
+    lineage store written before this mapping disagrees with one replayed after it on such a call.
+    """
+    if name != _UNAVAILABLE_TOOL_PLACEHOLDER:
+        return name
+    try:
+        payload = json.loads(arguments)
+    except (TypeError, ValueError):
+        return name
+    if not isinstance(payload, dict) or set(payload) != {"tool", "error"}:
+        return name
+    served = payload["tool"]
+    return served if isinstance(served, str) and served and isinstance(payload["error"], str) else name
+
+
 def tool_call_turn_fingerprint(items: list[dict]) -> str:
     """Fingerprint a complete model turn while tolerating rewritten tool arguments.
 
     Every tool ID and name, their order, and all non-tool assistant content must
     agree. Missing/duplicate IDs abstain; they cannot identify a served call.
+    A call OpenCode rewrote into its unavailable-tool placeholder counts under the
+    name it was served with (``_served_tool_name``).
     Chat/Anthropic bundled turns and Responses items use the same canonical
     fields as the strict fingerprint. Empty assistant items remain accounted for.
     This fallback key supplements the versioned content fingerprint and the
@@ -334,12 +362,12 @@ def tool_call_turn_fingerprint(items: list[dict]) -> str:
         for content_type, payload in content:
             _update_field(hasher, b"\x00", content_type)
             _update_field(hasher, b"\x01", payload)
-        for call_id, name, _arguments in tools:
+        for call_id, name, arguments in tools:
             if not call_id or not name or call_id in seen_ids:
                 return ""
             seen_ids.add(call_id)
             _update_field(hasher, b"\x02", call_id)
-            _update_field(hasher, b"\x03", name)
+            _update_field(hasher, b"\x03", _served_tool_name(name, arguments))
     return hasher.hexdigest() if seen_ids else ""
 
 
