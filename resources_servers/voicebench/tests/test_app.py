@@ -11,8 +11,8 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.judge import judge_failsafe
-from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.voicebench.app import (
     VoiceBenchConfig,
     VoiceBenchServer,

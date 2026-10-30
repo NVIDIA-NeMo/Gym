@@ -185,7 +185,7 @@ def write_example_rollouts(example_rows: Sequence[Dict[str, Any]], output_path: 
     from unittest.mock import MagicMock
 
     from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
     from nemo_gym.server_utils import ServerClient
     from resources_servers.assaybench.app import (
         AssayBenchResourcesServer,

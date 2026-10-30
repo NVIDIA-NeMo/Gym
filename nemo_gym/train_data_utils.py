@@ -51,13 +51,14 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
 )
+from nemo_gym.core.episode import TaskId
 from nemo_gym.dataset_metrics import (
     DatasetMetricHook,
     DatasetMetricsHookError,
     DatasetMetricValue,
     load_dataset_metrics_hook,
 )
-from nemo_gym.episode_types import TaskId, is_materialized_task_row
+from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,

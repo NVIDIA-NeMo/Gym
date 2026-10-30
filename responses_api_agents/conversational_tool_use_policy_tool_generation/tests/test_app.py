@@ -24,7 +24,7 @@ from fastapi import Request, Response
 from omegaconf import OmegaConf
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.conversational_tool_use_policy_tool_generation.app import (
     PolicyToolGenerationAgent,
     PolicyToolGenerationAgentConfig,

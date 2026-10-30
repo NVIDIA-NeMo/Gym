@@ -8,7 +8,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
-from nemo_gym.episode_types import EpisodeFailure, EpisodeId
+from nemo_gym.core.episode import EpisodeId
+from nemo_gym.episode_types import EpisodeFailure
 
 
 class RolloutFailure(BaseModel):

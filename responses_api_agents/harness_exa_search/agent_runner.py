@@ -91,7 +91,7 @@ async def main() -> None:
 
     try:
         from nemo_gym.config import ModelServerRef, ResourcesServerRef
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
         from nemo_gym.server_utils import ServerClient
     except ModuleNotFoundError as exc:
         # This runs against the nemo-gym the sandbox image installed, which can predate the package

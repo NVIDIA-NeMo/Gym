@@ -31,8 +31,8 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     _AgentSessionRecord,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -40,6 +40,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseReasoningItem,
+    TaskId,
 )
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
@@ -831,7 +832,7 @@ class TestSigtermHandler:
 
     def test_interrupted_agent_id_cleared_when_run_conversation_raises(self, monkeypatch) -> None:
         import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1178,7 +1179,7 @@ class TestRolloutCorrelation:
         from fastapi.testclient import TestClient
 
         import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1245,14 +1246,14 @@ class TestMaxTokens:
         return agent, seen
 
     def test_max_tokens_passed_to_ai_agent(self, monkeypatch) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         agent, seen = self._agent_and_seen(monkeypatch, max_tokens=4096)
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["max_tokens"] == 4096
 
     def test_max_tokens_defaults_to_none(self, monkeypatch) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         agent, seen = self._agent_and_seen(monkeypatch)
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
@@ -1266,7 +1267,7 @@ class TestObservability:
     )
     def test_observation_failure_does_not_change_response(self, monkeypatch, terminal_backend, runtime_gap) -> None:
         import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1376,7 +1377,7 @@ class TestObservability:
 
     def test_observer_failure_does_not_mask_agent_exception(self, monkeypatch) -> None:
         import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)

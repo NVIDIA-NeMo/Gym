@@ -27,14 +27,15 @@ from pydantic import ValidationError
 from yarl import URL
 
 import resources_servers.genrm_compare.app as genrm
-from nemo_gym.judge import judge_failsafe
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    current_rollout_id,
+    rollout_context,
 )
+from nemo_gym.judge import judge_failsafe
 from nemo_gym.reward_profile import RewardProfiler
-from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
 from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member

@@ -34,7 +34,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field, field_validator
 
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import SandboxProvider, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.utils import cpu_cap_env, read_text

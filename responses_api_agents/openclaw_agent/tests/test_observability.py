@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,

@@ -42,7 +42,7 @@ from nemo_gym.config import (
     ResourcesServerRef,
     get_first_server_config_dict,
 )
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,

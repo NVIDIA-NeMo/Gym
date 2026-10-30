@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 from openai.types.responses import FunctionToolParam
 from pytest import approx, fixture
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,

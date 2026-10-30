@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from nemo_gym.agent_utils import uv_bootstrap
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,

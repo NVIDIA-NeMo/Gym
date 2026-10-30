@@ -31,15 +31,15 @@ from typing import Any, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field
 
-from nemo_gym import failure_kinds
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    failure_kinds,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 

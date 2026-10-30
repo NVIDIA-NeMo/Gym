@@ -84,7 +84,7 @@ from environment_servers.harbor.verifier import (
     _verifier_key,
     summing_components,
 )
-from nemo_gym import RESULTS_DIR, failure_kinds
+from nemo_gym import RESULTS_DIR
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
 from nemo_gym.atif_export import AtifExportError
@@ -112,8 +112,8 @@ from nemo_gym.config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse, TaskId, failure_kinds
+from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxAccess

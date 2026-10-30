@@ -5,7 +5,7 @@
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_models.genrm_model.app import GenRMModelConfig, GenRMModelMixin
 
 

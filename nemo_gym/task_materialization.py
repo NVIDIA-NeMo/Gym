@@ -13,7 +13,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.episode_types import TaskId
+from nemo_gym.core.episode import TaskId
 
 
 # Row fields that hold a task's own id, in precedence order.

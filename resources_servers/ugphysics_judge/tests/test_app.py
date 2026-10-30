@@ -38,7 +38,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pytest import approx, fixture
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
@@ -411,7 +411,7 @@ class TestServer:
         ``output_item.type != "message"`` skip and the
         ``content_item.type != "output_text"`` skip).
         """
-        from nemo_gym.openai_utils import NeMoGymResponseReasoningItem, NeMoGymSummary
+        from nemo_gym.core import NeMoGymResponseReasoningItem, NeMoGymSummary
 
         server_mock = MagicMock(spec=ServerClient)
         server = UGPhysicsJudgeResourcesServer(config=config, server_client=server_mock)
@@ -539,7 +539,7 @@ class TestServer:
 
         Covers line 305 (``if last_output.type != "message": return …``).
         """
-        from nemo_gym.openai_utils import NeMoGymResponseReasoningItem, NeMoGymSummary
+        from nemo_gym.core import NeMoGymResponseReasoningItem, NeMoGymSummary
 
         server_mock = MagicMock(spec=ServerClient)
         server = UGPhysicsJudgeResourcesServer(config=config, server_client=server_mock)

@@ -54,8 +54,8 @@ from nemo_gym.config import (
     ResourcesServerRef,
     get_first_server_config_dict,
 )
-from nemo_gym.failure_kinds import FailureStage
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    FailureStage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
