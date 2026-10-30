@@ -15,6 +15,8 @@
 import base64
 import hashlib
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +26,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from pytest import MonkeyPatch
+from swebench.harness.constants import END_TEST_OUTPUT, START_TEST_OUTPUT
 from swebench.harness.run_evaluation import make_test_spec
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
@@ -38,7 +41,11 @@ from resources_servers.swebench.app import (
     patch_extraction_command,
     strip_binary_diffs,
 )
-from resources_servers.swebench.swebench_patches import patch_swebench_multilingual_sandbox, run_instance
+from resources_servers.swebench.swebench_patches import (
+    EVAL_SCRIPT_COMMAND,
+    patch_swebench_multilingual_sandbox,
+    run_instance,
+)
 from resources_servers.swebench.task_data import TaskData
 
 
@@ -601,16 +608,19 @@ class TestImageAssets:
 
 class _FakeEvalSandbox:
     """A verification sandbox in which every command succeeds. The evaluation script prints `tests_printed` on stdout
-    and bash's trace, test-output markers included, on stderr, which a sandbox returns separately."""
+    and bash's trace, test-output markers included, on stderr; the evaluation command joins the two in order."""
 
     def __init__(self, tests_printed: str) -> None:
         self.tests_printed = tests_printed
 
     async def exec(self, command: str, **kwargs: Any) -> SandboxExecResult:
-        if command != "/bin/bash /eval.sh":
+        if command != EVAL_SCRIPT_COMMAND:
             return SandboxExecResult(stdout="", stderr="", return_code=0)
-        trace = "+ : '>>>>> Start Test Output'\n+ ./node_modules/.bin/karma start\n+ : '>>>>> End Test Output'\n"
-        return SandboxExecResult(stdout=self.tests_printed, stderr=trace, return_code=0)
+        output = (
+            "+ : '>>>>> Start Test Output'\n+ ./node_modules/.bin/karma start\n"
+            f"{self.tests_printed}\n+ : '>>>>> End Test Output'\n"
+        )
+        return SandboxExecResult(stdout=output, stderr="", return_code=0)
 
     async def upload(self, local_path: Path, remote_path: str) -> None:
         pass
@@ -665,3 +675,23 @@ class TestFailureOnlyGrading:
             "Chrome 120.0.0.0 (Linux x86_64): Executed 1545 of 1545 (1 FAILED) (43 secs / 33 secs)",
         )
         assert result["completed"] is True and result["resolved"] is False
+
+
+class TestEvalScriptCommand:
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+    def test_stderr_of_the_tests_stays_between_the_markers_when_only_stdout_is_read(self, tmp_path: Path) -> None:
+        """A provider that returns stdout and stderr apart (E2B) still yields one ordered graded region."""
+        script = tmp_path / "eval.sh"
+        script.write_text(
+            f"echo '{START_TEST_OUTPUT}'\n"
+            "echo 'PASSED tests/test_a.py::test_one' >&2\n"
+            "echo 'FAILED tests/test_a.py::test_two'\n"
+            f"echo '{END_TEST_OUTPUT}'\n"
+        )
+        command = EVAL_SCRIPT_COMMAND.replace("/eval.sh", str(script))
+
+        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=True)
+
+        assert result.stderr == ""
+        region = result.stdout.split(START_TEST_OUTPUT)[1].split(END_TEST_OUTPUT)[0]
+        assert region.splitlines()[1:] == ["PASSED tests/test_a.py::test_one", "FAILED tests/test_a.py::test_two"]
