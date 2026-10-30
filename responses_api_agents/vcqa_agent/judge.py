@@ -9,7 +9,7 @@ completion call. Reward is `must_pass / must_total` in [0, 1]. If
 `must_total == 0`, reward defaults to `0.0` and an `error` is set on the
 verify response.
 
-Transient judge failures (timeouts, transport errors, HTTP 408/429/5xx,
+Transient judge failures (timeouts, transport errors, HTTP 408/409/425/429/5xx,
 replies that are not YES/NO) are retried with exponential backoff. An item
 that still fails after the last attempt counts as NO and is reported in
 `JudgeResult.judge_errors`, so the caller can mark the sample as not
@@ -37,7 +37,8 @@ _JUDGE_SYSTEM_PROMPT = (
     "explanation."
 )
 
-_RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+# Retried besides every 5xx.
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429})
 _THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
 _LEADING_VERDICT = re.compile(r"^(YES|NO)\b")
 
@@ -139,11 +140,14 @@ def parse_yes_no(text: str) -> Optional[bool]:
 async def _judge_attempt(
     *, url: str, headers: Dict[str, str], body: Dict[str, Any], timeout_s: int, cookies: Optional[Dict[str, str]]
 ) -> Dict[str, Any]:
-    """One judge call. Returns passed/error/raw plus whether a retry may help; never raises."""
+    """One judge call. Returns passed/error/raw plus whether a retry may help; never raises.
+
+    `timeout_s` bounds the whole exchange, reading either reply body included, so a reply that stalls cannot keep
+    holding a slot of the shared judge semaphore.
+    """
     try:
-        response = await asyncio.wait_for(
-            request(method="POST", url=url, headers=headers, data=orjson.dumps(body), cookies=cookies or {}),
-            timeout=timeout_s,
+        return await asyncio.wait_for(
+            _judge_exchange(url=url, headers=headers, body=body, cookies=cookies), timeout=timeout_s
         )
     except asyncio.TimeoutError:
         return {"passed": False, "error": "judge timed out", "raw": None, "retryable": True}
@@ -155,13 +159,29 @@ async def _judge_attempt(
             "retryable": True,
         }
 
+
+async def _judge_exchange(
+    *, url: str, headers: Dict[str, str], body: Dict[str, Any], cookies: Optional[Dict[str, str]]
+) -> Dict[str, Any]:
+    response = await request(method="POST", url=url, headers=headers, data=orjson.dumps(body), cookies=cookies or {})
+    try:
+        outcome = await _read_judge_reply(response)
+    except BaseException:
+        # Cancelled at the deadline or failed mid-body: drop the connection rather than return it to the pool.
+        response.close()
+        raise
+    response.release()
+    return outcome
+
+
+async def _read_judge_reply(response: Any) -> Dict[str, Any]:
     if not response.ok:
         body_text = (await response.content.read()).decode(errors="replace")
         return {
             "passed": False,
             "error": f"judge returned HTTP {response.status}: {body_text[:512]}",
             "raw": None,
-            "retryable": response.status in _RETRYABLE_HTTP_STATUSES,
+            "retryable": response.status in _RETRYABLE_HTTP_STATUSES or 500 <= response.status < 600,
         }
 
     try:

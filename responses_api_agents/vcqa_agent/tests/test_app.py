@@ -1016,6 +1016,31 @@ def _answering_server_client(answer: str = "The answer is forty-two.") -> MagicM
     return server_client
 
 
+def _model_reply(output: list[dict]) -> AsyncMock:
+    reply = AsyncMock()
+    reply.ok, reply.status, reply.cookies = True, 200, {}
+    payload = {
+        "id": "resp_turn",
+        "created_at": 0,
+        "model": "policy",
+        "object": "response",
+        "output": output,
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    }
+    reply.read = AsyncMock(return_value=json.dumps(payload).encode())
+    return reply
+
+
+def _model_error_reply(status: int, error: dict) -> AsyncMock:
+    reply = AsyncMock()
+    reply.ok, reply.status, reply.cookies = False, status, {}
+    reply.read = AsyncMock(return_value=json.dumps({"error": {"type": "invalid_request_error", **error}}).encode())
+    reply.raise_for_status = MagicMock(side_effect=RuntimeError(f"HTTP {status}"))
+    return reply
+
+
 def _scripted_judge(monkeypatch: pytest.MonkeyPatch, replies: list[tuple[int, str]]) -> list[dict]:
     """Judge replies in order (the last one repeats); returns the request bodies sent."""
     sent: list[dict] = []
@@ -1047,6 +1072,33 @@ async def _run_with_fake_sandbox(agent: VcqaAgent, monkeypatch: pytest.MonkeyPat
     request = MagicMock(spec=Request)
     request.cookies = {}
     return await agent.run(request=request, response=MagicMock(), body=body)
+
+
+async def test_local_sandboxes_do_not_share_writable_trees(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import Request
+
+    built: list[Path] = []
+
+    async def fake_materialize(**kwargs):  # type: ignore[no-untyped-def]
+        built.append(kwargs["scratch_dir"])
+        await asyncio.sleep(0.05)  # both rollouts hold their trees at once
+        return kwargs["scratch_dir"]
+
+    monkeypatch.setattr("responses_api_agents.vcqa_agent.app.materialize_working_tree", fake_materialize)
+    monkeypatch.setattr(VcqaAgent, "_build_sandbox", lambda self, **kwargs: FakeSandbox())
+    _scripted_judge(monkeypatch, [(200, "YES")])
+    agent = VcqaAgent(
+        config=_make_config(sandbox_backend="local", share_working_trees=True),
+        server_client=_answering_server_client(),
+    )
+    request = MagicMock(spec=Request)
+    request.cookies = {}
+
+    await asyncio.gather(
+        *(agent.run(request=request, response=MagicMock(), body=_hardening_run_body()) for _ in range(2))
+    )
+
+    assert len(built) == 2 and built[0] != built[1]
 
 
 class TestRunCapturePathAndMasking:
@@ -1108,6 +1160,41 @@ class TestRunCapturePathAndMasking:
         assert result.mask_sample is True
         assert result.failure_stage == "model"
         assert result.failure_kind == "agent_request_failed"
+
+    @pytest.mark.parametrize("first_call", [False, True])
+    async def test_context_refusal_ends_the_episode_as_a_measurement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_call: bool
+    ) -> None:
+        tool_turn = _model_reply(
+            [{"id": "fc_1", "call_id": "c1", "type": "function_call", "name": "list_dir", "arguments": "{}"}]
+        )
+        refusal = _model_error_reply(
+            400, {"message": "maximum context length is 32768 tokens", "code": "context_length_exceeded"}
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=[refusal] if first_call else [tool_turn, refusal])
+        sent = _scripted_judge(monkeypatch, [(200, "YES")])
+        agent = VcqaAgent(config=_make_config(), server_client=server_client)
+
+        result = await _run_with_fake_sandbox(agent, monkeypatch, tmp_path, _hardening_run_body())
+
+        assert result.evaluation_completed is True and result.mask_sample is False
+        assert result.reward == 0.0 and sent == []  # no answer, so no judge call
+        assert result.response.status == "incomplete"
+        assert result.response.metadata["nemo_gym_context_window_exceeded"] == "true"
+        expected = [] if first_call else ["function_call", "function_call_output"]
+        assert [item.type for item in result.response.output] == expected
+
+    async def test_other_bad_requests_stay_masked(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(
+            return_value=_model_error_reply(400, {"message": "bad tool", "code": "invalid_value"})
+        )
+        agent = VcqaAgent(config=_make_config(), server_client=server_client)
+
+        result = await _run_with_fake_sandbox(agent, monkeypatch, tmp_path, _hardening_run_body())
+
+        assert result.mask_sample is True and result.failure_stage == "model"
 
     async def test_judge_outage_is_masked_not_scored(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         sent = _scripted_judge(monkeypatch, [(503, "unavailable")])
@@ -1173,6 +1260,54 @@ class TestJudgeRetries:
         assert len(sent) == 1
         assert result.judge_errors == 1
         assert "HTTP 400" in result.per_item[0]["error"]
+
+    async def test_any_server_error_is_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sent = _scripted_judge(monkeypatch, [(520, "origin error"), (200, "YES")])
+        result = await self._grade(max_attempts=2)
+        assert len(sent) == 2
+        assert result.reward == 1.0 and result.judge_errors == 0
+        assert result.per_item[0]["attempts"] == 2
+
+    @pytest.mark.parametrize("status", [200, 503])
+    async def test_stalled_reply_body_times_out_and_frees_its_slot(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        never = asyncio.Event()
+        responses: list[MagicMock] = []
+
+        async def stall() -> bytes:
+            await never.wait()
+            return b""
+
+        async def fake_request(method, url, **kwargs):  # type: ignore[no-untyped-def]
+            response = MagicMock()
+            if not responses:  # the first criterion's reply arrives but its body never does
+                response.ok, response.status = status == 200, status
+                response.read = stall
+                response.content.read = stall
+            else:
+                response.ok, response.status = True, 200
+                response.read = AsyncMock(
+                    return_value=json.dumps({"choices": [{"message": {"content": "YES"}}]}).encode()
+                )
+            responses.append(response)
+            return response
+
+        monkeypatch.setattr(judge_mod, "request", fake_request)
+        result = await judge_mod.grade(
+            rubric={"judge": [{"category": "must_have", "description": d} for d in "AB"]},
+            problem_statement="p",
+            model_answer="a",
+            base_url="https://example.invalid/v1",
+            api_key="dummy",  # pragma: allowlist secret
+            model_name="judge-model",
+            timeout_s=0.2,
+            semaphore=asyncio.Semaphore(1),
+        )
+        assert [item["error"] for item in result.per_item] == ["judge timed out", None]
+        assert result.judge_errors == 1 and result.must_pass == 1
+        responses[0].close.assert_called_once()
+        responses[1].release.assert_called_once()
 
     async def test_extra_body_is_merged_into_the_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sent = _scripted_judge(monkeypatch, [(200, "YES")])
@@ -1485,6 +1620,24 @@ class TestJudgeApiKeyEnv:
         assert result.failure_stage == "judge"
         assert "VCQA_TEST_JUDGE_KEY_MISSING" in (result.failure_reason or "")
 
+    async def test_missing_key_is_not_needed_without_a_judge_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("VCQA_TEST_JUDGE_KEY_MISSING", raising=False)
+        sent = _scripted_judge(monkeypatch, [(200, "YES")])
+        config = _make_config(judge_api_key_env="VCQA_TEST_JUDGE_KEY_MISSING")
+
+        empty = VcqaAgent(config=config, server_client=_answering_server_client(answer="   "))
+        result = await _run_with_fake_sandbox(empty, monkeypatch, tmp_path, _hardening_run_body())
+        assert result.reward == 0.0 and result.evaluation_completed is True and result.mask_sample is False
+
+        no_criteria = _hardening_run_body()
+        no_criteria.verifier_metadata.rubric = {"judge": [{"category": "nice_to_have", "description": "Extra."}]}
+        agent = VcqaAgent(config=config, server_client=_answering_server_client())
+        result = await _run_with_fake_sandbox(agent, monkeypatch, tmp_path, no_criteria)
+        assert result.mask_sample is True and result.failure_kind == "verifier_error"
+        assert sent == []
+
 
 async def test_apptainer_network_none_adds_an_empty_network_namespace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1633,30 +1786,61 @@ def test_provider_setup_commands_build_the_tree_inside_the_sandbox() -> None:
         )
 
 
-def test_hidden_paths_become_root_only_and_fail_closed(tmp_path: Path) -> None:
+def _setup_kwargs() -> dict:
+    return dict(
+        dataset_kind="fileset", artifact_path="/a.tgz", head_sha=None, tools_command=None, remove_artifact=True
+    )
+
+
+def test_hidden_paths_must_be_roots_and_fail_closed(tmp_path: Path) -> None:
     import os
     import subprocess
 
-    kwargs = dict(
-        dataset_kind="fileset", artifact_path="/a.tgz", head_sha=None, tools_command=None, remove_artifact=False
-    )
-    as_root = sandbox_mod.provider_setup_commands(run_as=None, hidden_paths=["/mnt"], **kwargs)
-    assert not any("chmod 700" in c for c in as_root)
-    assert not any(
-        "chmod 700" in c for c in sandbox_mod.provider_setup_commands(run_as="vcqa", hidden_paths=[], **kwargs)
-    )
+    as_root = sandbox_mod.provider_setup_commands(run_as=None, hidden_paths=["/mnt"], **_setup_kwargs())
+    assert not any("chmod 700" in c or "chown -hR" in c for c in as_root)
+    no_hidden = sandbox_mod.provider_setup_commands(run_as="vcqa", hidden_paths=[], **_setup_kwargs())
+    assert not any("chmod 700" in c for c in no_hidden)
 
-    volume = tmp_path / "vol x"
-    volume.mkdir(mode=0o755)
-    hide = sandbox_mod.provider_setup_commands(
-        run_as="vcqa", hidden_paths=[str(volume), str(tmp_path / "absent")], **kwargs
-    )[-1]
-    assert subprocess.run(["bash", "-c", hide]).returncode == 0
-    assert volume.stat().st_mode & 0o777 == 0o700
-    if os.geteuid() != 0:
-        # An existing path that cannot be hidden fails the setup (the rollout is masked) instead of staying readable.
-        cannot = sandbox_mod.provider_setup_commands(run_as="vcqa", hidden_paths=["/"], **kwargs)[-1]
-        assert subprocess.run(["bash", "-c", cannot], capture_output=True).returncode == 1
+    def hide(*paths: str) -> int:
+        command = sandbox_mod.provider_setup_commands(run_as="vcqa", hidden_paths=list(paths), **_setup_kwargs())[-1]
+        return subprocess.run(["sh", "-c", command], capture_output=True).returncode
+
+    assert hide(str(tmp_path / "absent")) == 0
+    owned = tmp_path / "vol x"
+    owned.mkdir(mode=0o755)
+    if os.geteuid() == 0:
+        assert hide(str(owned)) == 0 and owned.stat().st_mode & 0o777 == 0o700
+    else:
+        # Mode 700 leaves a path readable by its owner, so one that is not root's fails the setup instead.
+        assert hide(str(owned)) == 1 and owned.stat().st_mode & 0o777 == 0o755
+        # Root's, but this user cannot restrict it: also a failed setup, never a readable path.
+        assert hide("/") == 1
+
+
+def test_provider_tree_is_made_root_owned_and_read_only(tmp_path: Path) -> None:
+    import stat
+    import subprocess
+
+    commands = sandbox_mod.provider_setup_commands(run_as="vcqa", hidden_paths=[], **_setup_kwargs())
+    extract = next(i for i, c in enumerate(commands) if "tar -xzf" in c)
+    normalize = next(i for i, c in enumerate(commands) if c.startswith("chown -hR 0:0 /codebase"))
+    remove = next(i for i, c in enumerate(commands) if c.startswith("rm -f"))
+    assert extract < normalize < remove
+    assert not any("chown -hR" in c for c in sandbox_mod.provider_setup_commands(run_as=None, **_setup_kwargs()))
+
+    # The mode half on a tree like an archive can leave it (chown needs root).
+    tree = tmp_path / "codebase"
+    (tree / "bin").mkdir(parents=True)
+    (tree / "answer.txt").write_text("x")
+    (tree / "answer.txt").chmod(0o666)
+    (tree / "bin" / "run.sh").write_text("#!/bin/sh\n")
+    (tree / "bin" / "run.sh").chmod(0o4777)
+    (tree / "link").symlink_to("answer.txt")
+    chmod = commands[normalize].split(" && ")[1].replace("/codebase", str(tree))
+    assert subprocess.run(["sh", "-c", chmod]).returncode == 0
+    assert stat.S_IMODE((tree / "answer.txt").stat().st_mode) == 0o644
+    assert stat.S_IMODE((tree / "bin" / "run.sh").stat().st_mode) == 0o755
+    assert (tree / "link").is_symlink() and stat.S_IMODE((tree / "bin").stat().st_mode) == 0o755
 
 
 class TestProviderSandbox:
@@ -1681,7 +1865,12 @@ class TestProviderSandbox:
         assert all(e["user"] == "root" for e in provider.execs)
         result = await sb.exec("rg foo", timeout_s=7)
         assert result.exit_code == 0 and result.stdout == "ok" and not result.timed_out
-        assert provider.execs[-1] == {"command": "rg foo", "cwd": "/codebase", "user": "vcqa", "timeout_s": 7}
+        assert provider.execs[-1] == {
+            "command": "bash -lc 'rg foo'",
+            "cwd": "/codebase",
+            "user": "vcqa",
+            "timeout_s": 7,
+        }
         await sb.stop()
         await sb.stop()
         assert provider.closed == ["sb-1"]
@@ -1704,6 +1893,37 @@ class TestProviderSandbox:
         with pytest.raises(sandbox_mod.SandboxInfraError):
             await sb.exec("git log")
 
+    @pytest.mark.skipif(shutil.which("dash") is None, reason="needs dash, the /bin/sh of Debian sandbox images")
+    async def test_tool_commands_keep_bash_semantics_under_the_providers_sh(self) -> None:
+        import subprocess
+
+        provider = FakeProvider()
+        sb = self._sandbox(provider)
+        await sb.start()
+        await sb.exec("a=(one two); printf '%s\\n' \"${a[1]}\"")
+        # The provider runs a non-root user's command through `su -s /bin/sh`, dash on Debian images.
+        sent = provider.execs[-1]["command"]
+        assert subprocess.run(["dash", "-c", sent], capture_output=True, text=True).stdout == "two\n"
+
+    async def test_failed_stop_stays_retryable(self) -> None:
+        provider = FakeProvider()
+        closes = {"n": 0}
+
+        async def flaky_close(handle):  # type: ignore[no-untyped-def]
+            closes["n"] += 1
+            if closes["n"] == 1:
+                raise ConnectionError("close timed out")
+            provider.closed.append(handle.sandbox_id)
+
+        provider.close = flaky_close  # type: ignore[method-assign]
+        sb = self._sandbox(provider)
+        await sb.start()
+        with pytest.raises(ConnectionError):
+            await sb.stop()
+        await sb.stop()
+        await sb.stop()
+        assert closes["n"] == 2 and provider.closed == ["sb-1"]
+
     async def test_failed_setup_stops_the_sandbox(self) -> None:
         from nemo_gym.sandbox import SandboxExecResult
 
@@ -1717,6 +1937,15 @@ class TestProviderSandbox:
         with pytest.raises(RuntimeError, match="setup command failed"):
             await sb.start()
         assert provider.closed == ["sb-1"]
+
+
+async def test_run_retries_a_failed_sandbox_stop() -> None:
+    from responses_api_agents.vcqa_agent.app import _stop_sandbox
+
+    sandbox = MagicMock()
+    sandbox.stop = AsyncMock(side_effect=[ConnectionError("close timed out"), None])
+    await _stop_sandbox(sandbox)
+    assert sandbox.stop.await_count == 2
 
 
 async def test_dispatch_tool_lets_sandbox_infra_errors_abort_the_rollout() -> None:

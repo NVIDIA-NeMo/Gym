@@ -35,7 +35,6 @@ not the concrete class.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import shlex
 import shutil
@@ -45,8 +44,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional, Protocol
 
-
-LOG = logging.getLogger(__name__)
 
 CODEBASE_PATH = "/codebase"
 SCRATCH_PATH = "/tmp/scratch"
@@ -460,12 +457,8 @@ class ProviderSandbox:
 
         sandbox = AsyncSandbox(self.provider, self.spec, owns_provider=False)
         self._sandbox = sandbox
-        try:
-            # Stops the sandbox if an upload or a setup command fails.
-            await sandbox.start_with_setup(None, setup)
-        except BaseException:
-            self.cleaned_up = True
-            raise
+        # Stops the sandbox if an upload or a setup command fails; a stop that fails there stays retryable by stop().
+        await sandbox.start_with_setup(None, setup)
         self.started = True
 
     async def exec(self, command: str, timeout_s: Optional[int] = None) -> ExecResult:
@@ -473,7 +466,10 @@ class ProviderSandbox:
             raise SandboxInfraError("sandbox is not running")
         timeout_s = timeout_s if timeout_s is not None else self.exec_timeout_s
         try:
-            result = await self._sandbox.exec(command, cwd=self.codebase_path, timeout_s=timeout_s, user=self.run_as)
+            # Tool commands are bash, as in the Apptainer backends; the provider runs another user's command with sh.
+            result = await self._sandbox.exec(
+                f"bash -lc {shlex.quote(command)}", cwd=self.codebase_path, timeout_s=timeout_s, user=self.run_as
+            )
         except Exception as e:
             raise SandboxInfraError(f"sandbox exec failed: {type(e).__name__}: {e}") from e
         if result.error_type is not None and result.error_type != "timeout":
@@ -487,14 +483,12 @@ class ProviderSandbox:
         )
 
     async def stop(self) -> None:
+        """Stop the sandbox. A failed or cancelled stop raises and can be retried; a confirmed one is not repeated."""
         if self.cleaned_up:
             return
-        self.cleaned_up = True
         if self._sandbox is not None:
-            try:
-                await self._sandbox.stop()
-            except Exception as e:  # the provider's TTL reclaims a sandbox whose close failed
-                LOG.warning("closing a VCQA provider sandbox failed: %s: %s", type(e).__name__, e)
+            await self._sandbox.stop()
+        self.cleaned_up = True
         self.started = False
 
 
@@ -511,8 +505,9 @@ def provider_setup_commands(
     """Root commands that prepare a fresh provider sandbox for one VCQA task.
 
     The tree is materialized like `materialize.py` does on the host: a fileset tarball is extracted as-is (entering a
-    single wrapping directory, if any), a githistory bundle is cloned and checked out at `head_sha`. With `run_as`,
-    `hidden_paths` become root-only last; failing to hide an existing one fails the setup.
+    single wrapping directory, if any), a githistory bundle is cloned and checked out at `head_sha`. With `run_as`, the
+    tree is then made root-owned and read-only to that user, and `hidden_paths` become root-only last: an existing one
+    that is not root's, or cannot be restricted, fails the setup.
     """
     q = shlex.quote
     commands: List[str] = []
@@ -544,9 +539,18 @@ def provider_setup_commands(
         )
     else:
         raise ValueError(f"unknown dataset_kind: {dataset_kind!r}")
+    if run_as:
+        # Extraction keeps the archive's owners and modes (a member can be 0666 or owned by the tool user's UID):
+        # make the tree root-owned and read-only to everyone else, without following its symlinks.
+        commands.append(f"chown -hR 0:0 {CODEBASE_PATH} && chmod -R a+rX,go-w,a-s {CODEBASE_PATH}")
     if remove_artifact:
         commands.append(f"rm -f {q(artifact_path)}")
     if run_as and hidden_paths:
+        # Mode 700 hides a path only from users other than its owner, so a hidden path must be root's: anything else
+        # fails the setup rather than leave it readable.
         paths = " ".join(q(p) for p in hidden_paths)
-        commands.append(f'for p in {paths}; do if [ -e "$p" ]; then chmod 700 "$p" || exit 1; fi; done')
+        commands.append(
+            f'for p in {paths}; do if [ -e "$p" ]; then '
+            '[ "$(stat -Lc %u -- "$p")" = 0 ] && chmod 700 -- "$p" || exit 1; fi; done'
+        )
     return commands

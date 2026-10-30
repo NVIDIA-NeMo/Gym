@@ -179,7 +179,7 @@ read-only.
 | Setting | Purpose |
 | ------- | ------- |
 | `sandbox_image`, `sandbox_resources`, `sandbox_ttl_s` | Sandbox image, resources, and time to live |
-| `sandbox_provider_options` | Provider options; the default denies all egress |
+| `sandbox_provider_options` | Provider options; the default is OpenSandbox's deny-all egress policy, which other providers ignore |
 | `sandbox_tools_archive` or `sandbox_tools_command` | Tools (`rg`, `fd`, `git`, `tree`) for the image: an archive uploaded and extracted over `/`, or a root command that installs them |
 | `sandbox_artifact_root` | Sandbox-side directory with the artifacts under their `artifact_key`, for example a mounted bucket; unset uploads each artifact from `artifact_url_prefix` |
 | `sandbox_hidden_paths` | Paths made root-only after setup (default `/mnt`), so the tool user cannot browse a shared mount that holds every task's artifacts |
@@ -192,6 +192,10 @@ gym env start \
     ++vcqa_agent.responses_api_agents.vcqa_agent.sandbox_backend=provider \
     ++vcqa_agent.responses_api_agents.vcqa_agent.sandbox_tools_archive=/path/to/vcqa-tools-amd64.tar.gz
 ```
+
+Egress is denied only where the provider enforces it. On OpenSandbox the default
+`sandbox_provider_options` does; other providers need their own setting, for example
+`++sandbox.docker.create.network=none` for Docker.
 
 A sandbox that fails mid-rollout is an infrastructure failure: the rollout is
 masked (see below) and the sandbox is stopped.

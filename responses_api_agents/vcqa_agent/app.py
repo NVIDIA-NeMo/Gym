@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -46,6 +47,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Body, Request, Response
+from openai.types.responses.response import IncompleteDetails
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym.base_resources_server import (
@@ -68,6 +70,7 @@ from nemo_gym.core import (
     accumulate_response_usage,
     failure_kinds,
 )
+from responses_api_agents.vcqa_agent.judge import extract_must_have_items
 from responses_api_agents.vcqa_agent.judge import grade as judge_grade
 from responses_api_agents.vcqa_agent.materialize import (
     SharedWorkingTrees,
@@ -86,6 +89,9 @@ from responses_api_agents.vcqa_agent.sandbox import (
     provider_setup_commands,
 )
 from responses_api_agents.vcqa_agent.tools import build_tool_definitions, dispatch_tool
+
+
+LOG = logging.getLogger(__name__)
 
 
 ########################################
@@ -130,8 +136,9 @@ class VcqaAgentConfig(BaseResponsesAPIAgentConfig):
     )
     sandbox_provider_options: Dict[str, Any] = Field(
         default_factory=lambda: {"network_policy": {"defaultAction": "deny"}},
-        description="SandboxSpec.provider_options. The default denies all egress (OpenSandbox network policy): the "
-        "task is offline, and the agent server drives every command through the provider API.",
+        description="SandboxSpec.provider_options. The default is OpenSandbox's deny-all egress policy (the task is "
+        "offline, and the agent server drives every command through the provider API); other providers ignore it "
+        "and need their own network setting, e.g. `sandbox.docker.create.network: none`.",
     )
     sandbox_tools_archive: Optional[str] = Field(
         default=None,
@@ -262,8 +269,9 @@ class VcqaAgentConfig(BaseResponsesAPIAgentConfig):
     share_working_trees: bool = Field(
         default=True,
         description="Concurrent rollouts of the same task (same artifact and commit) share one "
-        "materialized working tree instead of each extracting or cloning its own. Sandboxes mount "
-        "it read-only, so sharing is not observable to the model.",
+        "materialized working tree instead of each extracting or cloning its own. Apptainer sandboxes mount "
+        "it read-only, so sharing is not observable to the model; `local` sandboxes never share (their tree "
+        "is writable), and `provider` sandboxes build their own tree.",
     )
     inject_tools: bool = Field(
         default=True,
@@ -500,7 +508,8 @@ class VcqaAgent(SimpleResponsesAPIAgent):
                 )
 
             if sandbox is None:
-                if self.config.share_working_trees:
+                # Only read-only (Apptainer) trees are shared: a local sandbox's tree is writable.
+                if self.config.share_working_trees and self.config.sandbox_backend != "local":
                     tree_key = f"{meta.dataset_kind}:{meta.artifact_key}:{meta.head_sha or ''}"
                     working_tree = await trees.enter_async_context(self._shared_trees().acquire(tree_key, build_tree))
                 else:
@@ -529,7 +538,9 @@ class VcqaAgent(SimpleResponsesAPIAgent):
                 problem_statement=problem_statement,
                 model_answer=final_answer,
                 base_url=self.config.judge_base_url,
-                api_key=self._judge_api_key(),
+                # Only a call needs the key: grade() scores an empty answer 0, and rejects a rubric without
+                # must-have criteria, before calling the judge.
+                api_key=self._judge_api_key() if final_answer.strip() and extract_must_have_items(rubric) else "",
                 model_name=self.config.judge_model_name,
                 timeout_s=self.config.judge_timeout_s,
                 cookies=dict(request.cookies),
@@ -562,10 +573,7 @@ class VcqaAgent(SimpleResponsesAPIAgent):
             failure_kind = _STAGE_FAILURE_KINDS.get(failure_stage, failure_kinds.AGENT_RUN_ERROR)
         finally:
             if sandbox is not None:
-                try:
-                    await sandbox.stop()
-                except Exception:
-                    pass
+                await _stop_sandbox(sandbox)
             # Release the shared tree only after the sandbox that mounts it has stopped.
             await trees.aclose()
             shutil.rmtree(scratch_dir, ignore_errors=True)
@@ -664,6 +672,7 @@ class VcqaAgent(SimpleResponsesAPIAgent):
         step = 0
         model_server_cookies = None
         latest_response: Optional[NeMoGymResponse] = None
+        context_exceeded = False
 
         while True:
             step += 1
@@ -675,6 +684,14 @@ class VcqaAgent(SimpleResponsesAPIAgent):
                 json=new_body,
                 cookies=model_server_cookies,
             )
+            if model_response_raw.status == 400:
+                content = await model_response_raw.read()
+                if _is_context_refusal(content):
+                    # The prompt no longer fits the context window. This ends the episode as a measurement, as when
+                    # the model server answers such a call itself: what the policy produced so far is graded.
+                    context_exceeded = True
+                    break
+                await raise_for_status(model_response_raw, content)
             await raise_for_status(model_response_raw)
             model_server_cookies = model_response_raw.cookies
             model_response_json = await get_response_json(model_response_raw)
@@ -730,9 +747,14 @@ class VcqaAgent(SimpleResponsesAPIAgent):
         for k, v in (model_server_cookies or {}).items():
             response.set_cookie(k, v)
 
-        assert latest_response is not None
+        if latest_response is None:  # only a refusal of the first call gets here without one
+            latest_response = _empty_response(body)
         latest_response.output = new_outputs
         latest_response.usage = usage
+        if context_exceeded:
+            latest_response.status = "incomplete"
+            latest_response.incomplete_details = IncompleteDetails(reason="max_output_tokens")
+            latest_response.metadata = {**(latest_response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return latest_response, step
 
 
@@ -771,6 +793,34 @@ def _extract_problem_statement(params: NeMoGymResponseCreateParamsNonStreaming) 
                         if text:
                             parts.append(text)
     return "\n".join(parts).strip()
+
+
+async def _stop_sandbox(sandbox: Any, *, attempts: int = 3) -> None:
+    """Stop a rollout's sandbox, retrying a failed stop; one that never stops is left to the provider's TTL."""
+    for attempt in range(1, attempts + 1):
+        try:
+            await sandbox.stop()
+            return
+        except Exception as e:
+            if attempt == attempts:
+                LOG.warning(
+                    "stopping a VCQA sandbox failed %d times, leaving it to its TTL: %s: %s",
+                    attempts,
+                    type(e).__name__,
+                    e,
+                )
+                return
+            await asyncio.sleep(attempt)
+
+
+def _is_context_refusal(content: bytes) -> bool:
+    """Whether a model server's HTTP 400 body is a refusal for exceeding the context window (OpenAI's envelope with
+    ``code: context_length_exceeded``, which Gym's model servers answer with when they propagate the refusal)."""
+    try:
+        error = json.loads(content).get("error")
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(error, dict) and error.get("code") == "context_length_exceeded"
 
 
 def _empty_response(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
