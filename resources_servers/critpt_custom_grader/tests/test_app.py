@@ -17,6 +17,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym import server_utils
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.client import ServerClient
 from nemo_gym.config import DatasetConfig, visit_resources_server
 from nemo_gym.config.config_types import ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
@@ -293,6 +294,57 @@ async def test_finish_mode_explicit_content_filter_scores_zero_without_masking(m
     assert status == 200
     assert result["scored"] is True and result["reward"] == 0 and result["mask_sample"] is False
     assert result["category"] == "candidate_no_answer"
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "condition,category,scored",
+    [
+        ("exhausted", "candidate_no_answer", True),
+        ("transport_error", "response_incomplete", False),
+        ("provider_error", "response_incomplete", False),
+        ("request_error", "response_incomplete", False),
+        ("response_error", "response_incomplete", False),
+        ("cancelled", "response_incomplete", False),
+        ("wall_time", "response_incomplete", False),
+        ("invalid_outcome", "submission_invalid", False),
+        ("acknowledged_finish", "submission_invalid", False),
+    ],
+)
+async def test_finish_token_limit_preserves_termination_evidence(make_server, condition, category, scored):
+    _, app, fake = make_server(answer_source="finish_tool")
+    acknowledgement = None
+    if condition == "acknowledged_finish":
+        status, acknowledgement = await post(
+            app, "/finish", {"reason": "done", "derivation": "synthetic", "answer": SOURCE}
+        )
+        assert status == 200
+    row = agentic_payload(acknowledgement=acknowledgement)
+    response = row["response"]
+    response["status"] = "incomplete"
+    response["incomplete_details"] = {"reason": "max_output_tokens"}
+    if condition in ("transport_error", "provider_error", "request_error"):
+        kind = {
+            "transport_error": failure_kinds.MODEL_TRANSPORT_ERROR,
+            "provider_error": failure_kinds.PROVIDER_UNAVAILABLE,
+            "request_error": failure_kinds.MODEL_REQUEST_ERROR,
+        }[condition]
+        outcome = AgentOutcome(failure_kind=kind, status_code=400 if condition == "request_error" else None)
+        response["metadata"] = {AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json()}
+    elif condition == "response_error":
+        response["error"] = {"code": "server_error", "message": "synthetic"}
+    elif condition in ("cancelled", "wall_time"):
+        response["metadata"] = {"stop_reason": condition}
+    elif condition == "invalid_outcome":
+        response["metadata"] = {AGENT_OUTCOME_METADATA_KEY: "{"}
+    status, result = await post(app, "/verify", row)
+    assert status == 200
+    assert result["reward"] == 0.0 and result["scored"] is scored
+    assert result["mask_sample"] is (not scored)
+    assert result["category"] == category
+    assert result["response"] == response
+    assert ("_ng_failure_class" in result) is (not scored)
     fake.grade.assert_not_awaited()
 
 
@@ -1550,7 +1602,38 @@ async def test_raw_text_fallback_still_honors_source_bounds(make_server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error"])
+@pytest.mark.parametrize("has_source", [True, False])
+async def test_token_limit_is_scored_zero_without_regeneration(make_server, has_source):
+    _, app, fake = make_server()
+    row = payload()
+    row["response"]["status"] = "incomplete"
+    row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
+    if not has_source:
+        row["response"]["output"] = []
+    result = (await post(app, "/verify", row))[1]
+    assert result["reward"] == 0.0
+    assert result["scored"] is True
+    assert result["mask_sample"] is False
+    assert result["category"] == "response_truncated"
+    assert result["response"] == row["response"]
+    assert "_ng_failure_class" not in result
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("details", ["max_output_tokens", ["max_output_tokens"], 1])
+async def test_malformed_token_limit_details_are_rejected(make_server, details):
+    _, app, fake = make_server()
+    row = payload()
+    row["response"]["status"] = "incomplete"
+    row["response"]["incomplete_details"] = details
+    status, result = await post(app, "/verify", row)
+    assert status == 422 and result == {"error": {"category": "request_invalid"}}
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error", "token_limit_with_error"])
 async def test_uncompleted_response_needs_regeneration(make_server, mode):
     # An uncompleted, incomplete, or error response has no usable source. It carries needs_regeneration, not
     # verifier_unavailable, because reverify would reach the same verdict. The class is not terminal.
@@ -1562,6 +1645,9 @@ async def test_uncompleted_response_needs_regeneration(make_server, mode):
         row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     else:
         row["response"]["error"] = {"code": "server_error", "message": "synthetic"}
+        if mode == "token_limit_with_error":
+            row["response"]["status"] = "incomplete"
+            row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     result = (await post(app, "/verify", row))[1]
     assert result["reward"] == 0.0 and result["scored"] is False
     assert result["mask_sample"] is True
