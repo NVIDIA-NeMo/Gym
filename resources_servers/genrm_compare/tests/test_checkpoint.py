@@ -172,67 +172,40 @@ async def test_a_member_that_has_not_recorded_its_judge_failure_gets_it_back_aft
     await restored.aclose()
 
 
-async def test_a_cohort_scored_after_a_dropped_comparison_restores_its_rewards(config):
-    """A dropped judge failure leaves a completed cohort, saved and restored like any other."""
-    config.num_rollouts_per_prompt = 3
-    sessions = [f"session-{index}" for index in range(3)]
+async def test_members_masked_alone_get_their_judge_failure_back_after_a_restore(config):
+    """A failed comparison masks its two members; a restore keeps them masked and their siblings scored."""
+    config.num_rollouts_per_prompt = 4
+    sessions = [f"session-{index}" for index in range(4)]
 
     def judge(*_args, pair_idx, **_kwargs):
         if pair_idx == (0, 1):
             raise JudgeError("judge is down for one pair")
-        return member_0_wins(pair_idx=pair_idx)
-
-    server, participant = participant_server(config, judge=AsyncMock(side_effect=judge))
-    for index, session_id in enumerate(sessions):
-        participant.seeded(session_id, EpisodeId(rollout_id=f"group_g{index}"))
-    outcomes = await asyncio.gather(*(verify_as(server, sessions[index], member(index)) for index in range(3)))
-    assert not any(outcome.mask_sample for outcome in outcomes)
-    assert all(outcome.genrm_failed_comparison_rate_per_group == approx(1 / 3) for outcome in outcomes)
-    participant.ended(sessions[0])
-    records = await participant.export(None)
-    assert [record.session_id for record in records] == sessions[1:]
-    assert all("result" in record.state and "judge_failure" not in record.state for record in records)
-    await server.aclose()
-
-    restored, _ = await restore(config, records)
-    for index in (1, 2):
-        replayed = await asyncio.wait_for(verify_as(restored, sessions[index], member(index)), timeout=0.5)
-        assert replayed.reward == outcomes[index].reward
-        assert replayed.genrm_failed_comparison_rate_per_group == approx(1 / 3)
-    restored._run_single_comparison.assert_not_awaited()
-    await restored.aclose()
-
-
-async def test_a_member_masked_alone_gets_its_judge_failure_back_after_a_restore(config):
-    """Only the member with no successful comparison is masked; a restore keeps it masked and its sibling scored."""
-    config.num_rollouts_per_prompt = 3
-    sessions = [f"session-{index}" for index in range(3)]
-
-    def judge(*_args, pair_idx, **_kwargs):
-        if 1 in pair_idx:
-            raise JudgeError("judge is down for rollout 1")
         return comparison_result(5.0, 1.0)
 
     server, participant = participant_server(config, judge=AsyncMock(side_effect=judge))
     for index, session_id in enumerate(sessions):
         participant.seeded(session_id, EpisodeId(rollout_id=f"group_g{index}"))
     outcomes = await asyncio.gather(
-        *(verify_as(server, sessions[index], member(index)) for index in range(3)), return_exceptions=True
+        *(verify_as(server, sessions[index], member(index)) for index in range(4)), return_exceptions=True
     )
-    assert isinstance(outcomes[1], JudgeError) and not isinstance(outcomes[2], JudgeError)
+    assert [isinstance(outcome, JudgeError) for outcome in outcomes] == [True, True, False, False]
+    assert all(outcome.genrm_failed_comparison_rate_per_group == approx(1 / 4) for outcome in outcomes[2:])
     participant.ended(sessions[0])
     records = await participant.export(None)
     states = {record.session_id: record.state for record in records}
     assert states[sessions[1]]["masked_alone"] is True
     assert states[sessions[1]]["judge_failure"] == str(outcomes[1])
-    assert "masked_alone" not in states[sessions[2]] and states[sessions[2]]["result"]["reward"] == outcomes[2].reward
+    for index in (2, 3):
+        assert "masked_alone" not in states[sessions[index]]
+        assert states[sessions[index]]["result"]["reward"] == outcomes[index].reward
     await server.aclose()
 
     restored, _ = await restore(config, records)
-    with pytest.raises(JudgeError, match="rollout_index=1 has no successful comparison"):
+    with pytest.raises(JudgeError, match="rollout_index=1 lost a comparison"):
         await asyncio.wait_for(verify_as(restored, sessions[1], member(1)), timeout=0.5)
-    replayed = await asyncio.wait_for(verify_as(restored, sessions[2], member(2)), timeout=0.5)
-    assert replayed.reward == outcomes[2].reward
+    for index in (2, 3):
+        replayed = await asyncio.wait_for(verify_as(restored, sessions[index], member(index)), timeout=0.5)
+        assert replayed.reward == outcomes[index].reward
     restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 

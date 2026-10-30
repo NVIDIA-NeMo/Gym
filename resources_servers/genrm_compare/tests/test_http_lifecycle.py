@@ -232,7 +232,7 @@ async def test_judge_failure_preserves_answer_and_diagnostics_through_run(servic
     assert all(c.phase == "failed" and not c.results for c in services.resource._verify_cohorts.values())
 
 
-@pytest.mark.parametrize("failing_pairs", [{(0, 1)}, {(0, 1), (1, 2)}], ids=["one_failure", "uncovered_rollout"])
+@pytest.mark.parametrize("failing_pairs", [{(0, 1)}, {(0, 1), (1, 2)}], ids=["one_failure", "adjacent_failures"])
 async def test_failed_comparisons_through_run(services, monkeypatch, failing_pairs):
     services.resource.config.num_rollouts_per_prompt = 16
     judge = services.resource._run_single_comparison
@@ -245,26 +245,20 @@ async def test_failed_comparisons_through_run(services, monkeypatch, failing_pai
     monkeypatch.setattr(services.resource, "_run_single_comparison", judge_fails_for_pairs)
     results = await asyncio.gather(*(run(services, i) for i in range(16)))
 
-    if len(failing_pairs) == 2:
-        # Rollout 1 lost both comparisons, so only rollout 1 is masked as a judge failure.
-        status, body = results[1]
-        assert_judge_failure(status, body, "rollout_index=1 has no successful comparison")
-        assert "judge unavailable for this pair" in body["failure_reason"]
-        # Rollout 0 keeps only its 2 from (15, 0), rollout 2 only its 4 from (2, 3); the others keep both.
-        assert [body["reward"] for _, body in results[:1] + results[2:]] == [2.0, 4.0] + [3.0] * 13
-        for status, body in results[:1] + results[2:]:
-            assert status == 200 and not body["mask_sample"] and body.get("failure_kind") is None
-            assert body["genrm_masked_rollout_rate_per_group"] == 1 / 16
-        return
-    # Every rollout scores 4 as response_1 and 2 as response_2. Without (0, 1), rollout 0 keeps only its 2
-    # from (15, 0) and rollout 1 only its 4 from (1, 2); the others keep both comparisons.
-    assert [body["reward"] for _, body in results] == [2.0, 4.0] + [3.0] * 14
-    for status, body in results:
+    masked = {index for pair in failing_pairs for index in pair}
+    for index, (status, body) in enumerate(results):
+        if index in masked:
+            assert_judge_failure(status, body, f"rollout_index={index} lost a comparison")
+            assert "judge unavailable for this pair" in body["failure_reason"]
+            continue
+        # Every scored rollout keeps both comparisons: 4 as response_1 and 2 as response_2.
         assert status == 200 and "_ng_failure_class" not in body
+        assert body["reward"] == 3.0
         assert not body["mask_sample"] and not (body.get("instance_config") or {}).get("mask_sample")
         assert body.get("failure_kind") is None
-        assert body["genrm_failed_comparison_rate_per_group"] == 1 / 16
-    assert services.policy_calls == 16 and services.judge_calls == 15
+        assert body["genrm_failed_comparison_rate_per_group"] == len(failing_pairs) / 16
+        assert body["genrm_masked_rollout_rate_per_group"] == len(masked) / 16
+    assert services.policy_calls == 16 and services.judge_calls == 16 - len(failing_pairs)
 
 
 async def test_empty_http_200_judge_retries_then_fails_through_run(services):

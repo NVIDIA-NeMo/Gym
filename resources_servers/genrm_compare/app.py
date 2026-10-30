@@ -141,7 +141,7 @@ class _CohortState:
     members: Dict[int, _CohortMember] = field(default_factory=dict)
     phase: Literal["collecting", "evaluating", "completed", "failed"] = "collecting"
     results: Dict[int, VerifyResult] = field(default_factory=dict)
-    # In a completed cohort, the members masked alone because none of their comparisons succeeded, with the reason.
+    # In a completed cohort, the members masked alone because a comparison of theirs failed, with the reason.
     member_failures: Dict[int, str] = field(default_factory=dict)
     failure: Optional[str] = None
     failure_kind: Literal["cohort", "judge"] = "cohort"
@@ -175,7 +175,7 @@ class _CompletedMemberState(BaseModel):
     # Exactly one of these: a completed cohort's reward, or a judge failure, which the caller records as a masked row.
     result: Optional[Dict[str, Any]] = None
     judge_failure: Optional[str] = None
-    # The judge failure masked only this member, which had no successful comparison; the rest of the cohort completed.
+    # The judge failure masked only this member, which lost a comparison; the rest of the cohort completed.
     masked_alone: bool = False
 
     @model_validator(mode="after")
@@ -895,7 +895,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     ) -> None:
         """Publish under ``cohort.lock``, with no await, so every member gets its outcome at once.
 
-        A member in ``member_failures`` had no successful comparison; it gets that judge failure instead of a reward.
+        A member in ``member_failures`` lost a comparison; it gets that judge failure instead of a reward.
         """
         if cohort.phase == "failed":
             logger.debug("Discarding late GenRM completion for key=%r", cohort.key[:160])
@@ -1264,29 +1264,30 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         metadata: List[Tuple[int, int, int]],
         trainable_count: Optional[int] = None,
     ) -> tuple:
-        """Score each response from its successful comparisons; a comparison that failed is dropped.
+        """Score each response whose comparisons all succeeded; mask both responses of a failed comparison.
 
-        A trainable response that had comparisons but kept none gets no score. It is left out of the scoring, so the
-        group adjustments do not see it, and its entries in the per-response lists are None. The last element maps
-        its position to the reason it is masked; when every trainable response is in it, the caller fails the group.
+        A trainable response with a failed comparison gets no score, so every scored response is scored from all of
+        its comparisons. Its entries in the per-response lists are None, and the last element maps its position to
+        the reason it is masked; when every trainable response is in it, the caller fails the group. A masked
+        response's successful comparisons still score its neighbors, but the group adjustments see only the scored
+        responses.
         """
         count = trainable_count if trainable_count is not None else len(response_objs)
         failed = [isinstance(result, JudgeError) for result in raw_results]
-        covered = {index for item, lost in zip(metadata, failed) if not lost for index in item[:2]}
-        uncovered: Dict[int, str] = {}
+        masked: Dict[int, str] = {}
         for result, item in zip(raw_results, metadata):
             if isinstance(result, JudgeError):
                 for index in item[:2]:
-                    if index < count and index not in covered and index not in uncovered:
-                        uncovered[index] = (
-                            f"GenRM rollout_index={index} has no successful comparison after {sum(failed)} of "
-                            f"{len(raw_results)} comparisons failed: {str(result)[:1500]}"
+                    if index < count and index not in masked:
+                        masked[index] = (
+                            f"GenRM rollout_index={index} lost a comparison to a judge failure ({sum(failed)} of "
+                            f"{len(raw_results)} comparisons failed): {str(result)[:1500]}"
                         )
         drop_metrics = {
             "genrm_failed_comparison_rate_per_group": sum(failed) / max(1, len(raw_results)),
-            "genrm_masked_rollout_rate_per_group": len(uncovered) / max(1, count),
+            "genrm_masked_rollout_rate_per_group": len(masked) / max(1, count),
         }
-        if len(uncovered) == count:
+        if len(masked) == count:
             nothing: List[Any] = [None] * count
             return (
                 nothing,
@@ -1297,22 +1298,24 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 list(nothing),
                 list(nothing),
                 list(nothing),
-                uncovered,
+                masked,
             )
-        kept = [index for index in range(len(response_objs)) if index not in uncovered]
-        position = {index: new for new, index in enumerate(kept)}
+        # Scored responses lead, so only they are adjusted; masked responses and any baseline follow.
+        order = [index for index in range(count) if index not in masked] + sorted(masked)
+        order += list(range(count, len(response_objs)))
+        position = {index: new for new, index in enumerate(order)}
         scored = self._score_results(
-            [response_objs[index] for index in kept],
+            [response_objs[index] for index in order],
             [result for result, lost in zip(raw_results, failed) if not lost],
             [(position[i], position[j], judge) for (i, j, judge), lost in zip(metadata, failed) if not lost],
-            trainable_count=None if trainable_count is None else count - len(uncovered),
+            trainable_count=count - len(masked),
         )
         rewards, raw_scores, valid_rubric_scores, metrics, comparisons, overall_raw, overall_adjusted, adjustments = (
             scored
         )
 
         def expand(values: List[Any]) -> List[Any]:
-            return [None if index in uncovered else values[position[index]] for index in range(count)]
+            return [None if index in masked else values[position[index]] for index in range(count)]
 
         return (
             expand(rewards),
@@ -1323,7 +1326,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             expand(overall_raw),
             expand(overall_adjusted),
             expand(adjustments),
-            uncovered,
+            masked,
         )
 
     def _score_results(
@@ -1504,14 +1507,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             expected_rubric_ids,
         )
         aggregate_result = self._aggregate_results(response_objs, raw_results, comparison_metadata)
-        rewards, _, _, metrics, comparison_results, _, _, _, uncovered = aggregate_result
-        if uncovered:
-            # This API has no per-response mask, so a response left without a comparison fails the request.
-            raise JudgeError(uncovered[min(uncovered)])
-        # The aggregated comparisons omit dropped judge failures; keep their metadata aligned.
-        comparison_metadata = [
-            item for result, item in zip(raw_results, comparison_metadata) if not isinstance(result, JudgeError)
-        ]
+        rewards, _, _, metrics, comparison_results, _, _, _, masked = aggregate_result
+        if masked:
+            # This API has no per-response mask, so a failed comparison fails the request.
+            raise JudgeError(masked[min(masked)])
         return rewards, metrics, comparison_results, comparison_metadata
 
     async def _run_fixed_baseline_compare(

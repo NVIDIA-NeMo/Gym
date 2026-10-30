@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A failed judge comparison is dropped; only a rollout with no comparison left is masked."""
+"""A failed judge comparison masks its two rollouts; every other rollout is scored from all its comparisons."""
 
 import asyncio
 
@@ -27,7 +27,7 @@ from resources_servers.genrm_compare.tests.test_cohort_lifecycle import comparis
 
 
 # One distinct score per rollout; ranking 3.5 with unequal scores skips the tiebreaker, so each
-# rollout's reward is its score whatever subset of its comparisons survives.
+# scored rollout's reward is its score.
 SCORES = [1.0 + 0.25 * index for index in range(16)]
 NO_VERDICT = "Judge returned no completed answer after 2 attempts"
 
@@ -60,50 +60,69 @@ async def verify_cohort(server, size):
     )
 
 
-async def test_one_failed_comparison_scores_every_rollout(server, caplog):
+def masked_and_scored(results):
+    masked = {index for index, r in enumerate(results) if isinstance(r, genrm.JudgeError)}
+    scored = {index: r for index, r in enumerate(results) if index not in masked}
+    return masked, scored
+
+
+async def test_one_failed_comparison_masks_its_two_rollouts(server, caplog):
     server._run_single_comparison = judge_failing({(5, 6)})
     with caplog.at_level("WARNING"):
         results = await verify_cohort(server, 16)
-    # Rollouts 5 and 6 lost (5, 6) and keep one comparison each; nobody is masked.
-    assert [r.reward for r in results] == approx(SCORES)
-    assert not any(r.mask_sample for r in results)
-    assert all(r.genrm_failed_comparison_rate_per_group == 1 / 16 for r in results)
-    assert all(r.genrm_masked_rollout_rate_per_group == 0.0 for r in results)
-    assert all(r.genrm_parse_failure_rate_per_group == 0.0 for r in results)
-    assert "dropped comparison (5, 6)" in caplog.text and NO_VERDICT in caplog.text
+    masked, scored = masked_and_scored(results)
+    # Rollouts 5 and 6 lost (5, 6); every other rollout keeps both of its comparisons.
+    assert masked == {5, 6}
+    assert all(
+        "lost a comparison to a judge failure" in str(results[i]) and NO_VERDICT in str(results[i]) for i in masked
+    )
+    assert [r.reward for r in scored.values()] == approx([SCORES[i] for i in scored])
+    assert not any(r.mask_sample for r in scored.values())
+    assert all(r.genrm_failed_comparison_rate_per_group == 1 / 16 for r in scored.values())
+    assert all(r.genrm_masked_rollout_rate_per_group == 2 / 16 for r in scored.values())
+    assert all(r.genrm_parse_failure_rate_per_group == 0.0 for r in scored.values())
+    assert "dropped comparison (5, 6)" in caplog.text and "masked one rollout" in caplog.text
 
 
-async def test_non_adjacent_failures_score_every_rollout(server):
+async def test_neighbors_of_a_masked_rollout_keep_both_comparisons(server):
+    """Rollout 4 is still scored from (3, 4) and (4, 5), although rollout 5 is masked by (5, 6)."""
+    seen = []
+    judge = judge_failing({(5, 6)})
+
+    async def recording_judge(*args, pair_idx, **kwargs):
+        seen.append(pair_idx)
+        return await judge(*args, pair_idx=pair_idx, **kwargs)
+
+    server._run_single_comparison = recording_judge
+    results = await verify_cohort(server, 16)
+    assert (4, 5) in seen and (6, 7) in seen
+    assert results[4].reward == approx(SCORES[4]) and results[7].reward == approx(SCORES[7])
+
+
+async def test_non_adjacent_failures_mask_their_rollouts(server):
     server._run_single_comparison = judge_failing({(1, 2), (6, 7)})
     results = await verify_cohort(server, 16)
-    assert [r.reward for r in results] == approx(SCORES)
-    assert not any(r.mask_sample for r in results)
-    assert all(r.genrm_failed_comparison_rate_per_group == 2 / 16 for r in results)
+    masked, scored = masked_and_scored(results)
+    assert masked == {1, 2, 6, 7}
+    assert [r.reward for r in scored.values()] == approx([SCORES[i] for i in scored])
+    assert all(r.genrm_failed_comparison_rate_per_group == 2 / 16 for r in scored.values())
+    assert all(r.genrm_masked_rollout_rate_per_group == 4 / 16 for r in scored.values())
 
 
-async def test_adjacent_failures_mask_only_the_uncovered_rollout(server, caplog):
-    server._run_single_comparison = judge_failing({(0, 1), (1, 2)})  # both of rollout 1's comparisons
-    with caplog.at_level("WARNING"):
-        results = await verify_cohort(server, 4)
-
-    masked = results[1]
-    assert isinstance(masked, genrm.JudgeError)
-    assert "rollout_index=1 has no successful comparison after 2 of 4" in str(masked) and NO_VERDICT in str(masked)
-    scored = [results[index] for index in (0, 2, 3)]
-    assert [r.reward for r in scored] == approx([SCORES[0], SCORES[2], SCORES[3]])
-    assert not any(r.mask_sample for r in scored)
-    assert all(r.genrm_failed_comparison_rate_per_group == 0.5 for r in scored)
-    assert all(r.genrm_masked_rollout_rate_per_group == 0.25 for r in scored)
-    assert "dropped comparison (0, 1)" in caplog.text and "dropped comparison (1, 2)" in caplog.text
-    assert "masked one rollout" in caplog.text
+async def test_masked_members_replay_without_judging_again(server):
+    server._run_single_comparison = judge_failing({(0, 1), (1, 2)})
+    results = await verify_cohort(server, 4)
+    masked, scored = masked_and_scored(results)
+    assert masked == {0, 1, 2} and scored[3].reward == approx(SCORES[3])
+    assert "rollout_index=1 lost a comparison to a judge failure (2 of 4 comparisons failed)" in str(results[1])
 
     (cohort,) = server._verify_cohorts.values()
-    assert cohort.phase == "completed" and set(cohort.member_failures) == {1} and set(cohort.results) == {0, 2, 3}
+    assert cohort.phase == "completed" and set(cohort.member_failures) == {0, 1, 2} and set(cohort.results) == {3}
     # An exact retry replays the same outcome without judging again.
     server._run_single_comparison = judge_failing(set(), error=AssertionError("judged again"))
     with pytest.raises(genrm.JudgeError, match="rollout_index=1"):
         await server.verify(request_with_session(), member(1))
-    assert (await server.verify(request_with_session(), member(0))).reward == approx(SCORES[0])
+    assert (await server.verify(request_with_session(), member(3))).reward == approx(SCORES[3])
 
 
 async def test_a_non_judge_error_cancels_the_comparisons_still_running(server):
@@ -117,41 +136,37 @@ async def test_a_non_judge_error_cancels_the_comparisons_still_running(server):
     assert cancelled == {(2, 3), (3, 0)}
 
 
-async def test_a_masked_rollout_does_not_shift_group_adjustments(server):
-    """The uncovered rollout never enters the length penalty that the scored rollouts share."""
+async def test_masked_rollouts_do_not_shift_group_adjustments(server):
+    """The masked rollouts never enter the length penalty that the scored rollouts share."""
     server.config.group_answer_length_penalty_coeff = 0.5
-    response_objs = [response_obj("short"), response_obj("x" * 5000), response_obj("medium answer"), response_obj("a")]
+    texts = ["x" * 5000, "y" * 3000, "medium answer", "a"]
     metadata = [(0, 1, 0), (1, 2, 0), (2, 3, 0), (3, 0, 0)]
-    raw_results = [
-        genrm.JudgeError(NO_VERDICT),
-        genrm.JudgeError(NO_VERDICT),
-        comparison_result(SCORES[2], SCORES[3], 3.5),
-        comparison_result(SCORES[3], SCORES[0], 3.5),
-    ]
-    rewards, *_, uncovered = server._aggregate_results(response_objs, raw_results, metadata)
+    raw_results = [genrm.JudgeError(NO_VERDICT)] + [comparison_result(3.0, 3.0, 3.5)] * 3
+    rewards, *_, masked = server._aggregate_results([response_obj(t) for t in texts], raw_results, metadata)
 
-    without_masked, *_ = server._score_results(
-        [response_objs[index] for index in (0, 2, 3)], raw_results[2:], [(1, 2, 0), (2, 0, 0)]
+    alone, *_ = server._score_results(
+        [response_obj(t) for t in texts[2:]], [comparison_result(3.0, 3.0, 3.5)], [(0, 1, 0)]
     )
-    assert set(uncovered) == {1}
-    assert rewards[1] is None
-    assert [rewards[index] for index in (0, 2, 3)] == approx(without_masked)
+    assert set(masked) == {0, 1}
+    assert rewards[:2] == [None, None]
+    assert rewards[2:] == approx(alone)
+    assert rewards[2] != approx(rewards[3])
 
 
-@pytest.mark.parametrize("failing_pairs", [{(0, 1), (0, 2)}, {(0, 1), (0, 2), (0, 3)}], ids=["one_left", "none_left"])
-async def test_all_pairs_masks_a_rollout_only_when_every_pair_of_it_failed(server, failing_pairs):
+@pytest.mark.parametrize("failing_pairs", [{(0, 1)}, {(0, 1), (2, 3)}], ids=["one_failure", "every_rollout_masked"])
+async def test_all_pairs_masks_the_rollouts_of_a_failed_pair(server, failing_pairs):
     # Under all_pairs each rollout has three comparisons in a group of 4, not two as under circular.
     server.config.comparison_strategy = "all_pairs"
     server._run_single_comparison = judge_failing(failing_pairs)
     results = await verify_cohort(server, 4)
-    if len(failing_pairs) == 3:
-        assert isinstance(results[0], genrm.JudgeError)
-        assert "rollout_index=0 has no successful comparison after 3 of 6" in str(results[0])
-        assert [r.reward for r in results[1:]] == approx(SCORES[1:4])
-        assert all(r.genrm_masked_rollout_rate_per_group == 0.25 for r in results[1:])
+    if len(failing_pairs) == 2:
+        assert all(isinstance(r, genrm.JudgeError) for r in results)
         return
-    assert [r.reward for r in results] == approx(SCORES[:4])
-    assert all(r.genrm_failed_comparison_rate_per_group == approx(2 / 6) for r in results)
+    masked, scored = masked_and_scored(results)
+    assert masked == {0, 1}
+    # Rollouts 2 and 3 keep all three comparisons, including the ones against 0 and 1.
+    assert [r.reward for r in scored.values()] == approx(SCORES[2:4])
+    assert all(r.genrm_failed_comparison_rate_per_group == approx(1 / 6) for r in scored.values())
 
 
 async def test_every_failed_comparison_fails_the_group(server):
@@ -169,31 +184,19 @@ async def test_non_judge_errors_fail_the_whole_group(server):
     assert all("ValueError: bad comparison" in r.detail for r in results)
 
 
-async def test_compare_endpoint_keeps_results_aligned_with_pairs(server):
+async def test_compare_endpoint_fails_on_a_failed_comparison(server):
+    # /compare has no per-response mask.
     server._run_single_comparison = judge_failing({(1, 2)})
-    request = genrm.GenRMCompareRequest(
-        conversation_history=[], response_objs=[response_obj(str(i)) for i in range(4)]
-    )
-    response = await server.compare(request)
-    assert response.rewards == approx(SCORES[:4])
-    assert [(r["response_i"], r["response_j"]) for r in response.comparison_results] == [(0, 1), (2, 3), (3, 0)]
-    expected_scores = [(SCORES[0], SCORES[1]), (SCORES[2], SCORES[3]), (SCORES[3], SCORES[0])]
-    assert [(r["score_1"], r["score_2"]) for r in response.comparison_results] == expected_scores
-    assert response.metrics["genrm_failed_comparison_rate_per_group"] == 0.25
-
-
-async def test_compare_endpoint_fails_when_a_response_keeps_no_comparison(server):
-    server._run_single_comparison = judge_failing({(0, 1), (1, 2)})
     request = genrm.GenRMCompareRequest(
         conversation_history=[], response_objs=[response_obj(str(i)) for i in range(4)]
     )
     with pytest.raises(HTTPException) as raised:
         await server.compare(request)
-    assert raised.value.status_code == 503 and "rollout_index=1 has no successful comparison" in raised.value.detail
+    assert raised.value.status_code == 503 and "rollout_index=1 lost a comparison" in raised.value.detail
 
 
-@pytest.mark.parametrize("failing_passes, expected_rewards", [({0}, [5.0, 5.0]), ({0, 1}, [None, 5.0])])
-async def test_fixed_baseline_masks_only_a_rollout_whose_every_pass_failed(server, failing_passes, expected_rewards):
+@pytest.mark.parametrize("failing_passes", [{0}, {0, 1}])
+async def test_fixed_baseline_masks_a_rollout_with_a_failed_pass(server, failing_passes):
     server.config.comparison_mode = "fixed_baseline"
     server.config.num_judges_per_comparison = 2
     passes = {}
@@ -206,16 +209,16 @@ async def test_fixed_baseline_masks_only_a_rollout_whose_every_pass_failed(serve
         return comparison_result(5.0, 5.0, 3.5)
 
     server._run_single_comparison = judge
-    rewards, *_, metrics, _, _, _, _, uncovered = await server._run_fixed_baseline_compare(
+    rewards, *_, metrics, _, _, _, _, masked = await server._run_fixed_baseline_compare(
         [], [response_obj("first"), response_obj("second")], "baseline", None, "prompt"
     )
-    assert rewards == [approx(reward) if reward is not None else None for reward in expected_rewards]
-    assert set(uncovered) == ({0} if expected_rewards[0] is None else set())
+    assert rewards[0] is None and rewards[1] == approx(5.0)
+    assert set(masked) == {0}
     assert metrics["genrm_failed_comparison_rate_per_group"] == len(failing_passes) / 4
-    assert metrics["genrm_masked_rollout_rate_per_group"] == (0.5 if expected_rewards[0] is None else 0.0)
+    assert metrics["genrm_masked_rollout_rate_per_group"] == 0.5
 
 
-async def test_fixed_baseline_cohort_masks_the_uncovered_member_through_verify(server):
+async def test_fixed_baseline_cohort_masks_the_member_through_verify(server):
     server.config.comparison_mode = "fixed_baseline"
 
     async def judge(_conversation, _response_1, _response_2, *, pair_idx, **_kwargs):
