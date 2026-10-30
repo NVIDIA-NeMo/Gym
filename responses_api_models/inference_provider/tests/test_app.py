@@ -19,7 +19,7 @@ from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
 from nemo_gym.models import CaptureStore, NeMoGymAsyncOpenAI
-from nemo_gym.observability.model_calls import read_model_call_records
+from nemo_gym.rollouts.model_calls import read_model_call_records
 from responses_api_models.inference_provider.app import (
     InferenceProvider,
     InferenceProviderConfig,

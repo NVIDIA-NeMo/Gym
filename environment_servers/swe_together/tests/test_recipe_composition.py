@@ -9,7 +9,7 @@ from environment_servers.swe_together.app import SWETConfig, SWETEnvironmentServ
 from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.config import AggregateMetricsRequest, GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.config.global_config import taskset_environment_server_name
-from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
+from nemo_gym.rollouts import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 
 
 @pytest.mark.asyncio

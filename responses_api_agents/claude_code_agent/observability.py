@@ -34,7 +34,7 @@ from nemo_gym.trajectory import (
 
 
 if TYPE_CHECKING:
-    from nemo_gym.observability.model_calls import ModelCallRecord
+    from nemo_gym.trajectory import ModelCallRecord
 
 
 SOURCE = "claude_code"

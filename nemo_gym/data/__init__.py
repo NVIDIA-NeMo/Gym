@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         HarborTaskStep,
         HarborVerifier,
     )
+    from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT
     from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE, VerifierShim, write_shim
     from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, MAIN_SERVICE
     from nemo_gym.data.tasks.harbor.registry import ImageConfigError
@@ -86,6 +87,7 @@ _PUBLIC_API = {
     "HarborVerifier": "tasks.harbor.models",
     "ImageConfigError": "tasks.harbor.registry",
     "MAIN_SERVICE": "tasks.harbor.records",
+    "ORACLE_AGENT": "tasks.harbor.prepare",
     "OverlayRun": "tasks.harbor.dockerfile",
     "PromptConfig": "prompt",
     "RECORD_VERSION": "tasks.harbor.dockerfile",

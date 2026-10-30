@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Latency accounting behind the dispatch budget."""
 
-from nemo_gym.rollout_collection import NG_ELAPSED_KEY, DispatchLatencyTracker, observed_elapsed
+from nemo_gym.rollouts.rollout_collection import NG_ELAPSED_KEY, DispatchLatencyTracker, observed_elapsed
 
 
 def _tracker(*durations):

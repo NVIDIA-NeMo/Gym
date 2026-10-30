@@ -6,7 +6,7 @@ import pytest
 
 from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.core import EpisodeId, maybe_rollout_id_from_run_body
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 from resources_servers.gdpval.multistage_orchestrator import build_stage_rows, index_rows_by_task
 from resources_servers.gdpval.persisted_layout import repeat_from_rollout_id
 
