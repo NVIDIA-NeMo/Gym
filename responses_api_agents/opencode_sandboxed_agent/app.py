@@ -16,6 +16,7 @@
 import json
 import sqlite3
 import sys
+import tempfile
 from asyncio import Semaphore, to_thread
 from copy import deepcopy
 from pathlib import Path
@@ -420,6 +421,11 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
+    # Send the user query to `opencode run` on stdin (uploaded as a file) instead of as an argument.
+    # As an argument, OpenCode wraps it in double quotes and backslash-escapes its inner quotes (run.ts
+    # quotes every argument containing a space), and the whole launch command must fit Linux's 128 KiB
+    # single-argument limit; on stdin the query reaches the model verbatim, at any length.
+    query_via_stdin: bool = False
 
     # Sandbox config
     sandbox_provider: str
@@ -591,7 +597,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
-    async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
+    async def _start_sandbox(
+        self,
+        sandbox_id: Optional[str] = None,
+        workdir: Optional[str] = None,
+        files: Optional[Dict[str, str]] = None,
+    ) -> AsyncSandbox:
+        """Connect to the resources server's sandbox, or create one from sandbox_config.
+
+        `files` (remote path -> text) are per-row files from /seed_session, written on top of
+        sandbox_config.files into a sandbox this agent creates.
+        """
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -599,6 +615,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
         if sandbox_id:
+            if files:
+                raise ValueError("Per-row sandbox_files apply only to a sandbox the agent creates")
             if self.config.network_access != "inherit":
                 raise ValueError("Cannot verify network policy on an externally supplied sandbox")
             sandbox = await AsyncSandbox.connect(
@@ -621,7 +639,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=self.config.sandbox_config.get("workdir"),
             env=env,
-            files=dict(self.config.sandbox_config.get("files", {})),
+            files=dict(self.config.sandbox_config.get("files", {})) | dict(files or {}),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
             | {
@@ -899,6 +917,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
 
+        query_str = f"-- {quote(query)}"
+        if self.config.query_via_stdin:
+            query_remote_path = f"/tmp/nemo-gym-opencode-query-{uuid4().hex}.txt"
+            with tempfile.TemporaryDirectory(prefix="nemo-gym-opencode-query-") as tmp_dir:
+                query_local_path = Path(tmp_dir) / "query.txt"
+                query_local_path.write_text(query, encoding="utf-8")
+                await sandbox.upload(query_local_path, query_remote_path)
+            query_str = f"< {quote(query_remote_path)}"
+
         # OpenCode's glob/grep tools otherwise download rg inside the sandbox.
         ripgrep_remote_path = None
         ripgrep_install_str = ""
@@ -925,7 +952,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
         && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} {query_str} \
         && echo "OpenCode run finished"
         """
 
@@ -1283,6 +1310,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
             workdir=seed_session_result.get("workdir"),
+            files=seed_session_result.get("sandbox_files"),
         )
         agent_sandbox_start_time_taken = perf_counter() - sandbox_started
         self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox

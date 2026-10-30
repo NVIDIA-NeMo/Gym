@@ -139,6 +139,32 @@ class TestOpenCodeSandboxedAgent:
         await server._start_sandbox(sandbox_id="sb-2")
         assert async_sandbox.connect.await_args.args[0] == {"sandbox_id": "sb-2", "workdir": None}
 
+        # Per-row files cannot be written into a sandbox the agent did not create.
+        with raises(ValueError, match="sandbox_files"):
+            await server._start_sandbox(sandbox_id="sb-3", files={"/workspace/a.md": "a"})
+
+    async def test_start_sandbox_writes_seeded_files_over_config_files(self, monkeypatch: MonkeyPatch) -> None:
+        sandbox = MagicMock()
+        sandbox.start = AsyncMock()
+        monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app_module, "create_provider", lambda *_: SimpleNamespace(name="opensandbox"))
+        monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: SimpleNamespace(name="opensandbox"))
+        monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+        config = self._create_config()
+        config.sandbox_config = {"files": {"/tmp/env.txt": "static", "/workspace/a.md": "config"}}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        await server._start_sandbox(files={"/workspace/a.md": "row", "/workspace/b.md": "row b"})
+        assert sandbox.start.await_args.args[0].files == {
+            "/tmp/env.txt": "static",
+            "/workspace/a.md": "row",
+            "/workspace/b.md": "row b",
+        }
+
+        await server._start_sandbox()
+        assert sandbox.start.await_args.args[0].files == {"/tmp/env.txt": "static", "/workspace/a.md": "config"}
+
     @fixture
     def opencode_export_test_data(self) -> Dict[str, Any]:
         test_data_path = Path(__file__).parent / "opencode_export_test_data.json"
@@ -270,6 +296,60 @@ class TestOpenCodeSandboxedAgent:
         else:
             assert not any(str(u[1]).startswith("/tmp/nemo-gym-ripgrep-") for u in uploads)
             assert "nemo-gym-ripgrep" not in command and ".opencode/bin/rg" not in command
+
+    @mark.parametrize("query_via_stdin", [False, True])
+    async def test_query_is_passed_as_argument_or_piped_from_an_uploaded_file(
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, query_via_stdin: bool
+    ) -> None:
+        # Quotes and a size past Linux's 128 KiB single-argument limit: only stdin carries this verbatim.
+        query = 'Judge "both" responses.\n' * 8000
+        config = OpenCodeSandboxedAgentConfig.model_validate(
+            self._create_config().model_dump() | {"query_via_stdin": query_via_stdin}
+        )
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        uploaded = {}
+
+        async def upload(source, remote):
+            with open(source, encoding="utf-8") as f:
+                uploaded[remote] = f.read()
+
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+            ]
+        )
+        sandbox_mock.download = AsyncMock()
+        sandbox_mock.upload = AsyncMock(side_effect=upload)
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: True)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
+            lambda self: json.dumps(opencode_export_test_data),
+        )
+
+        await server.responses(
+            request=MagicMock(
+                session={SESSION_ID_KEY: "my session"},
+                cookies={"sandbox_id": ""},
+                path_params={"rollout_id": "direct-call"},
+            ),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": query}]),
+        )
+
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        query_uploads = {r: text for r, text in uploaded.items() if r.startswith("/tmp/nemo-gym-opencode-query-")}
+        if query_via_stdin:
+            [(remote, text)] = query_uploads.items()
+            assert text == query
+            assert command.index("opencode run") < command.index(f"--thinking < {shlex.quote(remote)}")
+            assert "Judge" not in command and len(command) < 128 * 1024
+        else:
+            assert not query_uploads
+            assert f"--thinking -- {shlex.quote(query)}" in command
 
     @mark.parametrize("error_type", [PermissionError, FileNotFoundError])
     async def test_ripgrep_upload_failure_propagates_without_export_and_cleans_up(
@@ -946,6 +1026,60 @@ class TestBenchmarkLifecycle:
         assert client.post.await_args.kwargs["json"]["response"]["output"] == []
         assert result.model_dump()["library_reward"] == 0.0
         sandbox.stop.assert_awaited_once()
+
+    async def test_run_passes_seeded_sandbox_files_to_the_sandbox(self, monkeypatch):
+        files = {"/workspace/genrm/response_1.md": "one", "/workspace/genrm/response_2.md": "two"}
+        seed = MagicMock(cookies={})
+        seed.json = AsyncMock(return_value={"sandbox_files": files})
+        client = MagicMock(spec=ServerClient)
+
+        async def post(**kwargs):
+            if kwargs["url_path"] == "/seed_session":
+                return seed
+            payload = kwargs["json"] | {"reward": -1.0}
+            return SimpleNamespace(
+                ok=True, read=AsyncMock(return_value=json.dumps(payload).encode()), raise_for_status=lambda: None
+            )
+
+        client.post = AsyncMock(side_effect=post)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=client)
+        sandbox = MagicMock(stop=AsyncMock())
+        server._start_sandbox = AsyncMock(return_value=sandbox)
+        response = NeMoGymResponse(
+            id="ok",
+            created_at=0,
+            model="test",
+            object="response",
+            output=[],
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+
+        async def finished_response(*args):
+            server._sandbox_id_to_run_result["trial"] = {
+                "opencode_results_fpath": "",
+                "opencode_run_stdout": "",
+                "opencode_run_stderr": "",
+                "opencode_finished": True,
+                "opencode_export_found": True,
+                "opencode_failed": False,
+                "opencode_error_type": None,
+                "opencode_exit_code": 0,
+            }
+            return response
+
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", finished_response)
+        monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
+        request = MagicMock(cookies={}, session={SESSION_ID_KEY: "trial"})
+        request.state = SimpleNamespace()
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Judge"}]}
+        )
+
+        result = await server.run(request, body)
+        assert result.reward == -1.0
+        assert server._start_sandbox.await_args.kwargs == {"sandbox_id": None, "workdir": None, "files": files}
 
 
 @mark.parametrize("failure", ["command", "download", "empty"])
