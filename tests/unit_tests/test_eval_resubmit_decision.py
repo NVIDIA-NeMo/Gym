@@ -451,7 +451,9 @@ def test_gate_summary_from_collected_reads_the_named_score_and_passes_only_when_
     write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
-    task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status="FINISHED")
+    task = gate_summary_from_collected(
+        d, collected, max_unhealthy_fraction=0.02, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
+    )
     assert (task["status"], task["score"], task["expected_samples"], task["scored_samples"], task["errors"]) == (
         "FAILED",
         0.75,
@@ -572,6 +574,8 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
             '["agent", "mean/reward"]',
             "--max-unhealthy-fraction",
             "0.02",
+            "--mlflow-run-id",
+            "postrun-run",
             "--mlflow-status",
             "FINISHED",
         ],
@@ -721,18 +725,20 @@ def mlflow_job(tmp_path: Path, *, mode: str) -> Path:
                 "is not verified"
             ],
         ),
-        (
-            "both",
-            "FINISHED",
-            ["MLflow live run live-run and a post-run export both exist: the observed status names neither"],
-        ),
+        # A current receipt with its own run observed is bound, whatever earlier live run left its id behind.
+        ("both", "FINISHED", []),
         ("none", None, ["no MLflow run evidence: no live run id and no post-run export receipt"]),
     ],
 )
 def test_mlflow_delivery_follows_the_producer_of_its_evidence(tmp_path, fake_executor, mode, status, mlflow) -> None:
     fake_executor.job_dir = mlflow_job(tmp_path, mode=mode)
     out = submit.recover(
-        "gym-job-r", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02, mlflow_status=status
+        "gym-job-r",
+        "bench",
+        score_key=["agent", "mean/reward"],
+        max_unhealthy_fraction=0.02,
+        mlflow_status=status,
+        mlflow_run_id="postrun-run",
     )
     assert out.dispatched is None and fake_executor.calls == ["decide"]
     # No case accepts: response/trial health has no producer. Only a current post-run receipt with FINISHED has no
@@ -1010,7 +1016,9 @@ def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path
     summary_path.write_text(json.dumps(summary))
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
-    task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.5, mlflow_status="FINISHED")
+    task = gate_summary_from_collected(
+        d, collected, max_unhealthy_fraction=0.5, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
+    )
     assert task["status"] == "FAILED"
     assert task["warnings"][-3].startswith("per-rollout health within the configured criterion")
     assert task["warnings"][-2:] == [
@@ -1080,7 +1088,12 @@ def test_a_current_post_run_receipt_with_finished_is_the_only_mlflow_pass() -> N
     from nemo_gym.orchestration.recovery import mlflow_errors
 
     assert (
-        mlflow_errors({"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True}}, "FINISHED") == []
+        mlflow_errors(
+            {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True}},
+            "FINISHED",
+            observed_run_id="postrun-run",
+        )
+        == []
     )
 
 
@@ -1110,7 +1123,9 @@ def gate_of(job: Path) -> tuple:
 
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
-    return d, gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status="FINISHED")
+    return d, gate_summary_from_collected(
+        d, collected, max_unhealthy_fraction=0.02, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
+    )
 
 
 @pytest.mark.parametrize(("final_zeros", "failed"), [(0, False), (1, False), (2, True), (3, True)])
@@ -1272,3 +1287,40 @@ def test_missing_mlflow_evidence_names_the_configuration_and_never_passes(tmp_pa
     mlflow = [e for e in task["errors"] if "MLflow" in e]
     assert d.action == RecoveryAction.NOOP and task["status"] == "FAILED" and len(mlflow) == 1
     assert message in mlflow[0]
+
+
+@pytest.mark.parametrize(
+    ("observed_run_id", "message"),
+    [
+        (None, "MLflow observed status names no run, so it is not bound to the receipt's run postrun-run"),
+        ("  ", "MLflow observed status names no run, so it is not bound to the receipt's run postrun-run"),
+        ("other-run", "MLflow observed status is for run other-run, not the receipt's run postrun-run"),
+    ],
+)
+def test_a_finished_status_counts_only_for_the_receipt_s_own_run(observed_run_id, message) -> None:
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    local = {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True}}
+    assert mlflow_errors(local, "FINISHED", observed_run_id=observed_run_id) == [message]
+
+
+@pytest.mark.parametrize(
+    ("observed_run_id", "status", "accepted"),
+    [
+        ("postrun-run", "FINISHED", True),
+        ("live-old", "FINISHED", False),
+        (None, "FINISHED", False),
+        ("other", "FINISHED", False),
+        ("postrun-run", "FAILED", False),
+    ],
+)
+def test_a_post_run_receipt_beside_an_earlier_live_run_is_bound_only_by_its_own_run(
+    observed_run_id, status, accepted
+) -> None:
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    local = {"live_run_id": "live-old", "receipt": {"run_id": "postrun-run", "current": True}}
+    errors = mlflow_errors(local, status, observed_run_id=observed_run_id)
+    assert (errors == []) is accepted
+    stale = {"live_run_id": "live-old", "receipt": {"run_id": "postrun-run", "current": False}}
+    assert mlflow_errors(stale, "FINISHED", observed_run_id="postrun-run")

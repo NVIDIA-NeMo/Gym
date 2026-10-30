@@ -656,7 +656,11 @@ def quality_inputs(
 
 
 def mlflow_errors(
-    local: Mapping[str, Any] | None, observed_status: str | None, *, configured: bool | None = None
+    local: Mapping[str, Any] | None,
+    observed_status: str | None,
+    *,
+    configured: bool | None = None,
+    observed_run_id: str | None = None,
 ) -> list[str]:
     """MLflow delivery errors from the collected exporter files and the server status the caller observed.
 
@@ -665,7 +669,11 @@ def mlflow_errors(
     with an observed FINISHED passes. A live run is not accepted here: live uploads log failures and continue, so
     neither its run id nor FINISHED shows the configured payloads arrived. A live run beside a post-run export leaves
     the observed status unbound. ``configured`` is the health report's `run.provenance.mlflow.configured`, a
-    names-only fact about the saved config snapshot (None when not reported); it only qualifies the message. No
+    names-only fact about the saved config snapshot (None when not reported); it only qualifies the message. The
+    observed status is bound to a run: with a post-run receipt, ``observed_run_id`` must name the receipt's run.
+    `BaseExporter.export` writes the receipt only after every upload returned and the artifacts did not change, but
+    its teardown still sets FINISHED on a partial export (``run_failed`` is the process's run, not the export's), so
+    a FINISHED from any other run proves nothing. No
     evidence is always an error, never a run that needed none: exporter activation and whether tracking was required
     or disabled are not recorded.
     """
@@ -711,13 +719,28 @@ def mlflow_errors(
         errors.append(
             f"MLflow post-run export receipt of run {receipt.get('run_id')} does not match the current artifacts"
         )
-    if live and receipt is not None:
+    # A post-run export beside an earlier live run is allowed (BaseExporter.export warns and keeps the live id), so a
+    # current receipt whose own run is the observed one is bound; any other observation stays ambiguous.
+    bound = (
+        isinstance(receipt, dict)
+        and receipt.get("current") is True
+        and isinstance(observed_run_id, str)
+        and bool(observed_run_id.strip())
+        and observed_run_id == receipt.get("run_id")
+    )
+    if live and receipt is not None and not bound:
         errors.append(f"MLflow live run {live} and a post-run export both exist: the observed status names neither")
-    elif live is not None and live.strip():
+    elif live is not None and live.strip() and receipt is None:
         errors.append(
             f"MLflow live run {live}: configured payload delivery is not verified (live uploads log failures and "
             "continue), so live acceptance is unsupported"
         )
+    if isinstance(receipt, dict) and not live and observed_status is not None:
+        bound = receipt.get("run_id")
+        if not isinstance(observed_run_id, str) or not observed_run_id.strip():
+            errors.append(f"MLflow observed status names no run, so it is not bound to the receipt's run {bound}")
+        elif observed_run_id != bound:
+            errors.append(f"MLflow observed status is for run {observed_run_id}, not the receipt's run {bound}")
     if observed_status is None:
         errors.append("MLflow terminal status not observed")
     elif observed_status != "FINISHED":
@@ -888,8 +911,12 @@ def gate_summary_from_collected(
     *,
     max_unhealthy_fraction: float | None,
     mlflow_status: str | None = None,
+    mlflow_run_id: str | None = None,
 ) -> dict[str, Any]:
-    """The Day-0 gate task entry from the collected run: decision counts, the named score and the quality summary."""
+    """The Day-0 gate task entry from the collected run: decision counts, the named score and the quality summary.
+
+    ``mlflow_status`` and ``mlflow_run_id`` are the tracking run's status and id as the caller read them together.
+    """
     fe_valid, fe_reasons, rollout_health, rollout_reasons = quality_inputs(
         decision, collected, max_unhealthy_fraction=max_unhealthy_fraction
     )
@@ -930,7 +957,12 @@ def gate_summary_from_collected(
     mlflow_facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
     configured = mlflow_facts.get("configured") if isinstance(mlflow_facts, dict) else None
     extra.extend(
-        mlflow_errors(collected.mlflow, mlflow_status, configured=configured if isinstance(configured, bool) else None)
+        mlflow_errors(
+            collected.mlflow,
+            mlflow_status,
+            configured=configured if isinstance(configured, bool) else None,
+            observed_run_id=mlflow_run_id,
+        )
     )
     if extra:
         task["errors"] = task["errors"] + extra

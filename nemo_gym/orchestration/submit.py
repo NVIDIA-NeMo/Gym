@@ -68,6 +68,7 @@ def recover(
     score_key: list[str] | None = None,
     max_unhealthy_fraction: float | None = None,
     mlflow_status: str | None = None,
+    mlflow_run_id: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -87,7 +88,11 @@ def recover(
     decision, collected = executor.recovery_evidence(record, benchmark, score_key=score_key)
     gate_task = (
         gate_summary_from_collected(
-            decision, collected, max_unhealthy_fraction=max_unhealthy_fraction, mlflow_status=mlflow_status
+            decision,
+            collected,
+            max_unhealthy_fraction=max_unhealthy_fraction,
+            mlflow_status=mlflow_status,
+            mlflow_run_id=mlflow_run_id,
         )
         if collected is not None
         else gate_task_summary(
@@ -99,7 +104,11 @@ def recover(
             health_reasons=["no evidence collected"],
         )
     )
-    mlflow = {"local": collected.mlflow if collected is not None else None, "observed_status": mlflow_status}
+    mlflow = {
+        "local": collected.mlflow if collected is not None else None,
+        "observed_status": mlflow_status,
+        "observed_run_id": mlflow_run_id,
+    }
     if decision.action == RecoveryAction.NOOP:
         return RecoveryOutcome(decision=decision, ok=True, dispatched=None, gate_task=gate_task, mlflow=mlflow)
     if decision.action == RecoveryAction.REVERIFY:

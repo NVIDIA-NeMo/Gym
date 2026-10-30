@@ -707,6 +707,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             score_key is not None
             or getattr(args, "max_unhealthy_fraction", None) is not None
             or getattr(args, "mlflow_status", None) is not None
+            or getattr(args, "mlflow_run_id", None) is not None
         ) and not getattr(args, "recover", False):
             args._parser.error("--score-key and --max-unhealthy-fraction need --recover")
         if getattr(args, "recover", False):
@@ -716,6 +717,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 score_key=score_key,
                 max_unhealthy_fraction=getattr(args, "max_unhealthy_fraction", None),
                 mlflow_status=getattr(args, "mlflow_status", None),
+                mlflow_run_id=getattr(args, "mlflow_run_id", None),
             )
             print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
             if not outcome.ok:
@@ -1697,6 +1699,13 @@ COMMANDS = {
                     "--mlflow-status",
                     metavar="STATUS",
                     help="With --recover: the tracking run's terminal status as read from the MLflow server.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--mlflow-run-id",
+                    metavar="RUN_ID",
+                    help="With --recover: the id of the run whose --mlflow-status was read.",
                 ),
             ),
         ),

@@ -205,6 +205,15 @@ class MLflowExporter(BaseExporter):
             raise RuntimeError("MLflow run is not open; call setup() before logging.")
         return self.client, self.run_id
 
+    def _batch_mode(self) -> dict[str, bool]:
+        """`log_batch` arguments: a post-run export waits for each batch.
+
+        With MLflow's async logging (``MLFLOW_ENABLE_ASYNC_LOGGING``) a batch call returns before the server has the
+        batch. The post-run receipt says the whole run reached the backend, so the export logs synchronously and a
+        failed batch raises before the receipt is written. A live run keeps MLflow's default.
+        """
+        return {"synchronous": True} if self._exported_artifacts is not None else {}
+
     def _log_config(self, config_dict: DictConfig) -> None:
         client, run_id = self._active()
         container = OmegaConf.to_container(config_dict)
@@ -232,7 +241,7 @@ class MLflowExporter(BaseExporter):
             client.log_dict(run_id, container, self.CONFIG_ARTIFACT_FILE)
 
         for batch in batched(params, MAX_PARAMS_TAGS_PER_BATCH):
-            client.log_batch(run_id, params=batch)
+            client.log_batch(run_id, params=batch, **self._batch_mode())
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
         client, run_id = self._active()
@@ -252,9 +261,9 @@ class MLflowExporter(BaseExporter):
                 tags.append(RunTag(name, value[:MAX_PARAM_VAL_LENGTH]))
 
         for batch in batched(numeric, MAX_METRICS_PER_BATCH):
-            client.log_batch(run_id, metrics=batch)
+            client.log_batch(run_id, metrics=batch, **self._batch_mode())
         for batch in batched(tags, MAX_PARAMS_TAGS_PER_BATCH):
-            client.log_batch(run_id, tags=batch)
+            client.log_batch(run_id, tags=batch, **self._batch_mode())
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         client, run_id = self._active()
