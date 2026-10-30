@@ -74,6 +74,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxPtySession,
     SandboxPtySpec,
     SandboxResources,
+    SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
     clamp_resource_requests,
@@ -1652,6 +1653,16 @@ class OpenSandboxProvider:
             if pagination.get("hasNextPage") is not True:
                 return found
             page += 1
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        """Create a sandbox from a snapshot: OpenSandbox takes ``snapshot_id`` in place of the image."""
+        fork = replace(spec, image=None, provider_options={**spec.provider_options, "snapshot_id": snapshot_id})
+        try:
+            return await self.create(fork)
+        except Exception as error:
+            if "SNAPSHOT::NOT_FOUND" in f"{error!s} {error!r}":
+                raise SandboxSnapshotNotFoundError(f"OpenSandbox has no snapshot {snapshot_id!r}: {error}") from error
+            raise
 
     async def _management_get_page(self, page: int) -> dict[str, Any]:
         attempts = self._operations.retries + 1

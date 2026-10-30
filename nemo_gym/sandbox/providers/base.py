@@ -324,6 +324,13 @@ class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
 
 
+class SandboxSnapshotNotFoundError(LookupError):
+    """Raised when a provider has no snapshot with the requested id.
+
+    The snapshot may be deleted, or not yet visible on every replica of a snapshot store that is not fully shared.
+    """
+
+
 class SandboxProvider(Protocol):
     """Runtime/infra provider contract used by the public sandbox API."""
 
@@ -549,9 +556,8 @@ class SupportsSandboxPauseResume(Protocol):
 class SupportsSandboxSnapshot(Protocol):
     """Optional provider capability to snapshot a running sandbox into a durable, independent copy.
 
-    A snapshot is a restore point: ``create`` with ``provider_options["snapshot_id"]`` (and no image) builds a new
-    sandbox from it, however the source sandbox changed or ended since. Deleting the source sandbox leaves the
-    snapshot; only ``delete_snapshot`` removes it.
+    A snapshot is a restore point: ``create_from_snapshot`` builds a new sandbox from it, however the source sandbox
+    changed or ended since. Deleting the source sandbox leaves the snapshot; only ``delete_snapshot`` removes it.
     """
 
     async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
@@ -568,6 +574,13 @@ class SupportsSandboxSnapshot(Protocol):
 
     async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
         """Every snapshot whose name starts with ``prefix``, each a mapping with at least ``id`` and ``name``."""
+        ...
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        """Create a sandbox from a snapshot in place of ``spec``'s image, with the rest of ``spec``.
+
+        Raises ``SandboxSnapshotNotFoundError`` when the provider has no snapshot ``snapshot_id``.
+        """
         ...
 
 

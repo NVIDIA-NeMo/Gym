@@ -18,6 +18,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxHandle,
     SandboxResources,
     SandboxSidecarSpec,
+    SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxSnapshot,
@@ -41,8 +42,8 @@ pytestmark = pytest.mark.sandbox
 
 
 class FakeSnapshotProvider:
-    """OpenSandbox-shaped fake: an explicit snapshot copies the filesystem, create can fork a snapshot, connect is
-    by id, and snapshots can be listed by name. Snapshots live until deleted, whatever the source sandbox does."""
+    """OpenSandbox-shaped fake: an explicit snapshot copies the filesystem, create_from_snapshot forks one, connect
+    is by id, and snapshots can be listed by name. Snapshots live until deleted, whatever the source sandbox does."""
 
     name = "fake-snapshots"
 
@@ -83,16 +84,19 @@ class FakeSnapshotProvider:
         return snapshot_id
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return self._create(spec, snapshot_id=None)
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        return self._create(spec, snapshot_id=snapshot_id)
+
+    def _create(self, spec: SandboxSpec, *, snapshot_id: str | None) -> SandboxHandle:
         self._counter += 1
         sandbox_id = f"sb-{self._counter}"
-        snapshot_id = spec.provider_options.get("snapshot_id")
         self._maybe_fail("create", sandbox_id)
-        if (spec.image is None) == (snapshot_id is None):
-            raise ValueError("exactly one of image or snapshot_id must be specified")  # as OpenSandbox does
         if snapshot_id is not None and snapshot_id not in self.snapshots:
-            raise RuntimeError(f"SNAPSHOT::NOT_FOUND {snapshot_id}")
+            raise SandboxSnapshotNotFoundError(f"no snapshot {snapshot_id}")
         fs = list(self.snapshots[snapshot_id]["fs"]) if snapshot_id is not None else []
-        self.boxes[sandbox_id] = {"fs": fs, "state": "running", "spec": spec}
+        self.boxes[sandbox_id] = {"fs": fs, "state": "running", "spec": spec, "snapshot_id": snapshot_id}
         return SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw=None)
 
     async def exec(self, handle: SandboxHandle, command: str, **kwargs: Any) -> SandboxExecResult:
@@ -726,13 +730,26 @@ async def test_restore_retries_a_fork_the_backend_cannot_find_yet(
     states = await (await seeded(provider, state_dir, "s1")).export(["s1"], checkpoint_id="c1")
     monkeypatch.setattr(checkpoint_sandbox, "FORK_NOT_FOUND_BACKOFF_S", 0.0)
     # The first two creates land on a replica without the snapshot (sb-3, sb-4 are the failed attempts' ids).
-    provider.fail[("create", "sb-3")] = RuntimeError("Create sandbox failed: HTTP 404: SNAPSHOT::NOT_FOUND")
-    provider.fail[("create", "sb-4")] = RuntimeError("Create sandbox failed: HTTP 404: SNAPSHOT::NOT_FOUND")
+    provider.fail[("create", "sb-3")] = SandboxSnapshotNotFoundError("snapshot not on this replica yet")
+    provider.fail[("create", "sb-4")] = SandboxSnapshotNotFoundError("snapshot not on this replica yet")
 
     fresh = make_checkpointer(state_dir, provider)
     await fresh.restore(states)
 
     assert fresh.get("s1").handle.sandbox_id == "sb-5" and provider.files("sb-5") == ["s1: one"]
+
+
+async def test_restore_forks_through_the_providers_create_from_snapshot(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1")).export(["s1"], checkpoint_id="c1")
+
+    fresh = make_checkpointer(state_dir, provider)
+    await fresh.restore(states)
+
+    box = provider.boxes[fresh.get("s1").handle.sandbox_id]
+    assert box["snapshot_id"] == state_of(states, "s1").snapshot_id
+    # The provider decides how a snapshot replaces the image: the spec carries no provider convention for it.
+    assert box["spec"].image is None and "snapshot_id" not in box["spec"].provider_options
 
 
 async def test_not_found_retries_stop_after_the_configured_attempts(
@@ -745,7 +762,7 @@ async def test_not_found_retries_stop_after_the_configured_attempts(
     creates_before = len(ops(provider, "create"))
 
     fresh = make_checkpointer(state_dir, provider)
-    with pytest.raises(SandboxCheckpointError, match="NOT_FOUND"):
+    with pytest.raises(SandboxCheckpointError, match="no snapshot snap-2"):
         await fresh.restore(states)
 
     assert len(ops(provider, "create")) == creates_before + FORK_NOT_FOUND_RETRIES + 1
