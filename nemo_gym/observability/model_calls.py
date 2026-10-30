@@ -76,6 +76,11 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     if tokens_out is None:
         tokens_out = _token_count(usage.get("completion_tokens"))
     cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
+    if cache_creation is None:
+        # OpenAI reports cache writes as a subset of its prompt count, so they never change tokens_in.
+        cache_creation = _usage_detail_token(
+            usage, ("input_tokens_details", "prompt_tokens_details"), ("cache_write_tokens",)
+        )
     tokens_total = _token_count(usage.get("total_tokens"))
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
@@ -246,7 +251,7 @@ class ModelCallRecord(BaseModel):
     reasoning_content: Optional[str] = None
 
     # Cache visibility. cached_tokens is the cache-read count; cache_creation_tokens is the
-    # Anthropic cache-write count (also folded into tokens_in for the true prompt size).
+    # cache-write count. Both are part of tokens_in.
     cache_hit: Optional[bool] = None
     cached_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
@@ -570,6 +575,8 @@ def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:
     - ``input_tokens`` with top-level ``cache_read_input_tokens`` or ``cache_creation_input_tokens``
       (Anthropic Messages) excludes it, so the cache counts are added.
     - ``input_tokens`` alone (Responses) includes it.
+
+    The OpenAI ``*_tokens_details`` cache read and write counts are subsets of the prompt count and are never added.
     """
     prompt_tokens = _token_count(usage.get("prompt_tokens"))
     if prompt_tokens is not None:

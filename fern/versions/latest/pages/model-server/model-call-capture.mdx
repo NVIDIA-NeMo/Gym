@@ -245,6 +245,12 @@ includes a gap to show the complete shape. The `gaps` field is omitted when ther
 reported by the provider; a `null` value means unknown, not zero. For example, Anthropic does not
 report reasoning-token usage, so `tokens_reasoning` is `null` for that dialect.
 
+Each call's `tokens_in` is the whole prompt size. When the provider reports prompt caching, the call
+also carries `cached_tokens` (tokens read from the cache) and `cache_creation_tokens` (tokens written
+to the cache); both are part of `tokens_in`. Gym reads cache writes from OpenAI's
+`input_tokens_details.cache_write_tokens` (Responses) or `prompt_tokens_details.cache_write_tokens`
+(Chat Completions), and from Anthropic's `cache_creation_input_tokens`.
+
 After successful [`ng_trajectory`](/main/reference/trajectory-capabilities) projection, attached calls
 omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads
 remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
