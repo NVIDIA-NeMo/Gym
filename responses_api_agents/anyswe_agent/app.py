@@ -47,6 +47,15 @@ from nemo_gym.sandbox import (
 from nemo_gym.server_utils import apply_rollout_prefix
 
 
+# Grading files live in the sandbox's own /sandbox staging directory, apart from provider-shared paths.
+# Apptainer's --no-home preserves the image's home but does not isolate the host-bound /tmp; concurrent graders
+# would still overwrite each other's eval scripts there.
+_GRADING_DIR = "/sandbox"
+_GRADING_PATCH = f"{_GRADING_DIR}/patch.diff"
+_GRADING_SCRIPT = f"{_GRADING_DIR}/anyswe_eval.sh"
+_GRADING_TMPDIR_SETUP = f"mkdir -p {_GRADING_DIR}/tmp && export TMPDIR={_GRADING_DIR}/tmp\n"
+
+
 class SWEBenchMetrics(BaseModel):
     resolved: Optional[bool] = None
     patch_exists: Optional[bool] = None
@@ -634,9 +643,9 @@ class AnySweAgent(SimpleResponsesAPIAgent):
     def _apply_patch_script() -> str:
         return (
             "cd /testbed && "
-            "if git apply --verbose /root/patch.diff || "
-            "git apply --verbose --reject /root/patch.diff || "
-            "patch --batch --fuzz=5 -p1 -i /root/patch.diff; then "
+            f"if git apply --verbose {_GRADING_PATCH} || "
+            f"git apply --verbose --reject {_GRADING_PATCH} || "
+            f"patch --batch --fuzz=5 -p1 -i {_GRADING_PATCH}; then "
             "echo '>>>>> Applied Patch'; else "
             "echo '>>>>> Patch Apply Failed'; exit 1; fi\n"
         )
@@ -661,15 +670,18 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         instance = self._instance_dict(params)
         test_spec = make_test_spec(instance, namespace="swebench")
         eval_script = (
-            'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n' + self._apply_patch_script() + test_spec.eval_script
+            _GRADING_TMPDIR_SETUP
+            + 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n'
+            + self._apply_patch_script()
+            + test_spec.eval_script
         )
-        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": eval_script})
+        spec = self._sandbox_spec(params, files={_GRADING_SCRIPT: eval_script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
             await sandbox.start()
-            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
+            await sandbox.upload(self._stage_patch(params, patch), _GRADING_PATCH)
             result = await sandbox.exec(
-                "bash /tmp/anyswe_eval.sh",
+                f"bash {_GRADING_SCRIPT}",
                 cwd="/testbed",
                 timeout_s=params.swebench_tests_timeout,
                 user="root",
@@ -707,18 +719,19 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "else echo 'R2E eval script not found'; exit 127; fi"
             )
         script = (
-            'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n'
+            _GRADING_TMPDIR_SETUP
+            + 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"\n'
             + self._r2e_test_setup_script()
             + self._apply_patch_script()
             + str(eval_script)
         )
-        spec = self._sandbox_spec(params, files={"/tmp/anyswe_eval.sh": script})
+        spec = self._sandbox_spec(params, files={_GRADING_SCRIPT: script})
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         try:
             await sandbox.start()
-            await sandbox.upload(self._stage_patch(params, patch), "/root/patch.diff")
+            await sandbox.upload(self._stage_patch(params, patch), _GRADING_PATCH)
             result = await sandbox.exec(
-                "bash /tmp/anyswe_eval.sh",
+                f"bash {_GRADING_SCRIPT}",
                 cwd="/testbed",
                 timeout_s=params.swebench_tests_timeout,
                 user="root",
