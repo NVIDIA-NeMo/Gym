@@ -15,9 +15,9 @@ from pydantic import ValidationError
 
 import nemo_gym.rollout_collection
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction
-from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
+from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
     NG_FAILURE_COUNTS_AS_ZERO_KEY,
