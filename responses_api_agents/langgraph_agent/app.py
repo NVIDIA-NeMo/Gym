@@ -17,11 +17,11 @@ from collections.abc import Mapping
 from numbers import Number
 from typing import Any
 
-from fastapi import Body, Request, Response
+from fastapi import Body, HTTPException, Request
 from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, StatelessResponsesAPIAgent
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
 from nemo_gym.server_utils import get_response_json, raise_for_status
@@ -50,9 +50,9 @@ def _aggregate_usage_values(values: list[Any]) -> Any:
     return values[-1]
 
 
-def aggregate_response_usage(usages: list[NeMoGymResponseUsage]) -> NeMoGymResponseUsage | None:
+def aggregate_response_usage(usages: list[NeMoGymResponseUsage | None]) -> NeMoGymResponseUsage | None:
     """Aggregate usage from all model calls represented by one agent response."""
-    if not usages:
+    if not usages or any(usage is None for usage in usages):
         return None
     usage = _aggregate_usage_values([item.model_dump(mode="python") for item in usages])
     return NeMoGymResponseUsage.model_validate(usage)
@@ -60,7 +60,11 @@ def aggregate_response_usage(usages: list[NeMoGymResponseUsage]) -> NeMoGymRespo
 
 class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
+
+
+class LangGraphRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
 
 
 class LangGraphVerifyResponse(BaseVerifyResponse):
@@ -70,7 +74,7 @@ class LangGraphVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
-class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
+class LangGraphAgentAdapter(StatelessResponsesAPIAgent):
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
     config: LangGraphAgentConfig
 
@@ -96,14 +100,23 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
         raise NotImplementedError("State must contain 'last_policy_response' or override extract_model_response()")
 
     async def responses(
-        self, request: Request, response: Response, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
-        initial_state = await self.get_initial_state(body, request.cookies)
-        final_state = await self.graph.ainvoke(initial_state)
+        return await self._run_stateless_agent_session(
+            request,
+            body,
+            operation=lambda: self._invoke_graph(
+                body.model_copy(deep=True), model_url_path=self.url_path_for_request("/v1/responses", request)
+            ),
+        )
 
-        if "cookies" in final_state:
-            for k, v in final_state["cookies"].items():
-                response.set_cookie(k, v)
+    async def _invoke_graph(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, *, model_url_path: str
+    ) -> NeMoGymResponse:
+        # Model cookies are independent of the agent and Resources Server session jars.
+        initial_state = await self.get_initial_state(body, {})
+        initial_state["model_url_path"] = model_url_path
+        final_state = await self.graph.ainvoke(initial_state)
 
         model_response = self.extract_model_response(final_state)
         outputs = self.extract_outputs(final_state)
@@ -112,7 +125,9 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
             model_response.usage = aggregate_response_usage(final_state["policy_usages"])
         return model_response
 
-    async def run(self, request: Request, body: BaseRunRequest) -> LangGraphVerifyResponse:
+    async def run(self, request: Request, body: LangGraphRunRequest) -> LangGraphVerifyResponse:
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Legacy /run requires resources_server; use agent sessions for composition")
         cookies = request.cookies
 
         seed = await self.server_client.post(
@@ -125,7 +140,9 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
         cookies = seed.cookies
 
         resp = await self.server_client.post(
-            server_name=self.config.name, url_path="/v1/responses", json=body.responses_create_params, cookies=cookies
+            server_name=self.config.name,
+            url_path=self.url_path_for_run("/v1/responses", body),
+            json=body.responses_create_params,
         )
         await raise_for_status(resp)
 
@@ -135,7 +152,7 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
             server_name=self.config.resources_server.name,
             url_path="/verify",
             json=verify_request_dict,
-            cookies=resp.cookies,
+            cookies=cookies,
         )
         await raise_for_status(verify)
         return LangGraphVerifyResponse.model_validate(await get_response_json(verify))

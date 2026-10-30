@@ -18,7 +18,7 @@ import ipaddress
 import logging
 from abc import abstractmethod
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import wraps
@@ -75,7 +75,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -1098,4 +1098,69 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
                 }
             }
+        )
+
+
+@dataclass
+class _StatelessAgentSessionState(AgentSessionState):
+    operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
+    activation_path: str | None = None
+
+
+class StatelessResponsesAPIAgent(SimpleResponsesAPIAgent):
+    """Session lifecycle for model-only agents with no persistent harness state.
+
+    Required tools and sandboxes are refused. One activation is retained for retries,
+    and close cancels and drains it before returning explicit observation gaps.
+    Checkpoint recovery remains restart-only; this helper does not export graph state.
+    """
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("This agent does not support sandbox access")
+        required = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        if required:
+            raise AgentSeedRejectedError(f"This agent does not support required tool access: {', '.join(required)}")
+        return _StatelessAgentSessionState(request=body)
+
+    async def _run_stateless_agent_session(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        operation: Callable[[], Awaitable[NeMoGymResponse]],
+    ) -> NeMoGymResponse:
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            return await operation()
+        state = self._require_agent_session(session_id)
+        if not isinstance(state, _StatelessAgentSessionState):
+            raise TypeError("Expected stateless agent session state")
+        rollout_id = request.path_params.get("rollout_id")
+        if rollout_id != state.request.episode_id.capture_key:
+            raise HTTPException(409, "Activation requires the seeded session's rollout path")
+        if state.activation_path is None:
+            state.activation_path = request.url.path
+        elif state.activation_path != request.url.path:
+            raise HTTPException(409, "Activation path does not match the session's first activation")
+        try:
+            return await state.operations.execute(index=1, request=body, operation=operation)
+        except ActivationConflictError as error:
+            raise HTTPException(409, str(error)) from error
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, _StatelessAgentSessionState):
+            raise TypeError("Expected stateless agent session state")
+        await state.operations.close(timeout=30.0)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=AgentObservationBundle(
+                source=self.config.name,
+                gaps=[
+                    ObservationGap(
+                        code="observation_capture_failed",
+                        detail="This model-only adapter does not record native invocations or turns.",
+                    )
+                ],
+            ),
         )

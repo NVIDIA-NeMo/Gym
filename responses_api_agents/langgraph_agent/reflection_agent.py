@@ -25,7 +25,6 @@ Graph: generate -> should_continue? -> reflect -> generate (revised) -> ...
 from typing import Annotated, TypedDict
 
 from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
-from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -33,7 +32,7 @@ from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import raise_for_status
 
 
 class ReflectionAgentConfig(LangGraphAgentConfig):
@@ -57,6 +56,7 @@ class ReflectionState(TypedDict):
     policy_outputs: list
     policy_usages: list
     cookies: dict
+    model_url_path: str
     reflections: int
     request_body: NeMoGymResponseCreateParamsNonStreaming
     last_policy_response: NeMoGymResponse
@@ -79,7 +79,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
 
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path="/v1/responses",
+                url_path=state["model_url_path"],
                 json=request_body,
                 cookies=state["cookies"],
             )
@@ -97,7 +97,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             return {
                 "messages": [AIMessage(content=text)],
                 "policy_outputs": all_outputs,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": resp.cookies,
                 "reflections": state["reflections"],
                 "last_policy_response": policy_response,
@@ -119,7 +119,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
 
             resp = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path="/v1/responses",
+                url_path=state["model_url_path"],
                 json=request_body,
                 cookies=state["cookies"],
             )
@@ -138,7 +138,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [reflection_prompt] + policy_response.output,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": resp.cookies,
                 "reflections": state["reflections"] + 1,
                 "last_policy_response": policy_response,
@@ -192,6 +192,7 @@ class ReflectionAgent(LangGraphAgentAdapter):
             "policy_outputs": policy_outputs,
             "policy_usages": [],
             "cookies": cookies,
+            "model_url_path": "/v1/responses",
             "reflections": 0,
             "request_body": body,
             "last_policy_response": None,
@@ -199,36 +200,6 @@ class ReflectionAgent(LangGraphAgentAdapter):
 
     def extract_outputs(self, final_state: dict) -> list:
         return response_output_items(final_state["policy_outputs"])
-
-    async def run(self, request: Request, body: ReflectionAgentRunRequest) -> ReflectionAgentVerifyResponse:
-        cookies = request.cookies
-
-        seed = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed)
-        cookies = seed.cookies
-
-        resp = await self.server_client.post(
-            server_name=self.config.name, url_path="/v1/responses", json=body.responses_create_params, cookies=cookies
-        )
-        await raise_for_status(resp)
-
-        verify_request = ReflectionAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(resp)}
-        )
-
-        verify = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=resp.cookies,
-        )
-        await raise_for_status(verify)
-        return ReflectionAgentVerifyResponse.model_validate(await get_response_json(verify))
 
 
 if __name__ == "__main__":

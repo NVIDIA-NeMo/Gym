@@ -158,6 +158,7 @@ def needs_environment_server(instance: dict) -> bool:
     if (
         agent_type
         in {
+            "langgraph_agent",
             "hermes_agent",
             "pi_agent",
             "codex_agent",

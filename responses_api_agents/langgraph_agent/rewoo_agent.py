@@ -27,7 +27,6 @@ import re
 from typing import Annotated, List, TypedDict
 
 from app import LangGraphAgentAdapter, LangGraphAgentConfig, response_output_items
-from fastapi import Request
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -35,7 +34,7 @@ from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_utils import raise_for_status
 
 
 ROLE_MAP = {"human": "user", "ai": "assistant", "system": "system"}
@@ -98,6 +97,7 @@ class ReWOOState(TypedDict):
     policy_outputs: list
     policy_usages: list
     cookies: dict
+    model_url_path: str
     request_body: NeMoGymResponseCreateParamsNonStreaming
     last_policy_response: NeMoGymResponse
     task: str
@@ -124,7 +124,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
         request_body = state["request_body"].model_copy(update={"input": input_messages})
         resp = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=state["model_url_path"],
             json=request_body,
             cookies=state["cookies"],
         )
@@ -147,7 +147,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -177,7 +177,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
                     AIMessage(content=text),
                 ],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -201,7 +201,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             return {
                 "messages": [HumanMessage(content=prompt), AIMessage(content=text)],
                 "policy_outputs": state["policy_outputs"] + [prompt_msg] + policy_response.output,
-                "policy_usages": state["policy_usages"] + ([policy_response.usage] if policy_response.usage else []),
+                "policy_usages": state["policy_usages"] + [policy_response.usage],
                 "cookies": cookies,
                 "last_policy_response": policy_response,
                 "request_body": state["request_body"],
@@ -239,6 +239,7 @@ class ReWOOAgent(LangGraphAgentAdapter):
             "policy_outputs": [],
             "policy_usages": [],
             "cookies": cookies,
+            "model_url_path": "/v1/responses",
             "request_body": body,
             "last_policy_response": None,
             "task": task,
@@ -250,36 +251,6 @@ class ReWOOAgent(LangGraphAgentAdapter):
 
     def extract_outputs(self, final_state: dict) -> list:
         return response_output_items(final_state["policy_outputs"])
-
-    async def run(self, request: Request, body: ReWOORunRequest) -> ReWOOVerifyResponse:
-        cookies = request.cookies
-
-        seed = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed)
-        cookies = seed.cookies
-
-        resp = await self.server_client.post(
-            server_name=self.config.name, url_path="/v1/responses", json=body.responses_create_params, cookies=cookies
-        )
-        await raise_for_status(resp)
-
-        verify_request = ReWOOVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(resp)}
-        )
-
-        verify = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=resp.cookies,
-        )
-        await raise_for_status(verify)
-        return ReWOOVerifyResponse.model_validate(await get_response_json(verify))
 
 
 if __name__ == "__main__":
