@@ -31,6 +31,7 @@ from nemo_gym.trajectory import (
     AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
+    SandboxObservation,
     ToolCallObservation,
     TrajectoryRecord,
     TrajectoryTurn,
@@ -459,6 +460,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         if self.observability_enabled:
             invocation = AgentInvocation(invocation_id=self.context.session_id)
             observations = AgentObservationBundle(source="miniswe", records=[invocation])
+            # The resources server owns the sandbox lifecycle; the agent observes only which sandbox it ran in.
+            sandbox_id = getattr(self.sandbox, "sandbox_id", None)
+            if sandbox_id is not None:
+                observations.records.append(SandboxObservation(role="agent", sandbox_id=sandbox_id))
             trajectory = TrajectoryRecord(
                 task_id=self.context.task_id or self.context.session_id,
                 rollout_id=self.context.rollout_id or self.context.session_id,
@@ -531,6 +536,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                     ToolCallObservation(
                         invocation_id=invocation.invocation_id,
                         tool_call_id=tool["tool_call_id"],
+                        sandbox_id=sandbox_id,
                         tool_name="bash",
                         started_at=tool.get("started_at"),
                         completed_at=tool.get("completed_at"),

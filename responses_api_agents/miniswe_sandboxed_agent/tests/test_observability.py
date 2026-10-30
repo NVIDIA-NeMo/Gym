@@ -186,8 +186,24 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         directory=tmp_path,
         observability_enabled=True,
     )
+    # The simulated executor (ProcessSandbox) gets the identity a connected AsyncSandbox reports;
+    # "missing_details" keeps it unknown to show nothing is invented without one.
+    sandbox_id = None if scenario == "missing_details" else "sbx-agent-1"
+    if sandbox_id is not None:
+        harness.sandbox.sandbox_id = sandbox_id
     response, outcome, extra = await harness.execute(15)
     client.close()
+    records = extra["ng_agent_observations"]["records"]
+    sandboxes = [r for r in records if r["kind"] == "sandbox"]
+    if sandbox_id is None:
+        assert sandboxes == []
+    else:
+        # Identity only: the agent does not own the sandbox lifecycle, so its outcome stays unknown.
+        (sandbox,) = sandboxes
+        assert (sandbox["role"], sandbox["sandbox_id"], sandbox["outcome"]) == ("agent", sandbox_id, "unknown")
+        assert sandbox["sandbox_id"] != harness.context.session_id
+        assert all(sandbox[key] is None for key in ("exit_code", "wall_time_s", "cpu_time_s", "peak_memory_mib"))
+    assert {r.get("sandbox_id") for r in records if r["kind"] == "tool_call"} == {sandbox_id}
     record = {
         "_ng_task_index": 0,
         "_ng_rollout_index": 0,
@@ -198,6 +214,7 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
     merge_model_call_capture_into_record(record, [capture_dir], include_payloads=True)
     _attach_trajectory_record(record, record)
     trajectory = record["ng_trajectory"]
+    assert {call.get("sandbox_id") for call in trajectory["tool_calls"]} == {sandbox_id}
     invocations = trajectory["invocations"]
     assert len(invocations) == 1
     captured = record["ng_model_call_capture"]["calls"]

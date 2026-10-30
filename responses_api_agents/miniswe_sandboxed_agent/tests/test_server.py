@@ -10,7 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.rollout_collection import _trajectory_identity
+from nemo_gym.rollout_collection import _attach_trajectory_record, _trajectory_identity
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import (
     TerminalBench4Config,
@@ -957,3 +957,72 @@ async def test_shutdown_finishes_seeding_and_requests_cleanup_within_budget(fixt
     session = next(iter(f.server._sessions.values()))
     assert session.expiry_task.cancelled()
     f.grade.assert_not_awaited()
+
+
+@pytest.mark.parametrize("graded", ["healthy", "wrong", "verifier_error"])
+async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture, monkeypatch, graded):
+    """The /run path posts /verify through the real ServerClient into the registered, observed /verify route."""
+    import re
+
+    from fastapi import FastAPI
+    from omegaconf import OmegaConf
+
+    from nemo_gym.client import server_client
+    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.server_utils import BaseServerConfig
+
+    f = fixture
+    if graded == "wrong":
+        f.grade.side_effect = AsyncMock(return_value={"rewards": {"reward": 0.0}})
+    elif graded == "verifier_error":
+        f.grade.side_effect = RuntimeError("verifier container exited")
+    f.server.server_client.global_config_dict = {"observability_enabled": True}
+    routes = FastAPI()
+    f.server.register_protocol_routes(routes)
+    verify_route = next(r.endpoint for r in routes.routes if getattr(r, "path", None) == "/verify")
+    client = ServerClient(
+        head_server_config=BaseServerConfig(host="localhost", port=3),
+        global_config_dict=OmegaConf.create({"observability_enabled": True, "tb4": {"resources_servers": {}}}),
+    )
+    monkeypatch.setattr(ServerClient, "_resolve_base_url", lambda self, name: "http://tb4")
+    seen = []
+
+    async def transport(*, method, url, json, cookies, **kwargs):
+        match = re.fullmatch(r"http://tb4(?:/ng-rollout/(?P<rid>[^/]+))?(?P<path>/.*)", url)
+        seen.append((match["rid"], match["path"]))
+        resource_request = SimpleNamespace(
+            session={SESSION_ID_KEY: "owner", "tb4_client_session_id": json.get("client_session_id", "owner")},
+            cookies=cookies,
+        )
+        with rollout_context(match["rid"]):  # what RolloutContextMiddleware does for the prefixed path
+            if match["path"] == "/seed_session":
+                value = await f.server.seed_session(resource_request, TerminalBench4RunRequest.model_validate(json))
+            else:
+                value = await verify_route(resource_request, SandboxedVerifyRequest.model_validate(json))
+        return SimpleNamespace(value=value.model_dump(mode="json"), cookies={"session": "resource"})
+
+    monkeypatch.setattr(server_client, "request", transport)
+    f.agent.server_client = client
+    body = f.body.model_copy(update={"capture_rollout_id": "rollout-1", "capture_model_calls": True})
+    with rollout_context(f.agent.rollout_id_from_run(body)):  # what the registered /run route does
+        result = await f.agent.run(f.request, body)
+
+    assert seen == [("rollout-1", "/seed_session"), ("rollout-1", "/verify")]
+    dumped = result.model_dump(mode="json")
+    (invocation,) = dumped["ng_verifier_invocations"]
+    assert invocation["invocation_id"].startswith("verify-")
+    assert invocation["status"] == ("completed" if graded != "verifier_error" else "failed")
+    assert "ng_verifier_invocations" not in (dumped.get("ng_agent_observations") or {})
+    # The collection writer moves the separate top-level field into ng_trajectory.verifier_invocations.
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0, **dumped}
+    _attach_trajectory_record(record, record)
+    assert "ng_verifier_invocations" not in record
+    assert [i["invocation_id"] for i in record["ng_trajectory"]["verifier_invocations"]] == [
+        invocation["invocation_id"]
+    ]
+    assert record["reward"] == dumped["reward"]
+    if graded == "verifier_error":
+        assert dumped["evaluation_completed"] is False
+    else:
+        assert dumped["reward"] == (0.75 if graded == "healthy" else 0.0)
+        assert dumped["evaluation_completed"] is True
