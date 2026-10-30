@@ -160,6 +160,15 @@ def _rotate_matrix_entry() -> tuple[dict, str]:
     return entry, gold
 
 
+def _entry_with_gold(name: str, predicate, max_seed: int = 400) -> tuple[dict, str]:
+    """The first entry of dataset ``name`` (seeds 0..max_seed) whose gold answer satisfies ``predicate``."""
+    for seed in range(max_seed):
+        entry = reasoning_gym.create_dataset(name, size=1, seed=seed)[0]
+        if predicate(entry["answer"]):
+            return entry, entry["answer"]
+    raise AssertionError(f"no {name} gold in {max_seed} seeds satisfies the predicate")
+
+
 def _message(index: int, text: str) -> dict:
     return {
         "id": f"msg_{index}",
@@ -333,11 +342,27 @@ class TestAnswerExtraction:
     )
     async def test_boxed_grid_answers_keep_their_rows(self, server, label, build):
         # rotate_matrix, binary_matrix and pool_matrix oracles are newline-separated rows scored by exact match, so
-        # the box normalization must collapse whitespace within a row and never across rows.
+        # the box normalization may remove a common indent but never join rows.
         entry, gold = _rotate_matrix_entry()
         result = await server.verify(_verify_request(entry, [_message(0, build(gold))]))
         assert result.extracted_answer == gold, label
         assert result.reward == 1.0, label
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "name, predicate",
+        [
+            ("futoshiki", lambda gold: "   " in gold),  # cells and ∧/∨ markers aligned with runs of spaces
+            ("emoji_mystery", lambda gold: "  " in gold),  # a sentence with a double space
+        ],
+    )
+    async def test_boxed_answers_keep_runs_of_spaces(self, server, name, predicate):
+        # Runs of spaces inside a line are part of these oracles: a boxed gold must score like the tagged gold.
+        entry, gold = _entry_with_gold(name, predicate)
+        boxed = await server.verify(_verify_request(entry, [_message(0, f"\\boxed{{{gold}}}")]))
+        tagged = await server.verify(_verify_request(entry, [_message(0, f"<answer>{gold}</answer>")]))
+        assert tagged.reward == 1.0, name
+        assert boxed.reward == tagged.reward, name
 
     def test_last_balanced_box_wins_and_latex_text_is_normalized(self, server):
         extract = server._extract_answer_from_response
@@ -361,4 +386,9 @@ class TestAnswerExtraction:
         # \, is a space between words but a thousands separator between digits.
         assert extract(response_of("\\boxed{" + gold.replace(" ", "\\,") + "}")) == gold
         assert extract(response_of("\\boxed{1\\,000}")) == "1000"
+        # Dedent and right-strip only: runs of spaces inside a line (codeio string outputs such as "L   L") and the
+        # relative indent of later lines are part of the answer.
+        assert extract(response_of("\\boxed{\n    L\n    L L\n    L   L\n}")) == "L\nL L\nL   L"
+        assert extract(response_of("\\boxed{a  b}")) == "a  b"
+        assert extract(response_of("\\boxed{\n    x\n      y\n}")) == "x\n  y"
         assert extract(response_of("first message", "", "   ")) == "first message"

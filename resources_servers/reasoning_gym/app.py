@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import re
+import textwrap
 from typing import Any, Optional
 
 import reasoning_gym
@@ -164,10 +165,11 @@ def _last_boxed_content(text: str) -> Optional[str]:
 def _normalize_latex_text(answer: str) -> str:
     """Turn LaTeX text markup inside a box back into plain text: ``\\ `` spaces, ``\\text{...}`` wrappers, ``$``.
 
-    Whitespace collapses within a line, never across lines: grid tasks such as ``rotate_matrix`` and
-    ``binary_matrix`` score newline-separated rows against the oracle by exact match.
+    The answer's own whitespace is kept: a common indent is removed (a box written as an indented block) and each
+    line is right-stripped, but line breaks and runs of spaces within a line stay, because they are part of the
+    oracle in grid tasks (``rotate_matrix``, ``futoshiki``), ``emoji_mystery`` sentences and ``codeio`` strings.
     """
-    text = answer.strip().strip("$").strip()
+    text = textwrap.dedent(answer).strip().strip("$").strip()
     # Unwrap \text{...}-style wrappers wherever they appear, innermost last, so nested wrappers all go.
     while True:
         match = _LATEX_TEXT_WRAPPER.search(text)
@@ -182,7 +184,7 @@ def _normalize_latex_text(answer: str) -> str:
     text = text.replace("\\ ", " ").replace("\\,", " ").replace("\\;", " ").replace("\\!", "")
     # A tilde between words is LaTeX's non-breaking space; leave other tildes (operators) alone.
     text = re.sub(r"(?<=\w)~(?=\w)", " ", text)
-    return "\n".join(" ".join(line.split()) for line in text.splitlines()).strip()
+    return "\n".join(line.rstrip() for line in text.splitlines()).strip()
 
 
 if __name__ == "__main__":
