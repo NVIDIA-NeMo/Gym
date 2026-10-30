@@ -65,3 +65,8 @@ def exporter_run_id_path_for(output_fpath: Path, exporter: str) -> Path:
 def export_done_path_for(output_fpath: Path, exporter: str) -> Path:
     """`results/rollouts.jsonl`, `mlflow` -> `results/rollouts_mlflow_export_done`: set once the run was exported."""
     return output_fpath.with_name(f"{output_fpath.stem}_{exporter}_export_done")
+
+
+def batch_status_path_for(output_fpath: Path) -> Path:
+    """`results/math.jsonl` -> `results/math_batch_status.json`."""
+    return output_fpath.with_stem(output_fpath.stem + "_batch_status").with_suffix(".json")
