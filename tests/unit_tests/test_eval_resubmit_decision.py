@@ -274,6 +274,7 @@ def test_recover_keeps_a_terminal_model_zero_done(tmp_path, fake_executor) -> No
         failure_kind="model_context_limit",
         _ng_failure_terminal=True,
         _ng_failure_counts_as_zero=True,
+        _ng_failure_id="e",
         _ng_failure_events={
             "e": {
                 "boundary": "model",
@@ -506,7 +507,7 @@ def final_model_zero(task: int, rollout: int) -> dict:
         "_ng_failure_counts_as_zero": True,
         "_ng_failure_id": f"f-{task}-{rollout}",
         "_ng_failure_events": {
-            "root": {
+            f"f-{task}-{rollout}": {
                 "boundary": "agent",
                 "operation": "agent.policy_request",
                 "failure_kind": "model_transport_error",
@@ -2005,3 +2006,9 @@ def test_terminal_judge_failure_never_reopens_by_policy(tmp_path, where):
     )
     d = _decide(job)
     assert d.action == RecoveryAction.STOP and d.identities["terminal"] == [(0, 0)]
+
+
+@pytest.mark.parametrize("events", [{}, {"unrelated": {**POLICY_REQUEST, "cause_id": None}}])
+def test_explicit_missing_final_failure_id_is_not_validated_from_unrelated_observations(tmp_path, events):
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[_final_zero(events)])
+    assert _decide(job).action == RecoveryAction.STOP

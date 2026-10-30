@@ -228,13 +228,14 @@ def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") 
 def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
     """The event ``failure_id`` selects and its explicit ``cause_id`` chain; other saved events are observations only.
 
-    A row whose ``failure_id`` names no saved event selects no final event, so every saved event is checked, as
-    before. ``None`` when a ``cause_id`` in the chain names no saved event or the chain loops: the final failure's
-    causes cannot be checked.
+    Legacy rows with no event report retain their explicit terminal classification. Otherwise a selected event
+    and every explicit cause must exist; missing references and cycles remain unknown.
     """
     events = row.get(FAILURE_EVENTS)
+    if row.get(FAILURE_ID) is None and not events:
+        return []
     if not isinstance(events, Mapping) or not isinstance(events.get(row.get(FAILURE_ID)), Mapping):
-        return _events(row)
+        return None
     chain: list[tuple[str | None, ...]] = []
     seen: set[str] = set()
     event_id = row.get(FAILURE_ID)
