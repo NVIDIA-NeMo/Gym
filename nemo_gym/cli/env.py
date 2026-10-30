@@ -1199,7 +1199,7 @@ head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
     # need their own five rollouts. Rollouts without a taskset count as one group.
     with open(example_rollouts_fpath) as f:
         counts = Counter(_example_rollout_taskset(line) for line in f)
-    assert counts and set(counts.values()) == {5}, (
+    assert set(counts.values()) == {5}, (
         f"Expected 5 example rollouts for each taskset in {example_rollouts_fpath}, but got {dict(counts)}"
     )
 
