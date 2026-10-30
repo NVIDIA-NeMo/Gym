@@ -126,7 +126,11 @@ class VcqaAgentConfig(BaseResponsesAPIAgentConfig):
         description="SandboxSpec.resources for provider sandboxes.",
     )
     sandbox_ttl_s: int = Field(default=14400, description="Provider sandbox time to live.")
-    sandbox_ready_timeout_s: int = Field(default=900, description="Provider sandbox readiness timeout.")
+    sandbox_ready_timeout_s: int = Field(
+        default=600,
+        description="Provider sandbox readiness timeout. With the shipped OpenSandbox create budget (1500 s) a create "
+        "attempt needs this twice, so it stays below 750 s.",
+    )
     sandbox_setup_timeout_s: int = Field(
         default=900, description="Per setup command (tools, user, repo extraction or clone) in a provider sandbox."
     )
