@@ -19,7 +19,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
-from asyncio import Semaphore
+from asyncio import Semaphore, timeout
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Mapping
@@ -30,13 +30,19 @@ from fastapi import Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.episode_types import EpisodeId
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -50,6 +56,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status, trace_con
 
 
 LOG = logging.getLogger(__name__)
+CLOSE_SESSION_TIMEOUT_S = 30.0
 _RUN_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("harness_agent_run_context", default={})
 
 
@@ -310,9 +317,31 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 return HarnessAgentVerifyResponse.model_validate(verify_json)
             except BaseException:
                 await self._close_run_sandbox(run_context)
+                await self._close_resources_session(body, cookies, seed.get("resources_session_id"))
                 raise
             finally:
                 _RUN_CONTEXT.reset(token)
+
+    async def _close_resources_session(self, body: HarnessAgentRunRequest, cookies: Any, session_id: Any) -> None:
+        # A failed run never reaches /verify. A server whose seed reply names its session releases it now, not at its
+        # TTL. Session routing refuses a close whose body and cookie name different sessions, so only that id works.
+        if not isinstance(session_id, str) or not session_id:
+            return
+        try:
+            # The server client retries without a deadline, so bound the close or a dead server hides the run's error.
+            async with timeout(CLOSE_SESSION_TIMEOUT_S):
+                episode_id = EpisodeId.from_capture_key(self.rollout_id_from_run(body) or "harness-run")
+                resp = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/close_session",
+                    json=ResourcesCloseSessionRequest(
+                        resources_session_id=session_id, episode_id=episode_id
+                    ).model_dump(mode="json"),
+                    cookies=cookies,
+                )
+                await raise_for_status(resp)
+        except Exception:
+            LOG.warning("could not close the resources session of a failed run", exc_info=True)
 
     def _mcp_server_entry(self, seed: dict) -> dict[str, Any]:
         """This rollout's MCP server for the in-box agent, from the /seed_session response."""
