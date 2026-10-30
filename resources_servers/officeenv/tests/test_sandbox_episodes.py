@@ -2628,6 +2628,52 @@ def test_each_harness_config_binds_its_harness_to_the_shared_episodes() -> None:
         assert set(config) - {"config_paths", "oe", "single_agent_turn_legacy"} == {agent}, name
 
 
+AGENTS = Path(__file__).parents[3] / "responses_api_agents"
+HARNESS_RUNTIME = Path(__file__).parents[1] / "sandbox" / "harness_runtime.sh"
+
+
+@pytest.mark.parametrize(
+    ("harness", "agent", "variable", "version_of"),
+    [
+        ("pi", "pi_agent", "PI_VERSION", "pi_version"),
+        ("codex", "codex_agent", "CODEX_VERSION", "codex_version"),
+        ("openclaw", "openclaw_agent", "OPENCLAW_VERSION", "openclaw_version"),
+        ("opencode", "opencode_agent", "OPENCODE_VERSION", "opencode_version"),
+    ],
+)
+def test_a_harness_image_holds_the_runtime_its_adapter_looks_for(
+    harness: str, agent: str, variable: str, version_of: str
+) -> None:
+    """sandbox/harness_runtime.sh puts a harness's runtime in its image at the adapter's configured version and in the
+    adapter's runtime folder: an adapter that changes either installs again at session start, which a sandbox
+    without the internet cannot."""
+    block = HARNESS_RUNTIME.read_text().split(f"\n  {harness})\n", 1)[1].split(";;", 1)[0]
+    version = re.search(rf"version=\$\{{{variable}:-([^}}]+)\}}", block).group(1)
+    folder = re.search(r"runtime=(\S+)", block).group(1).replace("$version", f"{{self.config.{version_of}}}")
+    assert f'runtime = f"{folder}"' in (AGENTS / agent / "app.py").read_text()
+    if harness == "opencode":
+        runtime_module = (AGENTS / agent / "runtime.py").read_text()
+        configured = re.search(r'^OPENCODE_VERSION = "([^"]+)"', runtime_module, re.MULTILINE).group(1)
+    else:
+        settings = yaml.safe_load((AGENTS / agent / "configs" / f"{agent}.yaml").read_text())
+        configured = settings[agent]["responses_api_agents"][agent][version_of]
+    assert version == str(configured)
+
+
+@pytest.mark.parametrize("harness", ["pi", "codex", "openclaw", "opencode"])
+def test_a_harness_image_keeps_no_npm_cache_its_installer_left(harness: str) -> None:
+    """npm's cache keeps debug logs that name the runtime folder. An installer that moves HOME puts it in the runtime
+    (``npm_config_cache``, as Codex's and OpenClaw's do), any other in ~/.npm: sandbox/harness_runtime.sh removes it
+    wherever the adapter's installer puts it, once the harness has run, which leaves Node's compile cache too."""
+    script = HARNESS_RUNTIME.read_text()
+    tidy = script.split("tidy() {", 1)[1].split("\n}", 1)[0]
+    block = script.split(f"\n  {harness})\n", 1)[1].split(";;", 1)[0]
+    installer = (AGENTS / re.search(r'bash "\$agents/([^"]+)"', block).group(1)).read_text()
+    cache = re.search(r'npm_config_cache="\$runtime/([^"]+)"', installer)
+    assert (f'"$1/{cache.group(1)}"' if cache else '"${HOME:-/root}/.npm"') in tidy
+    assert "tidy" not in block and script.rindex('tidy "$runtime"') > script.rindex("esac")
+
+
 # The committed rows.
 
 

@@ -261,6 +261,45 @@ sandbox_config:
 A cell whose sandboxes have no internet pulls the image from a registry, pinned by digest: its
 tools cannot be installed at sandbox start, as the OpenSandbox config installs pandas and openpyxl.
 
+### Images per harness
+
+A harness that runs in the sandbox installs its runtime there at session start (Pi and Codex
+fetch Node and their package), which a sandbox without the internet cannot do.
+`sandbox/Dockerfile.harness` builds one image per harness on the documents image: each target
+runs the harness adapter's own installer as the adapter runs it (`sandbox/harness_runtime.sh`),
+so the runtime is where the adapter looks for it at session start and the adapter downloads
+nothing. Build from the Gym checkout's root (`Dockerfile.harness.dockerignore` sends only the
+installers and that script):
+
+```bash
+docker build -f resources_servers/officeenv/sandbox/Dockerfile.harness --target pi \
+  -t officeenv-sandbox:documents-pi .
+```
+
+The targets are `pi`, `codex`, `openclaw`, `opencode` and `terminus-2` (Terminus 2 runs its agent
+on Gym's host and needs only `tmux` in the sandbox). The versions are the adapters' configured
+ones (`PI_VERSION`, `CODEX_VERSION`, `OPENCLAW_VERSION` and `OPENCODE_VERSION` override them), and
+the runtime folders follow the adapters at this Gym revision: rebuild when an adapter changes.
+Check a built image without a network, where the adapter's installer must find the runtime and
+the harness must start:
+
+```bash
+docker run --rm --network none -v "$PWD:/gym:ro" officeenv-sandbox:documents-pi \
+  bash /gym/resources_servers/officeenv/sandbox/harness_runtime.sh pi /gym/responses_api_agents
+```
+
+A run names its harness's image in `sandbox_config.image`, with `provides: [documents, office]`.
+An Environment Server binds one harness to one resources server, so in a mix of harnesses each
+harness gets its own OfficeEnv server with its own image. Hermes, Stirrup and Claude Code also
+reuse a runtime they find in the sandbox, but name its folder after their agent server's own
+install (the Hermes commit, Stirrup's version, Claude Code's binary digest), so they have no target
+yet; mini-SWE and Kilo Code install at every session start, whatever the image holds. Pi, Codex,
+OpenClaw and OpenCode keep their runtime under `/tmp`, which a provider that mounts a fresh `/tmp`
+would hide. An image keeps only the runtime: once the installer and the harness have run, the
+script removes what they leave behind, the archives the install unpacked, npm's cache and logs
+(in `~/.npm`, or in the runtime folder for an installer that moves `HOME`, as Codex's and
+OpenClaw's do), Node's compile cache in `/tmp` and the helper links Codex makes in `~/.codex`.
+
 ### Tools, commands or endpoints
 
 The row's exposure decides how the harness reaches the apps (`SANDBOX_SURFACES`); the world,
@@ -404,10 +443,20 @@ mini-SWE its Python packages, in each sandbox at session start. What a sandbox s
 - Pi's own names: its session and runtime directories, the `NEMO_GYM_PI_*` variables its shell
   inherits, the model provider `nemo`, its supervisor's process names, and a system prompt that
   states the sandbox clock's date. Changing those is Pi agent work;
-- the other harnesses' own names, which their Gym adapters fix: Codex's session and runtime
-  folders (`/tmp/nemo-gym-codex-sessions/<id>`, `/tmp/nemo-gym-codex-node-22.19.0-<version>`), and
-  mini-SWE's task file and working folder (`/tmp/.nemo-gym/task.json`,
-  `/tmp/nemo-gym-miniswe-<id>`). Changing those is adapter work.
+- the other harnesses' own names, which their Gym adapters fix and the harness images keep where
+  the adapters look: the session and runtime folders of Codex (`/tmp/nemo-gym-codex-sessions/<id>`,
+  `/tmp/nemo-gym-codex-node-22.19.0-<version>`), OpenClaw (`/tmp/nemo-gym-openclaw-sessions/<id>`,
+  `/tmp/nemo-gym-openclaw-node-22.19.0-<version>`) and OpenCode
+  (`/tmp/nemo-gym-opencode-sessions/<id>`, `/tmp/nemo-gym-opencode-runtime-<version>` and its
+  `.lock`), and mini-SWE's task file and working folder (`/tmp/.nemo-gym/task.json`,
+  `/tmp/nemo-gym-miniswe-<id>`). The adapters take no other folder, so changing those is adapter
+  work;
+- the system prompts the harnesses send with every model call, which name those folders: Pi's
+  points to its documentation (three paths in its runtime folder), Codex's to its skills (five
+  paths in its session folder), OpenClaw's to its documentation, and OpenCode's to its
+  instructions file, and it gives the model's ID as `nemo_gym/dummy_model` (the provider and
+  model names OpenCode's adapter configures). Terminus 2's names none. Changing those is adapter
+  work as well.
 
 The caller check is not a network boundary: a gateway that exposes only MCP and the file API to
 sandboxes would be one.
