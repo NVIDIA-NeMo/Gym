@@ -389,6 +389,10 @@ the exceptions. A file that cannot be deleted is left in place and counted, and 
 deletes nothing still waiting in its batch. The collection output reports how many capture files were
 deleted and why others were kept.
 
+A model call that reaches the rollout after its capture file was deleted is written to a new capture
+file for that rollout, which holds only that call. A write that was already waiting on the old file
+when it was deleted detects this and writes to the new file, so no call is lost to a deletion.
+
 ## Keep token metadata once in a rollout
 
 With `return_token_id_information` on, the items in `response.output` carry `prompt_token_ids`,

@@ -1120,6 +1120,82 @@ def test_delete_if_unchanged_uses_the_pending_ids_it_is_given_instead_of_scannin
     assert not store.path_for("0-0").exists()
 
 
+class _GateOnTheDelete(set):
+    """A pending-id snapshot taken before the late claim; membership is read while the delete holds the lock."""
+
+    def __init__(self, holding_the_lock, release):
+        super().__init__()
+        self._holding_the_lock = holding_the_lock
+        self._release = release
+
+    def __contains__(self, item):
+        self._holding_the_lock.set()
+        assert self._release.wait(timeout=10)
+        return False
+
+
+def test_a_write_admitted_after_the_pending_scan_is_not_lost_to_the_delete(tmp_path, monkeypatch):
+    """The writer opened the capture file, then the delete unlinked it before the writer got the lock."""
+    import threading
+    from types import SimpleNamespace
+
+    import nemo_gym.base_responses_api_model as module
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "covered"})
+    size = store.size("0-0")
+    holding_the_lock, release, writer_waits = threading.Event(), threading.Event(), threading.Event()
+    writer = {}
+    real_fcntl = module.fcntl
+
+    def flock(fd, operation):
+        if threading.get_ident() == writer.get("ident") and operation == real_fcntl.LOCK_EX:
+            writer_waits.set()  # the file is already open; the delete holds the lock
+        return real_fcntl.flock(fd, operation)
+
+    monkeypatch.setattr(module, "fcntl", SimpleNamespace(**{**vars(real_fcntl), "flock": flock}))
+    outcome = []
+    deleter = threading.Thread(
+        target=lambda: outcome.append(
+            store.delete_if_unchanged("0-0", size, pending_rollout_ids=_GateOnTheDelete(holding_the_lock, release))
+        )
+    )
+
+    def late_write():
+        writer["ident"] = threading.get_ident()
+        store.mark_pending("0-0", "late")
+        store.record("0-0", {"model_call_id": "late"})
+        store.clear_pending("0-0", "late")
+
+    deleter.start()
+    assert holding_the_lock.wait(timeout=10)
+    late = threading.Thread(target=late_write)
+    late.start()
+    assert writer_waits.wait(timeout=10)
+    release.set()
+    deleter.join(timeout=10)
+    late.join(timeout=10)
+
+    assert outcome == [None]  # the delete judged the file it had, and deleted it
+    assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["late"]
+
+
+def test_delete_if_unchanged_leaves_a_file_that_replaced_the_one_it_judged(tmp_path):
+    """After a delete and a new append, an equal-sized file at the same path is not the file that was judged."""
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "x"})
+    size = store.size("0-0")
+
+    class _Replace(set):
+        def __contains__(self, item):
+            store.path_for("0-0").unlink()
+            store.record("0-0", {"model_call_id": "x"})  # same size, different file
+            return False
+
+    assert store.delete_if_unchanged("0-0", size, pending_rollout_ids=_Replace()) == "capture_file_changed"
+    assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["x"]
+
+
 def test_delete_if_unchanged_reports_a_missing_file(tmp_path):
     assert CaptureStore(tmp_path).delete_if_unchanged("0-0", 0) == "capture_file_missing"
 

@@ -1011,6 +1011,20 @@ def _validate_rollout_id(rollout_id: str) -> str:
     return rollout_id
 
 
+# A write retries when the file it opened was deleted while it waited for the lock; each retry needs another delete.
+_RECORD_ATTEMPTS = 5
+
+
+def _path_names_open_file(path: Path, handle: Any) -> bool:
+    """Whether the path still names the file this handle opened, rather than a deleted or replaced one."""
+    try:
+        current = os.stat(path)
+    except FileNotFoundError:
+        return False
+    opened = os.fstat(handle.fileno())
+    return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+
+
 class CaptureStore:
     """Append-only, rollout-keyed JSONL sink for model exchanges."""
 
@@ -1090,6 +1104,10 @@ class CaptureStore:
         Returns None once deleted, or the reason the file was kept. The append lock is held across the
         check and the delete, so a writer that has not yet appended waits instead of racing it. A caller
         deleting many files passes ``pending_rollout_ids`` from one scan instead of globbing per file.
+
+        A claim made after that scan is not seen here, and need not be: a writer that opened the file
+        before the delete notices under the lock that the path no longer names its file, and appends to a
+        new file instead (see ``record``), so an admitted write is never lost to this delete.
         """
         path = self.path_for(rollout_id)
         try:
@@ -1106,6 +1124,9 @@ class CaptureStore:
                 )
                 if has_pending:
                     return "write_pending"
+                if not _path_names_open_file(path, handle):
+                    # Another delete and a new append got here first; the file at the path is not the one judged.
+                    return "capture_file_changed"
                 if os.fstat(handle.fileno()).st_size != expected_size:
                     return "capture_file_changed"
                 path.unlink()
@@ -1124,17 +1145,26 @@ class CaptureStore:
         ``flock`` serializes appends to the same rollout across worker processes and threads while
         allowing independent rollouts to write concurrently. This does blocking file IO + fsync,
         so callers run it off the event loop (the capture middleware uses ``asyncio.to_thread``).
+
+        The file is opened before the lock is taken, so a delete (``delete_if_unchanged``) can unlink it
+        while this writer waits. The lock holder checks that the path still names the file it opened and
+        otherwise opens the path again, which creates a new file, so the exchange is never written to a
+        file nothing can reach.
         """
         line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
         path = self.path_for(rollout_id)
-        with path.open("ab") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        for _ in range(_RECORD_ATTEMPTS):
+            with path.open("ab") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    if _path_names_open_file(path, handle):
+                        handle.write(line)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                        return
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        raise OSError(f"The capture file for rollout {rollout_id} was removed {_RECORD_ATTEMPTS} times while writing.")
 
     def read(self, rollout_id: str) -> list[dict[str, Any]]:
         path = self.path_for(rollout_id)
