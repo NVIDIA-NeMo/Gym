@@ -241,9 +241,9 @@ class TokenCaptureStore:
                 os.fsync(handle.fileno())
             self._fsync_root()
 
-    async def mark_incomplete(self, rollout_id: str, model_call_id: str = "") -> None:
+    async def mark_incomplete(self, capture_key: str, model_call_id: str = "") -> None:
         """Durably record that a call was lost."""
-        await asyncio.to_thread(self._mark_incomplete, rollout_id, model_call_id)
+        await asyncio.to_thread(self._mark_incomplete, capture_key, model_call_id)
 
     def is_incomplete(self, rollout_id: str) -> bool:
         with self._locked(rollout_id, shared=True):
@@ -414,7 +414,7 @@ class TokenCaptureStore:
                 self._dangling_intents(rollout_id, entries, state)
             )
             return TokenCaptureSnapshot(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 entries=entries,
                 incomplete=incomplete,
                 snapshot_id=str(state["snapshot_id"]),

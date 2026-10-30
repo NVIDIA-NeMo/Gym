@@ -669,7 +669,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ):
             refuse = getattr(context.lineage_store, "refuse_call", None)
             if refuse is not None:
-                await refuse(context.rollout_id, context.model_call_id)
+                await refuse(context.capture_key, context.model_call_id)
                 context.refused = True
         if source_history or self.config.propagate_context_overflow_errors:
             code = _mark_propagated_overflow(error)
@@ -725,7 +725,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise HTTPException(status_code=422, detail="measurement requires explicit non-streaming history")
         client = self._resolve_client(request)
         context = CaptureContext(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id="measurement",
             token_sink=None,
             lineage_store=self._capture_lineage,

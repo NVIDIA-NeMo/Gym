@@ -860,7 +860,7 @@ def test_install_capture_uses_the_worker_host_seam() -> None:
 def test_external_commit_marker_prevents_duplicate_missing_capture() -> None:
     sink = _IncompleteSink()
     context = CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="c1",
         token_sink=sink,
     )
@@ -876,7 +876,7 @@ def test_external_commit_marker_prevents_duplicate_missing_capture() -> None:
 
 def test_external_commit_marker_rejects_cross_request_acknowledgement() -> None:
     context = CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="c1",
         token_sink=None,
     )

@@ -451,7 +451,7 @@ class PolicyGate:
             if ticket.cut_regenerate_reason is not None:
                 return admission
             digest = conversation_digest(list(context.request_items or []))
-            record = self.restored_cuts.take(ticket, context.rollout_id, digest)
+            record = self.restored_cuts.take(ticket, context.capture_key, digest)
             if record is None:
                 return admission
             return admission.model_copy(update={"generation_cut": record.continuation})

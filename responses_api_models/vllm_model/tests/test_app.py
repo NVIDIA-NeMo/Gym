@@ -1089,7 +1089,7 @@ class TestApp:
         """Send one captured request through the real dispatch, which registers the call intent."""
         app = server.setup_webserver()
         server.setup_exception_middleware(app)
-        token = set_token_sink(CaptureContext(rollout_id="r0", model_call_id="mc-1", token_sink=store))
+        token = set_token_sink(CaptureContext(capture_key="r0", model_call_id="mc-1", token_sink=store))
         try:
             return TestClient(app).post(path, json=body)
         finally:
@@ -1452,7 +1452,7 @@ class TestApp:
     def test_megatron_capture_handler_prepares_an_admitted_child_request(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch, external_staging_backend="megatron_worker")
         context = CaptureContext(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c2",
             token_sink=None,
             external_staging=True,
@@ -1547,7 +1547,7 @@ class TestApp:
         request.headers = {}
         lineage_store = InMemoryLineageStore()
         context = CaptureContext(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             model_call_id="c1",
             token_sink=None,
             lineage_store=lineage_store,
@@ -6276,7 +6276,7 @@ class TestTopLogprobsHandling:
             model._external_capture_handler = VLLMWorkerCaptureHandler()
             token = set_token_sink(
                 CaptureContext(
-                    rollout_id="r1",
+                    capture_key="r1",
                     model_call_id="c1",
                     token_sink=None,
                     external_staging=True,
@@ -6307,7 +6307,7 @@ class TestTopLogprobsHandling:
             body.update(fields)
         token = set_token_sink(
             CaptureContext(
-                rollout_id="r1",
+                capture_key="r1",
                 model_call_id="c1",
                 token_sink=None,
                 external_staging=True,
@@ -7056,7 +7056,7 @@ async def test_generation_cut_reaches_each_owning_backend(
         ticket = participant.gate.enter(f"rollout-{index}")
         ticket.backend = client.base_url
         ticket.capture = CaptureContext(
-            rollout_id=f"rollout-{index}", model_call_id=f"call-{index}", token_sink=None, request_items=[]
+            capture_key=f"rollout-{index}", model_call_id=f"call-{index}", token_sink=None, request_items=[]
         )
     routes: dict[str, list[str]] = {}
 
@@ -7130,7 +7130,7 @@ class TestPrefixSupply:
     @staticmethod
     def _armed(rollout_id: str, tmp_path) -> CaptureContext:
         return CaptureContext(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id="call-x",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7306,7 +7306,7 @@ class TestPrefixSupplyAccounting:
         lineage_index().for_rollout("acct-0").record("parent", turn, [1, 2, 3], "d")
 
         ctx = CaptureContext(
-            rollout_id="acct-0",
+            capture_key="acct-0",
             model_call_id="c",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7330,7 +7330,7 @@ class TestPrefixSupplyAccounting:
         lineage_index().for_rollout("acct-1").record("parent", [{"role": "assistant", "content": "a"}], [1, 2], "d")
 
         ctx = CaptureContext(
-            rollout_id="acct-1",
+            capture_key="acct-1",
             model_call_id="c",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7418,7 +7418,7 @@ class TestPrefixSupplyReachesTokenize:
 
         sink = set_token_sink(
             CaptureContext(
-                rollout_id="tok-0",
+                capture_key="tok-0",
                 model_call_id="call-y",
                 token_sink=TokenCaptureStore(tmp_path),
                 lineage_store=_TEST_LINEAGE,
@@ -7477,7 +7477,7 @@ class TestPrefixSupplyReachesTokenize:
         model._clients = [mock_client]
 
         context = CaptureContext(
-            rollout_id=rollout,
+            capture_key=rollout,
             model_call_id="call-v",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7558,7 +7558,7 @@ class TestPrefixSupplyReachesTokenize:
 
         sink = set_token_sink(
             CaptureContext(
-                rollout_id="tok-unknown",
+                capture_key="tok-unknown",
                 model_call_id="call-z",
                 token_sink=TokenCaptureStore(tmp_path),
                 lineage_store=_TEST_LINEAGE,
@@ -7656,7 +7656,7 @@ class TestGenerationProofAcceptsBundleShape:
         model._clients = [mock_client]
 
         context = CaptureContext(
-            rollout_id="bundle-0",
+            capture_key="bundle-0",
             model_call_id="call-b",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7677,7 +7677,7 @@ class TestGenerationProofAcceptsBundleShape:
     def _verify(self, tmp_path, response: dict) -> CaptureContext:
         model = TestPrefixSupplyReachesTokenize._model()
         context = CaptureContext(
-            rollout_id="bundle-1",
+            capture_key="bundle-1",
             model_call_id="call-b",
             token_sink=TokenCaptureStore(tmp_path),
             lineage_store=_TEST_LINEAGE,
@@ -7818,7 +7818,7 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
         assert model._preserve_envelope_id() is False
 
         captured = CaptureContext(
-            rollout_id="env-0",
+            capture_key="env-0",
             model_call_id="call-a",
             token_sink=None,
             lineage_store=_TEST_LINEAGE,
@@ -7831,7 +7831,7 @@ class TestPreserveEnvelopeIdFollowsCaptureContext:
             reset_token_sink(token)
 
         local = CaptureContext(
-            rollout_id="env-0",
+            capture_key="env-0",
             model_call_id="call-b",
             token_sink=None,
             lineage_store=_TEST_LINEAGE,

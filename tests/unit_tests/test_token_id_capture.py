@@ -354,7 +354,7 @@ def test_register_call_intent_uses_optional_sink_extension():
         async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
             calls.append((rollout_id, model_call_id))
 
-    token = set_token_sink(CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink()))
+    token = set_token_sink(CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink()))
     try:
         asyncio.run(register_call_intent())
     finally:
@@ -458,7 +458,7 @@ def test_record_refusal_uses_the_optional_sink_extension():
         ) -> None:
             calls.append((rollout_id, model_call_id, code, parent_call_id, parent_resolution))
 
-    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
     context.parent_resolution = LineageResolution(
         ParentResolutionStatus.RESOLVED,
         match=LineageMatch(model_call_id="p", cumulative_token_ids=(1, 2, 3), digest="d"),
@@ -482,7 +482,7 @@ def test_record_refusal_without_a_lineage_decision_records_no_parent():
         ) -> None:
             calls.append((code, lineage))
 
-    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
     token = set_token_sink(context)
     try:
         asyncio.run(capture_engine_refusal(None))
@@ -497,7 +497,7 @@ def test_record_refusal_without_the_extension_warns_once_and_leaves_the_intent_d
         async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
             pass
 
-    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
     token = set_token_sink(context)
     try:
         with patch("nemo_gym.token_id_capture.sink._REFUSE_CALL_MISSING_NOTED", [False]):
@@ -532,7 +532,7 @@ def test_record_refusal_never_raises(caplog):
         ) -> None:
             raise RuntimeError("disk full")
 
-    context = CaptureContext(rollout_id="r", model_call_id="c", token_sink=Sink())
+    context = CaptureContext(capture_key="r", model_call_id="c", token_sink=Sink())
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.token_id_capture.sink"):
@@ -604,7 +604,7 @@ def test_a_late_capture_after_freeze_is_dropped_without_marking_the_frozen_rollo
     with pytest.raises(TokenCaptureFrozenError):
         asyncio.run(store.put(entry.model_copy(update={"model_call_id": "c2"})))
 
-    context = CaptureContext(rollout_id="late-r0", model_call_id="c2", token_sink=store)
+    context = CaptureContext(capture_key="late-r0", model_call_id="c2", token_sink=store)
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.WARNING):
@@ -634,7 +634,7 @@ def test_a_late_capture_after_retire_is_dropped_like_one_after_freeze(tmp_path, 
     asyncio.run(store.put(entry))
     store.retire_now(["abandoned"])
 
-    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    context = CaptureContext(capture_key="abandoned", model_call_id="c2", token_sink=store)
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.WARNING):
@@ -789,7 +789,7 @@ def test_a_late_call_without_token_ids_after_retire_is_not_reported_as_a_failure
     _store_entry(store, "abandoned")
     store.retire_now(["abandoned"])
 
-    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    context = CaptureContext(capture_key="abandoned", model_call_id="c2", token_sink=store)
     token = set_token_sink(context)
     try:
         with caplog.at_level(logging.WARNING):
@@ -852,7 +852,7 @@ def test_a_late_build_failure_after_retire_is_not_counted_as_a_capture_failure(t
     store = TokenCaptureStore(tmp_path)
     _store_entry(store, "abandoned")
     store.retire_now(["abandoned"])
-    context = CaptureContext(rollout_id="abandoned", model_call_id="c2", token_sink=store)
+    context = CaptureContext(capture_key="abandoned", model_call_id="c2", token_sink=store)
     failures_before = sink_module._CAPTURE_FAILURES[0]
 
     async def build_fails():
@@ -1723,7 +1723,7 @@ def test_external_mode_still_mints_identity_for_a_correlated_call(tmp_path):
     class _Peek(_CapturingModel):
         async def responses(self, request: Request, body=Body()) -> NeMoGymResponse:
             context = current_capture_context()
-            seen["rollout_id"] = context.rollout_id if context else None
+            seen["rollout_id"] = context.capture_key if context else None
             seen["model_call_id"] = context.model_call_id if context else None
             seen["sink"] = context.token_sink if context else "no context"
             return _training_response("hi")
@@ -1760,7 +1760,7 @@ def test_external_mode_does_not_mark_a_token_less_response_incomplete(tmp_path):
 def test_a_committed_call_is_not_marked_even_without_token_ids(tmp_path):
     """A caller that had the arrays when this process did not has already accounted for the call."""
     store = TokenCaptureStore(tmp_path)
-    context = CaptureContext(rollout_id="cm0-r0", model_call_id="c1", token_sink=store)
+    context = CaptureContext(capture_key="cm0-r0", model_call_id="c1", token_sink=store)
     token = set_token_sink(context)
     try:
         asyncio.run(
@@ -1954,7 +1954,7 @@ def test_commit_entry_records_a_call_with_no_token_fields_on_the_response(instal
         generation_token_ids=GTOKS,
         generation_log_probs=LPS,
     )
-    token = set_token_sink(CaptureContext(rollout_id="task0-sink3", model_call_id="mc-1", token_sink=installed_sink))
+    token = set_token_sink(CaptureContext(capture_key="task0-sink3", model_call_id="mc-1", token_sink=installed_sink))
     try:
         asyncio.run(commit_entry(entry))
     finally:
@@ -2522,7 +2522,7 @@ async def test_lineage_lookup_failure_is_persisted_as_unresolved(tmp_path):
 
     store = TokenCaptureStore(tmp_path)
     context = CaptureContext(
-        rollout_id="lookup-failure",
+        capture_key="lookup-failure",
         model_call_id="call-1",
         token_sink=store,
         lineage_store=_FailingResolver(),

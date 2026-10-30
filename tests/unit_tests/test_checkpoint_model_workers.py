@@ -80,7 +80,7 @@ def worker_link(socket_path: str, lost: Optional[list[str]] = None) -> PolicyWor
 def held_call(gate: PolicyGate, capture_key: str, model_call_id: str, request_items: list) -> _Ticket:
     ticket = gate.enter(capture_key)
     ticket.capture = CaptureContext(
-        rollout_id=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
+        capture_key=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
     )
     return ticket
 

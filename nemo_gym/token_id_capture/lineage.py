@@ -133,7 +133,7 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
     }
 
 
-def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
+def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
     """Build the token-free ``RolloutManifest`` payload from ledger rows.
 
     Committed custody rows become ``CallRecord`` payloads; failure rows become
@@ -222,7 +222,7 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                 )
             )
     manifest = RolloutManifest(
-        capture_key=rollout_id,
+        capture_key=capture_key,
         records=records,
         failures=failures,
         attempted_call_ids=attempted,
@@ -607,19 +607,19 @@ class InMemoryLineageStore:
             )
         rows.append(row)
 
-    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
-        if rollout_id in self._retired:
-            _log_late_write_dropped(rollout_id, model_call_id)
+    async def record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
+        if capture_key in self._retired:
+            _log_late_write_dropped(capture_key, model_call_id)
             return
-        rows = self._ledgers.setdefault(rollout_id, [])
+        rows = self._ledgers.setdefault(capture_key, [])
         row = {"model_call_id": model_call_id, "failure_reason": reason}
         if not any(existing == row for existing in rows):
             rows.append(row)
 
-    async def manifest(self, rollout_id: str) -> dict:
-        if rollout_id in self._retired:
-            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
-        return _manifest_from_rows(rollout_id, list(self._ledgers.get(rollout_id) or []))
+    async def manifest(self, capture_key: str) -> dict:
+        if capture_key in self._retired:
+            raise RolloutRetiredError(f"rollout {capture_key} is retired")
+        return _manifest_from_rows(capture_key, list(self._ledgers.get(capture_key) or []))
 
     async def has_rows(self, rollout_id: str) -> bool:
         if self._ledgers.get(rollout_id):
@@ -628,19 +628,19 @@ class InMemoryLineageStore:
             raise RolloutRetiredError(f"rollout {rollout_id} is retired")
         return bool(self.index.for_rollout(rollout_id).by_call_id)
 
-    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
-        rollout_ids = validate_rollout_ids(rollout_ids)
-        self._retired.update(rollout_ids)
-        return self._remove(rollout_ids)
+        capture_keys = validate_rollout_ids(capture_keys)
+        self._retired.update(capture_keys)
+        return self._remove(capture_keys)
 
-    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    async def delete(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
-        rollout_ids = validate_rollout_ids(rollout_ids)
-        self._retired.difference_update(rollout_ids)
-        return self._remove(rollout_ids)
+        capture_keys = validate_rollout_ids(capture_keys)
+        self._retired.difference_update(capture_keys)
+        return self._remove(capture_keys)
 
     def _remove(self, rollout_ids: list[str]) -> RolloutRemovalPayload:
         removed, absent = [], []
@@ -1186,37 +1186,37 @@ class FileLineageStore(IncrementalLineageStore):
                 return
             self._append(commit.capture_key, record, records)
 
-    async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
-        await asyncio.to_thread(self._record_failure, rollout_id, model_call_id, reason)
+    async def record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
+        await asyncio.to_thread(self._record_failure, capture_key, model_call_id, reason)
 
-    def _record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
+    def _record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
         # No fingerprint: ``_resolve_row`` filters on it, so a failure row can
         # never be returned as a parent. Idempotent for the identical reason.
         record = {"model_call_id": model_call_id, "failure_reason": reason}
-        with self._locked(rollout_id):
-            records = self._read(rollout_id)
-            if not records and self._is_retired(rollout_id):
-                _log_late_write_dropped(rollout_id, model_call_id)
+        with self._locked(capture_key):
+            records = self._read(capture_key)
+            if not records and self._is_retired(capture_key):
+                _log_late_write_dropped(capture_key, model_call_id)
                 return
             if any(existing == record for existing in records):
                 return
-            self._append(rollout_id, record, records)
+            self._append(capture_key, record, records)
 
-    async def manifest(self, rollout_id: str) -> dict:
-        return await asyncio.to_thread(self._manifest, rollout_id)
+    async def manifest(self, capture_key: str) -> dict:
+        return await asyncio.to_thread(self._manifest, capture_key)
 
-    def _manifest(self, rollout_id: str) -> dict:
+    def _manifest(self, capture_key: str) -> dict:
         # Do not mint a lock just to measure an unused rollout. An existing lock
         # may belong to a writer before its first row, so still wait for it below.
-        if not self._ledger_path(rollout_id).exists() and not self._store.lock_path_for(rollout_id).exists():
-            if self._is_retired(rollout_id):
-                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
-            return _manifest_from_rows(rollout_id, [])
-        with self._locked(rollout_id):
-            rows = list(self._read(rollout_id))
-            if not rows and self._is_retired(rollout_id):
-                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
-        return _manifest_from_rows(rollout_id, rows)
+        if not self._ledger_path(capture_key).exists() and not self._store.lock_path_for(capture_key).exists():
+            if self._is_retired(capture_key):
+                raise RolloutRetiredError(f"rollout {capture_key} is retired")
+            return _manifest_from_rows(capture_key, [])
+        with self._locked(capture_key):
+            rows = list(self._read(capture_key))
+            if not rows and self._is_retired(capture_key):
+                raise RolloutRetiredError(f"rollout {capture_key} is retired")
+        return _manifest_from_rows(capture_key, rows)
 
     async def has_rows(self, rollout_id: str) -> bool:
         return await asyncio.to_thread(self._has_rows, rollout_id)
@@ -1229,32 +1229,32 @@ class FileLineageStore(IncrementalLineageStore):
                 raise RolloutRetiredError(f"rollout {rollout_id} is retired")
             return False
 
-    async def retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        return await asyncio.to_thread(self._retire, rollout_ids)
+    async def retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
+        return await asyncio.to_thread(self._retire, capture_keys)
 
-    def _retire(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    def _retire(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
-        rollout_ids = validate_rollout_ids(rollout_ids)
-        for rollout_id in rollout_ids:
-            with self._locked(rollout_id):
-                fence = self._retired_path(rollout_id)
+        capture_keys = validate_rollout_ids(capture_keys)
+        for capture_key in capture_keys:
+            with self._locked(capture_key):
+                fence = self._retired_path(capture_key)
                 if not fence.exists():
                     fence.touch()
         # Make every fence durable before deleting any ledger, and before returning, so a crash leaves a fence.
         # That includes fences that already existed: an overlapping or crashed retire may have created them
         # without syncing. A retried batch writes nothing, but still syncs once.
-        if rollout_ids:
+        if capture_keys:
             self._fsync_ledger_root()
-        return self._remove(rollout_ids)
+        return self._remove(capture_keys)
 
-    async def delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
-        return await asyncio.to_thread(self._delete, rollout_ids)
+    async def delete(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
+        return await asyncio.to_thread(self._delete, capture_keys)
 
-    def _delete(self, rollout_ids: Sequence[str]) -> RolloutRemovalPayload:
+    def _delete(self, capture_keys: Sequence[str]) -> RolloutRemovalPayload:
         from nemo_gym.token_id_capture.store import validate_rollout_ids
 
-        return self._remove(validate_rollout_ids(rollout_ids), unretire=True)
+        return self._remove(validate_rollout_ids(capture_keys), unretire=True)
 
     def mark_started(self, rollout_id: str) -> None:
         """Record, for every server sharing this ledger, that a restored attempt has started.

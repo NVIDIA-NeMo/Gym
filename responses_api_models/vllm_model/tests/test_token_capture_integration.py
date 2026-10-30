@@ -396,7 +396,7 @@ class _ExternalSource:
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
         self.backend.frozen.add(rollout_id)
         return TokenCaptureSnapshot(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             entries=tuple(self.backend.entries.get(rollout_id, {}).values()),
             incomplete=rollout_id in self.backend.incomplete,
             snapshot_id=f"snapshot-{rollout_id}",
@@ -441,7 +441,7 @@ def _simulate_two_workers(
 
     def serve(client: TestClient, call_id: str, messages: list[dict]) -> tuple[dict, CaptureContext]:
         context = CaptureContext(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id=call_id,
             token_sink=sink_factory(),
             lineage_store=lineage_factory(),

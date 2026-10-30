@@ -453,10 +453,11 @@ POST /training-token-capture/control/rollouts/retire
 POST /training-token-capture/control/rollouts/delete
 Authorization: Bearer <control auth token>
 
-{"rollout_ids": ["<rollout_id>", ...]}
+{"capture_keys": ["<capture_key>", ...]}
 ```
 
-Each request takes at most 4096 rollout IDs, and `RolloutControlClient.retire` and `RolloutControlClient.delete` split longer lists into batches for you.
+The body field was earlier named `rollout_ids`, which the routes still accept for one release.
+Each request takes at most 4096 capture keys, and `RolloutControlClient.retire` and `RolloutControlClient.delete` split longer lists into batches for you.
 The reply lists the rollouts whose ledger was removed under `removed` and the rest under `absent`.
 Because repeating either operation changes nothing, a failed batch can simply be sent again.
 

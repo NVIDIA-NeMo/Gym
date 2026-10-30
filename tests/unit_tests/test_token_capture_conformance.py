@@ -101,7 +101,7 @@ class _MemorySource:
             backend.frozen[rollout_id] = (f"snap-{rollout_id}", backend.versions[rollout_id])
         snapshot_id, version = backend.frozen[rollout_id]
         return TokenCaptureSnapshot(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             entries=tuple(backend.entries.get(rollout_id, {}).values()),
             incomplete=rollout_id in backend.incomplete,
             snapshot_id=snapshot_id,
