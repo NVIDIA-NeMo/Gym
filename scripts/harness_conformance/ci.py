@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.check_suites.github_actions import annotation_data, changed_paths, tested_sha, write_ci_result
+
 from .feedback import failure_details, reproduction
 from .registry import HARNESSES
 
@@ -78,19 +80,8 @@ def select_harnesses(paths: list[str]) -> list[str]:
 
 def changed_harnesses(base: str, *, root: Path = ROOT) -> list[str]:
     """Compare the entire branch since its merge base, including deleted/renamed paths."""
-    if not base:
-        return list(HARNESSES)
-    try:
-        ancestor = subprocess.check_output(
-            ["git", "merge-base", "--", base, "HEAD"], cwd=root, text=True, stderr=subprocess.PIPE
-        ).strip()
-        paths = subprocess.check_output(
-            ["git", "diff", "--name-only", "--no-renames", "-z", ancestor, "HEAD", "--"], cwd=root
-        ).decode("utf-8", errors="replace")
-    except subprocess.CalledProcessError:
-        print("::warning::Could not determine changed files; running all registered harnesses.")
-        return list(HARNESSES)
-    return select_harnesses([path for path in paths.split("\0") if path])
+    paths = changed_paths(base, root=root, subject="registered harnesses")
+    return list(HARNESSES) if paths is None else select_harnesses(paths)
 
 
 def _build_crewai_sandbox_runtime() -> None:
@@ -175,18 +166,14 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
     else:
         status = "passed"
         message = f"{harness}: P0 conformance requirements are fulfilled; additional checks are reported below."
-    tested_sha = os.environ.get("TESTED_SHA") or os.environ.get("GITHUB_SHA", "local")
-    output.mkdir(parents=True, exist_ok=True)
-    (output / "ci-result.json").write_text(
-        json.dumps({"harness": harness, "sha": tested_sha, "status": status}) + "\n"
-    )
+    write_ci_result(output, subject=harness, status=status, subject_key="harness")
     markdown = f"## Harness conformance: {harness}\n\n{message}\n\n"
     count, first = failure_details(harness, output)
     markdown += f"**Failed scenario checks:** {count}\n\n**First failure:** {first}\n\n"
     if status != "passed":
         detail = f"{message} Failed scenario checks: {count}. First failure: {first}"
-        print(f"::warning title={warning_title}::{detail}".replace("%", "%25"))
-    markdown += f"Source: `{tested_sha}`\n\n"
+        print(f"::warning title={warning_title}::{annotation_data(detail)}")
+    markdown += f"Source: `{tested_sha()}`\n\n"
     report_path = output / "conformance_report.md"
     if report_path.exists():
         markdown += report_path.read_text() + "\n"
