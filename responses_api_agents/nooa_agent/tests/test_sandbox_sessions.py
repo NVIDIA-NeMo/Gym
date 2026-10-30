@@ -59,6 +59,36 @@ async def test_missing_resources_sandbox_is_rejected(setup) -> None:
     sandbox.stop.assert_not_awaited()
 
 
+async def test_sandbox_session_forwards_configured_context_window(setup) -> None:
+    instance, sandbox, _, _ = setup
+    instance.config.context_window = 262144
+    instance.config.sandbox_runner_timeout_seconds = 60.5
+    instance.config.session_close_timeout_seconds = 1.25
+    await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    state = instance._require_agent_session("session")
+    assert state.runner.context_window == 262144
+    assert state.runner.timeout == 60.5
+    assert state.runner.close_timeout == 1.25
+    await close(instance)
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_offline_runtime_failure_never_activates_or_destroys_borrowed_sandbox(setup) -> None:
+    instance, sandbox, staging, connect = setup
+    instance.config.runtime_wheelhouse = Path("/prepared/nooa")
+    staging.side_effect = ValueError("Offline runtime source fingerprint mismatch")
+    with pytest.raises(ValueError, match="source fingerprint mismatch"):
+        await instance.seed_agent_session(request(), seed(sandbox_access=access()))
+    staging.assert_awaited_once_with(sandbox, wheelhouse_path=Path("/prepared/nooa"))
+    connect.assert_awaited_once()
+    sandbox.exec.assert_not_awaited()
+    with pytest.raises(HTTPException, match="closing"):
+        instance._require_agent_session("session")
+    await close(instance)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
 async def test_runtime_staging_failure_keeps_borrowed_connection_for_close(setup) -> None:
     instance, sandbox, staging, _ = setup
     staging.side_effect = RuntimeError("unsupported runtime")
@@ -279,7 +309,7 @@ async def test_seed_wires_resolved_endpoint_runtime_and_limits_into_one_runner(s
     assert runner.invocation is instance.config.nooa
     instance.server_client._resolve_base_url.assert_not_called()
     instance.server_client._build_server_base_url.assert_called_once_with({"host": "model", "port": 8000})
-    staging.assert_awaited_once_with(sandbox)
+    staging.assert_awaited_once_with(sandbox, wheelhouse_path=None)
     connect.assert_awaited_once()
     await instance.seed_agent_session(request(), body)
     assert instance._require_agent_session("session").runner is runner

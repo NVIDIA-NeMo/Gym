@@ -34,7 +34,6 @@ from nooa.strategies.predict import PredictStrategy
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
 from nemo_gym.tool_access import DirectHTTPToolAccess
-from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import (
     GymModelClient,
     GymResponsesLLM,
@@ -43,6 +42,7 @@ from responses_api_agents.nooa_agent.gym_llm import (
     PolicyCallBudgetExceeded,
     RolloutLLMState,
 )
+from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
@@ -147,12 +147,14 @@ class InProcessNOOARunner:
         model_server_name: str,
         max_policy_calls: int | None,
         on_progress: Callable[[NOOARunResult], None] | None = None,
+        context_window: int | None = None,
     ) -> None:
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._max_policy_calls = max_policy_calls
         self._on_progress = on_progress
+        self._context_window = context_window
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
 
@@ -204,6 +206,7 @@ class InProcessNOOARunner:
             on_call=trace.on_model_call,
             on_response=checkpoint,
             sampling_overrides=sampling_overrides,
+            context_window=self._context_window,
         )
         dispatcher = ResourceToolDispatcher(
             tool_access=request.tool_access,

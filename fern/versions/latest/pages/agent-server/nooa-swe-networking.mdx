@@ -1,0 +1,121 @@
+---
+title: "Run NOOA SWE-bench Pro with restricted networking"
+description: "Prepare NOOA offline and restrict only the SWE-bench Pro task sandbox on OpenSandbox."
+position: 5
+---
+
+# Run NOOA SWE-bench Pro with restricted networking
+
+The NOOA SWE-bench Pro recipe enables a task-only OpenSandbox network policy.
+The SWE Resources server applies default-deny egress when it creates the task
+sandbox, before handing the sandbox to NOOA. NOOA borrows that Resources-owned
+sandbox. Fresh grading sandboxes continue using the benchmark's original
+network settings, images, test artifacts, and dependency preparation.
+Other SWE harnesses keep their existing network behavior.
+
+## Deployment requirements
+
+Use an OpenSandbox deployment with an egress sidecar and **`dns+nft` enforcement**.
+DNS-only filtering can be bypassed with a literal IP address. Provider API
+acceptance of a policy is not proof of enforcement; validate both blocked domain
+requests and blocked literal-IP requests against the actual deployment. See
+[OpenSandbox egress controls](/main/infrastructure/sandbox/opensandbox-best-practices#egress-controls-are-off-by-default).
+
+The allowlist contains the advertised **Gym model-server host**, which proxies
+inference to the configured upstream model. NOOA uses the Gym Responses API; the Gym model adapter
+may call a different upstream protocol, such as Chat Completions. It does not add package indexes,
+GitHub, or the upstream model service to the task allowlist. Advertise a concrete
+host reachable from OpenSandbox; loopback and wildcard bind addresses are rejected.
+The policy model reference is derived from the NOOA agent's `model_server`, so overriding that
+reference also changes the permitted endpoint.
+The recipe uses `use_absolute_ip: true`, but a controller behind NAT still needs a
+reachable advertised host and firewall rules for its selected server ports.
+
+<Warning>
+This policy allows **all ports and HTTP routes on the allowed host**. It does not
+limit access to a model API path, and it cannot isolate other services sharing
+that host or IP. Place the model endpoint accordingly and assess cohosted services.
+The current helper is a host allowlist, not a model-request authorization boundary.
+</Warning>
+
+Only the OpenSandbox network-policy provider is supported for restricted tasks.
+Unsupported providers, unreachable endpoint configuration, and provider policy
+creation errors fail explicitly; they never trigger an unrestricted retry.
+Choose the provider explicitly with a provider config overlay. The NOOA recipe does not load
+OpenSandbox credentials when another provider is selected. Existing unrestricted local/Docker configurations
+remain available only when the user explicitly sets `task_network_policy: null`; restricted configurations
+never disable their policy automatically. An intentionally online runtime also needs
+`runtime_wheelhouse_required: false` and `runtime_wheelhouse: null`. These choices permit internet access
+and are unsuitable for a restricted evaluation.
+
+Configure the OpenSandbox deployment outside the task: no task environment variable
+can turn a DNS-only deployment into `dns+nft` enforcement.
+
+## Prepare and run
+
+Use a controller with Python 3.13.14 or newer, package/GitHub access, and Docker
+capable of running a Linux amd64 build container. Install Gym and the NOOA agent
+requirements in your controller environment. Docker builds the runtime; the
+benchmark task and grading sandboxes run on OpenSandbox.
+
+Prebuilding is intentional: Docker, package indexes, and GitHub are available on the build controller,
+not necessarily on the agent host or inside restricted task sandboxes. Startup reports a setup error
+when the required bundle path is unset; it does not attempt an online task installation.
+
+From the repository root, prepare a fresh bundle and the shared SWE dataset:
+
+```bash
+export NOOA_SWE_RUNTIME_WHEELHOUSE=/absolute/path/to/new-owned-runtime-bundle
+python -m responses_api_agents.nooa_agent.offline_runtime \
+  --output "$NOOA_SWE_RUNTIME_WHEELHOUSE" --target x86_64/gnu
+python benchmarks/swebench/pro/prepare.py
+```
+
+The bundle contains portable Python, the pinned NOOA packages, the Gym runtime,
+and all dependency wheels. Its manifest binds the source, Python and wheel checksums,
+architecture, and builder glibc version. Task setup uses local wheels with
+`--no-index --no-deps` in a private prefix. It preserves the task image and its Python.
+Missing, incompatible, or corrupted bundles fail setup without an online fallback.
+Source or dependency changes require a fresh bundle directory. An existing empty output directory is
+accepted; a nonempty incompatible directory is preserved and rejected. Use an absolute bundle path or
+`~/...` (expanded by both preparation and agent configuration). Relative agent paths are rejected because
+the server working directory differs from the preparation shell. An existing bundle
+can be checked with the same command plus `--validate-only`.
+
+The recipe selects Linux amd64. An arm64 platform overlay requires a matching
+`aarch64/gnu` bundle and compatible task images. Task glibc must be at least the
+builder version; the default `manylinux2014` builder uses glibc 2.17, permitting older glibc task images
+such as Ubuntu 18.04. A custom newer builder still requires its newer glibc; musl targets are unsupported. Prepared bundles can be transferred
+between controllers with matching source and target.
+
+Supply `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` privately, and configure
+`policy_base_url`, `policy_api_key`, and `policy_model_name` through Gym's normal
+`env.yaml` or CLI overrides. The Gym model-server host must be reachable from the
+sandbox. Set the NOOA agent's optional `context_window` to the model's known context
+size when needed. The planner and outgoing request use the same output cap: explicit Gym
+`max_output_tokens` wins; otherwise NOOA's `max_tokens`, `max_completion_tokens`, or `max_output_tokens`,
+including an `extra_body` cap, is sent as `max_output_tokens`. Conflicting NOOA caps are rejected.
+When no cap is supplied, no request cap is invented; a planning fallback remains planning-only.
+
+```bash
+gym env start --config benchmarks/swebench/pro/nooa.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+
+gym eval run --no-serve --agent swebench_pro_nooa_agent \
+  --input benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  --output /tmp/nooa-swebench-pro.jsonl --limit 1 --concurrency 1
+```
+
+## Validate the deployment
+
+Before increasing concurrency, check a fresh task sandbox installs the offline
+runtime and reaches the model server. Confirm external hostname and literal-IP
+requests are denied, grading completes in a separate sandbox with its original
+network settings, and both sandboxes are cleaned up. Unit tests and successful
+policy creation do not establish live network enforcement.
+
+The recipe uses the existing SWE verifier and retains its reward and failure
+semantics. NOOA execution, transport, worker, resource, and cleanup failures remain
+episode failures. Inspect the rollout and verifier diagnostics before interpreting
+benchmark results.

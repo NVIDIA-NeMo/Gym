@@ -48,10 +48,12 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox.agent_tools import restricted_network_policy, sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -114,6 +116,18 @@ def _attempt_budget(attempt_timeout: float | None, deadline: float | None) -> fl
     return min(attempt_timeout, remaining)
 
 
+class SWEBenchProTaskNetworkPolicy(BaseModel):
+    """Allow only the model server host for task egress, on every port and route.
+
+    Requires an OpenSandbox deployment enforcing network policies with dns+nft.
+    Grading sandboxes retain the original sandbox_config.provider_options.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_server: ModelServerRef
+
+
 class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
@@ -143,6 +157,7 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     image_template: str | None = None  # Local SIF path with a checked provenance manifest.
     sandbox_provider: str
     sandbox_config: dict[str, Any]
+    task_network_policy: SWEBenchProTaskNetworkPolicy | None = None
 
 
 class SWEBenchProInstanceRequest(BaseModel):
@@ -308,10 +323,18 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self,
         body: SWEBenchProInstanceRequest,
         files: dict[str, str] | None = None,
+        *,
+        task: bool = False,
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        provider_options = self.config.sandbox_config.get("provider_options", {})
+        if task and self.config.task_network_policy is not None:
+            model_url = sandbox_server_url(self.config.task_network_policy.model_server.name, require_reachable=True)
+            # Replace rather than extend any baseline allowlist. Grading keeps the original options.
+            provider_options = dict(provider_options or {})
+            provider_options["network_policy"] = restricted_network_policy(next(iter(provider_config)), [model_url])
         image_info = await asyncio.to_thread(self._image_info, body)
         spec = SandboxSpec(
             image=image_info["image"],
@@ -328,7 +351,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             },
             resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
             entrypoint=None,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=provider_options,
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)
@@ -405,7 +428,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     async def _seed_session(self, session_id: str, body: SWEBenchProInstanceRequest) -> SWEBenchProSeedSessionResponse:
         await self._stop_session_sandbox(session_id)
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, task=True)
         # Keep ownership before initialization, including when cleanup itself fails.
         self._session_id_to_sandbox[session_id] = sandbox
         try:

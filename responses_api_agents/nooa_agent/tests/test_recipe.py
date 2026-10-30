@@ -83,18 +83,29 @@ def test_swe_shared_preparation_preserves_grading_metadata_through_legacy_adapte
     assert output.read_bytes() == original
 
 
-def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment() -> None:
+def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from omegaconf import OmegaConf
 
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from nemo_gym.cli.env import _configured_servers
     from nemo_gym.global_config import GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionHelper
     from nemo_gym.sandbox import AsyncSandbox
     from resources_servers.swebench_pro.app import SWEBenchProResourcesServerConfig
     from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 
+    for key, value in {
+        "POLICY_BASE_URL": "http://model.invalid/v1",
+        "POLICY_API_KEY": "fixture",
+        "POLICY_MODEL_NAME": "fixture",
+        "NOOA_SWE_RUNTIME_WHEELHOUSE": str(tmp_path / "wheelhouse"),
+    }.items():
+        monkeypatch.setenv(key, value)
     parser = GlobalConfigDictParser()
-    _, configs = parser.load_extra_config_paths([str(ROOT / "benchmarks/swebench/pro/nooa.yaml")])
+    paths = [str(ROOT / "benchmarks/swebench/pro/nooa.yaml")]
+    _, configs = parser.load_extra_config_paths(paths)
     config = OmegaConf.merge(*configs)
     parser._recursively_swap_keys(config)
     environment = SingleAgentTurnEnvironmentServerConfig(
@@ -117,9 +128,14 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment() ->
     assert not environment.resources_tool_transports
     resources = config[environment.resources_server.name].resources_servers.swebench_pro
     assert resources.allowed_agents == ["nooa_agent"]
+    assert resources.entrypoint == "app.py"
+    assert resources.sandbox_config.provider_options.platform == {"os": "linux", "arch": "amd64"}
+    assert resources.task_network_policy.model_server.name == agent.model_server.name
+    assert "network_policy" not in resources.sandbox_config.provider_options
+    assert agent.runtime_wheelhouse == tmp_path / "wheelhouse"
+    assert "sandbox" not in config  # The caller explicitly selects a provider overlay.
     assert resources.datasets[0].jsonl_fpath == "benchmarks/swebench/data/swebench_pro_benchmark.jsonl"
     assert resources.datasets[0].prepare_script == "benchmarks/swebench/pro/prepare.py"
-    assert resources.get("task_network_policy") is None
     resource_config = SWEBenchProResourcesServerConfig(
         name=environment.resources_server.name,
         host="localhost",
@@ -157,3 +173,68 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment() ->
     assert [(instance.name, set(instance.environment_servers)) for instance in environments] == [
         ("swebench_pro_nooa", {"single_agent_turn_legacy"})
     ]
+    assert {(server.top_level_path, server.server_type, server.name) for server in _configured_servers(config)} == {
+        ("swebench_pro_nooa_resources_server", "resources_servers", "swebench_pro"),
+        ("swebench_pro_nooa_agent", "responses_api_agents", "nooa_agent"),
+        ("swebench_pro_nooa", "environment_servers", "single_agent_turn_legacy"),
+    }
+
+
+def test_shared_swe_recipe_keeps_default_networking() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import GlobalConfigDictParser
+
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths(
+        [str(ROOT / "resources_servers/swebench_pro/configs/swebench_pro.yaml")]
+    )
+    config = OmegaConf.merge(*configs)
+    parser._recursively_swap_keys(config)
+    resources = config.swebench_pro_resources_server.resources_servers.swebench_pro
+    assert resources.get("task_network_policy") is None
+    assert "network_policy" not in resources.sandbox_config.provider_options
+    assert resources.entrypoint == "app.py"
+
+
+def test_swe_model_override_drives_the_network_endpoint() -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import GlobalConfigDictParser
+
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths([str(ROOT / "benchmarks/swebench/pro/nooa.yaml")])
+    config = OmegaConf.merge(*configs)
+    parser._recursively_swap_keys(config)
+    agent = config.swebench_pro_nooa_agent.responses_api_agents.nooa_agent
+    agent.model_server.name = "alternate_policy"
+    resources = config.swebench_pro_nooa_resources_server.resources_servers.swebench_pro
+    assert resources.task_network_policy.model_server.name == "alternate_policy"
+    assert resources.task_network_policy.model_server.type == "responses_api_models"
+
+
+def test_explicit_unrestricted_docker_config_needs_no_opensandbox_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omegaconf import OmegaConf
+
+    from nemo_gym.global_config import GlobalConfigDictParser
+    from responses_api_agents.nooa_agent.config import NOOAAgentConfig
+
+    for name in ["OPENSANDBOX_API_KEY", "OPENSANDBOX_DOMAIN", "NOOA_SWE_RUNTIME_WHEELHOUSE"]:
+        monkeypatch.delenv(name, raising=False)
+    parser = GlobalConfigDictParser()
+    _, configs = parser.load_extra_config_paths(
+        [
+            str(ROOT / "benchmarks/swebench/pro/nooa.yaml"),
+            str(ROOT / "nemo_gym/sandbox/providers/docker/configs/docker.yaml"),
+        ]
+    )
+    config = OmegaConf.merge(*configs)
+    parser._recursively_swap_keys(config)
+    resources = config.swebench_pro_nooa_resources_server.resources_servers.swebench_pro
+    resources.task_network_policy = None
+    agent = config.swebench_pro_nooa_agent.responses_api_agents.nooa_agent
+    agent.runtime_wheelhouse_required = False
+    parsed = NOOAAgentConfig(name="agent", host="localhost", port=8001, **OmegaConf.to_container(agent, resolve=True))
+    assert parsed.runtime_wheelhouse is None
+    assert resources.task_network_policy is None
+    assert "docker" in OmegaConf.to_container(config.sandbox, resolve=True)

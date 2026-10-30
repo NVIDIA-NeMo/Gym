@@ -134,7 +134,7 @@ def typed_seed_json(session_id: str, rollout_id: str = "rollout", task_data: dic
 def stub_task_sandboxes(monkeypatch: MonkeyPatch, server: SWEBenchProResourcesServer) -> AsyncMock:
     """Make typed seeds open fake task sandboxes; return the ``_create_sandbox`` mock."""
     create = AsyncMock(
-        side_effect=lambda body, files=None: SimpleNamespace(
+        side_effect=lambda body, files=None, *, task=False: SimpleNamespace(
             _handle=SimpleNamespace(sandbox_id="sandbox-id"),
             exec=AsyncMock(),
             serialize=AsyncMock(return_value={"sandbox_id": "sandbox-id"}),
@@ -571,8 +571,11 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
     )
     verifier_sandbox = SimpleNamespace(stop=AsyncMock(side_effect=stop_verifier))
 
-    async def create_sandbox(body: SWEBenchProInstanceRequest, files: dict | None = None) -> SimpleNamespace:
-        if files is None:
+    async def create_sandbox(
+        body: SWEBenchProInstanceRequest, files: dict | None = None, *, task: bool = False
+    ) -> SimpleNamespace:
+        assert task is (files is None)
+        if task:
             events.append("create-task")
             return task_sandbox
         events.append("create-verifier")
