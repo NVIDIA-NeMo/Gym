@@ -16,7 +16,7 @@ Sources:
 Image tools: crop, rotate, flip, resize, enhance, grayscale, autocontrast,
 blur, sharpen, denoise, edge_detect, invert, equalize, threshold.
 
-Retrieval: google_search, google_lens_search (+ ImgBB upload; providers below),
+Retrieval: google_search, google_lens_search (image uploaded to SerpAPI, or ImgBB for Serper; providers below),
 fetch_webpage (Jina Reader, or Exa /contents). The paper describes download_image, but the released
 atomic harness disables it; this integration likewise does not expose it.
 Free-form Python/Gen mode is not implemented.
@@ -119,11 +119,11 @@ environment):
 
 | overlay | text search | Lens | keys |
 |---|---|---|---|
-| retrieval_serpapi.yaml | SerpAPI | SerpAPI | SERPAPI_API_KEY, IMGBB_API_KEY |
+| retrieval_serpapi.yaml | SerpAPI | SerpAPI | SERPAPI_API_KEY |
 | retrieval_tavily.yaml | Tavily | none | TAVILY_API_KEY |
 | retrieval_exa.yaml | Exa | none | EXA_API_KEY |
-| retrieval_tavily_serpapi_lens.yaml | Tavily | SerpAPI | TAVILY_API_KEY, SERPAPI_API_KEY, IMGBB_API_KEY |
-| retrieval_exa_serpapi_lens.yaml | Exa | SerpAPI | EXA_API_KEY, SERPAPI_API_KEY, IMGBB_API_KEY |
+| retrieval_tavily_serpapi_lens.yaml | Tavily | SerpAPI | TAVILY_API_KEY, SERPAPI_API_KEY |
+| retrieval_exa_serpapi_lens.yaml | Exa | SerpAPI | EXA_API_KEY, SERPAPI_API_KEY |
 
 Every overlay also passes `JINA_API_KEY` (if set) to fetch_webpage's Jina Reader. Anonymous
 Jina is rate-limited per IP; under search-heavy runs it answers HTTP 401, so set the key there.
@@ -140,10 +140,16 @@ withheld: every result referenced the benchmark itself." Filtering happens on ev
 or cached, and the cache keeps the raw answer. Outputs carry `"contaminated": <n dropped>`.
 `contamination_patterns: []` disables the guard.
 
+Google Lens needs the image online. With SerpAPI Lens it is uploaded to SerpAPI's own Image API
+(`POST /image`, re-encoded as JPEG under 500 KB; Lens then takes the `image_id`), so no ImgBB key
+is needed. Serper's Lens takes a public URL, so with Serper the image goes to ImgBB
+(`IMGBB_API_KEY`). `retrieval.image_host` (auto | serpapi | imgbb) overrides the choice;
+`allow_image_upload: true` is required either way.
+
 Add `retrieval_cache.yaml` after one of them to answer from a shared on-disk cache
 before calling the provider (`AGENTIC_MME_SEARCH_CACHE=<dir>`):
 
-    export AGENTIC_MME_SEARCH_CACHE=/shared/agentic_mme_search_cache TAVILY_API_KEY=... SERPAPI_API_KEY=... IMGBB_API_KEY=...
+    export AGENTIC_MME_SEARCH_CACHE=/shared/agentic_mme_search_cache TAVILY_API_KEY=... SERPAPI_API_KEY=...
     config_paths="benchmarks/agentic_mme/config.yaml,benchmarks/agentic_mme/retrieval_tavily_serpapi_lens.yaml,benchmarks/agentic_mme/retrieval_cache.yaml"
     ng_prepare_benchmark "+config_paths=[$config_paths]"   # then run with the same config_paths
 

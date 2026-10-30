@@ -241,16 +241,15 @@ async def test_tavily_search_with_serpapi_lens(workspace, monkeypatch) -> None:
         tavily_api_key="t",
         lens_provider="serpapi",
         serpapi_api_key="s",
-        imgbb_api_key="i",
-        allow_image_upload=True,
+        allow_image_upload=True,  # no ImgBB key: SerpAPI hosts the image itself
     )
-    assert config.lens_available()
+    assert config.lens_available() and config.image_host_resolved() == "serpapi"
     calls = []
 
     async def fake_payload(cfg, method, url, **kwargs):
         calls.append((method, url, kwargs))
-        if "imgbb" in url:
-            return json.dumps({"success": True, "data": {"url": "https://i.ibb.co/x.png"}}).encode()
+        if url == "https://serpapi.com/image":
+            return json.dumps({"image_id": "img-123"}).encode()
         if "serpapi" in url:
             return json.dumps({"visual_matches": [{"title": "M", "link": "https://m.example"}]}).encode()
         return json.dumps({"results": [{"title": "T", "url": "https://t.example", "content": "c"}]}).encode()
@@ -263,10 +262,40 @@ async def test_tavily_search_with_serpapi_lens(workspace, monkeypatch) -> None:
     assert lens["raw"]["organic"][0]["title"] == "M"
     assert [c[1] for c in calls] == [
         "https://api.tavily.com/search",
-        "https://api.imgbb.com/1/upload",
+        "https://serpapi.com/image",
         "https://serpapi.com/search.json",
     ]
-    assert calls[0][2]["headers"]["Authorization"] == "Bearer t" and calls[2][2]["params"]["api_key"] == "s"
+    assert calls[0][2]["headers"]["Authorization"] == "Bearer t"
+    lens_params = calls[2][2]["params"]
+    assert lens_params["api_key"] == "s" and lens_params["engine"] == "google_lens"
+    assert lens_params["image_id"] == "img-123" and "url" not in lens_params
+
+
+def test_serpapi_upload_is_jpeg_under_the_size_limit() -> None:
+    import random
+
+    rng = random.Random(0)
+    noisy = Image.frombytes("RGB", (1600, 1600), bytes(rng.getrandbits(8) for _ in range(1600 * 1600 * 3)))
+    data = retrieval.jpeg_under(noisy)
+    assert len(data) <= retrieval.SERPAPI_IMAGE_MAX_BYTES and data[:2] == b"\xff\xd8"
+
+
+def test_image_host_choice_and_keys() -> None:
+    # SerpAPI Lens needs no ImgBB key; Serper Lens still uploads to ImgBB for a public URL.
+    assert RetrievalConfig(mode="live", serpapi_api_key="s", search_provider="serpapi", allow_image_upload=True)
+    with pytest.raises(ValidationError, match="requires imgbb_api_key"):
+        RetrievalConfig(mode="live", serper_api_key="s", allow_image_upload=True)
+    with pytest.raises(ValidationError, match="image_host=serpapi only serves"):
+        RetrievalConfig(mode="live", serper_api_key="s", allow_image_upload=True, image_host="serpapi")
+    forced = RetrievalConfig(
+        mode="live",
+        serpapi_api_key="s",
+        search_provider="serpapi",
+        allow_image_upload=True,
+        image_host="imgbb",
+        imgbb_api_key="i",
+    )
+    assert forced.image_host_resolved() == "imgbb"
 
 
 @pytest.mark.asyncio

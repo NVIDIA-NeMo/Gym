@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Overlay on benchmarks/agentic_mme/config.yaml: live web search through serpapi.
 # Key read from the environment (SERPAPI_API_KEY); fetch_webpage uses Jina Reader (JINA_API_KEY if set; anonymous otherwise is rate-limited).
-# Google Lens is on: task images are uploaded to ImgBB (IMGBB_API_KEY), expiring after 10 minutes.
+# Google Lens is on: task images are uploaded to SerpAPI's own Image API (no ImgBB), expiring after 10 minutes.
 agentic_mme_agent:
   responses_api_agents:
     agentic_mme_agent:
@@ -10,6 +10,5 @@ agentic_mme_agent:
         mode: live
         search_provider: serpapi
         serpapi_api_key: ${oc.env:SERPAPI_API_KEY,""}
-        imgbb_api_key: ${oc.env:IMGBB_API_KEY,""}
         allow_image_upload: true
         jina_api_key: ${oc.env:JINA_API_KEY,""}
