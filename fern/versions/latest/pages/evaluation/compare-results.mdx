@@ -1,0 +1,191 @@
+---
+title: "Compare Results"
+description: "Compare evaluation runs and aggregate normalized benchmark scores with unpaired Welch confidence intervals."
+position: 6
+---
+
+# Compare Results
+
+Use `gym eval compare` to inspect a candidate's change from a baseline for one benchmark. Use `gym eval compare-suite` to combine benchmarks within each model and across a model–benchmark matrix.
+
+| Goal | Command | Confidence level |
+| --- | --- | --- |
+| Inspect one benchmark's metrics and task changes | `gym eval compare --baseline ... --candidates ...` | 95% for eligible metric differences |
+| Aggregate selected benchmarks and models | `gym eval compare-suite --suite suite.yaml` | 90% by default; adjustable |
+
+## Prepare comparable runs
+
+Collect baseline and candidate results using the same dataset split, task selection, ordering, and verifier. Keep other settings fixed when evaluating a change to a model, prompt, or harness. Use at least two independent repeats on each side to estimate repeat uncertainty; repeat counts may differ.
+
+Start the configured Gym servers first with [`gym env start`](/reference/cli-commands#gym-env-start); `--no-serve` below reuses that running stack.
+
+```bash
+gym eval run --no-serve \
+    --agent my_agent \
+    --input tasks.jsonl \
+    --output runs/baseline/rollouts.jsonl \
+    --num-repeats 5
+```
+
+Run collection again for the candidate after configuring the intended change, writing to a separate output path. An independent second collection with identical settings can also measure repeatability. Reusing a saved baseline as its own candidate does not provide independent samples.
+
+Collection normally writes `rollouts_aggregate_metrics.json` beside each rollout file. If aggregation was disabled, run [`gym eval aggregate`](/reference/cli-commands#gym-eval-aggregate) first. [Aggregate Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) describes the saved repeat rows; [Rollout Health Checks](/evaluation/rollout-health) covers trajectory integrity and [Reward Profiling](/reference/cli-commands#gym-eval-profile) checks collection completeness.
+
+## Compare one benchmark
+
+```bash
+gym eval compare \
+    --baseline runs/baseline/rollouts.jsonl \
+    --candidates runs/candidate/rollouts.jsonl \
+    --output-dir results/comparison
+```
+
+The rollout paths identify the runs; comparison reads their aggregate-metrics files. The report shows key metrics, other point estimates, and task changes. When both sides have suitable repeat statistics, the difference is based on repeat means and includes a two-sided 95% unpaired Welch confidence interval. Repeat numbers are not paired across baseline and candidate.
+
+The task-change table joins `_ng_task_index`, so both runs must use the same task ordering. By default, comparison includes agents whose names appear on both sides. Use `--agent`, or `--baseline-agent` and `--candidate-agents`, to select them explicitly. One candidate run is supported.
+
+Outputs are `compare_report.md` and `compare_report.json` (schema version `"1"`). The default output directory is the candidate rollout file's directory. See the [CLI reference](/reference/cli-commands#gym-eval-compare) for aggregate-file overrides and report-format options.
+
+## Compare a benchmark suite
+
+`gym eval compare-suite` calculates one score difference per model–benchmark pair, one aggregate per model, and one overall aggregate. Configure exactly one baseline and one candidate run for each included pair. Sources are not pooled.
+
+Save a manifest such as `suite.yaml`:
+
+```yaml
+schema_version: 1
+benchmarks:
+  birdbench:
+    metrics:
+      - name: mean/reward
+  mmlu-redux:
+    metrics:
+      - name: mean/strict_boxed_reward
+        low: 0
+        high: 1
+        higher_is_better: true
+      - name: mean/normalized_reward
+        low: 0
+        high: 1
+        higher_is_better: true
+models:
+  model-a:
+    birdbench:
+      baseline:
+        rollouts: runs/model-a/birdbench/baseline/rollouts.jsonl
+      candidate:
+        rollouts: runs/model-a/birdbench/candidate/rollouts.jsonl
+    mmlu-redux:
+      baseline:
+        rollouts: runs/model-a/mmlu-redux/baseline/rollouts.jsonl
+      candidate:
+        rollouts: runs/model-a/mmlu-redux/candidate/rollouts.jsonl
+  model-b:
+    birdbench:
+      baseline:
+        rollouts: runs/model-b/birdbench/baseline/rollouts.jsonl
+      candidate:
+        rollouts: runs/model-b/birdbench/candidate/rollouts.jsonl
+    mmlu-redux:
+      baseline:
+        rollouts: runs/model-b/mmlu-redux/baseline/rollouts.jsonl
+      candidate:
+        rollouts: runs/model-b/mmlu-redux/candidate/rollouts.jsonl
+```
+
+Paths are relative to the YAML file. Model names are report labels; each model's candidate is compared with that model's baseline. Include only the model–benchmark pairs you intend to measure; a complete rectangular matrix is not required.
+
+This example uses MCQA's existing dual scoring for MMLU-Redux. Collect both sides with the resources-server override `mmlu-redux_mcqa_resources_server.resources_servers.mcqa.grading_mode=boxed_and_normalized` to record both selected reward metrics. Selecting a metric in the suite YAML does not compute a missing metric.
+
+```bash
+gym eval compare-suite \
+    --suite suite.yaml \
+    --output-dir results/suite
+
+# Recalculate the interval at a different confidence level using the same data.
+gym eval compare-suite \
+    --suite suite.yaml \
+    --confidence-level 0.95 \
+    --output-dir results/suite-95
+```
+
+`--confidence-level` accepts a fraction strictly between zero and one; the default is `0.90`. The separate `gym eval compare` command retains its 95% difference intervals. For `compare-suite`, sources and agent selection come from the YAML. See the [CLI reference](/reference/cli-commands#gym-eval-compare-suite) for all command options.
+
+### Source options
+
+Each `baseline` or `candidate` mapping supports:
+
+| Field | Meaning |
+| --- | --- |
+| `rollouts` | Required run identity. Its aggregate-metrics sibling is read. |
+| `aggregate_metrics` | Optional explicit path when the aggregate file has a different name or location. |
+| `agent` | Optional when the aggregate contains one agent. Required if it contains several agents. |
+| `materialized_inputs` | Optional path to the collection inputs used to verify planned task/repeat coverage. The usual sibling is discovered automatically when present. |
+
+Referencing the same run and agent more than once is rejected because this method assumes independent source observations.
+
+## Normalize metrics and preserve benchmark weights
+
+Every selected metric needs theoretical lower and upper bounds and a score direction. For `mean/reward`, Gym reads `reward.range` and `higher_is_better` from the named benchmark's manifest. Other metrics need explicit `low`, `high`, and `higher_is_better` values. A complete explicit definition overrides manifest metadata.
+
+Metric bounds and directions are defined once per benchmark and shared across all models. The report's metric normalization table lists each benchmark's metric definitions once.
+
+Bounds must be finite, with `high > low`. They describe the metric's possible values, not the smallest and largest values observed in these runs. Values outside the declared bounds are errors.
+
+For every metric value in a repeat, Gym calculates:
+
+```text
+normalized = 100 * (raw - low) / (high - low)
+```
+
+For a lower-is-better metric, it then uses `100 - normalized`, so positive candidate-minus-baseline deltas consistently favor the candidate. For example, accuracy `0.8` with bounds `[0,1]` becomes `80`; an error rate `0.2` with the same bounds and `higher_is_better: false` also becomes `80`.
+
+Aggregation proceeds in this order:
+
+1. Average a benchmark's normalized metrics equally **within each repeat**.
+2. Calculate each side's mean and sample variance (divisor `n - 1`) from these composite repeat scores.
+3. Weight eligible benchmarks equally within each model.
+4. Weight eligible model–benchmark pairs equally in the overall result.
+
+MMLU-Redux therefore has the same benchmark weight as BirdBench in the example, despite having two selected metrics. Averaging metrics before estimating variance preserves their covariance within a repeat. The number of metrics and number of tasks do not become additional independent repeat observations.
+
+For a sparse matrix, a model with more included benchmarks contributes more cells to the overall result. The overall calculation uses equal cell weights rather than equal model weights.
+
+## Understand the confidence interval
+
+Suite comparison uses an **unpaired Welch interval for a fixed-suite mean delta**. Each cell's estimated delta is:
+
+```text
+delta = candidate_mean - baseline_mean
+```
+
+Its estimated variance is the sum of each side's sample variance divided by that side's repeat count. The aggregate adds these variances using squared cell weights and uses Welch–Satterthwaite effective degrees of freedom for its Student-t interval.
+
+The numerical method, including normalization and metric averaging, is isolated in `nemo_gym/comparison/statistics/unpaired_welch_fixed_suite.py`. The [NIST two-sample t-test reference](https://www.itl.nist.gov/div898/handbook/eda/section3/eda353.htm) and [coverage-factor guidance](https://www.nist.gov/pml/nist-technical-note-1297/nist-tn-1297-appendix-b-coverage-factors) describe the independent-sample and effective-degrees-of-freedom calculations.
+
+<Note>
+The interval quantifies repeat uncertainty for the fixed selected benchmarks, models, and task sets. It assumes independent repeats within each side, independent baseline/candidate collections, and independent cell estimates. It does not include uncertainty from sampling different benchmarks or models. Shared conditions or genuinely paired samples can require covariance terms beyond this method.
+</Note>
+
+A positive delta favors the candidate. An interval containing zero does not demonstrate a change at the selected confidence level; it also does not prove equivalence or an acceptable regression margin. Inspect individual benchmark results alongside the aggregate, because positive and negative deltas can cancel.
+
+Confidence intervals are not clipped to the score bounds. A constant-score cell retains its weight; when total empirical variance is zero, suite comparison reports the point estimate and zero SE with an unavailable interval and degrees of freedom.
+
+## Check exclusions and coverage
+
+`gym eval compare-suite` requires stored `repeat_level_metrics`. If the field is missing, regenerate aggregation; this command does not reconstruct repeat statistics from embedded rollout summaries. If either side has only one repeat, Gym excludes the entire model–benchmark pair with a warning. Remaining eligible cells receive recomputed equal weights. The requested suite, exclusions, and effective weights are recorded; no eligible cells is an error.
+
+Every selected metric must be present in every included repeat. Gym does not silently remove missing metric values or change metric weights between repeats.
+
+Recorded task sets must agree across repeats and sides. When materialized inputs are available, Gym also verifies planned coverage. Without those inputs, planned coverage remains unverified; recorded coverage checks cannot prove that a task absent from every completed result was collected. Known incomplete or inconsistent coverage suppresses affected confidence intervals while retaining descriptive results.
+
+## Read the reports
+
+`gym eval compare-suite` writes these files to `--output-dir`, defaulting to the YAML file's directory:
+
+| File | Contents |
+| --- | --- |
+| `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, and coverage notes. |
+| `suite_compare_report.json` | Schema version `"2"`: raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, and provenance. |
+
+Use `--report-format md`, `json`, or `both` (default). After quantifying the differences, use [Diagnose Results](/evaluation/diagnose-results) to investigate task-level causes and possible improvements.
