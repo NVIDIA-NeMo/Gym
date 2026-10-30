@@ -36,6 +36,11 @@ shard, which build_cache_index.py merges into the master offline.
 Layout (under <root>):
     search/<ab>/<cd>/<sha256(norm_query)>.json -> {"query","norm","provider","results":[...]}
     browse/<ab>/<cd>/<sha256(norm_url)>.json   -> {"url","norm","provider","content": "..."}
+    pack/                                      optional read-only pack of the same entries
+                                               (search_cache_pack.py, build_cache_pack.py)
+
+Reads go to the flat file first; only when it does not exist is the pack
+consulted (when pack/MANIFEST.json exists). Writes always go to flat files.
 
 Single key namespace across providers. Each entry is tagged with the provider
 that produced it ("tavily" | "exa"); legacy entries migrated from the reference
@@ -62,6 +67,7 @@ from resources_servers.browsecomp_advanced_harness.rollout_context import (
     log_line,
     record_phase,
 )
+from resources_servers.browsecomp_advanced_harness.search_cache_pack import open_pack
 from resources_servers.browsecomp_advanced_harness.sqlite_fuzzy_index import (
     DEFAULT_CANDIDATE_LIMIT,
     DEFAULT_TOKENIZER,
@@ -150,7 +156,16 @@ class SearchCache:
             "browse_get_s": 0.0,
             "browse_get_max_s": 0.0,
             "browse_get_slow": 0,
+            # Hits the pack served because the flat file was absent (fuzzy
+            # included); subsets of search_hits / browse_hits. pack_errors is
+            # the reader's own counter, merged in by stats().
+            "search_pack_hits": 0,
+            "browse_pack_hits": 0,
         }
+        # On iff <root>/pack/MANIFEST.json exists. open_pack raises when the
+        # manifest lists a shard file that is missing or the wrong size: failing
+        # here beats serving silent misses that each become a paid provider call.
+        self._pack = open_pack(self.root) if self.enabled else None
         self._fuzzy_index = None
         self._shard_path = None
         # Read-only creates nothing: the dirs we need are the ones already
@@ -170,6 +185,11 @@ class SearchCache:
             # caches nothing has nothing for build_cache_index.py to merge.
             if not self.read_only:
                 self._shard_path = os.path.join(index_dir, f"search_norms_{os.uname().nodename}_{os.getpid()}.txt")
+
+    @property
+    def pack_generation(self):
+        """Generation id of the pack being served, or None when there is no pack."""
+        return self._pack.generation if self._pack is not None else None
 
     @property
     def index_size(self):
@@ -219,15 +239,26 @@ class SearchCache:
         d = os.path.join(self.root, kind, h[:2], h[2:4])
         return d, os.path.join(d, h + ".json")
 
-    def _read(self, kind, norm_key):
+    def _read(self, kind, norm_key, count_pack_hit=False):
+        """Flat file first; the pack only when the flat file does not exist.
+
+        A flat file that exists but is corrupt or unreadable stays a miss: the
+        pack never masks it. count_pack_hit bumps <kind>_pack_hits when the pack
+        serves the entry -- the get paths pass it, the prefer-exa check does not."""
         _, path = self._path(kind, norm_key)
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except FileNotFoundError:
-            return None
+            pass
         except (json.JSONDecodeError, OSError):
             return None  # corrupt/unreadable -> treat as miss
+        if self._pack is None:
+            return None
+        obj = self._pack.load(kind, hashlib.sha256(norm_key.encode("utf-8")).digest())
+        if obj is not None and count_pack_hit:
+            self._bump(f"{kind}_pack_hits")
+        return obj
 
     def _write(self, kind, norm_key, payload):
         _t0 = perf_counter()
@@ -297,7 +328,7 @@ class SearchCache:
         # could never show.
         record_phase("cache_fuzzy", _elapsed)
 
-        obj = None if matched_norm is None else self._read("search", matched_norm)
+        obj = None if matched_norm is None else self._read("search", matched_norm, count_pack_hit=True)
         if matched_norm is None:
             status = "miss"
         elif obj is None:
@@ -327,7 +358,7 @@ class SearchCache:
         _t0 = perf_counter()
         try:
             norm = self._norm_q(query)
-            obj = self._read("search", norm)
+            obj = self._read("search", norm, count_pack_hit=True)
             if obj is None and self.fuzzy_threshold:
                 obj = self._fuzzy_lookup(norm)
                 if obj is not None:
@@ -371,7 +402,7 @@ class SearchCache:
             return None
         _t0 = perf_counter()
         try:
-            obj = self._read("browse", normalize_url(url))
+            obj = self._read("browse", normalize_url(url), count_pack_hit=True)
             if obj is None:
                 self._bump("browse_misses")
                 return None
@@ -391,7 +422,9 @@ class SearchCache:
     # ---- stats ------------------------------------------------------------
     def stats(self):
         with self._lock:
-            return dict(self._stats)
+            s = dict(self._stats)
+        s["pack_errors"] = self._pack.errors if self._pack is not None else 0
+        return s
 
     def stats_report(self):
         """Stats dict enriched with totals + hit percentages."""
@@ -421,7 +454,17 @@ class SearchCache:
                 f" ({r['search_get_slow']} >0.5s), browse avg {b_avg:.0f}ms"
                 f" max {r['browse_get_max_s']:.2f}s ({r['browse_get_slow']} >0.5s)"
             )
+        pack = ""
+        if self._pack is not None:
+            pack = (
+                f" | pack hits search {r['search_pack_hits']}, browse {r['browse_pack_hits']},"
+                f" errors {r['pack_errors']}"
+            )
         return (
-            "cache: search {search_hits}/{search_total} ({search_hit_pct:.0f}%)" + fuzzy + ", "
-            "browse {browse_hits}/{browse_total} ({browse_hit_pct:.0f}%)"
-        ).format(**r) + lat
+            (
+                "cache: search {search_hits}/{search_total} ({search_hit_pct:.0f}%)" + fuzzy + ", "
+                "browse {browse_hits}/{browse_total} ({browse_hit_pct:.0f}%)"
+            ).format(**r)
+            + lat
+            + pack
+        )

@@ -894,7 +894,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 f"Search cache enabled at {cache_dir} "
                 f"(fuzzy={self.config.search_cache_fuzzy_threshold or 'off'}, "
                 f"read_only={self._search_cache.read_only}, "
-                f"index norms={self._search_cache.index_size})"
+                f"index norms={self._search_cache.index_size}, "
+                f"pack={self._search_cache.pack_generation or 'off'})"
             )
 
         print(f"Excluded domains: {self._exclude_domains}")
