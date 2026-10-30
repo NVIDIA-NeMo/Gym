@@ -34,6 +34,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Annotated, Any, Dict, Optional, Tuple, Union
+from urllib.parse import unquote, urlsplit
 
 from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -75,6 +76,21 @@ _SCORING_KEYS = ("final_url", "url_contains", "dom_contains", "answer_equals")
 # Where the browser comes from when the config says nothing: a local Chromium,
 # which needs no account, no network and no quota.
 _DEFAULT_BACKEND: Dict[str, Any] = {"local_playwright": {"headless": True}}
+
+# Schemes whose URL is the address of a page. A `data:`, `javascript:` or `blob:` URL
+# carries content the policy can write into the URL itself, and an `about:` or error
+# page belongs to no site, so none of them shows that the policy reached a page.
+_PAGE_URL_SCHEMES = frozenset({"http", "https", "file"})
+
+# A `url_contains` value with one of these characters names part of a URL (a path, query or
+# fragment) and is matched against the whole URL. A value without them is a name: a domain
+# such as `iana.org`, a file such as `about.html`, or a path segment such as `example-domains`.
+_URL_PART_CHARACTERS = frozenset("/?#=")
+
+# Suffixes that make a dotted name a file rather than a domain. None of them is a top-level domain.
+_PAGE_FILE_SUFFIXES = frozenset(
+    {"htm", "html", "xhtml", "shtml", "php", "asp", "aspx", "jsp", "cgi", "pdf", "txt", "xml", "json"}
+)
 
 
 class InteractiveBrowserConfig(BaseResourcesServerConfig):
@@ -144,6 +160,29 @@ class _SessionState:
     @property
     def finished(self) -> bool:
         return self.finished_url is not None
+
+
+def _url_contains(url: str, expected: str) -> bool:
+    """Whether ``url`` is an http, https or file page that ``expected`` points at.
+
+    A value naming part of a URL is a substring of the whole URL. A domain matches an
+    http(s) host or a parent domain of it, and any other name must be a whole path segment.
+    Text the policy appends to a page's query or fragment therefore cannot satisfy a name,
+    and a domain cannot be satisfied by a path on another host.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # e.g. an unclosed IPv6 bracket: not the address of a page
+        return False
+    if parts.scheme not in _PAGE_URL_SCHEMES:
+        return False
+    if _URL_PART_CHARACTERS.intersection(expected):
+        return expected in url
+    host, name = (parts.hostname or "").removesuffix("."), expected.lower()
+    _, dot, suffix = name.rpartition(".")
+    if dot and suffix.isalpha() and suffix not in _PAGE_FILE_SUFFIXES:
+        return parts.scheme in ("http", "https") and (host == name or host.endswith("." + name))
+    return any(unquote(segment) == expected for segment in parts.path.split("/"))
 
 
 class InteractiveBrowserResourcesServer(SimpleResourcesServer):
@@ -411,7 +450,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
             if "final_url" in gt:
                 return float(url == gt["final_url"])
             if "url_contains" in gt:
-                return float(gt["url_contains"] in url)
+                return float(_url_contains(url, str(gt["url_contains"])))
             if "dom_contains" in gt:
                 # Title + full visible page text, not just interactive elements, so
                 # non-interactive DOM text (e.g. a <p>) is matched too.
