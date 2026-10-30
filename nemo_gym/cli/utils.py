@@ -163,15 +163,15 @@ def exit_cleanly_on_config_error(fn):
 
 
 def exit_cleanly_on_job_error(fn):
-    """Decorator: turn a `gym job` command's ValueError/RuntimeError (unknown id, unreachable scheduler) into
-    a message on stderr and a non-zero exit, so stdout stays clean for `--json`."""
+    """Decorator: turn a `gym job` command's expected failure (unknown id, unreachable scheduler, missing log)
+    into a message on stderr and a non-zero exit, so stdout stays clean for `--json`."""
     from functools import wraps
 
     @wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except (ValueError, RuntimeError) as e:
+        except (ValueError, RuntimeError, FileNotFoundError) as e:
             print(f"Error: {e}", file=sys.stderr)
             raise SystemExit(1)
 
