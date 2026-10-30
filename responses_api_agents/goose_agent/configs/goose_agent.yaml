@@ -1,0 +1,43 @@
+goose_agent:
+  responses_api_agents:
+    goose_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      token_id_capture: true
+      concurrency: 32
+      timeout: 3600
+
+      provider: openai
+      # Sent as the request model name. The Gym vLLM model server serves its configured model.
+      model: policy_model
+      base_url: null  # null routes through the Gym model server
+      subagent_model: null  # GOOSE_SUBAGENT_MODEL, null reuses `model`
+      delegate: true  # false disables Goose's summon extension (delegate/load) for a solo control
+      max_turns: 1000
+      goose_mode: auto  # headless runs cannot answer approval prompts
+      system_prompt: null
+      env:
+        GOOSE_CONTEXT_LIMIT: "262144"
+
+      goose_archive_dir: null  # host dir with the pinned release archives, for sandboxes without internet
+
+      sandbox_provider: sandbox
+      network_access: inherit
+      tool_servers: []
+      execution_failure_reward_zero: true
+      artifacts_dir: ${oc.env:GOOSE_ARTIFACTS_DIR,results/goose}
+      sandbox_config:
+        image: python:3.13-bookworm  # needs curl or wget, sha256sum, tar and coreutils timeout
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        entrypoint: [sleep, infinity]
+        resources:
+          cpu: 2
+          memory_mib: 4096
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms
