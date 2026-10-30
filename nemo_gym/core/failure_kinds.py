@@ -190,7 +190,7 @@ def validate_failure_kind(name: str | None) -> str | None:
     if name not in _WARNED_UNKNOWN:
         _WARNED_UNKNOWN.add(name)
         logger.warning(
-            "unregistered failure_kind %r; register it in nemo_gym/failure_kinds.py or namespace it as "
+            "unregistered failure_kind %r; register it in nemo_gym/core/failure_kinds.py or namespace it as "
             "'<server>:<kind>'. Reported once per name.",
             name,
         )
@@ -200,5 +200,5 @@ def validate_failure_kind(name: str | None) -> str | None:
 def require_failure_kind(name: str | None) -> str:
     """Validate a canonical event kind; legacy outcome envelopes keep their migration validator."""
     if name is None or not (is_registered(name) or is_namespaced(name)):
-        raise ValueError(f"failure_kind {name!r} is not registered in nemo_gym/failure_kinds.py or namespaced")
+        raise ValueError(f"failure_kind {name!r} is not registered in nemo_gym/core/failure_kinds.py or namespaced")
     return name

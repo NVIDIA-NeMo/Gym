@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
 from nemo_gym.episode_types import FailureBoundary
 from nemo_gym.exception_inspection import error_to_http_status
-from nemo_gym.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
 from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
 
 

@@ -63,11 +63,14 @@ from nemo_gym.config import (
     ModelServerRef,
     get_first_server_config_dict,
 )
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    verifier_invocation_context,
+)
 from nemo_gym.episode_types import FailureBoundary
-from nemo_gym.failure_kinds import JUDGE_FAILED
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.rollout_correlation import verifier_invocation_context
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -76,8 +79,9 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     resolve_provider_config,
 )
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)

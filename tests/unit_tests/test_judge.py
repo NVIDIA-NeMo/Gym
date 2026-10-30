@@ -18,8 +18,8 @@ import orjson
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, normalize_math_judge_verdict, reraise_judge_errors
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER
 from nemo_gym.typed_exceptions import NgFailureEvent
 
 
@@ -267,8 +267,8 @@ async def test_beam_task_group_keeps_unrelated_canonical_failures():
 
 @pytest.mark.asyncio
 async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
+    from nemo_gym.core.episode import verifier_invocation_context
     from nemo_gym.judge import is_judge_failure
-    from nemo_gym.rollout_correlation import verifier_invocation_context
 
     client = _client(status=200, body=b'{"verdict":"CORRECT"}')
     await _call(client)

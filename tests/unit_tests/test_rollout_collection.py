@@ -69,11 +69,10 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.health.types import RunHealthLimits
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.path_utils import aggregation_sources_path_for, materialized_path_for
 from nemo_gym.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
@@ -129,7 +128,6 @@ from nemo_gym.rollout_collection import (
     is_terminal_failure,
     loads_jsonl_line,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_health import health_check_run_dir
 from nemo_gym.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.server_utils import BaseServerConfig, ClientDisconnectCancellationMiddleware, ServerClient
@@ -148,6 +146,7 @@ from nemo_gym.token_id_capture.delivery import (
 from nemo_gym.token_id_capture.protocols import LineageResolution, TokenCaptureSnapshot
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.token_id_capture.store import TokenCaptureStore
+from nemo_gym.utils.path_utils import aggregation_sources_path_for, materialized_path_for
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 
 
@@ -13115,8 +13114,8 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
     from fastapi import FastAPI, Request, Response
 
     from nemo_gym.agent_outcome import OutcomeAction
+    from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
     from nemo_gym.episode_types import FailureBoundary
-    from nemo_gym.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
     from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
     from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for

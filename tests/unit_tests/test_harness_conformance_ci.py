@@ -26,7 +26,7 @@ def test_adapter_changes_select_only_that_harness(harness):
         "nemo_gym/agent_utils/sandbox_session.py",
         "nemo_gym/sandbox/local.py",
         "nemo_gym/cli/__init__.py",
-        "nemo_gym/cli/_compat.py",
+        "nemo_gym/utils/compat.py",
         "nemo_gym/cli/utils.py",
         "nemo_gym/prompts/system.md",
         "responses_api_agents/shared/prompts.md",

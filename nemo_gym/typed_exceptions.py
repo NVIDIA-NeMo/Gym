@@ -19,9 +19,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from aiohttp import ClientResponseError
 
+from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED, FailureStage, require_failure_kind
 from nemo_gym.episode_types import FailureBoundary, FailureEvent, FailureReport, SdkErrorDetails
 from nemo_gym.exception_inspection import bounded_text, error_to_http_status, explicit_causes, qualified_type_name
-from nemo_gym.failure_kinds import AGENT_ROUTE_FAILED, FailureStage, require_failure_kind
 
 
 _EVENT_FIELDS = (

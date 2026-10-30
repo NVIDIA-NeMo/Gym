@@ -25,11 +25,11 @@ from typing import Any, ClassVar, Optional
 
 from omegaconf import DictConfig
 
-from nemo_gym.cli._venv_setup import setup_environment
 from nemo_gym.config.config_types import RunExportConfig
 from nemo_gym.config.global_config import UV_VENV_DIR_KEY_NAME, WORKING_DIR
 from nemo_gym.exporters.base import Exporter, ExportResult, ExportState
 from nemo_gym.run_artifacts import RunArtifacts
+from nemo_gym.utils.venv_setup import setup_environment
 
 
 WORKER_HARNESS_FPATH = Path(__file__).with_name("_isolated_worker.py")

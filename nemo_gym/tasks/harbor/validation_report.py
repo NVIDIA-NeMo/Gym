@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.path_utils import failures_path_for
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY
+from nemo_gym.utils.path_utils import failures_path_for
 
 
 @dataclass(frozen=True)

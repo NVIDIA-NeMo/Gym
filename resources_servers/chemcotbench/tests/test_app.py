@@ -15,7 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
 from resources_servers.chemcotbench.app import (

@@ -322,7 +322,7 @@ def _make_server(subprocess_timeout: float = 120.0):
 
 def _make_response(text: str):
     """Minimal NeMoGymResponse carrying one assistant message."""
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     return NeMoGymResponse(
         id="resp-1",

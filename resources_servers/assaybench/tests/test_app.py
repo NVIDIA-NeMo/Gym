@@ -23,7 +23,7 @@ import pytest
 
 from benchmarks.assaybench.prepare import PROMPT_CONFIG_PATH, REPO_ROOT
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,

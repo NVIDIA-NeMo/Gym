@@ -35,7 +35,7 @@ from omegaconf import OmegaConf  # noqa: E402
 
 try:
     from nemo_gym.config import BaseServerConfig
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.server_utils import ServerClient
 except ModuleNotFoundError as exc:
     # With a prebuilt gym_source bundle, this runs against the bundle's nemo-gym, which can predate the package

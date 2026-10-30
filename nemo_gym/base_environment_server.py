@@ -24,17 +24,16 @@ from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym._checkpoint.steps import StepType
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
+from nemo_gym.core.episode import EpisodeId, rollout_context
+from nemo_gym.core.failure_kinds import EPISODE_FAILED, FailureStage
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     EpisodeFailure,
-    EpisodeId,
     FailureBoundary,
     FailureReport,
 )
-from nemo_gym.failure_kinds import EPISODE_FAILED, FailureStage
 from nemo_gym.failure_transport import reply_failure_report, report_for_current_request
-from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SimpleServer, format_exception_with_response_body
 from nemo_gym.typed_exceptions import NgFailureEvent
 

@@ -338,7 +338,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         sys.executable,
         # Found by module name rather than next to this file, because the script may live in another package.
         # The script itself runs without importing Gym.
-        importlib.util.find_spec("nemo_gym.cli._venv_setup").origin,
+        importlib.util.find_spec("nemo_gym.utils.venv_setup").origin,
         "--venv",
         str(venv_path),
         "--command",
