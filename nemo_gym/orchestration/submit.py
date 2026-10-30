@@ -13,16 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Iterator
+
 from nemo_gym.decorators import experimental
 from nemo_gym.orchestration import operations
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.capabilities import Inspectable, Resubmittable, require
+from nemo_gym.orchestration.executors.capabilities import (
+    Inspectable,
+    LogReadable,
+    Resubmittable,
+    Terminable,
+    require,
+)
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
     JobInfo,
+    JobStatus,
     SubmissionRecord,
     SubmissionStatus,
     list_submissions,
@@ -97,6 +106,30 @@ def info(gym_job_id: str, benchmark: str | None = None) -> JobInfo:
     """Describe submission `gym_job_id`, or only `benchmark` of it, and where its parts are."""
     record = load_submission_record(gym_job_id)
     return operations.info(require(_executor_for(record), Inspectable, "info"), record, benchmark)
+
+
+@experimental
+def cancel(gym_job_id: str, benchmark: str) -> JobStatus:
+    """Stop `benchmark` of submission `gym_job_id` and return its status as observed afterwards."""
+    record = load_submission_record(gym_job_id)
+    return operations.cancel(require(_executor_for(record), Terminable, "cancel"), record, benchmark)
+
+
+@experimental
+def cancel_submission(gym_job_id: str, *, confirm: str) -> list[JobStatus]:
+    """Stop every live benchmark of submission `gym_job_id`; `confirm` must be its id."""
+    record = load_submission_record(gym_job_id)
+    return operations.cancel_submission(require(_executor_for(record), Terminable, "cancel"), record, confirm=confirm)
+
+
+@experimental
+def logs(
+    gym_job_id: str, benchmark: str, *, source: str = "driver", instance: str | None = None, tail: int | None = None
+) -> Iterator[str]:
+    """The lines of one of `benchmark`'s logs, `tail` of them if given."""
+    record = load_submission_record(gym_job_id)
+    executor = require(_executor_for(record), LogReadable, "logs")
+    return operations.logs(executor, record, benchmark, source=source, instance=instance, tail=tail)
 
 
 def _records_to_inspect(
