@@ -322,7 +322,7 @@ def _make_server(subprocess_timeout: float = 120.0):
 
 def _make_response(text: str):
     """Minimal NeMoGymResponse carrying one assistant message."""
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     return NeMoGymResponse(
         id="resp-1",
@@ -351,6 +351,43 @@ def short_timeout_client():
 
     with TestClient(_make_server(subprocess_timeout=5.0).setup_webserver()) as c:
         yield c
+
+
+@pytest.mark.parametrize("code,reward", [("def add_one(x): return x + 1", 1.0), ("def add_one(x): return 2", 0.0)])
+def test_indic_mbpp_language_ids_survive_verify_roundtrip(short_timeout_client, monkeypatch, code, reward):
+    from app import SciCodePileVerifyRequest, SciCodePileVerifyResponse
+
+    from benchmarks.indic.mbpp import prepare as mbpp
+
+    monkeypatch.setattr(mbpp, "EXPECTED_ROWS", 1)
+    record = {
+        "task_id": 11,
+        "text": "Add one.",
+        "text_Hindi_translation": "एक जोड़ें।",
+        "code": "def add_one(x): return x + 1",
+        "test_list": ["assert add_one(1) == 2", "assert add_one(2) == 3", "assert add_one(3) == 4"],
+        "test_setup_code": "",
+    }
+    rows = mbpp.build_rows([record], languages=["en", "hi"])
+    assert rows[0]["verifier_metadata"] is not rows[1]["verifier_metadata"]
+    for row in rows:
+        body = SciCodePileVerifyRequest.model_validate(
+            {
+                **row,
+                "responses_create_params": {"input": [{"role": "user", "content": row["question"]}]},
+                "response": _make_response(f"```python\n{code}\n```"),
+            }
+        )
+        response = short_timeout_client.post("/verify", json=body.model_dump())
+        assert response.status_code == 200
+        saved = SciCodePileVerifyResponse.model_validate_json(response.content)
+        assert saved.task_id == f"Mbpp/{row['language']}/11"
+        assert saved.reward == reward
+        assert saved.status == ("pass" if reward else "fail")
+        assert saved.failure_reason is None
+        # Grouping must work from the serialized result alone, without an input join.
+        assert "language" not in response.json()
+        assert "verifier_metadata" not in response.json()
 
 
 class TestScratchDirectoryLifecycle:

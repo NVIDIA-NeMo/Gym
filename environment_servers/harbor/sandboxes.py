@@ -33,21 +33,28 @@ from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user, _is_root
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.sandbox.compose_config import (
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import (
+    ORPHAN_REAP_TIMEOUT_S,
+    AsyncSandbox,
+    AsyncSandboxCompose,
+    SandboxCreateError,
+    SandboxSpec,
     adapt_non_root_sidecars,
+    clamp_resource_requests,
+    cpu_cap_env,
     deployment_platform,
     document_volume_sources,
     opensandbox_shm_labels,
     resolve_compose,
+    resolve_provider_config,
+    resolve_provider_metadata,
+    resolve_provider_volume_sources,
     sandbox_platform,
+    service_gpus,
+    service_resources,
 )
-from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata, resolve_provider_volume_sources
-from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
-from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.server_utils import apply_rollout_prefix
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.compose_overlay import overlay_files

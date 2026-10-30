@@ -23,8 +23,8 @@ from app import (
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 

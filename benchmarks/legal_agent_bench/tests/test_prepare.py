@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.legal_agent_bench import prepare as benchmark_prepare
 from nemo_gym.benchmarks import BenchmarkConfig
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from resources_servers.legal_agent_bench.prepare import EXPECTED_TASK_COUNT, INDEX_FILENAME
 
 

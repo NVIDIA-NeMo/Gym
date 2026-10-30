@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
