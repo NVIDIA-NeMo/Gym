@@ -4,11 +4,11 @@
 
 `gym eval run --only-tasks` applies to Harbor task targets only; recipe runs read a prepared dataset file. This
 script filters each benchmark dataset of a resolved config to the rows whose task id matches one of the patterns,
-writes the filtered files and prints the Hydra overrides that point the run at them. The run then needs
-`++use_cached_prepared_benchmarks=true` so the filtered files are not prepared over.
+writes the filtered files and a config overlay that points the run at them, and prints the overlay's path. The run
+adds it as a final `--config` with `++use_cached_prepared_benchmarks=true` so the filtered files are not prepared over.
 
     gym env resolve <configs...> > resolved.yaml
-    python recipes/nooa-atom/only_tasks.py resolved.yaml <out dir> 'code-from-image,fp8-*'
+    OVERLAY=$(python recipes/nooa-atom/only_tasks.py resolved.yaml <out dir> 'code-from-image,fp8-*')
 """
 
 from __future__ import annotations
@@ -52,10 +52,15 @@ def benchmark_datasets(config: dict[str, Any]) -> Iterator[tuple[str, dict[str, 
                     yield f"{instance}.resources_servers.{server}.datasets.{index}", dataset
 
 
-def filter_datasets(config: dict[str, Any], out_dir: Path, patterns: list[str]) -> list[str]:
-    """Write the matching rows of every benchmark dataset under out_dir; return the Hydra overrides for them."""
-    overrides: list[str] = []
+def filter_datasets(config: dict[str, Any], out_dir: Path, patterns: list[str]) -> dict[str, Any]:
+    """Write the matching rows of every benchmark dataset under out_dir.
+
+    Returns a config overlay that re-declares each affected `datasets` list whole with the filtered files (a list
+    in a later config replaces the list; a dotted CLI override cannot address a list element).
+    """
+    overlay: dict[str, Any] = {}
     for key, dataset in benchmark_datasets(config):
+        instance, _, server, _, index = key.split(".")
         source = Path(dataset["jsonl_fpath"])
         if not source.exists():
             raise SystemExit(f"only_tasks: dataset file {source} is missing; run `gym eval prepare` first")
@@ -67,10 +72,13 @@ def filter_datasets(config: dict[str, Any], out_dir: Path, patterns: list[str]) 
         target = out_dir / source.name
         target.write_text("".join(json.dumps(row) + "\n" for row in kept), encoding="utf-8")
         print(f"only_tasks: {len(kept)} of {len(rows)} rows of {source} -> {target}", file=sys.stderr)
-        overrides.append(f"++{key}.jsonl_fpath={target}")
-    if not overrides:
+        datasets = overlay.setdefault(instance, {}).setdefault("resources_servers", {}).setdefault(server, {})
+        if "datasets" not in datasets:
+            datasets["datasets"] = [dict(entry) for entry in config[instance]["resources_servers"][server]["datasets"]]
+        datasets["datasets"][int(index)]["jsonl_fpath"] = str(target)
+    if not overlay:
         raise SystemExit("only_tasks: the resolved config declares no benchmark dataset")
-    return overrides
+    return overlay
 
 
 def main(argv: list[str]) -> None:
@@ -80,8 +88,11 @@ def main(argv: list[str]) -> None:
     patterns = [p.strip() for p in argv[3].split(",") if p.strip()]
     if not isinstance(config, dict) or not patterns:
         raise SystemExit(__doc__)
-    for override in filter_datasets(config, Path(argv[2]), patterns):
-        print(override)
+    out_dir = Path(argv[2])
+    overlay = filter_datasets(config, out_dir, patterns)
+    overlay_path = out_dir / "only-tasks.yaml"
+    overlay_path.write_text(yaml.safe_dump(overlay, sort_keys=False), encoding="utf-8")
+    print(overlay_path)
 
 
 if __name__ == "__main__":

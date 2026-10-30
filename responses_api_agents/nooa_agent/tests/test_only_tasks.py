@@ -36,12 +36,22 @@ def test_filter_datasets_keeps_matching_rows_and_points_the_run_at_them(tmp_path
         "policy_model": {"responses_api_models": {}},
     }
     out = tmp_path / "only"
-    overrides = only_tasks.filter_datasets(config, out, ["code-from-image", "fp8-*", "*navidrome*"])
+    overlay = only_tasks.filter_datasets(config, out, ["code-from-image", "fp8-*", "*navidrome*"])
 
-    assert overrides == [
-        f"++benchmark.resources_servers.tb.datasets.0.jsonl_fpath={out / 'benchmark.jsonl'}",
-        f"++swe_server.resources_servers.swe.datasets.0.jsonl_fpath={out / 'swe120.jsonl'}",
-    ]
+    assert overlay == {
+        "benchmark": {
+            "resources_servers": {
+                "tb": {"datasets": [{"type": "benchmark", "jsonl_fpath": str(out / "benchmark.jsonl")}]}
+            }
+        },
+        "swe_server": {
+            "resources_servers": {
+                "swe": {"datasets": [{"type": "benchmark", "jsonl_fpath": str(out / "swe120.jsonl")}]}
+            }
+        },
+    }
+    # The source config is not mutated: a later `--config` carries the filtered list.
+    assert config["benchmark"]["resources_servers"]["tb"]["datasets"][0]["jsonl_fpath"] == str(tb)
     kept = [json.loads(line)["task_id"] for line in (out / "benchmark.jsonl").read_text().splitlines()]
     assert kept == ["code-from-image", "fp8-gemm"]
     assert [json.loads(line)["instance_id"] for line in (out / "swe120.jsonl").read_text().splitlines()] == [

@@ -79,8 +79,9 @@ SETUP="$RECIPES/$BENCH.setup.sh"
 # filters the prepared file to the matching rows instead and points the run at the copy (only_tasks.py).
 if [ -n "${ONLY_TASKS:-}" ]; then
   gym env resolve "${CONFIGS[@]}" "${HYDRA[@]}" > "$OUT/only-tasks-resolved.yaml"
-  mapfile -t ONLY_OVERRIDES < <(python "$RECIPES/only_tasks.py" "$OUT/only-tasks-resolved.yaml" "$OUT/only-tasks" "$ONLY_TASKS")
-  HYDRA+=("${ONLY_OVERRIDES[@]}" ++use_cached_prepared_benchmarks=true)
+  ONLY_OVERLAY="$(python "$RECIPES/only_tasks.py" "$OUT/only-tasks-resolved.yaml" "$OUT/only-tasks" "$ONLY_TASKS")"
+  CONFIGS+=(--config "$ONLY_OVERLAY")
+  HYDRA+=(++use_cached_prepared_benchmarks=true)
 fi
 gym eval run \
   "${CONFIGS[@]}" \
