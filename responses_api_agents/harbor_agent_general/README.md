@@ -1,5 +1,15 @@
 # Harbor Agent for NeMo Gym
 
+> [!warning]
+> **Deprecated.** This agent is superseded by the Harbor task format, where Harbor tasks run through the Harbor
+> environment server with NeMo Gym's own sandboxed harnesses and the `harbor_oracle` agent, with no Harbor
+> dependency. The built-in benchmarks that still run through this agent (biomnibench_da, biomysterybench,
+> bixbench_hypothesis, genebench_pro, labbench2_pdf, legal_agent_bench, openthoughts_tblite and skillsbench) will be
+> migrated to the
+> [`harbor` environment server](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/harbor); no action is
+> needed from you yet, and they keep working as they are. New work should use the `harbor` environment server, whose
+> README links to its documentation.
+
 This agent integrates the [Harbor Framework](https://www.harborframework.com/) into NeMo Gym.
 The rollouts are compeletely owned by Harbor and NeMo Gym acts as the orchestrator,
 converting the [Agent Trajectory Format](https://www.harborframework.com/docs/agents/trajectory-format) (ATIF)

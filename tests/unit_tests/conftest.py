@@ -4,6 +4,7 @@
 """Session hygiene for the core unit tests."""
 
 import logging
+import urllib.request
 
 import pytest
 
@@ -51,3 +52,30 @@ def fresh_root_logging():
         if handler not in root.handlers:
             root.addHandler(handler)
     root.setLevel(level)
+
+
+@pytest.fixture(autouse=True)
+def no_real_container_registry(request, monkeypatch):
+    """No Harbor unit test reaches a container registry. Preparing a task records its base images through
+    ``RegistryClient``, and the shared ``write_task`` helper writes ``FROM ubuntu:24.04``, so a test that did not
+    ask for ``fake_registry`` went to Docker Hub and failed on its rate limit (HTTP 429) whatever the code under
+    test did. The guard used to live in ``test_harbor_tasks.py``, where it covered only the modules that imported
+    it; here it covers every ``test_harbor_*`` module. A test that serves the registry over a faked HTTP layer
+    instead (``patch_opener`` in ``test_harbor_image_configs.py`` replaces ``OpenerDirector.open``) gets the real
+    client, which then talks to that fake."""
+    if not request.module.__name__.rpartition(".")[2].startswith("test_harbor"):
+        return
+    from nemo_gym.tasks.harbor import image_configs
+    from tests.unit_tests.test_harbor_tasks import FakeRegistryClient
+
+    real_client = image_configs.RegistryClient
+    real_open = urllib.request.OpenerDirector.open
+
+    def client(*args, **kwargs):
+        if urllib.request.OpenerDirector.open is not real_open:
+            return real_client(*args, **kwargs)
+        return FakeRegistryClient(*args, **kwargs)
+
+    monkeypatch.setattr(image_configs, "RegistryClient", client)
+    monkeypatch.setattr(FakeRegistryClient, "missing", set())
+    monkeypatch.setattr(FakeRegistryClient, "resolved", [])

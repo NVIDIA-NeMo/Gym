@@ -496,3 +496,18 @@ def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
         if server_utils.is_global_aiohttp_client_setup():
             loop.run_until_complete(server_utils.get_global_aiohttp_client().close())
         loop.close()
+
+
+def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.LogCaptureFixture) -> None:
+    """The server says on startup that it is deprecated, where its replacement lives, and that users need not act yet."""
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent_general.app"):
+        agent.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent_general is deprecated" in notice
+    assert "environment_servers/harbor" in notice
+    # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
+    assert "docs.nvidia.com" not in notice
+    # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
+    assert "no action is needed" in notice

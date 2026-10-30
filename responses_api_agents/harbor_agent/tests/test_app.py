@@ -914,3 +914,20 @@ class TestLLMClientTeardown:
         # Idempotent: a second close is a no-op (no underlying client to touch).
         await llm.aclose()
         client.aclose.assert_awaited_once()
+
+
+def test_startup_logs_the_deprecation_notice(caplog) -> None:
+    """The server says on startup that it is deprecated, where its replacement lives, and that users need not act yet."""
+    server = _make_server()
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent.app"):
+        server.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent is deprecated" in notice
+    assert "environment_servers/harbor" in notice
+    # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
+    assert "docs.nvidia.com" not in notice
+    # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
+    assert "no action is needed" in notice
+    assert server.sem is not None
